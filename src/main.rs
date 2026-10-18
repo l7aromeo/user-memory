@@ -282,7 +282,7 @@ impl UserMemoryServer {
         })
     }
     #[tool(
-        description = "Only when the user asks: preview an export file from the exports directory by name (stores nothing, briefly locks the store), then import it with apply and user_confirmed once they approve."
+        description = "Only when the user asks: preview an export from the exports directory by name (writes nothing), then import it with apply and user_confirmed once they approve."
     )]
     async fn import(&self, Parameters(input): Parameters<memory::ImportMemories>) -> Reply {
         synced(guarded(Some("applied"), || {
