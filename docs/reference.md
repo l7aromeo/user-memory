@@ -280,6 +280,12 @@ user-memory import old-backup.json --titles titles.json   # format version 1
 | `export` | On the user's request: write every memory, or those the [filters](#exporting-or-importing-part-of-the-store) select, to a JSON file in the exports directory; returns a summary only |
 | `import` | On the user's request: preview an export file from the exports directory, or the memories the filters select from it; writes only with `apply` and `user_confirmed` after the user approves |
 
+A call that fails, such as an unknown id or a store that cannot be opened,
+returns its reason with `isError: true`. A refusal the agent resolves itself,
+a `reason` beside a false success field such as `"stored": false`, is a
+normal reply. The CLI's memory commands, run against a server, end with that
+reason and a failing status, as they do on a local store.
+
 ## How agents learn to use it
 
 An agent learns from six layers:

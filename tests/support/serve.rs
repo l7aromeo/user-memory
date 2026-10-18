@@ -1,6 +1,8 @@
 //! One tool call to `user-memory serve`, for tools with no command of their
 //! own, such as link.
 
+#![allow(dead_code, reason = "each test file uses part of this module")]
+
 use serde_json::{Value, json};
 use std::{
     io::{BufRead, BufReader, Write},
@@ -10,7 +12,17 @@ use std::{
 /// The reply of tool `name` called with `arguments`, parsed as JSON or else
 /// as a string, from the server `serve` starts: a `user-memory serve`
 /// command with its folder and environment set.
-pub fn call(mut serve: Command, name: &str, arguments: Value) -> Value {
+pub fn call(serve: Command, name: &str, arguments: Value) -> Value {
+    let reply = result(serve, name, arguments);
+    let text = reply["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{name}: {reply}"));
+    serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.to_owned()))
+}
+
+/// The whole result of tool `name` called with `arguments`: its `content`
+/// and its `isError` flag.
+pub fn result(mut serve: Command, name: &str, arguments: Value) -> Value {
     let mut child = serve
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -40,8 +52,5 @@ pub fn call(mut serve: Command, name: &str, arguments: Value) -> Value {
     };
     drop(input);
     child.wait().unwrap();
-    let text = reply["result"]["content"][0]["text"]
-        .as_str()
-        .unwrap_or_else(|| panic!("{name}: {reply}"));
-    serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.to_owned()))
+    reply["result"].clone()
 }

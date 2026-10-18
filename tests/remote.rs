@@ -634,6 +634,32 @@ fn cli_memory_commands_run_against_the_configured_server() {
     assert!(!sandbox::folder(client.path(), "store").exists());
 }
 
+/// A call the server fails ends the CLI with the server's own reason and a
+/// failing status, as the same call on a local store does.
+#[test]
+fn a_failed_server_call_fails_the_cli_with_the_servers_reason() {
+    let host = Host::start(root());
+    let client = tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_user-memory"))
+        .args(["read", "dead"])
+        .sandboxed(client.path())
+        .env("USER_MEMORY_URL", format!("http://{}/mcp", host.address))
+        .env("USER_MEMORY_TOKEN_FILE", host.root.path().join("token"))
+        .env_remove("USER_MEMORY_DB")
+        .output()
+        .unwrap();
+    let (stdout, stderr) = (
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(!output.status.success(), "{stdout}");
+    assert!(
+        stderr.contains("dead is not a memory id: give a full id or its first 8 characters"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains(r#"{"error""#), "{stderr}");
+}
+
 #[test]
 fn endpoint_urls_cannot_carry_credentials_queries_or_fragments() {
     let root = root();

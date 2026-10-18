@@ -702,3 +702,44 @@ fn record_and_update_refuse_a_local_path_as_project() {
         json!({"updated":false,"reason":reason("../app")})
     );
 }
+
+/// A call that failed reaches the client flagged with `isError`, with the
+/// reason as its text; a refusal the agent resolves, a `reason` beside a
+/// false success field, is an answer like any other.
+#[test]
+fn only_a_failed_call_is_flagged_as_an_error() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path();
+    let result = |name: &str, arguments: Value| serve::result(server(home, home), name, arguments);
+    let text = |reply: &Value| reply["content"][0]["text"].as_str().unwrap().to_owned();
+    for (name, arguments, said) in [
+        (
+            "read",
+            json!({"ids":["dead"]}),
+            "dead is not a memory id: give a full id or its first 8 characters",
+        ),
+        (
+            "search",
+            json!({"topic":"tabs","page_size":0}),
+            "page_size must be between 1 and 200",
+        ),
+        (
+            "index",
+            json!({"projects":["/srv/api"]}),
+            "/srv/api is a local path",
+        ),
+    ] {
+        let reply = result(name, arguments);
+        assert_eq!(reply["isError"], true, "{name}: {reply}");
+        assert!(text(&reply).contains(said), "{name}: {reply}");
+    }
+    let refused = result(
+        "link",
+        json!({"origin":"","projects":["github.com/acme/api"]}),
+    );
+    assert_ne!(refused["isError"], true, "{refused}");
+    assert!(text(&refused).contains(r#""linked":false"#), "{refused}");
+    let answered = result("index", json!({}));
+    assert_ne!(answered["isError"], true, "{answered}");
+    assert_eq!(text(&answered), "No user memories recorded yet.");
+}

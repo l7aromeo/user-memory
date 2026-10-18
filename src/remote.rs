@@ -130,17 +130,40 @@ impl Connection {
             tokio::time::timeout(Duration::from_secs(10), service.call_tool(request)).await;
         let _ = service.cancel().await;
         let result = serde_json::to_value(result.context("Memory server request timed out")??)?;
-        if result["isError"] == true {
-            bail!("Memory server could not complete {name}");
-        }
         let content = result["content"]
             .as_array()
             .context("Memory server returned no content")?;
-        Ok(content
+        let text = content
             .iter()
             .filter_map(|c| c["text"].as_str())
             .collect::<Vec<_>>()
-            .join("\n"))
+            .join("\n");
+        if result["isError"] == true {
+            bail!("{}", failure(name, &text));
+        }
+        Ok(text)
+    }
+}
+
+/// Why the server's `name` call failed, from the text it sent with
+/// `isError`: the `error` of a JSON reply, else the text itself without
+/// index's own "Memory unavailable" prefix, so the CLI and the hooks say what
+/// the server said.
+fn failure(name: &str, text: &str) -> String {
+    let said = serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|reply| reply["error"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| {
+            let text = text.trim();
+            // index says so itself; the caller adds its own word for it.
+            text.strip_prefix(crate::memory::INDEX_UNAVAILABLE)
+                .unwrap_or(text)
+                .to_owned()
+        });
+    if said.is_empty() {
+        format!("Memory server could not complete {name}")
+    } else {
+        said
     }
 }
 
@@ -445,6 +468,27 @@ async fn forward(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The CLI and the hooks get the server's own words for a failed call.
+    #[test]
+    fn a_failed_call_says_what_the_server_said() {
+        assert_eq!(
+            failure("read", r#"{"error":"dead is not a memory id"}"#),
+            "dead is not a memory id"
+        );
+        assert_eq!(
+            failure("record", r#"{"stored":false,"error":"store is locked"}"#),
+            "store is locked"
+        );
+        assert_eq!(
+            failure("index", "Memory unavailable: store is locked\n"),
+            "store is locked"
+        );
+        assert_eq!(
+            failure("index", " "),
+            "Memory server could not complete index"
+        );
+    }
 
     /// The tool schemas this server publishes, with `edit` applied to one field.
     fn tools(edit: impl Fn(&mut serde_json::Value)) -> Vec<(String, serde_json::Value)> {
