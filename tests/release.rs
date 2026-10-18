@@ -102,17 +102,24 @@ fn files(dir: &Path) -> Vec<String> {
 
 /// Writes `name`'s SHA-256 line beside it in `dir`, in shasum's format, as a
 /// build does.
+// Through sh, which every Unix has: the check job installs no zsh, and the
+// tests that need no script run there too.
 fn checksum(dir: &Path, name: &str) {
-    let sum = Command::new("/bin/zsh")
+    let sum = Command::new("/bin/sh")
         .args([
             "-c",
-            "shasum -a 256 $1 2>/dev/null || sha256sum $1",
-            "zsh",
+            "shasum -a 256 \"$1\" 2>/dev/null || sha256sum \"$1\"",
+            "sh",
             name,
         ])
         .current_dir(dir)
         .output()
         .unwrap();
+    assert!(
+        sum.status.success() && !sum.stdout.is_empty(),
+        "{}",
+        text(&sum).1
+    );
     fs::write(dir.join(format!("{name}.sha256")), &sum.stdout).unwrap();
 }
 

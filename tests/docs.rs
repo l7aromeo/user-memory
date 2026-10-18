@@ -1442,7 +1442,7 @@ fn anchors(doc: &str) -> HashSet<String> {
 /// repository's own pages on GitHub.
 fn link_errors(name: &str, doc: &str) -> Vec<String> {
     let mut errors = Vec::new();
-    let dir = Path::new(name).parent().unwrap_or(Path::new(""));
+    let dir = name.rsplit_once('/').map_or("", |(dir, _)| dir);
     let mut fenced = false;
     for (index, line) in doc.lines().enumerate() {
         if line.trim_start().starts_with("```") {
@@ -1459,32 +1459,26 @@ fn link_errors(name: &str, doc: &str) -> Vec<String> {
             };
             let (file, anchor) = if let Some(page) = target.strip_prefix(OWN_PAGES) {
                 let (file, anchor) = page.split_once('#').unwrap_or((page, ""));
-                (PathBuf::from(file), anchor)
+                (normalize(file), anchor)
             } else if target.contains("://") || target.starts_with("mailto:") {
                 continue;
             } else {
                 let (file, anchor) = target.split_once('#').unwrap_or((target, ""));
                 let file = if file.is_empty() {
-                    PathBuf::from(name)
+                    name.to_owned()
                 } else {
-                    normalize(&dir.join(file))
+                    normalize(&format!("{dir}/{file}"))
                 };
                 (file, anchor)
             };
             let number = index + 1;
-            let Ok(text) = fs::read_to_string(repo_file(&file.to_string_lossy())) else {
-                if !repo_file(&file.to_string_lossy()).exists() {
-                    errors.push(format!(
-                        "{name}:{number}: {target}: no file {}",
-                        file.display()
-                    ));
+            let Ok(text) = fs::read_to_string(repo_file(&file)) else {
+                if !repo_file(&file).exists() {
+                    errors.push(format!("{name}:{number}: {target}: no file {file}"));
                 }
                 continue;
             };
-            if !anchor.is_empty()
-                && file.extension().is_some_and(|ext| ext == "md")
-                && !anchors(&text).contains(anchor)
-            {
+            if !anchor.is_empty() && file.ends_with(".md") && !anchors(&text).contains(anchor) {
                 errors.push(format!("{name}:{number}: {target}: no heading #{anchor}"));
             }
         }
@@ -1492,19 +1486,20 @@ fn link_errors(name: &str, doc: &str) -> Vec<String> {
     errors
 }
 
-/// `path` with its `..` and `.` parts resolved, as a link names a file.
-fn normalize(path: &Path) -> PathBuf {
-    let mut parts: Vec<&std::ffi::OsStr> = Vec::new();
-    for part in path.components() {
+/// `path`, a repository path with `/` between its parts as links and the
+/// messages here show it, with its `..` and `.` parts resolved.
+fn normalize(path: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
         match part {
-            std::path::Component::ParentDir => {
+            ".." => {
                 parts.pop();
             }
-            std::path::Component::CurDir => {}
-            other => parts.push(other.as_os_str()),
+            "." | "" => {}
+            other => parts.push(other),
         }
     }
-    parts.iter().collect()
+    parts.join("/")
 }
 
 // Every link between the docs, and every link to this repository's own

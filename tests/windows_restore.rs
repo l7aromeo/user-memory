@@ -65,6 +65,8 @@ fn record(root: &Path, content: &str) {
             "workflow",
             "--scope",
             "global",
+            "--title",
+            content,
             "--content",
             content,
         ],
