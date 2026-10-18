@@ -4557,6 +4557,12 @@ fn the_cli_takes_projects_as_the_tools_name_it() {
             "{command}: {stdout}"
         );
     }
+    let out = s.run(&["review", "--projects", "github.com/acme/compiler"]);
+    assert!(
+        out.status.success(),
+        "review: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     // The CLI's help says it takes a folder, which only the tools refuse.
     for command in ["index", "read", "search"] {
         let help = String::from_utf8(s.run(&[command, "--help"]).stdout).unwrap();
