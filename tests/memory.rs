@@ -2841,7 +2841,7 @@ fn rewording_an_observation_or_inference_keeps_its_source() {
     assert_eq!(out["status"], "confirmed", "{out}");
     assert_eq!(
         kind(&pattern),
-        (json!("explicit"), json!("confirmed"), json!([]))
+        (json!("explicit"), json!("confirmed"), Value::Null)
     );
     assert_eq!(inactive(&s, &pattern)["reason"], "Said so in review");
     for change in [
