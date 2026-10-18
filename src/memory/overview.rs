@@ -32,22 +32,27 @@ pub struct Index {
     /// Used by user-memory's own client to keep instruction files current; leave unset. Only the user's global standing rules, as their instruction files hold them.
     #[arg(long)]
     #[serde(default)]
+    #[schemars(skip)]
     pub instructions: bool,
     /// Used by user-memory's own client to keep instruction files current; leave unset. With instructions: the most bytes the text may take, the largest categories counted in one line each beyond it (24 KiB unless set).
     #[arg(long)]
     #[serde(default)]
+    #[schemars(skip)]
     pub instructions_max_bytes: Option<usize>,
     /// Used by user-memory's own client to keep instruction files current; leave unset. Leaves out the global standing rules, which the client's instruction files already hold.
     #[arg(long)]
     #[serde(default)]
+    #[schemars(skip)]
     pub without_global_rules: bool,
     /// Used by user-memory's own client to notice what changed since a session last looked; leave unset. One line per memory with its id, last change, status and title.
     #[arg(long)]
     #[serde(default)]
+    #[schemars(skip)]
     pub stamps: bool,
     /// Used by user-memory's own client to add the projects this conversation origin linked; leave unset.
     #[arg(skip)]
     #[serde(default)]
+    #[schemars(skip)]
     pub origin_links: Option<String>,
 }
 

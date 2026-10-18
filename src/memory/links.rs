@@ -31,9 +31,11 @@ pub struct Link {
     pub unlink: bool,
     /// Used by user-memory's own client to name this folder's own projects, which always load; leave unset.
     #[serde(default)]
+    #[schemars(skip)]
     pub folder_projects: Vec<String>,
     /// Used by user-memory's own client to name the projects this folder's .user-memory lists; leave unset.
     #[serde(default)]
+    #[schemars(skip)]
     pub included_projects: Vec<String>,
 }
 

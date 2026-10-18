@@ -154,6 +154,20 @@ fn initialization_delivers_portable_memory_guidance_and_keeps_tools_available() 
         tools.iter().find(|t| t["name"] == tool).unwrap()["inputSchema"]["properties"][field]
             .clone()
     };
+    // What only user-memory's own client sends stays out of the schema every
+    // agent loads; the tools still accept it (below).
+    for (tool, field) in [
+        ("index", "instructions"),
+        ("index", "instructions_max_bytes"),
+        ("index", "without_global_rules"),
+        ("index", "stamps"),
+        ("index", "origin_links"),
+        ("link", "folder_projects"),
+        ("link", "included_projects"),
+    ] {
+        assert!(property(tool, field).is_null(), "{tool} advertises {field}");
+    }
+    assert!(property("index", "projects").is_object());
     let update_id = property("update", "memory_id");
     assert_eq!(update_id["type"], "string");
     assert_eq!(update_id["format"], "uuid");
@@ -199,52 +213,11 @@ fn initialization_delivers_portable_memory_guidance_and_keeps_tools_available() 
             );
         }
     }
-    assert!(
-        property("index", "stamps")["description"]
-            .as_str()
-            .unwrap()
-            .contains("leave unset")
-    );
-    // The index's parameters for the client's own sync tell an agent to leave
-    // them alone.
-    for internal in [
-        "instructions",
-        "instructions_max_bytes",
-        "without_global_rules",
-    ] {
-        let description = property("index", internal)["description"]
-            .as_str()
-            .unwrap_or_default()
-            .to_owned();
-        assert!(
-            description.starts_with(
-                "Used by user-memory's own client to keep instruction files current; leave unset."
-            ),
-            "{internal}: {description}"
-        );
-    }
     // Agents set it on their own judgment, so it says exactly when it is true.
     assert_eq!(
         property("record", "user_confirmed")["description"],
         "True only when the user, in this conversation, stated or approved this exact memory in their own words and, for scope global, that it holds in every project; for an observation or inference, only once the user approved recording it."
     );
-    // Filled in by the client from the folder and the hook payload; an agent
-    // that set them could load or protect projects the session never named.
-    for (tool, internal) in [
-        ("index", "origin_links"),
-        ("link", "folder_projects"),
-        ("link", "included_projects"),
-    ] {
-        let description = property(tool, internal)["description"]
-            .as_str()
-            .unwrap_or_default()
-            .to_owned();
-        assert!(
-            description.starts_with("Used by user-memory's own client")
-                && description.ends_with("; leave unset."),
-            "{tool}.{internal}: {description}"
-        );
-    }
     // The index and the instruction files are built from titles, so the
     // schema says a record needs one. Scope has no default: a global memory
     // applies everywhere, so the agent states which one it means.
@@ -742,4 +715,22 @@ fn only_a_failed_call_is_flagged_as_an_error() {
     let answered = result("index", json!({}));
     assert_ne!(answered["isError"], true, "{answered}");
     assert_eq!(text(&answered), "No user memories recorded yet.");
+}
+
+/// The fields user-memory's own client sends, which the tools' schemas leave
+/// out, still work: the session hooks ask index for stamps.
+#[test]
+fn the_clients_own_fields_are_accepted_though_not_advertised() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path();
+    let call = |name: &str, arguments: Value| serve::call(server(home, home), name, arguments);
+    let stored = call(
+        "record",
+        json!({"category":"workflow","title":"Use tabs","content":"Use tabs","scope":"global","user_confirmed":true}),
+    );
+    assert_eq!(stored["stored"], true, "{stored}");
+    let stamps = call("index", json!({"stamps": true}));
+    let stamps = stamps.as_str().unwrap();
+    assert!(!stamps.starts_with("USER MEMORY INDEX"), "{stamps}");
+    assert!(stamps.contains("Use tabs"), "{stamps}");
 }

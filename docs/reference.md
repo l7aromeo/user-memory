@@ -286,6 +286,11 @@ a `reason` beside a false success field such as `"stored": false`, is a
 normal reply. The CLI's memory commands, run against a server, end with that
 reason and a failing status, as they do on a local store.
 
+`index` and `link` also accept fields that only user-memory's own client
+sends, for its session hooks and instruction files (`stamps`, `instructions`,
+`folder_projects` and the like). The tools' published schemas leave them out,
+so agents never load or set them.
+
 ## How agents learn to use it
 
 An agent learns from six layers:
