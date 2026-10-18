@@ -168,8 +168,9 @@ CLI: `user-memory record … --confirms ID`, `--supersedes ID` (repeatable, add
 
 ## Consolidation review
 
-`review` (CLI `user-memory review [--project P]… [--max-groups N]`) is
-read-only and runs only when the user asks. It groups:
+`review` (CLI `user-memory review [--project P]… [--max-groups N]
+[--keep ID]…`) runs only when the user asks. It changes no memory. It groups
+(each member with its id, title and content):
 
 - **duplicate** — the same memory recorded more than once in one scope
   (merge with `supersedes` + `merge`);
@@ -191,8 +192,12 @@ and says how many it left out (`left_out`).
 
 Two memories the user calls different can be marked so review stops grouping
 them: `user-memory update ID --distinct-from OTHER` (repeatable), or
-`update` with `distinct_from` and nothing else. Marking never changes
-either memory. Memories in different category groups are never grouped.
+`update` with `distinct_from` and nothing else. A group, or the members of
+one, that the user leaves as they are is kept in one call: `review` with
+`keep` (CLI `--keep ID`, repeatable; at least 2, at most 20, the user's yes
+via `user_confirmed`) marks every pair among them, reports how many were new
+as `kept`, and returns the groups that remain. Marking never changes any
+memory. Memories in different category groups are never grouped.
 
 ## Export and import
 
@@ -284,7 +289,7 @@ user-memory import old-backup.json --titles titles.json   # format version 1
 | `update` | Correct or confirm a memory on the user's request, or with `distinct_from` mark memories the user calls different |
 | `forget` | Delete one memory, or every memory and link from one conversation origin, and invalidate dependent inferences |
 | `link` | Keep projects loaded for one conversation origin: its session start and change notices include them, after resume and compaction too; returns the linked projects' index lines; `unlink` removes. See [Conversation links](#conversation-links) |
-| `review` | On the user's request only: groups of duplicates, cross-scope copies, overlaps and stale patterns; read-only |
+| `review` | On the user's request only: groups of duplicates, cross-scope copies, overlaps and stale patterns; `keep` marks a group the user leaves as is |
 | `export` | On the user's request: write every memory, or those the [filters](#exporting-or-importing-part-of-the-store) select, to a JSON file in the exports directory; returns a summary only |
 | `import` | On the user's request: preview an export file from the exports directory, or the memories the filters select from it; writes only with `apply` and `user_confirmed` after the user approves |
 
@@ -672,7 +677,7 @@ user-memory search … --cursor NEXT_CURSOR [--page-size N]   # also index and r
 # Filters for index, search and read --category (see Scope and filters):
 #   --scope global|project|all  --type T  --category C  --source S
 #   --status active|stale|superseded|all  --origin O
-user-memory review [--project P]… [--max-groups N]
+user-memory review [--project P]… [--max-groups N] [--keep ID]…
 user-memory project-id [PATH] [--set KEY | --include FOLDER | --exclude FOLDER]
 
 # Record and correct (--scope is required; the CLI confirms explicit and

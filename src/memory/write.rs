@@ -502,7 +502,7 @@ pub fn record(db: &Path, mut input: Record) -> Result<Value> {
 
 /// Remembers that the user means two memories differently; returns 1 when the
 /// pair is new, 0 when it was already known.
-fn mark_pair(conn: &Connection, one: Uuid, other: Uuid) -> Result<usize> {
+pub(super) fn mark_pair(conn: &Connection, one: Uuid, other: Uuid) -> Result<usize> {
     let (a, b) = (one.min(other), one.max(other));
     Ok(conn.execute(
         "INSERT OR IGNORE INTO memory_distinct (a,b) VALUES (?1,?2)",

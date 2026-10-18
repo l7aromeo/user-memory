@@ -11,6 +11,7 @@ mod sandbox;
 use sandbox::Sandboxed;
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeSet,
     io::{BufRead, BufReader, Read, Write},
     net::TcpListener,
     path::PathBuf,
@@ -839,6 +840,81 @@ fn marking_existing_memories_distinct_changes_no_memory_and_ends_their_group() {
         "Mark memories distinct separately from changing one"
     );
     assert_eq!(rows(&s), before);
+}
+
+// A group the user leaves as it is stops coming back: keep marks every pair
+// among the members they name, and changes no memory. Members carry the
+// title the index shows, so the user knows each one by it.
+#[test]
+fn keeping_a_group_marks_every_pair_and_ends_it() {
+    let s = Store::new();
+    let a = s.stored(&["--content", "Prefer Rust", "--origin", "chat/x"]);
+    let b = s.stored(&["--content", "Use Go here", "--origin", "chat/y"]);
+    let c = s.stored(&["--content", "Wrap lines at 100", "--origin", "chat/z"]);
+    rusqlite::Connection::open(&s.db)
+        .unwrap()
+        .execute_batch(&format!(
+            "UPDATE memories SET content='Prefer Rust' WHERE id IN ('{b}','{c}');"
+        ))
+        .unwrap();
+    let groups = s.value(&["review"])["groups"].clone();
+    let titles: BTreeSet<&str> = groups[0]["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        titles,
+        BTreeSet::from(["Prefer Rust", "Use Go here", "Wrap lines at 100"]),
+        "{groups}"
+    );
+    let refused = s.value(&["review", "--keep", &a]);
+    assert_eq!(
+        refused["reason"],
+        "keep names at least two memories the user leaves as they are"
+    );
+    let before = rows(&s);
+    let kept = s.value(&["review", "--keep", &a[..8], "--keep", &b, "--keep", &c]);
+    assert_eq!(
+        (&kept["kept"], &kept["groups"]),
+        (&json!(3), &json!([])),
+        "{kept}"
+    );
+    assert_eq!(rows(&s), before, "keeping a group rewrites no memory");
+    let again = s.value(&["review", "--keep", &b, "--keep", &a]);
+    assert_eq!(again["kept"], 0, "the pairs are known");
+    let missing = s.value(&[
+        "review",
+        "--keep",
+        &a,
+        "--keep",
+        "00000000-0000-4000-8000-000000000000",
+    ]);
+    assert_eq!(missing["reason"], "Memory does not exist", "{missing}");
+    let conn = rusqlite::Connection::open(&s.db).unwrap();
+    let many: Vec<String> = (0..21)
+        .map(|i| format!("00000000-0000-4000-8000-{i:012}"))
+        .collect();
+    for id in &many {
+        conn.execute(
+            "INSERT INTO memories(id,category,context,content,memory_type,title) VALUES (?1,'x','',?1,'fact',?1)",
+            [id],
+        )
+        .unwrap();
+    }
+    drop(conn);
+    let mut args = vec!["review"];
+    for id in &many {
+        args.extend(["--keep", id.as_str()]);
+    }
+    let refused = s.value(&args);
+    assert_eq!(
+        refused["reason"], "keep names at most 20 memories",
+        "{refused}"
+    );
+    args.truncate(args.len() - 2);
+    assert_eq!(s.value(&args)["kept"], 190, "every pair among 20");
 }
 
 /// `args` with `--title` set to the content and `--scope` to global when a

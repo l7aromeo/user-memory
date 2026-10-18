@@ -5,14 +5,16 @@
 
 use super::{
     Memory,
+    ids::{MemoryRef, resolve_all, uuids},
     index::embed,
     project_key,
-    schema::{SELECT, connect, row},
+    schema::{SELECT, connect, get, row, write},
     selection::refuse_local_paths,
     similar::{
         DUPLICATE_OVERLAP, Draft, RELATED_OVERLAP, Thresholds, category_group, cosine, document,
         overlap, stored_vectors, thresholds, tokenize,
     },
+    write::mark_pair,
 };
 use anyhow::{Result, bail};
 use clap::Args;
@@ -47,6 +49,55 @@ pub struct Review {
     #[arg(long, default_value_t = GROUPS)]
     #[serde(default = "default_groups")]
     pub max_groups: usize,
+    /// Members of a group the user chose to leave as they are, in full or as the index's 8 characters: every pair among them is marked distinct, changing no memory, so review stops grouping them. Needs user_confirmed.
+    #[arg(long = "keep")]
+    #[serde(default)]
+    pub keep: Vec<MemoryRef>,
+    /// True only when the user, in this conversation, chose to leave the memories in keep as they are.
+    #[arg(skip)]
+    #[serde(default)]
+    pub user_confirmed: bool,
+}
+
+/// Most memories one keep names: more than a group lists, for a group the
+/// user chose to keep whole after reading some it left out.
+const KEEP_LIMIT: usize = 20;
+
+/// Why `keep` cannot be applied, or `None` once every pair among its
+/// memories is marked distinct; how many pairs were new goes to `kept`.
+fn keep(db: &Path, input: &Review, kept: &mut usize) -> Result<Option<String>> {
+    if !input.user_confirmed {
+        return Ok(Some(
+            "Keeping memories as they are requires the user's approval".into(),
+        ));
+    }
+    let mut members = input.keep.clone();
+    let conn = connect(db)?;
+    let tx = write(&conn)?;
+    if let Some(reason) = resolve_all(&tx, &mut members)? {
+        return Ok(Some(reason));
+    }
+    let members = uuids(&members);
+    if members.len() < 2 {
+        return Ok(Some(
+            "keep names at least two memories the user leaves as they are".into(),
+        ));
+    }
+    if members.len() > KEEP_LIMIT {
+        return Ok(Some(format!("keep names at most {KEEP_LIMIT} memories")));
+    }
+    for id in &members {
+        if get(&tx, *id)?.is_none() {
+            return Ok(Some("Memory does not exist".into()));
+        }
+    }
+    for (i, one) in members.iter().enumerate() {
+        for other in &members[i + 1..] {
+            *kept += mark_pair(&tx, *one, *other)?;
+        }
+    }
+    tx.commit()?;
+    Ok(None)
 }
 
 /// Members listed per group. A larger group of duplicates or stale patterns
@@ -239,11 +290,21 @@ fn overlaps(links: &[(usize, usize, f32)]) -> Vec<Vec<usize>> {
 /// overlaps, then stale patterns; within
 /// a kind by the newest member, then the smallest id.
 pub fn review(db: &Path, input: &Review) -> Result<Value> {
+    let mut kept = 0;
+    if !input.keep.is_empty()
+        && let Some(reason) = keep(db, input, &mut kept)?
+    {
+        return Ok(json!({"kept":false,"reason":reason}));
+    }
     let identity = embed::Config::from_env().map(|config| {
         let (model, dimensions) = config.identity();
         (model.to_owned(), dimensions)
     });
-    review_with(&connect(db)?, input, identity.as_ref())
+    let mut groups = review_with(&connect(db)?, input, identity.as_ref())?;
+    if !input.keep.is_empty() {
+        groups["kept"] = json!(kept);
+    }
+    Ok(groups)
 }
 
 /// `review` comparing stored vectors made with `identity` (model, requested
@@ -376,7 +437,7 @@ fn review_with(
                 .into_iter()
                 .map(|i| {
                     let m = &memories[i];
-                    json!({"id":m.id,"content":m.content,"type":m.memory_type,"category":m.category,"scope":m.scope,"project":m.project,"status":m.status,"source":m.source,"confirmations":m.confirmations})
+                    json!({"id":m.id,"title":m.title,"content":m.content,"type":m.memory_type,"category":m.category,"scope":m.scope,"project":m.project,"status":m.status,"source":m.source,"confirmations":m.confirmations})
                 })
                 .collect();
             let mut group = json!({"kind":kind.name(),"reason":kind.reason(),"members":members});
@@ -482,6 +543,8 @@ mod tests {
         let input = Review {
             projects: project.map(str::to_owned).into_iter().collect(),
             max_groups: 20,
+            keep: Vec::new(),
+            user_confirmed: false,
         };
         let id = identity();
         let found = review_with(conn, &input, semantic.then_some(&id)).unwrap();
@@ -535,6 +598,8 @@ mod tests {
                 &Review {
                     projects: projects.iter().map(|p| (*p).to_owned()).collect(),
                     max_groups: 20,
+                    keep: Vec::new(),
+                    user_confirmed: false,
                 },
                 None,
             )
@@ -649,6 +714,8 @@ mod tests {
                 &Review {
                     projects: vec!["lab".into(), "shop".into()],
                     max_groups: 20,
+                    keep: Vec::new(),
+                    user_confirmed: false,
                 },
                 None,
             )
@@ -808,6 +875,8 @@ mod tests {
             &Review {
                 projects: Vec::new(),
                 max_groups: 20,
+                keep: Vec::new(),
+                user_confirmed: false,
             },
             None,
         )
@@ -1026,6 +1095,8 @@ mod tests {
                 &Review {
                     projects: Vec::new(),
                     max_groups,
+                    keep: Vec::new(),
+                    user_confirmed: false,
                 },
                 None,
             )
@@ -1042,6 +1113,8 @@ mod tests {
             &Review {
                 projects: vec!["~/lab".into()],
                 max_groups: 5,
+                keep: Vec::new(),
+                user_confirmed: false,
             },
             None,
         )
@@ -1067,6 +1140,8 @@ mod tests {
             &Review {
                 projects: Vec::new(),
                 max_groups: 5,
+                keep: Vec::new(),
+                user_confirmed: false,
             },
             None,
         )
@@ -1118,6 +1193,8 @@ mod tests {
             &Review {
                 projects: vec!["lab".into()],
                 max_groups: 5,
+                keep: Vec::new(),
+                user_confirmed: false,
             },
         )
         .unwrap();

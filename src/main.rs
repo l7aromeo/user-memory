@@ -264,7 +264,7 @@ impl UserMemoryServer {
         })
     }
     #[tool(
-        description = "Read-only: groups of duplicate, cross-scope, overlapping and stale memories for the user to consolidate. Only when the user asks; change nothing they have not approved."
+        description = "Groups of duplicate, cross-scope, overlapping and stale memories to consolidate; keep marks one left as is. Only when the user asks; change nothing they have not approved."
     )]
     fn review(&self, Parameters(input): Parameters<memory::Review>) -> Reply {
         guarded(None, || match memory::review(&self.db, &input) {
@@ -511,7 +511,11 @@ async fn main() -> Result<()> {
             Command::Index(input) => Some(("index", serde_json::to_value(input)?)),
             Command::Search(input) => Some(("search", serde_json::to_value(input)?)),
             Command::Read(input) => Some(("read", serde_json::to_value(input)?)),
-            Command::Review(input) => Some(("review", serde_json::to_value(input)?)),
+            Command::Review(input) => {
+                let mut value = serde_json::to_value(input)?;
+                value["user_confirmed"] = json!(true);
+                Some(("review", value))
+            }
             Command::Record(input) => {
                 let mut input = input.clone();
                 input.user_confirmed = typed_by_the_user(&input);
@@ -667,10 +671,14 @@ async fn main() -> Result<()> {
             input.user_confirmed = typed_by_the_user(&input);
             println!("{}", memory::record(&db, input)?);
         }
-        Command::Review(input) => println!(
-            "{}",
-            serde_json::to_string_pretty(&memory::review(&db, &input)?)?
-        ),
+        Command::Review(mut input) => {
+            // Keeping a group typed on the command line is the user's choice.
+            input.user_confirmed = true;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&memory::review(&db, &input)?)?
+            )
+        }
         Command::Read(input) => println!(
             "{}",
             serde_json::to_string_pretty(&memory::read(&db, &input)?)?

@@ -404,6 +404,16 @@ fn tools_apply_documented_defaults_and_require_confirmation_to_change_memory() {
     .unwrap();
     assert_eq!(updated["updated"], true, "{updated}");
     assert_eq!(updated["id"], ids[0].as_str());
+    // Keeping a group as it is marks pairs, so it needs the user's yes too.
+    let refused: Value =
+        serde_json::from_str(&tool("review", json!({"keep":[&ids[1][..8], ids[2]]}))).unwrap();
+    assert_eq!(refused["kept"], false, "{refused}");
+    let kept: Value = serde_json::from_str(&tool(
+        "review",
+        json!({"keep":[&ids[1][..8], ids[2]],"user_confirmed":true}),
+    ))
+    .unwrap();
+    assert_eq!(kept["kept"], 1, "{kept}");
     let refused: Value =
         serde_json::from_str(&tool("forget", json!({"memory_id":ids[0]}))).unwrap();
     assert_eq!(refused["deleted"], false);

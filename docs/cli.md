@@ -26,7 +26,7 @@ Every command has `--help`.
 | `user-memory read 68da18b4 1b827239` | Whole memories, by up to 20 ids (full, or the 8 characters the index shows). |
 | `user-memory read --category workflow` | Every memory in one category. |
 | `user-memory search 'language choice'` | Memories that match a topic, best first. |
-| `user-memory review` | Groups of duplicates, project copies of global memories, one rule stated in several projects, overlaps and stale patterns. Changes nothing. |
+| `user-memory review` | Groups of duplicates, project copies of global memories, one rule stated in several projects, overlaps and stale patterns. Changes nothing; `--keep ID` (repeatable) leaves the memories you name as they are, so review stops grouping them. |
 
 Long results come in pages: 20 memories for `search`, 100 for `index` and
 `read --category`. A page with more to come ends with
