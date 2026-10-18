@@ -249,7 +249,12 @@ fn initialization_delivers_portable_memory_guidance_and_keeps_tools_available() 
             required("record")
         );
     }
-    assert_eq!(required("link"), ["origin"]);
+    // link requires nothing: without an origin it says where to find one.
+    let link = &tools.iter().find(|t| t["name"] == "link").unwrap()["inputSchema"];
+    assert!(
+        link["required"].as_array().is_none_or(Vec::is_empty),
+        "{link}"
+    );
     // A global memory is the user's call, and a repository a folder always
     // needs is listed for the folder rather than linked again each time.
     for tool in ["record", "update"] {
@@ -797,4 +802,28 @@ fn index_tells_a_refused_call_from_an_unreachable_store() {
     let text = broken["content"][0]["text"].as_str().unwrap();
     assert_eq!(broken["isError"], true, "{broken}");
     assert!(text.starts_with("Memory unavailable: "), "{text}");
+}
+
+/// link without an origin says where to find one, as an answer the agent
+/// can act on, rather than failing on a missing field.
+#[test]
+fn link_without_an_origin_says_where_to_find_it() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path();
+    let reply = serve::result(
+        server(home, home),
+        "link",
+        json!({"projects":["github.com/acme/compiler"]}),
+    );
+    assert_ne!(reply["isError"], true, "{reply}");
+    let answer: Value =
+        serde_json::from_str(reply["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(answer["linked"], false, "{answer}");
+    assert!(
+        answer["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("link needs the conversation origin printed at session start"),
+        "{answer}"
+    );
 }

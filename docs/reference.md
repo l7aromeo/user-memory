@@ -566,6 +566,9 @@ the repositories' remotes or project keys:
 {"origin": "claude:session/7f3c…", "projects": ["github.com/owner/tools"]}
 ```
 
+Without an origin, as without the session hooks, `link` links nothing and
+says where the origin comes from.
+
 - Links belong to the conversation origin and are stored with the memories,
   so they last through resume and compaction, which keep the session id, and
   reach every machine sharing a server. Another conversation sees none of

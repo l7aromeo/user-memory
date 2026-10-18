@@ -22,6 +22,9 @@ const NEEDS_ORIGIN: &str = "link needs the conversation origin printed at sessio
 #[derive(Deserialize, Serialize, JsonSchema)]
 pub struct Link {
     /// The conversation origin printed at session start, such as claude:session/<id>.
+    // Optional in the schema, so a call without it gets the reason below
+    // (where to find it) instead of a bare "missing field".
+    #[serde(default)]
     pub origin: String,
     /// Project keys or git remote URLs to load in this conversation, or with unlink to remove; none lists its links. For repositories this folder always needs, use .user-memory @ lines (user-memory project-id --include) instead of linking in every conversation: run it when the user asks for that, propose it when you noticed the need.
     #[serde(default)]
