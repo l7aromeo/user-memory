@@ -6,8 +6,10 @@
 //! fused with semantic similarity by reciprocal rank. Within the matches,
 //! project memories come before global ones.
 
+pub(super) use super::ids::SHORT_ID;
 use super::{
     Memory,
+    ids::resolve,
     index::{self, embed},
     page::{Paging, page},
     schema::{connect, get},
@@ -63,9 +65,6 @@ pub struct Read {
 
 /// Most ids one read accepts; more is a listing, which category or index gives.
 const READ_IDS: usize = 20;
-/// Shortest id prefix accepted: the 8 characters the index shows. Fewer would
-/// often match several memories.
-pub(super) const SHORT_ID: usize = 8;
 
 fn keyword_score(query: &BTreeSet<String>, m: &Memory) -> usize {
     let overlap = |words: &BTreeSet<String>| query.intersection(words).count();
@@ -220,29 +219,6 @@ pub(super) fn group_order(a: &Memory, b: &Memory) -> std::cmp::Ordering {
         .cmp(&(b.scope != "project"))
         .then_with(|| b.confirmations.cmp(&a.confirmations))
         .then_with(|| recency(b).cmp(&recency(a)))
-}
-
-/// Ids that `wanted` names: a full id, or a prefix of at least [`SHORT_ID`]
-/// characters. A prefix matching several memories is an error that lists them.
-fn resolve(conn: &Connection, wanted: &str) -> Result<Option<Uuid>> {
-    let wanted = wanted.trim().to_lowercase();
-    if let Ok(id) = Uuid::parse_str(&wanted) {
-        return Ok(get(conn, id)?.map(|m| m.id));
-    }
-    if wanted.chars().count() < SHORT_ID
-        || !wanted.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
-    {
-        bail!("{wanted} is not a memory id: give a full id or its first {SHORT_ID} characters");
-    }
-    let matches: Vec<String> = conn
-        .prepare("SELECT id FROM memories WHERE substr(id,1,length(?1))=?1 ORDER BY id")?
-        .query_map([&wanted], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    match matches.as_slice() {
-        [] => Ok(None),
-        [one] => Ok(Some(Uuid::parse_str(one)?)),
-        many => bail!("{wanted} matches several memories: {}", many.join(", ")),
-    }
 }
 
 /// Full memories by id or by category, in the shape search returns. Ids

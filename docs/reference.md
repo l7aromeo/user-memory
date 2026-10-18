@@ -807,8 +807,10 @@ topic as `topic`, or `query`.
   `status` asks for them.
 - Each line is `<8-character id> <title>`, marked `[project]` for project
   scope, `(tentative)` or `(stale)`, and `×N` when N conversations stated it.
-  `read` takes those 8 characters; a prefix several memories share is an
-  error naming each.
+  Every memory id a tool or command takes (`read`, `update`, `forget`, and
+  `record`'s `confirms`, `supersedes`, `distinct_from` and `evidence_ids`)
+  may be those 8 characters; a prefix several memories share, or none, is
+  refused, naming each match.
 - `--topic` moves task-relevant memories to the front of their groups.
 - When the store cannot be opened or read, the index tool answers
   `Memory unavailable: <reason>`. A call it refuses, such as a local path

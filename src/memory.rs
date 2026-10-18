@@ -13,6 +13,7 @@ use uuid::Uuid;
 pub mod backups;
 mod calibration;
 pub mod embedding;
+mod ids;
 mod index;
 mod links;
 pub(crate) mod migrate;
@@ -30,6 +31,7 @@ mod titles;
 mod transfer;
 mod write;
 
+pub use ids::MemoryRef;
 pub use index::reindex;
 pub use links::{Link, link};
 pub use migrate::{Migration, check_migration, migrate};

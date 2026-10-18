@@ -23,7 +23,7 @@
 //! memory contents, file contents or the store's path.
 
 use super::{
-    Memory, Scope, clean,
+    Memory, Scope, clean, ids,
     schema::{SCHEMA_VERSION, SELECT, connect, row, scratch, write},
     selection::{Filter, Subset, candidates},
     similar::{Draft, Pool, similar},
@@ -635,7 +635,7 @@ fn parse_entry(index: usize, value: &Value) -> std::result::Result<(Entry, bool)
         source: source.clone(),
         status: status.clone(),
         evidence: record.evidence,
-        evidence_ids: record.evidence_ids,
+        evidence_ids: ids::uuids(&record.evidence_ids),
         origins: origins
             .into_iter()
             .map(|(origin, first_seen)| Origin { origin, first_seen })

@@ -123,9 +123,9 @@ enum Command {
     Update(memory::Update),
     /// Forget a memory, or every memory from one conversation; invalidate patterns that depend on them.
     Forget {
-        /// ID of the memory to forget.
+        /// ID of the memory to forget, in full or as the index's 8 characters.
         #[arg(required_unless_present = "origin", conflicts_with = "origin")]
-        id: Option<uuid::Uuid>,
+        id: Option<memory::MemoryRef>,
         /// Forget every memory recorded with this conversation origin.
         #[arg(long)]
         origin: Option<String>,

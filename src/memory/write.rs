@@ -1,7 +1,9 @@
 //! Recording, corrections and deletion with provenance checks.
 
 use super::{
-    Memory, Scope, Source, TITLE_LIMIT, clean, project_key,
+    Memory, Scope, Source, TITLE_LIMIT, clean,
+    ids::{MemoryRef, full_id, resolve_all, uuids},
+    project_key,
     schema::{connect, get, write},
     selection::refuse_local_paths,
     similar::{self, Candidate, Draft, Pool, Signal},
@@ -66,7 +68,7 @@ pub struct Record {
     /// Only inferences cite supporting memories: at least two independent active explicit/observed memories.
     #[arg(long = "evidence-id")]
     #[serde(default)]
-    pub evidence_ids: Vec<Uuid>,
+    pub evidence_ids: Vec<MemoryRef>,
     /// Conversation origin printed at session start, such as claude:session/<id>; empty when none was given. Never invent one.
     #[arg(long, default_value = "")]
     #[serde(default)]
@@ -74,7 +76,7 @@ pub struct Record {
     /// IDs of active memories in the same scope that this one replaces because the user changed their mind (or, with merge, consolidates).
     #[arg(long = "supersedes")]
     #[serde(default)]
-    pub supersedes: Vec<Uuid>,
+    pub supersedes: Vec<MemoryRef>,
     /// With supersedes naming 2+ memories the user approved as duplicates: consolidate them, keeping all their conversations. Without it, supersedes means the user changed their mind.
     #[arg(long)]
     #[serde(default)]
@@ -82,11 +84,11 @@ pub struct Record {
     /// ID of an active explicit memory with the same scope that the user stated again; records the restatement instead of a new memory.
     #[arg(long)]
     #[serde(default)]
-    pub confirms: Option<Uuid>,
+    pub confirms: Option<MemoryRef>,
     /// IDs of the similar memories reported for this record that the user means differently; every reported one must be listed.
     #[arg(long = "distinct-from")]
     #[serde(default)]
-    pub distinct_from: Vec<Uuid>,
+    pub distinct_from: Vec<MemoryRef>,
     /// True only when the user, in this conversation, stated or approved this exact memory in their own words and, for scope global, that it holds in every project; for an observation or inference, only once the user approved recording it.
     #[arg(skip)]
     #[serde(default)]
@@ -95,8 +97,8 @@ pub struct Record {
 
 #[derive(Args, Deserialize, Serialize, JsonSchema)]
 pub struct Update {
-    /// The memory to correct or confirm, by its full id. Rewording only its title, context, reason or evidence keeps an observation or inference the agent's; any other change, or none (a confirmation), makes it the user's explicit statement.
-    pub memory_id: Uuid,
+    /// The memory to correct or confirm, by its full id or the 8 characters the index shows. Rewording only its title, context, reason or evidence keeps an observation or inference the agent's; any other change, or none (a confirmation), makes it the user's explicit statement.
+    pub memory_id: MemoryRef,
     /// New type: preference, constraint or value for a rule the user wants followed (only these become rules in the index and the instruction files); otherwise decision, goal, fact, behavior, pattern, or another label.
     #[arg(long = "type")]
     #[serde(rename = "type", default)]
@@ -144,7 +146,7 @@ pub struct Update {
     /// IDs of memories the user says mean something different from this one, so review stops grouping them. Give alone: marking them distinct changes no memory.
     #[arg(long = "distinct-from")]
     #[serde(default)]
-    pub distinct_from: Vec<Uuid>,
+    pub distinct_from: Vec<MemoryRef>,
     /// True only when the user explicitly asked for this correction or confirmation; never for your own revised guess.
     #[arg(skip)]
     #[serde(default)]
@@ -153,9 +155,9 @@ pub struct Update {
 
 #[derive(Deserialize, JsonSchema)]
 pub struct Forget {
-    /// The memory to delete. Give exactly one of memory_id or origin.
+    /// The memory to delete, by its full id or the 8 characters the index shows. Give exactly one of memory_id or origin.
     #[serde(default)]
-    pub memory_id: Option<Uuid>,
+    pub memory_id: Option<MemoryRef>,
     /// Delete every memory recorded with this origin, such as a deleted conversation.
     #[serde(default)]
     pub origin: Option<String>,
@@ -212,9 +214,9 @@ pub(super) fn check_support(
     extra: &HashSet<Uuid>,
     missing: Missing,
 ) -> Result<Option<&'static str>> {
-    for id in &input.evidence_ids {
-        let Some(support) = get(conn, *id)? else {
-            if extra.contains(id) || missing == Missing::Allow {
+    for id in uuids(&input.evidence_ids) {
+        let Some(support) = get(conn, id)? else {
+            if extra.contains(&id) || missing == Missing::Allow {
                 continue;
             }
             return Ok(Some("Supporting memory does not exist"));
@@ -316,7 +318,13 @@ pub(super) fn normalize(input: &mut Record) -> Option<String> {
     if input.source == Source::Inferred && input.evidence_ids.len() < 2 {
         return Some("Inferred patterns require at least two distinct supporting memories".into());
     }
-    if input.evidence_ids.len() > 20 || input.evidence_ids.iter().any(Uuid::is_nil) {
+    if input.evidence_ids.len() > 20
+        || input
+            .evidence_ids
+            .iter()
+            .filter_map(MemoryRef::full)
+            .any(|id| id.is_nil())
+    {
         return Some("Evidence must contain at most 20 non-nil UUID memory IDs".into());
     }
     None
@@ -352,9 +360,6 @@ pub fn record(db: &Path, mut input: Record) -> Result<Value> {
     if resolutions > 1 {
         return refused("Give at most one of confirms, supersedes or distinct_from");
     }
-    if input.merge && input.supersedes.len() < 2 {
-        return refused("merge needs at least two memories in supersedes");
-    }
     // Embedding may wait seconds for a cold model: never while holding the write lock.
     let vector = match input.confirms {
         Some(_) => None,
@@ -362,7 +367,25 @@ pub fn record(db: &Path, mut input: Record) -> Result<Value> {
     };
     let conn = connect(db)?;
     let tx = write(&conn)?;
-    if let Some(target) = input.confirms {
+    // Ids may be the index's first characters: each becomes the full id it
+    // names, or the call is refused.
+    for refs in [
+        &mut input.evidence_ids,
+        &mut input.supersedes,
+        &mut input.distinct_from,
+    ] {
+        if let Some(reason) = resolve_all(&tx, refs)? {
+            return refused(&reason);
+        }
+    }
+    if input.merge && input.supersedes.len() < 2 {
+        return refused("merge needs at least two memories in supersedes");
+    }
+    if let Some(named) = &input.confirms {
+        let target = match full_id(&tx, named)? {
+            Ok(target) => target,
+            Err(reason) => return refused(&reason),
+        };
         let result = confirm(&tx, &input, target)?;
         tx.commit()?;
         return Ok(result);
@@ -374,9 +397,9 @@ pub fn record(db: &Path, mut input: Record) -> Result<Value> {
     // counted once across all supports.
     let mut origins = BTreeSet::new();
     let mut unknown = 0;
-    for id in &input.evidence_ids {
+    for id in uuids(&input.evidence_ids) {
         // check_support found it in this transaction.
-        let support = listed(&tx, *id)?;
+        let support = listed(&tx, id)?;
         if !matches!(support.status.as_str(), "confirmed" | "tentative") {
             return refused(
                 "Evidence must be active explicit or observed memory, not another inference",
@@ -392,8 +415,9 @@ pub fn record(db: &Path, mut input: Record) -> Result<Value> {
             "Inferred patterns require at least two independent observations; memories from one conversation count once",
         );
     }
-    for target in &input.supersedes {
-        let Some(old) = get(&tx, *target)? else {
+    let supports = uuids(&input.evidence_ids);
+    for target in uuids(&input.supersedes) {
+        let Some(old) = get(&tx, target)? else {
             return refused("Superseded memory does not exist");
         };
         if old.status == "superseded" {
@@ -405,12 +429,12 @@ pub fn record(db: &Path, mut input: Record) -> Result<Value> {
         if old.source == "explicit" && input.source != Source::Explicit {
             return refused("Only the user's explicit statement can supersede an explicit memory");
         }
-        if input.evidence_ids.contains(target) {
+        if supports.contains(&target) {
             return refused("A memory cannot cite the memory it supersedes");
         }
     }
-    for other in &input.distinct_from {
-        if get(&tx, *other)?.is_none() {
+    for other in uuids(&input.distinct_from) {
+        if get(&tx, other)?.is_none() {
             return refused("distinct_from names a memory that does not exist");
         }
     }
@@ -446,7 +470,7 @@ pub fn record(db: &Path, mut input: Record) -> Result<Value> {
         result["duplicate"] = json!(true);
     }
     if !input.supersedes.is_empty() {
-        if input.supersedes.contains(&id) {
+        if uuids(&input.supersedes).contains(&id) {
             return refused("A memory cannot supersede itself");
         }
         // A merge of same-meaning memories keeps every conversation that
@@ -467,8 +491,8 @@ pub fn record(db: &Path, mut input: Record) -> Result<Value> {
         result["superseded"] = json!(input.supersedes);
     }
     add_origin(&tx, id, &input.origin)?;
-    for other in &input.distinct_from {
-        mark_pair(&tx, id, *other)?;
+    for other in uuids(&input.distinct_from) {
+        mark_pair(&tx, id, other)?;
     }
     tx.commit()?;
     Ok(result)
@@ -512,7 +536,8 @@ fn held_back(
             break;
         }
     }
-    if top.iter().all(|(c, _)| input.distinct_from.contains(&c.id)) {
+    let distinct = uuids(&input.distinct_from);
+    if top.iter().all(|(c, _)| distinct.contains(&c.id)) {
         return Ok(Vec::new());
     }
     Ok(top.iter().map(|(c, m)| reported(c, m)).collect())
@@ -593,7 +618,11 @@ pub fn update(db: &Path, input: Update) -> Result<Value> {
     }
     let conn = connect(db)?;
     let tx = write(&conn)?;
-    let Some(old) = get(&tx, input.memory_id)? else {
+    let memory_id = match full_id(&tx, &input.memory_id)? {
+        Ok(id) => id,
+        Err(reason) => return Ok(json!({"updated":false,"reason":reason})),
+    };
+    let Some(old) = get(&tx, memory_id)? else {
         return Ok(json!({"updated":false,"reason":"Memory does not exist"}));
     };
     if old.status == "superseded" {
@@ -620,10 +649,10 @@ pub fn update(db: &Path, input: Update) -> Result<Value> {
         }
         tx.execute(
             "UPDATE memories SET title=?2,updated_at=CURRENT_TIMESTAMP WHERE id=?1",
-            params![input.memory_id.to_string(), title],
+            params![memory_id.to_string(), title],
         )?;
         tx.commit()?;
-        return Ok(json!({"updated":true,"id":input.memory_id,"status":old.status}));
+        return Ok(json!({"updated":true,"id":memory_id,"status":old.status}));
     }
     // Wording (title, context, reason or evidence note) is not the user
     // stating the memory: alone it leaves an observation or inference the
@@ -687,7 +716,7 @@ pub fn update(db: &Path, input: Update) -> Result<Value> {
         "confirmed".to_owned()
     } else {
         next.source = source_named(&old_source);
-        next.evidence_ids = old_supports;
+        next.evidence_ids = old_supports.into_iter().map(MemoryRef::from).collect();
         if let Some(reason) = normalize(&mut next) {
             return Ok(json!({"updated":false,"reason":reason}));
         }
@@ -698,18 +727,18 @@ pub fn update(db: &Path, input: Update) -> Result<Value> {
             json!({"updated":false,"reason":"replace_origins needs the origin that replaces them"}),
         );
     }
-    tx.execute("UPDATE memories SET memory_type=?1,category=?2,context=?3,title=?4,content=?5,reason=?6,scope=?7,project=?8,source=?9,status=?10,evidence=?11,evidence_ids=?12,updated_at=CURRENT_TIMESTAMP WHERE id=?13",params![next.memory_type,next.category,next.context,next.title,next.content,next.reason,next.scope.name(),next.project,next.source.name(),status,next.evidence,serde_json::to_string(&next.evidence_ids)?,input.memory_id.to_string()])?;
+    tx.execute("UPDATE memories SET memory_type=?1,category=?2,context=?3,title=?4,content=?5,reason=?6,scope=?7,project=?8,source=?9,status=?10,evidence=?11,evidence_ids=?12,updated_at=CURRENT_TIMESTAMP WHERE id=?13",params![next.memory_type,next.category,next.context,next.title,next.content,next.reason,next.scope.name(),next.project,next.source.name(),status,next.evidence,serde_json::to_string(&next.evidence_ids)?,memory_id.to_string()])?;
     // The memory keeps the conversations it came from; a full restatement
     // in a new conversation replaces them with that one.
     if input.replace_origins {
         tx.execute(
             "DELETE FROM memory_origins WHERE memory_id=?1",
-            [input.memory_id.to_string()],
+            [memory_id.to_string()],
         )?;
     }
-    add_origin(&tx, input.memory_id, &next.origin)?;
+    add_origin(&tx, memory_id, &next.origin)?;
     tx.commit()?;
-    Ok(json!({"updated":true,"id":input.memory_id,"status":status}))
+    Ok(json!({"updated":true,"id":memory_id,"status":status}))
 }
 
 /// The source a stored memory names.
@@ -741,24 +770,30 @@ fn mark_distinct(db: &Path, mut input: Update) -> Result<Value> {
     if changes {
         return refused("Mark memories distinct separately from changing one");
     }
-    input.distinct_from.sort_unstable();
-    input.distinct_from.dedup();
-    if input.distinct_from.contains(&input.memory_id) {
-        return refused("A memory cannot be distinct from itself");
-    }
     let conn = connect(db)?;
     let tx = write(&conn)?;
-    for id in std::iter::once(&input.memory_id).chain(&input.distinct_from) {
-        if get(&tx, *id)?.is_none() {
+    let memory_id = match full_id(&tx, &input.memory_id)? {
+        Ok(id) => id,
+        Err(reason) => return refused(&reason),
+    };
+    if let Some(reason) = resolve_all(&tx, &mut input.distinct_from)? {
+        return refused(&reason);
+    }
+    let others = uuids(&input.distinct_from);
+    if others.contains(&memory_id) {
+        return refused("A memory cannot be distinct from itself");
+    }
+    for id in std::iter::once(memory_id).chain(others.iter().copied()) {
+        if get(&tx, id)?.is_none() {
             return refused("Memory does not exist");
         }
     }
     let mut marked = 0;
-    for other in &input.distinct_from {
-        marked += mark_pair(&tx, input.memory_id, *other)?;
+    for other in others {
+        marked += mark_pair(&tx, memory_id, other)?;
     }
     tx.commit()?;
-    Ok(json!({"updated":false,"distinct_marked":marked,"id":input.memory_id}))
+    Ok(json!({"updated":false,"distinct_marked":marked,"id":memory_id}))
 }
 
 pub fn forget(db: &Path, input: Forget) -> Result<Value> {
@@ -771,7 +806,11 @@ pub fn forget(db: &Path, input: Forget) -> Result<Value> {
     let conn = connect(db)?;
     let tx = write(&conn)?;
     let result = match (input.memory_id, origin) {
-        (Some(id), None) => {
+        (Some(named), None) => {
+            let id = match full_id(&tx, &named)? {
+                Ok(id) => id,
+                Err(reason) => return Ok(json!({"deleted":false,"reason":reason})),
+            };
             let count = tx.execute("DELETE FROM memories WHERE id=?1", [id.to_string()])?;
             json!({"deleted":count>0,"id":id})
         }
@@ -950,7 +989,7 @@ mod tests {
             let mut input = draft(
                 json!({"type":"pattern","category":"x","content":"Q","source":"inferred","scope":scope,"project":if scope == "project" {"repo"} else {""}}),
             );
-            input.evidence_ids = ids;
+            input.evidence_ids = ids.into_iter().map(MemoryRef::from).collect();
             check_support(&conn, &input, extra, missing).unwrap()
         };
         let none = HashSet::new();

@@ -137,6 +137,97 @@ fn database_contains_only_the_generic_memory_schema() {
     assert!(!s.run(&["context"]).status.success());
 }
 
+// The index shows each memory's first 8 characters; every tool that takes
+// a memory id takes those, as read does, and refuses a prefix that names no
+// memory or several.
+#[test]
+fn the_index_s_short_ids_name_memories_in_every_tool() {
+    let s = Store::new();
+    let short = |id: &str| id[..8].to_owned();
+    let a = s.add("preference", "Prefer concrete examples");
+    let b = s.add("preference", "Prefer runnable demonstrations");
+    let out = s.value(&["update", &short(&a), "--content", "Prefer worked examples"]);
+    assert_eq!(
+        (&out["updated"], &out["id"]),
+        (&json!(true), &json!(a)),
+        "{out}"
+    );
+    let out = s.value(&["update", &short(&a), "--distinct-from", &short(&b)]);
+    assert_eq!(out["distinct_marked"], 1, "{out}");
+    let pattern = s.value(&[
+        "record",
+        "--type",
+        "pattern",
+        "--category",
+        "learning",
+        "--content",
+        "Learns from practice",
+        "--source",
+        "inferred",
+        "--evidence-id",
+        &short(&a),
+        "--evidence-id",
+        &short(&b),
+    ]);
+    assert_eq!(pattern["stored"], true, "{pattern}");
+    let stored = inactive(&s, pattern["id"].as_str().unwrap());
+    assert_eq!(
+        stored["evidence_ids"],
+        json!([a.clone().min(b.clone()), a.clone().max(b.clone())])
+    );
+    let again = s.value(&[
+        "record",
+        "--category",
+        "programming",
+        "--content",
+        "Prefer worked examples",
+        "--confirms",
+        &short(&a),
+    ]);
+    assert_eq!(
+        (&again["confirmed"], &again["id"]),
+        (&json!(true), &json!(a)),
+        "{again}"
+    );
+    let changed = s.value(&[
+        "record",
+        "--category",
+        "programming",
+        "--content",
+        "Prefer slides",
+        "--supersedes",
+        &short(&b),
+    ]);
+    assert_eq!(changed["superseded"], json!([b]), "{changed}");
+    let gone = s.value(&["forget", &short(&a)]);
+    assert_eq!(
+        (&gone["deleted"], &gone["id"]),
+        (&json!(true), &json!(a)),
+        "{gone}"
+    );
+    // A prefix that names no memory, or several, is refused.
+    let none = s.value(&["update", "00000000", "--content", "x"]);
+    assert_eq!(none["reason"], "00000000 names no memory", "{none}");
+    let conn = rusqlite::Connection::open(&s.db).unwrap();
+    for id in [
+        "abcdef12-0000-4000-8000-000000000001",
+        "abcdef12-0000-4000-8000-000000000002",
+    ] {
+        conn.execute(
+            "INSERT INTO memories(id,category,context,content,memory_type,title) VALUES (?1,'x','',?1,'fact',?1)",
+            [id],
+        )
+        .unwrap();
+    }
+    drop(conn);
+    let several = s.value(&["forget", "abcdef12"]);
+    assert_eq!(
+        several["reason"],
+        "abcdef12 matches several memories: abcdef12-0000-4000-8000-000000000001, abcdef12-0000-4000-8000-000000000002",
+        "{several}"
+    );
+}
+
 #[test]
 fn memory_ids_are_uuid_v4_primary_keys_and_numeric_ids_are_rejected() {
     let s = Store::new();

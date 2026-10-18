@@ -396,18 +396,20 @@ fn tools_apply_documented_defaults_and_require_confirmation_to_change_memory() {
     ))
     .unwrap();
     assert_eq!(refused["updated"], false);
+    // The index's 8 characters name a memory here as in read.
     let updated: Value = serde_json::from_str(&tool(
         "update",
-        json!({"memory_id":ids[0],"content":"Changed","user_confirmed":true}),
+        json!({"memory_id":&ids[0][..8],"content":"Changed","user_confirmed":true}),
     ))
     .unwrap();
-    assert_eq!(updated["updated"], true);
+    assert_eq!(updated["updated"], true, "{updated}");
+    assert_eq!(updated["id"], ids[0].as_str());
     let refused: Value =
         serde_json::from_str(&tool("forget", json!({"memory_id":ids[0]}))).unwrap();
     assert_eq!(refused["deleted"], false);
     let deleted: Value = serde_json::from_str(&tool(
         "forget",
-        json!({"memory_id":ids[0],"user_confirmed":true}),
+        json!({"memory_id":&ids[0][..8],"user_confirmed":true}),
     ))
     .unwrap();
     assert_eq!(deleted["deleted"], true);

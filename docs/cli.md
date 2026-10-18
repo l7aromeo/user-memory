@@ -107,7 +107,7 @@ user-memory forget 68da18b4-5d40-4746-930f-22a7c859e8f7
 user-memory forget --origin claude:session/<id>
 ```
 
-The first deletes one memory, by its full id. The second deletes every memory
+The first deletes one memory, by its full id or the 8 characters the index shows. The second deletes every memory
 one conversation recorded, and the projects it linked, reported as
 `unlinked`. A memory that another conversation also stated is kept and
 listed as `kept`. Patterns built

@@ -74,10 +74,10 @@ Every memory has a title of at most 120 characters. The title states the
 memory itself ("Push, publish or tag only with my explicit go-ahead"), not a
 topic ("Release policy"). Agents decide from the title whether to read the
 whole memory, so a good title matters. To reword one, ask your agent, or run
-`update` with the memory's full id (`user-memory read 68da18b4` shows it):
+`update` with the memory's id, the 8 characters the index shows:
 
 ```bash
-user-memory update 68da18b4-5d40-4746-930f-22a7c859e8f7 --title 'Push, publish or tag only with my explicit go-ahead'
+user-memory update 68da18b4 --title 'Push, publish or tag only with my explicit go-ahead'
 ```
 
 Changing only the title keeps everything else about the memory.

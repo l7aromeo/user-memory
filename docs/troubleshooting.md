@@ -82,7 +82,7 @@ the instruction files and the git ignore. It exits with code:
 
 | Problem | Fix |
 |---|---|
-| The agent recorded something wrong | Ask it to update the memory, or run `user-memory update <full id> --content …`. |
+| The agent recorded something wrong | Ask it to update the memory, or run `user-memory update <id> --content …` with the id the index shows. |
 | The same thing is stored twice | Ask: "review my memories". |
 | A conversation taught the agent things you do not want kept | Ask: "forget what we discussed in that chat", or run `user-memory forget --origin <origin>`. |
 | Search finds only exact words | Semantic search is off. See [semantic search](server.md#semantic-search). |
