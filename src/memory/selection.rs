@@ -64,7 +64,8 @@ impl StatusFilter {
 #[derive(Args, Clone, Default, Deserialize, Serialize, JsonSchema)]
 pub struct Selection {
     /// Projects whose memories join the global ones: project keys or git remote URLs, as `user-memory project-id` prints them, never local paths. Another project's memories appear only when listed here.
-    #[arg(long = "project")]
+    // --projects is the tools' own name for it, which agents copy into the CLI.
+    #[arg(long = "project", visible_alias = "projects")]
     #[serde(default)]
     pub projects: Vec<String>,
     /// Narrow or widen the scopes: global, project (only the listed projects'), or all (every project, for review or inspection).

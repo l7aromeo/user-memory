@@ -741,7 +741,8 @@ plus those of the listed projects, or the global ones only when none is
 listed. Another project's memories appear only when it is listed, so a
 session in one repository does not see another's exceptions.
 
-- `projects` (CLI `--project`, repeatable) lists project keys or git remote
+- `projects` (CLI `--project`, or `--projects` as the tools name it;
+  repeatable) lists project keys or git remote
   URLs. The tools refuse local paths, since the server may run on another
   machine; the CLI resolves a path (`.`, `~/code/repo`, `file://…`) to its
   [project key](#project-identity) first. The session hook passes its working

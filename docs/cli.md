@@ -40,7 +40,7 @@ the projects you list. They take:
 
 | Option | Narrows to |
 |---|---|
-| `--project P` (repeatable) | Adds project P: a key, a git remote URL or a local folder such as `.`. |
+| `--project P` (repeatable; also `--projects`) | Adds project P: a key, a git remote URL or a local folder such as `.`. |
 | `--scope global`, `project` or `all` | Global only; only the listed projects; or every project. |
 | `--type T`, `--category C` | One type or category. |
 | `--source explicit`, `observed` or `inferred` | One source. |

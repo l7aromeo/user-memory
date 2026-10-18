@@ -4158,3 +4158,49 @@ fn a_search_page_is_twenty_unless_asked_for_more() {
     assert_eq!(category["memories"].as_array().unwrap().len(), 25);
     assert!(category.get("next_cursor").is_none(), "{category}");
 }
+
+/// The CLI takes `--projects`, the tools' own name, as `--project`: agents
+/// copy a tool call into the shell.
+#[test]
+fn the_cli_takes_projects_as_the_tools_name_it() {
+    let s = Store::new();
+    let out = s.resolved(&[
+        "record",
+        "--type",
+        "fact",
+        "--category",
+        "tooling",
+        "--content",
+        "The fuzzer needs nightly",
+        "--scope",
+        "project",
+        "--project",
+        "github.com/acme/compiler",
+    ]);
+    assert_eq!(out["stored"], true, "{out}");
+    for command in ["index", "search"] {
+        let out = s.run(&[command, "--projects", "github.com/acme/compiler"]);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "{command}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            stdout.contains("The fuzzer needs nightly"),
+            "{command}: {stdout}"
+        );
+    }
+    let out = s.run(&[
+        "read",
+        "--category",
+        "tooling",
+        "--projects",
+        "github.com/acme/compiler",
+    ]);
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("The fuzzer needs nightly"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
