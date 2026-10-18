@@ -764,7 +764,8 @@ result. An agent that works in a second repository during a session
 ## Search
 
 Search ranks the memories the [filters](#scope-and-filters) select, active
-global ones plus the listed projects' by default.
+global ones plus the listed projects' by default. The MCP tool takes the
+topic as `topic`, or `query`.
 
 - **Keyword:** an SQLite FTS5 index kept current by triggers. Relevance weighs
   category, then type, then text, then recency; common function words are
@@ -799,7 +800,8 @@ global ones plus the listed projects' by default.
 ## Pages
 
 `index`, `read --category` and `search` return at most a page: 100 memories
-unless `page_size` (`--page-size`) asks for up to 200. A page with more to
+unless `page_size` (`--page-size`; the tools also take `limit`) asks for up to
+200. A page with more to
 come ends with `next_cursor`; pass it as `cursor` (`--cursor`) for the next
 page. A cursor names a position in one result's order: after the store
 changes, or when mistyped, it is refused with a request to start again, so a

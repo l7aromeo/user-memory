@@ -747,3 +747,31 @@ fn the_clients_own_fields_are_accepted_though_not_advertised() {
     assert!(!stamps.starts_with("USER MEMORY INDEX"), "{stamps}");
     assert!(stamps.contains("Use tabs"), "{stamps}");
 }
+
+/// The names agents reach for, `query` and `limit`, work as `topic` and
+/// `page_size`; ignored, a search for one topic returned the whole store.
+#[test]
+fn search_takes_query_and_limit_as_agents_name_them() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path();
+    let call = |name: &str, arguments: Value| serve::call(server(home, home), name, arguments);
+    for title in [
+        "Indent with tabs",
+        "Tabs in makefiles",
+        "Write short replies",
+    ] {
+        let stored = call(
+            "record",
+            json!({"category":"workflow","title":title,"content":title,"scope":"global","user_confirmed":true}),
+        );
+        assert_eq!(stored["stored"], true, "{stored}");
+    }
+    let found = call("search", json!({"query":"tabs","limit":1}));
+    let memories = found["memories"].as_array().unwrap();
+    assert_eq!(memories.len(), 1, "{found}");
+    assert!(
+        memories[0]["title"].as_str().unwrap().contains("abs"),
+        "{found}"
+    );
+    assert!(found.get("next_cursor").is_some(), "{found}");
+}

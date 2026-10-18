@@ -34,7 +34,9 @@ const SEMANTIC_MATCHES: usize = 20;
 pub struct Search {
     /// What to look for; without it every memory in scope matches, newest first.
     #[arg(default_value = "")]
-    #[serde(default)]
+    // `query` is the name agents reach for; unknown names are ignored, so
+    // without it a search for a topic returned the whole store.
+    #[serde(default, alias = "query")]
     pub topic: String,
     #[command(flatten)]
     #[serde(flatten)]
