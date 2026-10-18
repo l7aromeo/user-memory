@@ -2547,6 +2547,141 @@ fn an_update_keeps_the_stated_reason_until_it_gives_a_new_one() {
     assert_eq!(reason(&s), Value::Null);
 }
 
+// Rewording an observation or inference (its title, context, reason or
+// evidence note) is not the user stating it: it stays the agent's tentative
+// memory with its supports. Changing what it says, or confirming it with a
+// bare update, still makes it the user's explicit statement.
+#[test]
+fn rewording_an_observation_or_inference_keeps_its_source() {
+    let s = Store::new();
+    let observed = stored(
+        &s,
+        &[
+            "--type",
+            "behavior",
+            "--content",
+            "Asked for a demonstration",
+            "--source",
+            "observed",
+            "--evidence",
+            "user asked for a demo durng review",
+            "--reason",
+            "Seemed to learn faster",
+        ],
+    );
+    let b = s.add("preference", "Prefer demonstrations");
+    let pattern = infer(&s, &observed, &b);
+    let kind = |id: &str| {
+        let m = inactive(&s, id);
+        (
+            m["source"].clone(),
+            m["status"].clone(),
+            m["evidence_ids"].clone(),
+        )
+    };
+    for (field, value) in [
+        ("--evidence", "User asked for a demo during review"),
+        ("--title", "Asks for demonstrations"),
+        ("--context", "During code review"),
+        ("--reason", "Learns faster from a demo"),
+    ] {
+        let out = s.value(&[
+            "update",
+            &observed,
+            field,
+            value,
+            "--origin",
+            "claude:session/x",
+        ]);
+        assert_eq!(out["updated"], true, "{field}: {out}");
+        assert_eq!(out["status"], "tentative", "{field}: {out}");
+        assert_eq!(kind(&observed).0, "observed", "{field}");
+        assert_eq!(kind(&observed).1, "tentative", "{field}");
+    }
+    let m = inactive(&s, &observed);
+    assert_eq!(m["reason"], "Learns faster from a demo");
+    assert_eq!(m["evidence"], "User asked for a demo during review");
+    // An observation needs its evidence note, so it cannot be cleared.
+    let refused = s.value(&["update", &observed, "--evidence", ""]);
+    assert_eq!(
+        refused["reason"],
+        "Observed behavior requires a concrete evidence note"
+    );
+    // An inference keeps the supports it cites.
+    let before = kind(&pattern);
+    let out = s.value(&[
+        "update",
+        &pattern,
+        "--title",
+        "Learns by doing",
+        "--reason",
+        "Two asks",
+    ]);
+    assert_eq!(out["updated"], true, "{out}");
+    assert_eq!(kind(&pattern), before);
+    assert_eq!(before.0, "inferred");
+    // Restating the same content is a confirmation; a correction of what it
+    // says or where it applies is the user's too, wording or not, and keeps
+    // a reason it gives.
+    let out = s.value(&[
+        "update",
+        &observed,
+        "--content",
+        "Asked for a demonstration",
+    ]);
+    assert_eq!(out["status"], "confirmed", "{out}");
+    assert_eq!(kind(&observed).0, "explicit");
+    let out = s.value(&[
+        "update",
+        &pattern,
+        "--content",
+        "Learns by doing, not reading",
+        "--title",
+        "Learns by doing",
+        "--reason",
+        "Said so in review",
+    ]);
+    assert_eq!(out["status"], "confirmed", "{out}");
+    assert_eq!(
+        kind(&pattern),
+        (json!("explicit"), json!("confirmed"), json!([]))
+    );
+    assert_eq!(inactive(&s, &pattern)["reason"], "Said so in review");
+    for change in [
+        ["--type", "preference"],
+        ["--category", "teaching"],
+        ["--scope", "project"],
+        ["--project", "github.com/acme/other"],
+    ] {
+        let mut args = vec![
+            "--type",
+            "behavior",
+            "--content",
+            change[1],
+            "--source",
+            "observed",
+            "--evidence",
+            "seen once",
+        ];
+        if change[0] == "--project" {
+            args.extend(["--scope", "project", "--project", "github.com/acme/app"]);
+        }
+        let id = stored(&s, &args);
+        let mut update = vec!["update", id.as_str(), "--title", "Reworded"];
+        update.extend(change);
+        if change[0] == "--scope" {
+            update.extend(["--project", "github.com/acme/app"]);
+        }
+        let out = s.value(&update);
+        assert_eq!(out["status"], "confirmed", "{change:?}: {out}");
+        let found = s.value(&["read", &id]);
+        assert_eq!(
+            found["memories"][0]["source"], "explicit",
+            "{change:?}: {found}"
+        );
+    }
+}
+
 // A confirmed inference is the user's own statement now: it no longer rests
 // on its supports, and only inferences may cite them.
 #[test]

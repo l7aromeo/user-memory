@@ -95,7 +95,7 @@ pub struct Record {
 
 #[derive(Args, Deserialize, Serialize, JsonSchema)]
 pub struct Update {
-    /// The memory to correct or confirm, by its full id.
+    /// The memory to correct or confirm, by its full id. Rewording only its title, context, reason or evidence keeps an observation or inference the agent's; any other change, or none (a confirmation), makes it the user's explicit statement.
     pub memory_id: Uuid,
     /// New type: preference, constraint or value for a rule the user wants followed (only these become rules in the index and the instruction files); otherwise decision, goal, fact, behavior, pattern, or another label.
     #[arg(long = "type")]
@@ -625,34 +625,42 @@ pub fn update(db: &Path, input: Update) -> Result<Value> {
         tx.commit()?;
         return Ok(json!({"updated":true,"id":input.memory_id,"status":old.status}));
     }
-    // The user's stated reason stays through a correction, as the evidence
-    // does, unless the update gives a new one ("" clears it). An observation
-    // or inference carries the agent's explanation instead, which is not the
-    // user's reason once the update makes it their statement.
-    let reason = input.reason.unwrap_or(if old.source == "explicit" {
-        old.reason
-    } else {
-        String::new()
-    });
+    // Wording (title, context, reason or evidence note) is not the user
+    // stating the memory: alone it leaves an observation or inference the
+    // agent's, with its source, status and supports. Changing what the memory
+    // says or where it applies, or an update giving none of these (the user
+    // confirming it), makes it the user's explicit statement.
+    let wording = input.title.is_some()
+        || input.context.is_some()
+        || input.reason.is_some()
+        || input.evidence.is_some();
+    let new_reason = input.reason.is_some();
+    let (old_source, old_status, old_supports) = (
+        old.source.clone(),
+        old.status.clone(),
+        old.evidence_ids.clone(),
+    );
     let mut next = Record {
-        memory_type: input.memory_type.unwrap_or(old.memory_type),
-        category: input.category.unwrap_or(old.category),
+        memory_type: input.memory_type.unwrap_or_else(|| old.memory_type.clone()),
+        category: input.category.unwrap_or_else(|| old.category.clone()),
         title: input.title.unwrap_or(old.title),
-        content: input.content.unwrap_or(old.content),
+        content: input.content.unwrap_or_else(|| old.content.clone()),
         context: input.context.unwrap_or(old.context),
-        reason,
+        // The user's stated reason stays through a correction, as the
+        // evidence does, unless the update gives a new one ("" clears it).
+        reason: input.reason.unwrap_or(old.reason),
         scope: input.scope.unwrap_or(if old.scope == "project" {
             Scope::Project
         } else {
             Scope::Global
         }),
-        project: input.project.unwrap_or(old.project),
+        project: input.project.unwrap_or_else(|| old.project.clone()),
         source: Source::Explicit,
         // The evidence is often the user's own words or the observation the
         // memory came from: a correction keeps it unless it gives new evidence.
         evidence: input.evidence.unwrap_or(old.evidence),
-        // An update makes the memory the user's own statement, which rests on
-        // no other memory, and only inferences cite supports.
+        // The user's own statement rests on no other memory, and only
+        // inferences cite supports.
         evidence_ids: vec![],
         origin: input.origin.unwrap_or_default(),
         supersedes: vec![],
@@ -664,12 +672,33 @@ pub fn update(db: &Path, input: Update) -> Result<Value> {
     if let Some(reason) = normalize(&mut next) {
         return Ok(json!({"updated":false,"reason":reason}));
     }
+    // A scope change always changes the project too: a global memory names
+    // none, and a project memory must name one.
+    let changed = next.memory_type != old.memory_type
+        || next.category != old.category
+        || next.content != old.content
+        || next.project != old.project;
+    let status = if changed || !wording {
+        // An observation or inference carries the agent's explanation, which
+        // is not the user's reason once the memory becomes their statement.
+        if old_source != "explicit" && !new_reason {
+            next.reason.clear();
+        }
+        "confirmed".to_owned()
+    } else {
+        next.source = source_named(&old_source);
+        next.evidence_ids = old_supports;
+        if let Some(reason) = normalize(&mut next) {
+            return Ok(json!({"updated":false,"reason":reason}));
+        }
+        old_status
+    };
     if input.replace_origins && next.origin.is_empty() {
         return Ok(
             json!({"updated":false,"reason":"replace_origins needs the origin that replaces them"}),
         );
     }
-    tx.execute("UPDATE memories SET memory_type=?1,category=?2,context=?3,title=?4,content=?5,reason=?6,scope=?7,project=?8,source='explicit',status='confirmed',evidence=?9,evidence_ids='[]',updated_at=CURRENT_TIMESTAMP WHERE id=?10",params![next.memory_type,next.category,next.context,next.title,next.content,next.reason,next.scope.name(),next.project,next.evidence,input.memory_id.to_string()])?;
+    tx.execute("UPDATE memories SET memory_type=?1,category=?2,context=?3,title=?4,content=?5,reason=?6,scope=?7,project=?8,source=?9,status=?10,evidence=?11,evidence_ids=?12,updated_at=CURRENT_TIMESTAMP WHERE id=?13",params![next.memory_type,next.category,next.context,next.title,next.content,next.reason,next.scope.name(),next.project,next.source.name(),status,next.evidence,serde_json::to_string(&next.evidence_ids)?,input.memory_id.to_string()])?;
     // The memory keeps the conversations it came from; a full restatement
     // in a new conversation replaces them with that one.
     if input.replace_origins {
@@ -680,7 +709,16 @@ pub fn update(db: &Path, input: Update) -> Result<Value> {
     }
     add_origin(&tx, input.memory_id, &next.origin)?;
     tx.commit()?;
-    Ok(json!({"updated":true,"id":input.memory_id,"status":"confirmed"}))
+    Ok(json!({"updated":true,"id":input.memory_id,"status":status}))
+}
+
+/// The source a stored memory names.
+fn source_named(name: &str) -> Source {
+    match name {
+        "observed" => Source::Observed,
+        "inferred" => Source::Inferred,
+        _ => Source::Explicit,
+    }
 }
 
 /// Records that the user means the memory differently from each of

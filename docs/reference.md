@@ -135,10 +135,14 @@ Details:
   for a full restatement in a new conversation. A content change still stales
   dependent inferences. It keeps the evidence too, often the user's own
   words, and the user's stated reason: `evidence` or `reason` replaces it,
-  and an empty one clears it. The memory becomes the user's confirmed
-  explicit statement, so an inference drops the supporting memories it
-  cited (only inferences cite them), and an observation or inference drops
-  the agent's explanation in `reason`, which the user never stated.
+  and an empty one clears it. Rewording only (title, context, reason or
+  evidence) keeps an observation or inference the agent's: its source,
+  status and supporting memories stay. Changing what a memory says or where
+  it applies (content, type, category, scope or project), or an update with
+  none of these fields (the user confirming it), makes it the user's
+  confirmed explicit statement: an inference drops the supporting memories
+  it cited (only inferences cite them), and an observation or inference
+  drops the agent's explanation in `reason`, which the user never stated.
 - Embedding happens before the store is locked, so a cold local model (up to
   about six seconds on first use) delays only that record, never other
   writers. `doctor` says when the configured model has no calibrated cutoff
