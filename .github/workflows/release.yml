@@ -136,7 +136,12 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $true
           $workspace = $env:GITHUB_WORKSPACE
           $userProfile = $env:USERPROFILE
-          $env:RUSTFLAGS = "--remap-path-prefix=$workspace=/src --remap-path-prefix=$userProfile=/home"
+          # The dependencies' sources stay out of the profile: MSVC and
+          # clang-cl get no path map for C, so the C code (aws-lc-sys,
+          # libsqlite3-sys) keeps each source's full path in __FILE__.
+          $cargoHome = Join-Path $env:RUNNER_TEMP 'cargo-home'
+          $env:CARGO_HOME = $cargoHome
+          $env:RUSTFLAGS = "--remap-path-prefix=$workspace=/src --remap-path-prefix=$cargoHome=/cargo --remap-path-prefix=$userProfile=/home"
           cargo build --release --locked --bin user-memory --target $env:TARGET
           $out = Join-Path $env:RUNNER_TEMP 'build'
           New-Item -ItemType Directory -Force $out | Out-Null
@@ -153,6 +158,17 @@ jobs:
           }
           foreach ($path in $workspace, $userProfile) {
             if (Select-String -LiteralPath $binary -SimpleMatch -Pattern $path -Quiet) {
+              # The text around the first matches says what holds the path.
+              $text = [Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes($binary))
+              $at = 0
+              for ($shown = 0; $shown -lt 5; $shown++) {
+                $at = $text.IndexOf($path, $at, [StringComparison]::OrdinalIgnoreCase)
+                if ($at -lt 0) { break }
+                $from = [math]::Max(0, $at - 40)
+                $length = [math]::Min($text.Length - $from, $at - $from + $path.Length + 40)
+                "  at byte ${at}: $($text.Substring($from, $length) -replace '[^\x20-\x7e]', '.')"
+                $at += $path.Length
+              }
               throw "$name names this runner's $path"
             }
           }

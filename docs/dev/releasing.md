@@ -85,7 +85,8 @@ built binary is refused if it holds the build machine's home folder.
    binary's glibc floor. The two Windows targets build on Windows runners in
    PowerShell, as the script would: only the client binary, with the
    checkout's and the runner's profile paths remapped out of it and checked
-   absent, and a `.exe.sha256` in `shasum`'s format. Every build then runs
+   absent (the dependencies' sources sit outside the profile, since the
+   Windows C compilers get no path map), and a `.exe.sha256` in `shasum`'s format. Every build then runs
    its binary with the debug-only `debug-paths` command and fails unless
    clap refuses it, so a command meant for tests can never ship.
 2. **Assemble:** the same run makes one release from those binaries

@@ -572,7 +572,11 @@ fn the_release_builds_both_windows_targets_on_windows() {
     let run = build["run"].as_str().unwrap();
     for line in [
         "$PSNativeCommandUseErrorActionPreference = $true",
-        "$env:RUSTFLAGS = \"--remap-path-prefix=$workspace=/src --remap-path-prefix=$userProfile=/home\"",
+        // MSVC and clang-cl get no path map for the C dependencies, so their
+        // sources are kept out of the profile the binary is checked for.
+        "$cargoHome = Join-Path $env:RUNNER_TEMP 'cargo-home'",
+        "$env:CARGO_HOME = $cargoHome",
+        "$env:RUSTFLAGS = \"--remap-path-prefix=$workspace=/src --remap-path-prefix=$cargoHome=/cargo --remap-path-prefix=$userProfile=/home\"",
         "cargo build --release --locked --bin user-memory --target $env:TARGET",
         "$name = \"user-memory-$env:TARGET.exe\"",
         "[IO.File]::WriteAllText(\"$binary.sha256\", \"$hash  $name`n\")",
@@ -580,6 +584,16 @@ fn the_release_builds_both_windows_targets_on_windows() {
         assert!(run.lines().any(|l| l.trim() == line), "{line}\n{run}");
     }
     assert!(run.contains("Select-String -LiteralPath $binary"), "{run}");
+    assert!(
+        run.find("$env:CARGO_HOME = $cargoHome").unwrap()
+            < run.find("cargo build --release").unwrap(),
+        "the build uses the moved cargo home: {run}"
+    );
+    // A failed check shows what holds the path, so its cause is in the log.
+    assert!(
+        run.contains("$text.IndexOf($path, $at, [StringComparison]::OrdinalIgnoreCase)"),
+        "{run}"
+    );
     // The other builds go through the script, which refuses Windows targets.
     assert_eq!(
         named("Build")["if"].as_str(),
