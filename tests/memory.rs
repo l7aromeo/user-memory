@@ -1941,7 +1941,7 @@ fn forgetting_needs_exactly_one_target_on_the_command_line() {
     let out = s.value(&["forget", "--origin", " chat/1 "]);
     assert_eq!(
         out,
-        serde_json::json!({"deleted":true,"count":1,"ids":[id],"kept":[],"unlinked":0})
+        serde_json::json!({"deleted":true,"count":1,"ids":[id],"kept":[],"unlinked":0,"staled":[],"left_superseded":[]})
     );
 }
 
@@ -2198,6 +2198,112 @@ fn forgetting_a_conversation_keeps_memories_another_conversation_stated() {
         )
         .unwrap();
     assert_eq!(rows, 0);
+}
+
+// Forgetting has effects beyond the memory itself: patterns built on it go
+// stale, and a memory it replaced stays superseded by nothing. The result
+// names both, and the user can bring such a memory back with update.
+#[test]
+fn forgetting_names_what_it_stales_and_what_it_leaves_superseded() {
+    let s = Store::new();
+    let a = stored(&s, &["--content", "Indent with tabs"]);
+    let b = stored(&s, &["--content", "Wrap at 100"]);
+    let pattern = infer(&s, &a, &b);
+    let old = stored(&s, &["--content", "Use Helix as the editor"]);
+    let new = stored(
+        &s,
+        &[
+            "--content",
+            "Use Neovim as the editor",
+            "--supersedes",
+            &old,
+        ],
+    );
+    // While its replacement exists, a superseded memory cannot be updated.
+    let refused = s.value(&["update", &old]);
+    assert_eq!(
+        refused["reason"],
+        "Memory was superseded; correct the memory that replaced it"
+    );
+    let out = s.value(&["forget", &new]);
+    assert_eq!(out["deleted"], true, "{out}");
+    assert_eq!(out["left_superseded"], json!([old]), "{out}");
+    assert_eq!(out["staled"], json!([]), "{out}");
+    let out = s.value(&["forget", &a]);
+    assert_eq!(out["staled"], json!([pattern]), "{out}");
+    assert_eq!(out["left_superseded"], json!([]), "{out}");
+    // Its replacement gone, the user's yes makes the old memory active again.
+    let out = s.value(&["update", &old]);
+    assert_eq!(out["updated"], true, "{out}");
+    assert_eq!(out["revived"], true, "{out}");
+    let revived = inactive(&s, &old);
+    assert_eq!(
+        (&revived["status"], &revived["superseded_by"]),
+        (&json!("confirmed"), &Value::Null)
+    );
+    let index = String::from_utf8(s.run(&["index"]).stdout).unwrap();
+    assert!(index.contains("Use Helix as the editor"), "{index}");
+    // An observation comes back as the agent's, even through a title alone.
+    let seen = |content: &str, extra: &[&str]| {
+        let mut args = vec![
+            "--type",
+            "behavior",
+            "--content",
+            content,
+            "--source",
+            "observed",
+            "--evidence",
+            "seen in review",
+        ];
+        args.extend(extra);
+        stored(&s, &args)
+    };
+    let first = seen("Reviews on Fridays", &[]);
+    let second = seen("Reviews on Mondays", &["--supersedes", &first]);
+    s.value(&["forget", &second]);
+    let out = s.value(&["update", &first, "--title", "Reviews on Fridays"]);
+    assert_eq!(
+        (&out["revived"], &out["status"]),
+        (&json!(true), &json!("tentative")),
+        "{out}"
+    );
+    assert_eq!(inactive(&s, &first)["source"], "observed");
+    let tabs = stored(&s, &["--content", "Indent with two spaces"]);
+    let spaces = stored(
+        &s,
+        &[
+            "--content",
+            "Indent with four spaces",
+            "--supersedes",
+            &tabs,
+        ],
+    );
+    s.value(&["forget", &spaces]);
+    let out = s.value(&["update", &tabs, "--context", "In shell scripts"]);
+    assert_eq!(
+        (&out["revived"], &out["status"]),
+        (&json!(true), &json!("confirmed")),
+        "{out}"
+    );
+    // A conversation's memories report the same.
+    let c = stored(&s, &["--content", "Sort imports"]);
+    let d = stored(&s, &["--content", "Trailing commas", "--origin", "chat/x"]);
+    let on_d = infer(&s, &c, &d);
+    let older = stored(&s, &["--content", "Two-space indents"]);
+    stored(
+        &s,
+        &[
+            "--content",
+            "Four-space indents",
+            "--supersedes",
+            &older,
+            "--origin",
+            "chat/x",
+        ],
+    );
+    let out = s.value(&["forget", "--origin", "chat/x"]);
+    assert_eq!(out["staled"], json!([on_d]), "{out}");
+    assert_eq!(out["left_superseded"], json!([older]), "{out}");
 }
 
 #[test]

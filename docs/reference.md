@@ -128,7 +128,9 @@ Details:
 - A memory supersedes only one with the same scope and project, so a project
   exception never retires a global preference. Only an explicit statement can
   supersede an explicit memory; superseded memories stay stored, hidden from
-  ordinary search and the index, and cannot be updated.
+  ordinary search and the index, and cannot be updated while the memory that
+  replaced them exists. Once that one is forgotten, `update` with the user's
+  yes makes such a memory active again (`revived: true`).
 - `update` is the in-place correction for a mistake in what was
   recorded. It keeps the memory's conversations: `origin` adds the one the
   correction came from, and `replace_origins` with it leaves only that one,
@@ -734,7 +736,10 @@ user-memory connect …           # stdio-to-HTTP connector
 `forget --origin` deletes every memory recorded with that origin and returns
 the deleted IDs; memories another conversation also stated are kept and listed
 as `kept`. It also removes the conversation's links and counts them as
-`unlinked`. Nothing is deleted automatically, so keep content, context and
+`unlinked`. Every forget also lists `staled`, the patterns that went stale,
+and `left_superseded`, memories a deleted one had replaced, which stay hidden
+until `update` makes them active again. Nothing is deleted automatically, so
+keep content, context and
 reason readable without the original chat. Observations and inferences
 recorded through the CLI stay tentative. On a client connected to a remote
 server, index, read, search, writes, export, import and health checks go to

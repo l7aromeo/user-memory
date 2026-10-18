@@ -442,7 +442,7 @@ fn tools_apply_documented_defaults_and_require_confirmation_to_change_memory() {
     }
     assert_eq!(
         forget(json!({"origin":"claude:session/none","user_confirmed":true})),
-        json!({"deleted":false,"count":0,"ids":[],"kept":[],"unlinked":0})
+        json!({"deleted":false,"count":0,"ids":[],"kept":[],"unlinked":0,"staled":[],"left_superseded":[]})
     );
     assert_eq!(
         forget(json!({"origin":"claude:session/none"}))["reason"],

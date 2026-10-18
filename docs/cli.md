@@ -111,8 +111,10 @@ The first deletes one memory, by its full id or the 8 characters the index shows
 one conversation recorded, and the projects it linked, reported as
 `unlinked`. A memory that another conversation also stated is kept and
 listed as `kept`. Patterns built
-on a forgotten memory become stale. Forgetting cannot be undone, except from a
-backup.
+on a forgotten memory become stale, listed as `staled`. A memory the forgotten
+one had replaced is listed as `left_superseded`: it stays hidden until
+`user-memory update ID` makes it active again. Forgetting cannot be undone,
+except from a backup.
 
 ## Projects
 

@@ -97,7 +97,7 @@ pub struct Record {
 
 #[derive(Args, Deserialize, Serialize, JsonSchema)]
 pub struct Update {
-    /// The memory to correct or confirm, by its full id or the 8 characters the index shows. Rewording only its title, context, reason or evidence keeps an observation or inference the agent's; any other change, or none (a confirmation), makes it the user's explicit statement.
+    /// The memory to correct or confirm, by its full id or the 8 characters the index shows; a superseded one whose replacement was forgotten becomes active again. Rewording only its title, context, reason or evidence keeps an observation or inference the agent's; any other change, or none (a confirmation), makes it the user's explicit statement.
     pub memory_id: MemoryRef,
     /// New type: preference, constraint or value for a rule the user wants followed (only these become rules in the index and the instruction files); otherwise decision, goal, fact, behavior, pattern, or another label.
     #[arg(long = "type")]
@@ -191,6 +191,8 @@ const SHORTEN_OR_SPLIT: &str = "shorten it or split the memory";
 /// Longest accepted origin reference; longer ones are refused, never truncated.
 const ORIGIN_LIMIT: usize = 240;
 const ACTIVE: &str = "status IN ('confirmed','tentative')";
+/// Superseded memories whose replacement no longer exists.
+const ORPHANED: &str = "status='superseded' AND NOT EXISTS (SELECT 1 FROM memories m WHERE m.id=memories.superseded_by)";
 
 /// How `check_support` treats a supporting memory that exists nowhere.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -625,7 +627,13 @@ pub fn update(db: &Path, input: Update) -> Result<Value> {
     let Some(old) = get(&tx, memory_id)? else {
         return Ok(json!({"updated":false,"reason":"Memory does not exist"}));
     };
-    if old.status == "superseded" {
+    // A superseded memory is corrected through the one that replaced it.
+    // Once that one is forgotten, the user's update makes it active again.
+    let revived = old.status == "superseded";
+    if revived
+        && let Some(by) = old.superseded_by
+        && get(&tx, by)?.is_some()
+    {
         return Ok(
             json!({"updated":false,"reason":"Memory was superseded; correct the memory that replaced it"}),
         );
@@ -640,7 +648,7 @@ pub fn update(db: &Path, input: Update) -> Result<Value> {
         && input.project.is_none()
         && input.origin.is_none()
         && !input.replace_origins;
-    if let (true, Some(title)) = (rewording_only, &input.title) {
+    if let (true, false, Some(title)) = (rewording_only, revived, &input.title) {
         // A title is only wording: the memory keeps its conversations,
         // status and source, and no pattern goes stale; it was still updated.
         let title = clean(title, usize::MAX);
@@ -720,14 +728,18 @@ pub fn update(db: &Path, input: Update) -> Result<Value> {
         if let Some(reason) = normalize(&mut next) {
             return Ok(json!({"updated":false,"reason":reason}));
         }
-        old_status
+        match (revived, next.source) {
+            (false, _) => old_status,
+            (true, Source::Explicit) => "confirmed".to_owned(),
+            (true, _) => "tentative".to_owned(),
+        }
     };
     if input.replace_origins && next.origin.is_empty() {
         return Ok(
             json!({"updated":false,"reason":"replace_origins needs the origin that replaces them"}),
         );
     }
-    tx.execute("UPDATE memories SET memory_type=?1,category=?2,context=?3,title=?4,content=?5,reason=?6,scope=?7,project=?8,source=?9,status=?10,evidence=?11,evidence_ids=?12,updated_at=CURRENT_TIMESTAMP WHERE id=?13",params![next.memory_type,next.category,next.context,next.title,next.content,next.reason,next.scope.name(),next.project,next.source.name(),status,next.evidence,serde_json::to_string(&next.evidence_ids)?,memory_id.to_string()])?;
+    tx.execute("UPDATE memories SET memory_type=?1,category=?2,context=?3,title=?4,content=?5,reason=?6,scope=?7,project=?8,source=?9,status=?10,evidence=?11,evidence_ids=?12,superseded_by=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?13",params![next.memory_type,next.category,next.context,next.title,next.content,next.reason,next.scope.name(),next.project,next.source.name(),status,next.evidence,serde_json::to_string(&next.evidence_ids)?,memory_id.to_string()])?;
     // The memory keeps the conversations it came from; a full restatement
     // in a new conversation replaces them with that one.
     if input.replace_origins {
@@ -738,7 +750,11 @@ pub fn update(db: &Path, input: Update) -> Result<Value> {
     }
     add_origin(&tx, memory_id, &next.origin)?;
     tx.commit()?;
-    Ok(json!({"updated":true,"id":memory_id,"status":status}))
+    let mut result = json!({"updated":true,"id":memory_id,"status":status});
+    if revived {
+        result["revived"] = json!(true);
+    }
+    Ok(result)
 }
 
 /// The source a stored memory names.
@@ -805,7 +821,9 @@ pub fn forget(db: &Path, input: Forget) -> Result<Value> {
     let origin = input.origin.map(|origin| clean(&origin, usize::MAX));
     let conn = connect(db)?;
     let tx = write(&conn)?;
-    let result = match (input.memory_id, origin) {
+    let active = ids_where(&tx, ACTIVE)?;
+    let orphaned = ids_where(&tx, ORPHANED)?;
+    let mut result = match (input.memory_id, origin) {
         (Some(named), None) => {
             let id = match full_id(&tx, &named)? {
                 Ok(id) => id,
@@ -846,8 +864,26 @@ pub fn forget(db: &Path, input: Forget) -> Result<Value> {
             );
         }
     };
+    // What the deletion did beyond itself, for the user to hear now rather
+    // than at the next review: patterns that lost a support, and memories
+    // whose replacement is gone, which update can make active again.
+    let stale = ids_where(&tx, "status='stale'")?;
+    result["staled"] = json!(active.intersection(&stale).collect::<Vec<_>>());
+    result["left_superseded"] = json!(
+        ids_where(&tx, ORPHANED)?
+            .difference(&orphaned)
+            .collect::<Vec<_>>()
+    );
     tx.commit()?;
     Ok(result)
+}
+
+/// The ids of the memories matching `condition`, in id order.
+fn ids_where(conn: &Connection, condition: &str) -> Result<BTreeSet<String>> {
+    Ok(conn
+        .prepare(&format!("SELECT id FROM memories WHERE {condition}"))?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?)
 }
 
 #[cfg(test)]
