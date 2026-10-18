@@ -799,9 +799,10 @@ topic as `topic`, or `query`.
 
 ## Pages
 
-`index`, `read --category` and `search` return at most a page: 100 memories
-unless `page_size` (`--page-size`; the tools also take `limit`) asks for up to
-200. A page with more to
+`index`, `read --category` and `search` return at most a page: 20 memories
+for a search, which ranks, and 100 for the index and a category read, which
+list, unless `page_size` (`--page-size`; the tools also take `limit`) asks
+for up to 200. A page with more to
 come ends with `next_cursor`; pass it as `cursor` (`--cursor`) for the next
 page. A cursor names a position in one result's order: after the store
 changes, or when mistyped, it is refused with a request to start again, so a

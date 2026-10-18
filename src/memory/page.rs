@@ -25,7 +25,7 @@ pub struct Paging {
     #[arg(long)]
     #[serde(default)]
     pub cursor: Option<String>,
-    /// Memories per page: 100 unless set, at most 200.
+    /// Memories per page, at most 200: unless set, 20 for search and 100 for index and a category read.
     #[arg(long)]
     // `limit` is the name agents reach for; unknown names are ignored, so
     // without it a limited search returned a full page.

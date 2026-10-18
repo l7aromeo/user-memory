@@ -179,13 +179,22 @@ fn paged(found: Vec<Memory>, paging: &Paging) -> Result<Value> {
     Ok(result)
 }
 
+/// A search's page unless asked otherwise: agents asked for 5 to 20 of the
+/// best matches, and each full memory costs their context about a
+/// kilobyte. Index and category reads, which list, keep the larger page.
+const SEARCH_PAGE: usize = 20;
+
 /// Memories matching `input`, best first, one page at a time.
 pub fn search(db: &Path, input: &Search) -> Result<Value> {
     let conn = connect(db)?;
     let filter = input.selection.filter()?;
+    let paging = Paging {
+        cursor: input.paging.cursor.clone(),
+        page_size: Some(input.paging.page_size.unwrap_or(SEARCH_PAGE)),
+    };
     paged(
         rank(&conn, &filter, &input.topic, SEMANTIC_MATCHES)?,
-        &input.paging,
+        &paging,
     )
 }
 

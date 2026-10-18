@@ -2983,9 +2983,15 @@ fn index_category_reads_and_search_page_through_a_large_store() {
             .collect();
         (ids, value["next_cursor"].as_str().map(str::to_owned))
     };
-    for args in [&["search"][..], &["read", "--category", "workflow"]] {
+    // A search, which ranks, pages by 20; a category read, which lists, by 100.
+    let mut by_twenty = vec![20; 12];
+    by_twenty.push(10);
+    for (args, expected) in [
+        (&["search"][..], by_twenty),
+        (&["read", "--category", "workflow"], vec![100, 100, 50]),
+    ] {
         let (sizes, seen) = pages(&|cursor| json_page(args, cursor));
-        assert_eq!(sizes, [100, 100, 50], "{args:?}");
+        assert_eq!(sizes, expected, "{args:?}");
         assert_eq!(seen, all, "{args:?}");
     }
     let index_page = |cursor: &str| -> Page {
@@ -4124,4 +4130,31 @@ fn read_and_search_leave_empty_fields_out_and_exports_keep_them() {
             "export lost {field}: {exported}"
         );
     }
+}
+
+/// A search returns its 20 best matches unless asked for more; the index
+/// and a category read, which list, keep pages of 100.
+#[test]
+fn a_search_page_is_twenty_unless_asked_for_more() {
+    let s = Store::new();
+    for n in 0..25 {
+        s.add("preference", &format!("Use tabs in file kind {n}"));
+    }
+    let page = |args: &[&str]| -> Value {
+        let out = s.run(args);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let found = page(&["search", "tabs"]);
+    assert_eq!(found["memories"].as_array().unwrap().len(), 20, "{found}");
+    assert!(found.get("next_cursor").is_some(), "{found}");
+    let more = page(&["search", "tabs", "--page-size", "25"]);
+    assert_eq!(more["memories"].as_array().unwrap().len(), 25);
+    let category = page(&["read", "--category", "programming"]);
+    assert_eq!(category["memories"].as_array().unwrap().len(), 25);
+    assert!(category.get("next_cursor").is_none(), "{category}");
 }

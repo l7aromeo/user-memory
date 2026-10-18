@@ -28,7 +28,8 @@ Every command has `--help`.
 | `user-memory search 'language choice'` | Memories that match a topic, best first. |
 | `user-memory review` | Groups of duplicates, project copies of global memories, one rule stated in several projects, overlaps and stale patterns. Changes nothing. |
 
-Long results come in pages of 100. A page with more to come ends with
+Long results come in pages: 20 memories for `search`, 100 for `index` and
+`read --category`. A page with more to come ends with
 `next_cursor`; pass it as `--cursor` for the next page. `--page-size N` asks
 for up to 200.
 
