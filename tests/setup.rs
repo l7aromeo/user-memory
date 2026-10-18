@@ -324,6 +324,102 @@ fn doctor_does_not_create_a_missing_database() {
     assert!(!s.path("private memory.sqlite3").exists());
 }
 
+/// Inside the Docker server's container nothing is installed, and the image
+/// names the store in USER_MEMORY_DB: doctor checks that store, as the
+/// server docs say to run it there. Without a named store it still asks for
+/// setup, even when the default store exists.
+#[test]
+fn doctor_checks_the_named_store_where_nothing_is_installed() {
+    let s = Sandbox::new();
+    let db = s.path("data/memories.sqlite3");
+    let container = |args: &[&str], named: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_user-memory"));
+        command
+            .args(args)
+            .sandboxed(s.path("home"))
+            .env("USER_MEMORY_NO_UPDATE_CHECK", "1")
+            .env_remove("USER_MEMORY_URL")
+            .env_remove("USER_MEMORY_DB");
+        for key in EMBED_ENV {
+            command.env_remove(key);
+        }
+        if named {
+            command.env("USER_MEMORY_DB", &db);
+        }
+        command.output().unwrap()
+    };
+    assert_success(&container(&["index"], true));
+    let out = container(&["doctor"], true);
+    assert_success(&out);
+    for line in [
+        format!(
+            "Nothing is installed here; checking the store at {}\n",
+            db.display()
+        ),
+        "Database: OK\n".into(),
+        "Memory index: OK\n".into(),
+    ] {
+        assert!(stdout(&out).contains(&line), "{line:?}\n{}", stdout(&out));
+    }
+    // A server named with --url is checked there, not the local store.
+    let token = s.path("token");
+    fs::write(&token, "a".repeat(40)).unwrap();
+    let url = format!("http://127.0.0.1:{}/mcp", port::closed_port());
+    let remote = container(
+        &[
+            "doctor",
+            "--url",
+            &url,
+            "--token-file",
+            token.to_str().unwrap(),
+        ],
+        true,
+    );
+    assert!(!remote.status.success(), "{}", stdout(&remote));
+    assert!(
+        !stdout(&remote).contains("Nothing is installed here"),
+        "{}",
+        stdout(&remote)
+    );
+    assert_success(&container(&["index"], false));
+    let unnamed = container(&["doctor"], false);
+    assert!(!unnamed.status.success(), "{}", stdout(&unnamed));
+    assert!(
+        stderr(&unnamed).contains("Installed binary is missing. Run setup first."),
+        "{}",
+        stderr(&unnamed)
+    );
+}
+
+/// An install with a part missing is not the server's container: with the
+/// binary gone doctor asks for setup, and with the receipt gone it still
+/// checks the clients, whatever store is named.
+#[test]
+fn doctor_still_checks_an_install_with_a_part_missing() {
+    let s = Sandbox::new();
+    s.client("codex", false);
+    assert_success(&s.run(&["setup", "--client", "codex"]));
+    let receipt = s.path("installed tools/.user-memory.json");
+    let saved = fs::read(&receipt).unwrap();
+    fs::remove_file(&receipt).unwrap();
+    let out = s.run(&["doctor", "--client", "codex"]);
+    assert!(
+        !stdout(&out).contains("Nothing is installed here"),
+        "{}",
+        stdout(&out)
+    );
+    assert!(stdout(&out).contains("Codex: OK\n"), "{}", stdout(&out));
+    fs::write(&receipt, saved).unwrap();
+    fs::remove_file(s.path("installed tools/user-memory")).unwrap();
+    let out = s.run(&["doctor", "--client", "codex"]);
+    assert!(!out.status.success(), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains("Installed binary is missing. Run setup first."),
+        "{}",
+        stderr(&out)
+    );
+}
+
 // The store runs in WAL mode, whose log a network filesystem cannot share
 // between processes; doctor says so.
 #[test]

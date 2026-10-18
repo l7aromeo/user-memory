@@ -687,7 +687,9 @@ user-memory setup [--url URL --token-file PATH] [--no-hooks|--hooks] [--no-skill
                   [--server-only]
 user-memory doctor               # exit 0: healthy; 3: only Action needed steps left; 1: an error
                                  # also prints the store's journal mode (WAL), its newest
-                                 # automatic backup, and a newer release when GitHub has one
+                                 # automatic backup, and a newer release when GitHub has one;
+                                 # with nothing installed and a store named by --db or
+                                 # USER_MEMORY_DB (inside the Docker server), the store only
 user-memory doctor --server-only # where the store lives with no agent app (e.g. inside the
                                  # Docker server): the store, index, journal, embedding and
                                  # automatic backups only

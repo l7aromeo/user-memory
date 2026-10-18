@@ -371,6 +371,11 @@ On the Docker server itself:
 docker compose -f ~/.local/share/user-memory/docker/compose.yaml exec memory user-memory doctor
 ```
 
+Nothing is installed inside the container, and its image names the store in
+`USER_MEMORY_DB`, so doctor says ``Nothing is installed here; checking the store
+at /data/memories.sqlite3`` and checks the store, its index, journal mode,
+semantic search settings and automatic backups.
+
 | You see | Do this |
 |---|---|
 | Clients show ``User memory unavailable`` | Check that the server runs (`docker compose -f ~/.local/share/user-memory/docker/compose.yaml ps`) and answers: `curl -fsS http://127.0.0.1:8765/`, or your HTTPS address. |

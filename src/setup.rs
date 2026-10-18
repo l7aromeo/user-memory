@@ -1552,6 +1552,21 @@ pub async fn doctor(options: &Options) -> Result<Health> {
     if options.server_only_enabled(saved.as_ref()) {
         return server_doctor(options, &paths, saved.as_ref()).await;
     }
+    // Nothing installed here, yet a store named: inside the Docker server's
+    // container, whose image sets USER_MEMORY_DB, the store is all there is
+    // to check. A store found only by default, or an install with a part
+    // missing, still asks for setup.
+    if saved.is_none()
+        && paths.remote.is_none()
+        && !executable(&paths.binary)
+        && (options.db.is_some() || env::var_os("USER_MEMORY_DB").is_some())
+    {
+        println!(
+            "Nothing is installed here; checking the store at {}",
+            paths.db.display()
+        );
+        return store_doctor(&paths);
+    }
     let journal = if let Some(remote) = &paths.remote {
         remote.probe().await?;
         None
