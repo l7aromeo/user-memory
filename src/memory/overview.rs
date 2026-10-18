@@ -233,8 +233,23 @@ fn ranked<'a>(names: impl Iterator<Item = &'a str>) -> String {
         .join(", ")
 }
 
-/// Starts the index tool's answer when it cannot list the index.
+/// Starts the index tool's answer when it cannot reach the store.
 pub const INDEX_UNAVAILABLE: &str = "Memory unavailable: ";
+
+/// The index tool's answer when it fails: a store it cannot open or read
+/// is "Memory unavailable", which agents and the hooks take for an outage;
+/// a request it refuses (a local path, a bad cursor or page size) is the
+/// refusal alone, so an agent fixes its call instead of giving up on memory.
+pub fn index_failure(err: &anyhow::Error) -> String {
+    let store = err
+        .chain()
+        .any(|cause| cause.is::<rusqlite::Error>() || cause.is::<std::io::Error>());
+    if store {
+        format!("{INDEX_UNAVAILABLE}{err}")
+    } else {
+        err.to_string()
+    }
+}
 
 /// Starts the last line of a page that has more to come.
 const NEXT_CURSOR: &str = "next_cursor: ";

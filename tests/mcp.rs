@@ -775,3 +775,26 @@ fn search_takes_query_and_limit_as_agents_name_them() {
     );
     assert!(found.get("next_cursor").is_some(), "{found}");
 }
+
+/// index says "Memory unavailable" only when it cannot reach the store; a
+/// call it refuses says what to change, so an agent does not take a mistyped
+/// call for an outage.
+#[test]
+fn index_tells_a_refused_call_from_an_unreachable_store() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path();
+    let refused = serve::result(
+        server(home, home),
+        "index",
+        json!({"projects":["/srv/api"]}),
+    );
+    let text = refused["content"][0]["text"].as_str().unwrap();
+    assert_eq!(refused["isError"], true, "{refused}");
+    assert!(text.starts_with("/srv/api is a local path"), "{text}");
+    // A store that is no database.
+    std::fs::write(home.join("memory.sqlite3"), "not a database").unwrap();
+    let broken = serve::result(server(home, home), "index", json!({}));
+    let text = broken["content"][0]["text"].as_str().unwrap();
+    assert_eq!(broken["isError"], true, "{broken}");
+    assert!(text.starts_with("Memory unavailable: "), "{text}");
+}

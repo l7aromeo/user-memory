@@ -800,6 +800,9 @@ topic as `topic`, or `query`.
   `read` takes those 8 characters; a prefix several memories share is an
   error naming each.
 - `--topic` moves task-relevant memories to the front of their groups.
+- When the store cannot be opened or read, the index tool answers
+  `Memory unavailable: <reason>`. A call it refuses, such as a local path
+  among `projects` or a stale cursor, answers with the refusal alone.
 
 ## Pages
 

@@ -298,8 +298,7 @@ impl UserMemoryServer {
     )]
     fn index(&self, Parameters(input): Parameters<memory::Index>) -> Reply {
         guarded(None, || {
-            memory::index(&self.db, &input)
-                .map_err(|err| format!("{}{err}", memory::INDEX_UNAVAILABLE))
+            memory::index(&self.db, &input).map_err(|err| memory::index_failure(&err))
         })
     }
     #[tool(

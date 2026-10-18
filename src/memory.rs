@@ -34,7 +34,8 @@ pub use index::reindex;
 pub use links::{Link, link};
 pub use migrate::{Migration, check_migration, migrate};
 pub use overview::{
-    INDEX_UNAVAILABLE, Index, ProjectIndex, index, merge, next_cursor, shorten, tiered,
+    INDEX_UNAVAILABLE, Index, ProjectIndex, index, index_failure, merge, next_cursor, shorten,
+    tiered,
 };
 pub use page::stale_cursor;
 pub use read::{Read, Search, read, search};
