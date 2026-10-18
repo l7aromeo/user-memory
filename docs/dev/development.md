@@ -151,6 +151,23 @@ started, and `docker compose ps`, `stop` or `down` in either acts on
 whichever runs. A new installer server refuses to start while any container
 uses the volume.
 
+Before 0.7.0 the file named no project, so Compose named it after the
+checkout's folder (`<folder>-memory-1`). To move such a server to the pinned
+name, stop it by its old project name first: a plain `docker compose down`
+now looks for `user-memory` and leaves the old container running.
+
+```bash
+docker compose -p <folder> down
+docker compose up -d
+```
+
+Never add `-v`, which deletes the memories. From then on `up` warns that the
+volume ``already exists but was created for project "<folder>" (expected
+"user-memory")``. That is harmless: the volume keeps its memories and is
+reused as it is. The installer's server never sees this warning: every
+installer has written its project's name into its compose file and created
+the volume through that project.
+
 1. In `.env`, keep the listener on loopback and, on a Mac, point embeddings
    at the Mac's own Ollama (Docker Desktop's `host.docker.internal` reaches
    it; plain http is acceptable because the traffic never leaves the
