@@ -10,12 +10,16 @@ accepted = [
     "Unicode-3.0",
     "Zlib",
 ]
-# Only what ships in the released binaries.
+# What ships in the released binaries: every target release.yml builds,
+# Windows included, since some dependencies are Windows-only; tests/ci.rs
+# checks that the two lists match.
 targets = [
     "aarch64-apple-darwin",
     "x86_64-apple-darwin",
     "x86_64-unknown-linux-gnu",
     "aarch64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
 ]
 ignore-dev-dependencies = true
 ignore-build-dependencies = true

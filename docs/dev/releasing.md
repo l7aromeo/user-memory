@@ -48,7 +48,10 @@ On a branch, in one pull request:
    with [cargo-about](https://github.com/EmbarkStudios/cargo-about)
    (`cargo install cargo-about --locked --features cli`; `about.toml` lists
    the accepted licenses, and a dependency under any other stops the
-   release). The Windows clients (`user-memory-<target>.exe`, for x64 and
+   release). The notices cover the dependencies of every target the release
+   builds, Windows included, even on a machine that builds only some of them:
+   `about.toml` names the same targets as release.yml's build matrix, which
+   tests/ci.rs checks. The Windows clients (`user-memory-<target>.exe`, for x64 and
    ARM64) build only on Windows, so a local run skips them and says so.
 
 ## The checks

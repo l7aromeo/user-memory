@@ -807,3 +807,35 @@ fn the_windows_build_step_ends_well_after_the_refusal_it_requires() {
         .expect("shasum's format");
     assert!(stdout.contains(&format!("{}…", &hash[..16])), "{stdout}");
 }
+
+// THIRD_PARTY_NOTICES.txt covers what the release ships: cargo-about lists
+// the dependencies of the targets about.toml names, so those must be
+// exactly the targets release.yml builds, or a target's own dependencies
+// (such as the Windows-only crates) ship without their notices.
+#[test]
+fn the_notices_cover_every_target_the_release_builds() {
+    let about = repo_file("about.toml");
+    let list = about
+        .split_once("\ntargets = [")
+        .and_then(|(_, rest)| rest.split_once(']'))
+        .map(|(list, _)| list)
+        .expect("about.toml lists its targets");
+    let mut noticed: Vec<String> = list
+        .split(',')
+        .map(|item| item.trim().trim_matches('"').to_owned())
+        .filter(|item| !item.is_empty())
+        .collect();
+    noticed.sort();
+    let docs = YamlLoader::load_from_str(&repo_file(".github/workflows/release.yml")).unwrap();
+    let mut built: Vec<String> = docs[0]["jobs"]["build"]["strategy"]["matrix"]["include"]
+        .as_vec()
+        .unwrap()
+        .iter()
+        .map(|row| row["target"].as_str().unwrap().to_owned())
+        .collect();
+    built.sort();
+    assert_eq!(
+        noticed, built,
+        "about.toml's targets are the release's builds"
+    );
+}
