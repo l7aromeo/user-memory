@@ -270,7 +270,7 @@ user-memory import old-backup.json --titles titles.json   # format version 1
 | Tool | Purpose |
 |---|---|
 | `index` | Every memory in scope, one line each (8-character id and title): rules first by category, then other memories by type; optional `topic` puts task-relevant memories first in their groups; [filters](#scope-and-filters); paged |
-| `read` | Whole memories by up to 20 ids (full or the index's 8 characters) or by category; unknown ids and ids outside `status` are reported; a category read takes the [filters](#scope-and-filters) and is paged |
+| `read` | Whole memories by up to 20 ids (full or the index's 8 characters) or by category; unknown ids and ids outside `status` are reported, and `projects` and `scope` given with ids are ignored; a category read takes the [filters](#scope-and-filters) and is paged |
 | `search` | Find relevant memories by topic; [filters](#scope-and-filters); paged |
 | `record` | Save a typed explicit memory, grounded observation, or evidence-backed inference; if similar memories exist, nothing is stored until the agent confirms, supersedes or marks it distinct |
 | `update` | Correct or confirm a memory on the user's request, or with `distinct_from` mark memories the user calls different |
@@ -747,7 +747,9 @@ session in one repository does not see another's exceptions.
   inferred) and `origin` (one conversation) narrow it further.
 - `status` is `active` (confirmed and tentative) unless set to `stale`,
   `superseded` or `all`. A read by ids takes only `status`: ids outside it are
-  listed under `excluded` with their status.
+  listed under `excluded` with their status. An id names one memory in any
+  scope, so `projects` and `scope` given with ids are ignored, and the other
+  filters are refused.
 
 Filters apply before [paging](#pages), so a cursor pages through the filtered
 result. An agent that works in a second repository during a session

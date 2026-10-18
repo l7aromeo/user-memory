@@ -3313,11 +3313,24 @@ fn filters_combine_on_index_read_and_search() {
     assert_eq!(second["memories"].as_array().unwrap().len(), 1);
     assert!(second.get("next_cursor").is_none(), "{second}");
     assert_ne!(first["memories"][0]["id"], second["memories"][0]["id"]);
-    // Ids are read as they are: only status applies to them.
+    // Ids are read as they are: only status applies to them. The projects
+    // and scope an agent carries over from index are ignored, since an id
+    // names one memory in any scope; the other filters are refused.
     let id = first["memories"][0]["id"].as_str().unwrap();
     for filter in [
-        ["--project", "github.com/acme/notebooks"],
-        ["--scope", "all"],
+        ["--project", "github.com/acme/elsewhere"],
+        ["--scope", "global"],
+    ] {
+        let out = s.run(&["read", id, filter[0], filter[1]]);
+        assert!(
+            out.status.success(),
+            "{filter:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let read: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(read["memories"][0]["id"], id, "{filter:?}: {read}");
+    }
+    for filter in [
         ["--type", "preference"],
         ["--source", "observed"],
         ["--origin", "chat/a"],
@@ -3328,7 +3341,12 @@ fn filters_combine_on_index_read_and_search() {
     }
     let out = s.run(&["read", id, "--category", "coding"]);
     let error = String::from_utf8_lossy(&out.stderr);
-    assert!(error.contains("Give either ids or a category"), "{error}");
+    assert!(
+        error.contains(
+            "Give either ids or a category; to list memories by project or scope, use index with those filters"
+        ),
+        "{error}"
+    );
 }
 
 // The CLI resolves a checkout on this machine to its project key; the tools

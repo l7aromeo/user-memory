@@ -46,7 +46,7 @@ pub struct Search {
 
 #[derive(Args, Deserialize, Serialize, JsonSchema)]
 pub struct Read {
-    /// Up to 20 memory ids, each in full or as the first 8 characters the index shows. Give ids or a category, not both; ids take only the status filter.
+    /// Up to 20 memory ids, each in full or as the first 8 characters the index shows. Give ids or a category, not both; with ids, status applies and projects and scope are ignored.
     #[serde(default)]
     pub ids: Vec<String>,
     /// With a category: which memories of it, as for index and search.
@@ -219,13 +219,20 @@ pub fn read(db: &Path, input: &Read) -> Result<Value> {
             found.sort_by(group_order);
             return paged(found, &input.paging);
         }
-        _ => bail!("Give either ids or a category"),
+        _ => bail!(
+            "Give either ids or a category; to list memories by project or scope, use index with those filters"
+        ),
     }
-    let only_status = Selection {
+    // An id names one memory in any scope, so the projects and scope an
+    // agent carries over from index change nothing and are let through;
+    // type, source and origin would look like they filter, and do not.
+    let ignored = Selection {
         status: selection.status,
+        projects: selection.projects.clone(),
+        scope: selection.scope,
         ..Selection::default()
     };
-    if selection.narrows_beyond(&only_status) {
+    if selection.narrows_beyond(&ignored) {
         bail!(
             "Ids are read as they are; only status applies to them, the other filters to a category read"
         );
