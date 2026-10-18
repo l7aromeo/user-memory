@@ -1,6 +1,6 @@
 [package]
 name = "user-memory"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 description = "Typed user memory and grounded patterns for adaptable agents via local or remote MCP"
 license = "MIT OR Apache-2.0"
