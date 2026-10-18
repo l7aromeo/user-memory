@@ -5,7 +5,7 @@ stated preferences, decisions, goals and context, plus grounded observations
 and tentative patterns, and shares them with all your agents and machines.
 It is self-hosted: one SQLite store on a server you run, or on your own
 machine, with no model gateway, transcript scraping or model training. It
-runs on macOS, Linux and Windows.
+runs on macOS, Linux and Windows (preview).
 
 - **Your rules in every session.** Your standing rules (explicit, confirmed,
   global preferences, constraints and values) are written into each client's

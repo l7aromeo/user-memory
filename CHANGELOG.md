@@ -37,8 +37,10 @@ curl -fsSL https://github.com/l7aromeo/user-memory/releases/latest/download/inst
 
 ### New
 
-- **Windows.** user-memory runs on Windows 10 and 11, x64 and ARM64. In
-  PowerShell:
+- **Windows (preview).** user-memory runs on Windows 10 and 11, x64 and
+  ARM64. It is tested in CI on both, but not yet with Claude Code and Codex
+  on a real Windows machine; please report what you find in an
+  [issue](https://github.com/l7aromeo/user-memory/issues). In PowerShell:
 
   ```powershell
   irm https://github.com/l7aromeo/user-memory/releases/latest/download/install.ps1 | iex

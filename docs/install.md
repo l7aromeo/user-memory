@@ -1,7 +1,7 @@
 # Install, upgrade and uninstall
 
-user-memory runs on macOS and Linux (Apple Silicon, Intel or ARM) and on
-Windows 10 and 11 (x64 or ARM64). It works with Claude Code and Codex; setup
+user-memory runs on macOS and Linux (Apple Silicon, Intel or ARM) and, as a
+preview, on Windows 10 and 11 (x64 or ARM64). It works with Claude Code and Codex; setup
 connects every one it finds on the machine. On macOS it also finds Codex
 inside the ChatGPT app.
 
@@ -56,6 +56,10 @@ The installer never prints the access token. It saves it to
 `~/.config/user-memory/client-token`, readable only by you.
 
 ## Install on Windows
+
+Windows support is a preview: it is tested in CI on x64 and ARM64, not yet
+with Claude Code and Codex on a real Windows machine. Please report what you
+find in an [issue](https://github.com/l7aromeo/user-memory/issues).
 
 In PowerShell (Windows PowerShell 5.1 or PowerShell 7), as yourself, not as
 administrator:
