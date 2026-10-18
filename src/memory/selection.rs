@@ -133,7 +133,10 @@ pub(super) fn refuse_local_paths(projects: &[String]) -> Result<()> {
 #[derive(Args, Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct Subset {
     /// Only these projects' memories, with the global ones unless scope says otherwise: project keys or git remote URLs, never local paths.
-    #[arg(long = "project")]
+    #[arg(
+        long = "project",
+        help = "Only these projects' memories, with the global ones unless scope says otherwise: project keys, git remote URLs, or a folder such as . whose project is used"
+    )]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub projects: Vec<String>,
     /// global, project (only the listed projects') or all.

@@ -207,7 +207,7 @@ The user-memory skill handles rare tasks. Ask in plain words:
 | Say | What happens |
 |---|---|
 | "review my memories" | The agent lists duplicates, project copies of global memories, one rule stated in several projects (which could become one global rule, with your yes), overlaps and stale patterns, and changes only what you approve. |
-| "back up my memories" | An export of every memory to one JSON file. The store also backs itself up every day ([automatic backups](cli.md#automatic-backups)). |
+| "back up my memories" | An export of every memory, or the part you name, to one JSON file. With a server, the agent's export lands on the server; for a copy on your own machine, run `user-memory export FILE` there. The store also backs itself up every day ([automatic backups](cli.md#automatic-backups)). |
 | "restore my memories from this backup" | A preview of what would change, then the import once you approve. |
 | "restore yesterday's backup" | The steps to restore an automatic backup, for you to run with your agents closed. |
 | "forget what we discussed in that chat" | Removes every memory that one conversation recorded. Memories that other conversations also stated are kept. |

@@ -273,7 +273,7 @@ impl UserMemoryServer {
         })
     }
     #[tool(
-        description = "Write every memory to a JSON file in the exports directory, by file name, never a path. Only when the user asks. Returns a summary only."
+        description = "Write every memory, or those read's filters select, to a JSON file in the exports directory by name, never a path. Only when the user asks; returns a summary."
     )]
     fn export(&self, Parameters(input): Parameters<memory::ExportMemories>) -> Reply {
         guarded(None, || match memory::export_named(&self.db, &input) {
@@ -282,7 +282,7 @@ impl UserMemoryServer {
         })
     }
     #[tool(
-        description = "Only when the user asks: preview an export file from the exports directory by name (stores nothing, briefly locks the store), then import it with apply and user_confirmed once they approve. Returns a summary."
+        description = "Only when the user asks: preview an export file from the exports directory by name (stores nothing, briefly locks the store), then import it with apply and user_confirmed once they approve."
     )]
     async fn import(&self, Parameters(input): Parameters<memory::ImportMemories>) -> Reply {
         synced(guarded(Some("applied"), || {
@@ -407,6 +407,19 @@ fn on_the_server(url: &str, command: &str) -> anyhow::Error {
     }
 }
 
+/// How to run `command` where the store of the server at `url` lives, for a
+/// client's advice: through the installer's Docker server when this machine
+/// runs it, else on the server's own machine.
+fn on_the_server_command(url: &str, command: &str) -> String {
+    match setup::docker_dir(url) {
+        Some(dir) => format!(
+            "`docker compose -f {} exec -T memory user-memory {command}`",
+            shell::quote(&dir.join("compose.yaml"))
+        ),
+        None => format!("`user-memory {command}` on the machine that serves {url}"),
+    }
+}
+
 fn db_path() -> PathBuf {
     env::var_os("USER_MEMORY_DB")
         .map(PathBuf::from)
@@ -472,6 +485,9 @@ async fn main() -> Result<()> {
         Command::Review(input) => resolve_projects(&mut input.projects)?,
         Command::Record(input) => resolve_projects(std::slice::from_mut(&mut input.project))?,
         Command::Update(input) => resolve_projects(input.project.as_mut_slice())?,
+        Command::Export { subset, .. } | Command::Import { subset, .. } => {
+            resolve_projects(&mut subset.projects)?
+        }
         _ => {}
     }
     if let Command::Server { command } = cli.command {
@@ -640,7 +656,19 @@ async fn main() -> Result<()> {
                     titles,
                     subset,
                 };
-                remote.import(&request, &document).await?
+                let mut summary = remote.import(&request, &document).await?;
+                // The server's advice names its own commands; this client
+                // refuses reindex, so name where it runs instead.
+                match memory::import_next(&summary, &on_the_server_command(&remote.url, "reindex"))
+                {
+                    Some(next) => summary["next"] = json!(next),
+                    None => {
+                        if let Some(fields) = summary.as_object_mut() {
+                            fields.remove("next");
+                        }
+                    }
+                }
+                summary
             } else {
                 memory::import_document(
                     &db,

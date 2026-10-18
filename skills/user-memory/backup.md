@@ -18,15 +18,15 @@ Never run a restore yourself. `user-memory backup now` makes a backup at once; r
 Agents read and write only inside the exports directory beside the memory store, by file name. Never pass a path.
 
 Back up:
-1. Call `export` with a `name` such as `backup-2026-10-15.json`. It refuses an existing name; pass `overwrite: true` only if the user wants that file replaced.
+1. Call `export` with a `name` such as `backup-2026-10-15.json`. It refuses an existing name; pass `overwrite: true` only if the user wants that file replaced. To export part of the memories, add read's filters (`projects`, `scope`, `category`, `type`, `source`, `status`, `origin`).
 2. Report the summary: file name and memory counts. Never read the file into the chat.
 3. Tell the user where the file is, since the summary gives only its name:
    - Local install: in the exports folder beside the store, by default `~/.local/share/user-memory/exports/<name>` (`%LOCALAPPDATA%\user-memory\exports\<name>` on Windows).
-   - Docker or other server: on the server, not on this machine. In the Docker server it is `/data/exports/<name>` inside the container; the user copies it out from the server's compose folder with `docker compose cp memory:/data/exports/<name> .`.
+   - Docker or other server: on the server, not on this machine. For a copy on the user's own machine, the simplest is for them to run `user-memory export FILE` there instead, which writes the file on their machine. Otherwise, in the Docker server it is `/data/exports/<name>` inside the container; the user copies it out from the server's compose folder with `docker compose cp memory:/data/exports/<name> .`.
    - If unsure which: `user-memory endpoint` prints the server's address on a client connected to one, and fails on a local install.
 
 Restore or import:
-1. Call `import` with the `name` and no `apply`. This preview changes nothing stored; with `on_conflict: use-file` it briefly holds the store's write lock, about as long as applying would take.
+1. Call `import` with the `name` and no `apply`. If the name is not there, the refusal lists the newest exports; ask the user which one they mean. This preview changes nothing stored; with `on_conflict: use-file` it briefly holds the store's write lock, about as long as applying would take.
 2. Explain the summary:
    - `added`: new memories by status.
    - `unchanged`: identical memories; `origins_merged` counts those that gain conversations.
@@ -41,9 +41,9 @@ Restore or import:
    A backup from before titles existed (export format version 1) imports only with a title for each memory the store does not already hold (those keep their titles), and the preview lists the ids without one. Ask the user to run `user-memory import FILE` on the command line, which lists each with its content; propose a title for each as "Titles for the upgrade" in [upgrade.md](upgrade.md) describes, get the user's approval, and pass the approved map as `titles` (CLI: `--titles FILE`).
 4. If there are conflicts, offer the `on_conflict` choices: `abort` (default, writes nothing), `keep-store` (keep the store's version, still add the file's conversations) or `use-file` (take the file's version).
 5. Only after the user approves the preview, call `import` again with `apply: true`, `user_confirmed: true` and the chosen `on_conflict`.
-6. Report `added`, `unchanged` and `staled`. Suggest that the user rebuild embeddings where the store lives, and `review` if `similar_to_existing` is above zero:
+6. Report `added`, `unchanged` and `staled`, and the summary's `next`, if any: `review` when imported memories resemble stored ones, and optionally `reindex`, which embeds the new memories at once; search embeds them as it goes otherwise. Reindex runs where the store lives:
    - Local install: `user-memory reindex`.
-   - Docker or other server: on the server, not on this client, which refuses it. For the Docker server: `docker compose exec memory user-memory reindex` in the server's compose folder.
+   - Docker or other server: on the server, not on a client, which refuses it. For the Docker server: `docker compose exec memory user-memory reindex` in the server's compose folder.
 
 ## On the command line (the user)
 
@@ -51,15 +51,15 @@ Moving memories between machines needs the CLI: agents cannot reach files outsid
 
 To export or import part of the memories, add read's filters: `--scope`, `--project`, `--category`, `--type`, `--source`, `--status` (every status unless given) and `--origin`. A filtered import skips a pattern whose supporting memories are neither imported with it nor already stored, and counts it in `skipped.unsupported_inferences`.
 
-On this machine:
+On this machine, a local install or a client of a server alike (`--project .` names this folder's project):
 
 ```sh
-umask 077
 user-memory export backup.json             # mode 0600; --force replaces an existing file
 user-memory import backup.json             # preview, writes nothing
 user-memory import backup.json --apply     # add --on-conflict keep-store|use-file if needed
-user-memory reindex
 ```
+
+Afterwards, optionally, `user-memory reindex` where the store lives (a local install; on a server, its own machine) embeds the new memories at once.
 
 Or on the Docker server's machine, through Docker (stdout is not written 0600 for you, so set `umask 077` first):
 

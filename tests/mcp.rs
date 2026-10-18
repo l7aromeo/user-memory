@@ -266,6 +266,17 @@ fn initialization_delivers_portable_memory_guidance_and_keeps_tools_available() 
             "{tool}"
         );
     }
+    // Export takes read's filters, so an agent asked for part of the
+    // memories need not export them all.
+    let export = tools.iter().find(|t| t["name"] == "export").unwrap();
+    assert!(
+        export["description"]
+            .as_str()
+            .unwrap()
+            .starts_with("Write every memory, or those read's filters select, to a JSON file"),
+        "{}",
+        export["description"]
+    );
     let link = tools.iter().find(|t| t["name"] == "link").unwrap();
     assert!(
         link["description"]

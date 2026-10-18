@@ -116,6 +116,10 @@ fn a_file_export_restores_into_a_fresh_store_after_a_preview() {
     let before = fs::read(&fresh.db).unwrap();
     let preview = fresh.value(&["import", file.to_str().unwrap()]);
     assert_eq!(preview["applied"], false, "{preview}");
+    assert!(
+        preview.get("next").is_none(),
+        "a preview has no next step: {preview}"
+    );
     assert_eq!(
         fs::read(&fresh.db).unwrap(),
         before,
@@ -123,6 +127,10 @@ fn a_file_export_restores_into_a_fresh_store_after_a_preview() {
     );
     let applied = fresh.value(&["import", file.to_str().unwrap(), "--apply"]);
     assert_eq!(applied["applied"], true, "{applied}");
+    assert_eq!(
+        applied["next"],
+        "optionally run `user-memory reindex` to embed the new memories now; search embeds them as it goes"
+    );
     assert_eq!(fresh.memories(), s.memories());
 }
 
@@ -1426,4 +1434,114 @@ fn one_page(value: Value, page_size_given: bool) -> Value {
         "{value}"
     );
     value["memories"].clone()
+}
+
+/// A git checkout in `store`'s sandbox whose remote names the project
+/// github.com/me/app.
+fn checkout(store: &Store) -> PathBuf {
+    let repo = store.root.path().join("app");
+    fs::create_dir_all(&repo).unwrap();
+    for args in [
+        &["init", "-q"][..],
+        &["remote", "add", "origin", "https://github.com/me/app.git"],
+    ] {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .sandboxed(store.root.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    }
+    repo
+}
+
+// Inside a checkout, `--project .` names its project for export and import,
+// as it does for read: the CLI resolves the folder to its key before the
+// filter applies.
+#[test]
+fn a_folder_names_its_project_for_export_and_import() {
+    let store = Store::new();
+    let repo = checkout(&store);
+    for (scope, project, content) in [
+        ("project", "github.com/me/app", "Ship the app weekly"),
+        ("project", "github.com/me/other", "Ship the other monthly"),
+        ("global", "", "Prefer small commits"),
+    ] {
+        let mut args = vec![
+            "--type",
+            "preference",
+            "--category",
+            "workflow",
+            "--scope",
+            scope,
+            "--content",
+            content,
+        ];
+        if !project.is_empty() {
+            args.extend(["--project", project]);
+        }
+        record(&store, &args);
+    }
+    let file = store.root.path().join("app.json");
+    let out = store
+        .command(&[
+            "export",
+            file.to_str().unwrap(),
+            "--scope",
+            "project",
+            "--project",
+            ".",
+        ])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let document: Value = serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+    let contents: Vec<&str> = document["memories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["content"].as_str().unwrap())
+        .collect();
+    assert_eq!(contents, ["Ship the app weekly"]);
+    assert_eq!(
+        document["selection"]["projects"],
+        json!(["github.com/me/app"])
+    );
+
+    // Importing every memory from a whole export, `.` selects this folder's.
+    let all = store.root.path().join("all.json");
+    store.ok(&["export", all.to_str().unwrap()]);
+    let fresh = Store::new();
+    let fresh_repo = checkout(&fresh);
+    let out = fresh
+        .command(&[
+            "import",
+            all.to_str().unwrap(),
+            "--apply",
+            "--scope",
+            "project",
+            "--project",
+            ".",
+        ])
+        .current_dir(&fresh_repo)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let summary: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(summary["selected"], 1, "{summary}");
+    assert_eq!(
+        summary["selection"]["projects"],
+        json!(["github.com/me/app"])
+    );
 }

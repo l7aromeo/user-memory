@@ -338,6 +338,11 @@ fn surface(root: &TempDir) -> Surface {
                 "forget",
                 json!({"origin": "claude:session/a", "user_confirmed": true}),
             ),
+            // Brings the forgotten memories back, so the summary has a next step.
+            (
+                "import",
+                json!({"name": "backup.json", "apply": true, "user_confirmed": true}),
+            ),
         ],
     );
     let mut values = BTreeSet::new();

@@ -204,7 +204,10 @@ user-memory import memories.json --apply
   unchanged, conflicts and invalid rows.
 - `--apply` writes it. On a conflict it stops by default. `--on-conflict
   keep-store` keeps the stored version; `--on-conflict use-file` takes the
-  file's.
+  file's. Its summary ends with a `next` step when one is worth taking:
+  `review` when imported memories resemble stored ones, and, optionally,
+  `reindex` to embed the new memories at once (search embeds them as it
+  goes otherwise).
 - Importing an older backup brings back memories forgotten since.
 - Backups do not include conversation links.
 - Connected to a memory server, `export` and `import` work the same way:
@@ -213,7 +216,9 @@ user-memory import memories.json --apply
 To export or import only part of your memories, add the filters `read`
 takes: `--scope global|project|all`, `--project KEY`, `--category`,
 `--type`, `--source`, `--status` and `--origin`. Without a `--status`,
-every status counts.
+every status counts. As for `read`, `--project .` (or another folder) names
+that checkout's project on this machine, so importing a file made
+elsewhere selects the memories of this folder's project.
 
 ```bash
 user-memory export work.json --scope project --project github.com/me/app
@@ -250,7 +255,7 @@ they refuse and say to run them on the server:
 | `user-memory project move OLD NEW` | Re-keys a project's memories and links. |
 | `user-memory migrate` | Upgrades the store after a new release, with a backup first. `--check` only checks. |
 | `user-memory repair` | Checks the store in full and, if it is damaged, backs it up and rebuilds its indexes. |
-| `user-memory reindex` | Rebuilds the search index. |
+| `user-memory reindex` | Rebuilds the search index and embeds every memory again. |
 | `user-memory embedding set --url URL --model NAME` | Chooses the embedding model for semantic search: checks it, calibrates it, saves it and embeds every memory again. |
 | `user-memory embedding show` | Shows the endpoint, model, vector length and how duplicates are detected. |
 | `user-memory embedding off` | Keyword search only; stored vectors are dropped. |

@@ -1350,6 +1350,13 @@ fn a_client_exports_and_imports_through_its_server_as_with_a_local_store() {
         b"",
     ));
     assert_eq!(applied["applied"], true, "{applied}");
+    // This client refuses reindex, so the advice names where it runs.
+    let next = applied["next"].as_str().unwrap();
+    assert!(
+        next.contains("optionally run `user-memory reindex` on the machine that serves http://"),
+        "{next}"
+    );
+    assert!(preview.get("next").is_none(), "{preview}");
     let copied = on_host(&other, &["export", "-"], b"");
     assert_eq!(
         timeless(serde_json::from_slice(&copied.stdout).unwrap()),

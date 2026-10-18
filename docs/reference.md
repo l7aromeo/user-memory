@@ -238,9 +238,10 @@ memory. Memories in different category groups are never grouped.
 ### Exporting or importing part of the store
 
 Export and import take the [filters](#scope-and-filters) `read` takes:
-`--scope`, `--project` (repeatable), `--category` (with its synonyms),
+`--scope`, `--project` (repeatable; on the CLI also a folder such as `.`,
+resolved to its project on this machine), `--category` (with its synonyms),
 `--type`, `--source`, `--status` and `--origin`; the tools take the same
-fields. Without any, they cover every memory. With some, they mean what they
+fields, with project keys only. Without any, they cover every memory. With some, they mean what they
 mean for `read`, except that an unset `--status` is every status and an unset
 `--scope` with no `--project` is every scope.
 
@@ -277,6 +278,14 @@ user-memory import backup.json --apply --category programming
 user-memory import - --apply < backup.json
 user-memory import old-backup.json --titles titles.json   # format version 1
 ```
+
+An applied import's summary ends with `next` when a step is worth taking:
+`review` when `similar_to_existing` is above zero, and an optional `reindex`
+when memories were added, since search embeds missing ones as it goes,
+up to 32 at a time. A client of a server names where reindex runs, which it
+refuses itself. A preview has no `next`. Asked for an export name that is
+not there, the import tool lists the newest names in the exports directory,
+which an agent cannot list itself.
 
 ## MCP tools
 

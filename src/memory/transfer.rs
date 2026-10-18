@@ -1097,10 +1097,6 @@ fn import(
             }),
         );
     }
-    summary.insert(
-        "next".into(),
-        json!("run review to consolidate similar memories; run reindex to rebuild embeddings"),
-    );
     if !apply || blocked {
         return Ok(Value::Object(summary));
     }
@@ -1135,7 +1131,43 @@ fn import(
     summary.insert("applied".into(), json!(true));
     summary.remove("will_stale");
     summary.insert("staled".into(), json!(staled));
-    Ok(Value::Object(summary))
+    let mut summary = Value::Object(summary);
+    if let Some(next) = import_next(&summary, "`user-memory reindex`") {
+        summary["next"] = json!(next);
+    }
+    Ok(summary)
+}
+
+/// What is worth doing after the applied import `summary`, if anything:
+/// review when imported memories resemble stored ones, and, when memories
+/// were added, `reindex` (the command that runs it where the store lives)
+/// to embed them now. That is optional: search embeds missing memories as
+/// it goes. A preview gets none, since nothing was written.
+pub fn import_next(summary: &Value, reindex: &str) -> Option<String> {
+    if summary["applied"] != true {
+        return None;
+    }
+    let similar = summary["similar_to_existing"].as_u64().unwrap_or(0);
+    let added: u64 = summary["added"]
+        .as_object()
+        .map_or(0, |counts| counts.values().filter_map(Value::as_u64).sum());
+    let mut steps = Vec::new();
+    if similar > 0 {
+        steps.push(format!(
+            "run review: {similar} imported {} stored ones",
+            if similar == 1 {
+                "memory resembles"
+            } else {
+                "memories resemble"
+            }
+        ));
+    }
+    if added > 0 {
+        steps.push(format!(
+            "optionally run {reindex} to embed the new memories now; search embeds them as it goes"
+        ));
+    }
+    (!steps.is_empty()).then(|| steps.join("; "))
 }
 
 /// Each stored memory's status.
@@ -1328,6 +1360,9 @@ pub fn export_named(db: &Path, input: &ExportMemories) -> Result<Value> {
 pub fn import_named(db: &Path, input: &ImportMemories) -> Result<Value> {
     let name = checked_name(&input.name)?;
     let dir = exports(db, false)?;
+    if fs::symlink_metadata(dir.join(name)).is_err() {
+        bail!("{name}: no such export; {}", newest_exports(&dir));
+    }
     let document = read_regular(&dir.join(name)).map_err(|err| anyhow!("{name}: {err}"))?;
     import(
         db,
@@ -1338,6 +1373,35 @@ pub fn import_named(db: &Path, input: &ImportMemories) -> Result<Value> {
         &input.subset,
         Untitled::IdsOnly,
     )
+}
+
+/// How many export names a missing name's refusal lists.
+const NEWEST_LISTED: usize = 5;
+
+/// The newest export names in `dir`, newest first, for an agent that asked
+/// for one that is not there: it cannot list the directory itself.
+fn newest_exports(dir: &Path) -> String {
+    let mut found: Vec<(std::time::SystemTime, String)> = fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let metadata = entry.metadata().ok()?;
+            (metadata.is_file() && checked_name(&name).is_ok())
+                .then(|| (metadata.modified().unwrap_or(std::time::UNIX_EPOCH), name))
+        })
+        .collect();
+    if found.is_empty() {
+        return "the exports directory holds none".to_owned();
+    }
+    found.sort_by(|a, b| b.cmp(a));
+    let names: Vec<String> = found
+        .into_iter()
+        .take(NEWEST_LISTED)
+        .map(|(_, name)| name)
+        .collect();
+    format!("the newest are: {}", names.join(", "))
 }
 
 /// Reads a regular file of at most `MAX_BYTES`, refusing symlinks, FIFOs and
@@ -2615,6 +2679,68 @@ mod tests {
             assert!(!same_file(&checked, &fs::metadata(&second).unwrap()));
             let directory = fs::metadata(dir.path()).unwrap();
             assert!(!same_file(&directory, &directory), "not a regular file");
+        }
+
+        // An agent cannot list the exports directory, so a name that is not
+        // there is refused with the newest ones there are, newest first.
+        #[test]
+        fn a_missing_export_names_the_newest_ones() {
+            let (s, _) = populated();
+            let fresh = store();
+            private::create_dir(&exports_dir(&fresh.db)).unwrap();
+            let err = import_named(&fresh.db, &import_request("gone.json"))
+                .unwrap_err()
+                .to_string();
+            assert_eq!(
+                err,
+                "gone.json: no such export; the exports directory holds none"
+            );
+            let start = std::time::SystemTime::now() - std::time::Duration::from_secs(600);
+            for (i, name) in ["a.json", "b.json", "c.json", "d.json", "e.json", "f.json"]
+                .iter()
+                .enumerate()
+            {
+                export_named(&s.db, &request(name, false)).unwrap();
+                fs::File::options()
+                    .write(true)
+                    .open(exports_dir(&s.db).join(name))
+                    .unwrap()
+                    .set_modified(start + std::time::Duration::from_secs(i as u64))
+                    .unwrap();
+            }
+            fs::write(exports_dir(&s.db).join("notes.txt"), "not an export").unwrap();
+            let err = import_named(&s.db, &import_request("gone.json"))
+                .unwrap_err()
+                .to_string();
+            assert_eq!(
+                err,
+                "gone.json: no such export; the newest are: f.json, e.json, d.json, c.json, b.json"
+            );
+        }
+
+        // After an applied import: review only when something resembles a
+        // stored memory, reindex only as an option when memories were added,
+        // and nothing at all for a preview, which wrote nothing.
+        #[test]
+        fn the_next_step_fits_what_the_import_did() {
+            let applied = |added: u64, similar: u64| json!({"applied": true, "added": {"confirmed": added, "tentative": 0}, "similar_to_existing": similar});
+            let reindex = "`user-memory reindex`";
+            assert_eq!(
+                import_next(&applied(2, 0), reindex).unwrap(),
+                "optionally run `user-memory reindex` to embed the new memories now; search embeds them as it goes"
+            );
+            assert_eq!(
+                import_next(&applied(2, 1), reindex).unwrap(),
+                "run review: 1 imported memory resembles stored ones; optionally run `user-memory reindex` to embed the new memories now; search embeds them as it goes"
+            );
+            assert_eq!(
+                import_next(&applied(0, 3), reindex).unwrap(),
+                "run review: 3 imported memories resemble stored ones"
+            );
+            assert_eq!(import_next(&applied(0, 0), reindex), None);
+            let mut preview = applied(2, 1);
+            preview["applied"] = json!(false);
+            assert_eq!(import_next(&preview, reindex), None);
         }
 
         #[test]
