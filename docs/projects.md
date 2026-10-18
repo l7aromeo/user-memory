@@ -67,9 +67,10 @@ Projects: github.com/you/notes (this folder); linked: github.com/you/api. Use th
 
 A group appears only when it has a project. They load in that order, each
 project once. The change notice before each prompt
-covers the same projects, and it reads them again every time: editing
-`.user-memory`, linking a project or adding a git remote takes effect at the
-next prompt, with a first line such as:
+covers the same projects, and those of every folder the session has worked
+in since; it reads them again every time. Moving between folders never drops
+a project, but editing `.user-memory`, linking a project or adding a git
+remote takes effect at the next prompt, with a first line such as:
 
 ```output
 Projects changed: - github.com/you/api (no longer listed)

@@ -189,7 +189,9 @@ Memory changed since this session last looked (+ new, ~ changed, - no longer act
 `+` is a new memory, `~` a changed one, and `-` one that was forgotten or
 replaced. When the session's projects change, for example after you edit
 `.user-memory` or the agent links a project, the notice starts with a line
-such as:
+such as the one below, and the memories of a project that left follow as `<`
+lines: still active, only no longer loaded in this session. The agent moving
+between folders never drops a project the session has seen.
 
 ```output
 Projects changed: + github.com/you/api (linked)

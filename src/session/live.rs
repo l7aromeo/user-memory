@@ -8,6 +8,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::BTreeSet,
     fs, io,
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
@@ -21,6 +22,9 @@ const SNAPSHOT_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 /// Session ids are short; a longer one is not a client's and is not used in
 /// a file name.
 const SESSION_ID_CHARS: usize = 128;
+/// Says why a memory that is still active left the notice's session: its
+/// project no longer loads there.
+const LEFT_WITH_PROJECT: &str = "project no longer loaded";
 /// Opens the notice; the agent reads a changed memory before applying it.
 const HEADER: &str = "Memory changed since this session last looked (+ new, ~ changed, - no longer active; read before applying):";
 
@@ -37,6 +41,64 @@ pub(super) const LINKED: &str = "linked";
 pub(super) struct Project {
     pub key: String,
     pub source: String,
+    /// The working folders the session saw it from (none for a link, or in
+    /// a snapshot saved before folders were kept).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folders: Vec<String>,
+}
+
+/// The projects a session sees after a prompt in `folder`: those it sees
+/// there now, each remembering the folders it was seen from, then those it
+/// saw before from another folder, which a change of folder never drops. A
+/// project leaves when no folder that gave it gives it any more, or, for a
+/// link, when the link is gone.
+pub(super) fn kept(fresh: Vec<Project>, before: Option<&[Project]>, folder: &str) -> Vec<Project> {
+    let before = before.unwrap_or_default();
+    let mut projects: Vec<Project> = fresh
+        .into_iter()
+        .map(|mut project| {
+            if project.source != LINKED {
+                project.folders.push(folder.to_owned());
+            }
+            if let Some(old) = before.iter().find(|old| old.key == project.key) {
+                for seen in &old.folders {
+                    if !project.folders.contains(seen) {
+                        project.folders.push(seen.clone());
+                    }
+                }
+            }
+            project
+        })
+        .collect();
+    for old in before {
+        if projects.iter().any(|p| p.key == old.key) {
+            continue;
+        }
+        let folders: Vec<String> = old
+            .folders
+            .iter()
+            .filter(|f| *f != folder)
+            .cloned()
+            .collect();
+        if !folders.is_empty() {
+            projects.push(Project {
+                folders,
+                ..old.clone()
+            });
+        }
+    }
+    projects
+}
+
+/// The keys a session saw before and no longer does.
+pub(super) fn gone(old: &Snapshot, new: &Snapshot) -> Vec<String> {
+    let (Some(old), Some(new)) = (&old.projects, &new.projects) else {
+        return Vec::new();
+    };
+    old.iter()
+        .filter(|o| new.iter().all(|n| n.key != o.key))
+        .map(|o| o.key.clone())
+        .collect()
 }
 
 /// What a session saw: its projects, unknown in a snapshot saved before
@@ -170,9 +232,12 @@ fn projects_changed(old: Option<&[Project]>, new: Option<&[Project]>) -> Option<
 /// `None` when nothing changed: the projects it gained and lost, then
 /// memories added, changed and no longer active, the first
 /// [`NOTICE_LINES`] listed and the rest counted.
-pub(super) fn notice(old: &Snapshot, new: &Snapshot) -> Option<String> {
+///
+/// A memory in `left` is still active but left with its project, so it is
+/// marked `<` with its title rather than `-`.
+pub(super) fn notice(old: &Snapshot, new: &Snapshot, left: &BTreeSet<String>) -> Option<String> {
     let projects = projects_changed(old.projects.as_deref(), new.projects.as_deref());
-    let memories = memory_notice(&old.stamps, &new.stamps);
+    let memories = memory_notice(&old.stamps, &new.stamps, left);
     match (projects, memories) {
         (None, None) => None,
         (projects, memories) => Some(
@@ -186,7 +251,7 @@ pub(super) fn notice(old: &Snapshot, new: &Snapshot) -> Option<String> {
 }
 
 /// The memory lines of a notice, or `None` when no memory changed.
-fn memory_notice(old: &Stamps, new: &Stamps) -> Option<String> {
+fn memory_notice(old: &Stamps, new: &Stamps, left: &BTreeSet<String>) -> Option<String> {
     let short = |id: &str| id.chars().take(8).collect::<String>();
     let line =
         |sign: char, id: &str, stamp: &Stamp| format!("{sign} {} {}", short(id), stamp.title);
@@ -199,9 +264,15 @@ fn memory_notice(old: &Stamps, new: &Stamps) -> Option<String> {
         .filter(|(id, stamp)| old.get(*id).is_some_and(|was| was != *stamp))
         .map(|(id, stamp)| line('~', id, stamp));
     let removed = old
-        .keys()
-        .filter(|id| !new.contains_key(*id))
-        .map(|id| format!("- {}", short(id)));
+        .iter()
+        .filter(|(id, _)| !new.contains_key(*id))
+        .map(|(id, stamp)| {
+            if left.contains(id) {
+                format!("< {} {} ({LEFT_WITH_PROJECT})", short(id), stamp.title)
+            } else {
+                format!("- {}", short(id))
+            }
+        });
     let changes: Vec<String> = added.chain(changed).chain(removed).collect();
     if changes.is_empty() {
         return None;
@@ -254,7 +325,7 @@ mod tests {
                 stamp("2026-10-01 10:00:00", "confirmed", "Old title"),
             ),
         ]);
-        assert_eq!(memory_notice(&old, &old), None);
+        assert_eq!(memory_notice(&old, &old, &BTreeSet::new()), None);
         let new = stamps(&[
             ("11111111-aaaa", kept),
             (
@@ -271,7 +342,7 @@ mod tests {
             ),
         ]);
         assert_eq!(
-            memory_notice(&old, &new).unwrap(),
+            memory_notice(&old, &new, &BTreeSet::new()).unwrap(),
             [
                 HEADER,
                 "+ 55555555 Ask before pushing",
@@ -293,7 +364,7 @@ mod tests {
                 )
             })
             .collect();
-        let text = memory_notice(&Stamps::new(), &new).unwrap();
+        let text = memory_notice(&Stamps::new(), &new, &BTreeSet::new()).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 1 + NOTICE_LINES + 1);
         assert_eq!(
@@ -303,7 +374,7 @@ mod tests {
         assert_eq!(lines[NOTICE_LINES + 1], "and 3 more: call index");
         let exact: Stamps = new.into_iter().take(NOTICE_LINES).collect();
         assert!(
-            !memory_notice(&Stamps::new(), &exact)
+            !memory_notice(&Stamps::new(), &exact, &BTreeSet::new())
                 .unwrap()
                 .contains("more")
         );
@@ -337,6 +408,7 @@ mod tests {
         let path = sessions.join("claude-s1.json");
         let first = Snapshot {
             projects: Some(vec![Project {
+                folders: Vec::new(),
                 key: "github.com/acme/app".into(),
                 source: THIS_FOLDER.into(),
             }]),
@@ -405,6 +477,7 @@ mod tests {
     #[test]
     fn a_changed_project_set_opens_the_notice() {
         let project = |key: &str, source: &str| Project {
+            folders: Vec::new(),
             key: key.into(),
             source: source.into(),
         };
@@ -431,7 +504,7 @@ mod tests {
             stamps: gained,
         };
         assert_eq!(
-            notice(&old, &new).unwrap(),
+            notice(&old, &new, &BTreeSet::new()).unwrap(),
             [
                 "Projects changed: + github.com/x/web (listed in .user-memory); - github.com/x/old (no longer listed); - github.com/x/tool (unlinked); - local:app (moved)",
                 HEADER,
@@ -445,7 +518,7 @@ mod tests {
             stamps: kept.clone(),
         };
         assert!(
-            notice(&old, &same_memories)
+            notice(&old, &same_memories, &BTreeSet::new())
                 .unwrap()
                 .starts_with("Projects changed: ")
         );
@@ -453,7 +526,47 @@ mod tests {
             projects: None,
             stamps: kept,
         };
-        assert_eq!(notice(&unknown, &same_memories), None);
-        assert_eq!(notice(&old, &old), None);
+        assert_eq!(notice(&unknown, &same_memories, &BTreeSet::new()), None);
+        assert_eq!(notice(&old, &old, &BTreeSet::new()), None);
+    }
+
+    fn seen_from(key: &str, source: &str, folders: &[&str]) -> Project {
+        Project {
+            key: key.into(),
+            source: source.into(),
+            folders: folders.iter().map(|f| (*f).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn a_project_stays_until_no_folder_that_gave_it_gives_it() {
+        let before = [
+            seen_from("a", LISTED, &["/w", "/w/a"]),
+            seen_from("b", LISTED, &["/w"]),
+            seen_from("link", LINKED, &[]),
+            seen_from("old", LISTED, &[]),
+        ];
+        // In /w/a: b, seen only from /w, stays; a gains nothing new; the
+        // link, gone from the server, and a project from an older snapshot
+        // with no folders leave.
+        let now = kept(
+            vec![seen_from("a", THIS_FOLDER, &[])],
+            Some(&before),
+            "/w/a",
+        );
+        assert_eq!(
+            now,
+            [
+                seen_from("a", THIS_FOLDER, &["/w/a", "/w"]),
+                seen_from("b", LISTED, &["/w"]),
+            ]
+        );
+        // Back in /w, which no longer lists b: b leaves; a, also seen from
+        // /w/a, stays though /w no longer lists it either.
+        let now = kept(Vec::new(), Some(&now), "/w");
+        assert_eq!(now, [seen_from("a", THIS_FOLDER, &["/w/a"])]);
+        // A link keeps no folder, and a first look has nothing before.
+        let now = kept(vec![seen_from("link", LINKED, &[])], None, "/w");
+        assert_eq!(now, [seen_from("link", LINKED, &[])]);
     }
 }

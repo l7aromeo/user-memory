@@ -540,14 +540,19 @@ Memory changed since this session last looked (+ new, ~ changed, - no longer act
 - 0b9d3a11
 ```
 
-It covers the same projects as session start, read again before each
-prompt: editing `.user-memory`, linking, or adding a git remote to a folder
-without one takes effect at the next prompt. When the projects change, the
-notice opens with a line such as
+It covers the projects of session start and of every folder the session
+has worked in since, read again before each prompt from the folder it works
+in now: editing `.user-memory`, linking, or adding a git remote to a folder
+without one takes effect at the next prompt. Moving to another folder never
+drops a project; one leaves only when no folder the session saw it from
+still gives it (an edited `.user-memory`, a changed key), or when its link
+is removed. When the projects change, the notice opens with a line such as
 `Projects changed: + github.com/x/web (listed in .user-memory); - github.com/x/old (no longer listed)`,
-and the memories of a project gained or lost follow as `+` or `-` lines.
-`+` is a new memory, `~` one whose title, status or content changed, and `-`
-one no longer active (forgotten, superseded or stale). Ten changes are listed;
+and the memories of a project gained follow as `+` lines, those of a project
+lost as `<` lines with their title and `(project no longer loaded)`: they
+are still active, only no longer loaded here. `+` is a new memory, `~` one
+whose title, status or content changed, and `-` one no longer active
+(forgotten, superseded or stale). Ten changes are listed;
 more are counted, with a pointer to `index`. Global rules are never repeated
 wholesale: the notice lists only changes, which the agent reads before
 applying. It finishes within about a second and prints nothing on any

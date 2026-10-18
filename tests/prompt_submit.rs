@@ -75,14 +75,20 @@ impl Home {
     }
     /// Runs a hook with the session's payload on stdin.
     fn hook(&self, hook: &str, session: &str, env: &[(&str, &str)]) -> Output {
-        let payload = json!({"session_id": session, "cwd": self.path(), "hook_event_name": hook});
+        self.hook_in(hook, session, self.path(), env)
+    }
+    /// Runs a hook for a session whose working folder is now `cwd`.
+    fn hook_in(&self, hook: &str, session: &str, cwd: &Path, env: &[(&str, &str)]) -> Output {
+        let payload = json!({"session_id": session, "cwd": cwd, "hook_event_name": hook});
         let subcommand = if hook == "SessionStart" {
             "session-start"
         } else {
             "prompt-submit"
         };
+        // A client runs its hooks in the session's folder.
         let mut child = self
             .command(&[subcommand, "--client", "claude"], env)
+            .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -100,7 +106,11 @@ impl Home {
     }
     /// What the prompt hook adds to the session's context, or "" for nothing.
     fn notice(&self, session: &str) -> String {
-        let out = self.hook("UserPromptSubmit", session, &[]);
+        self.notice_in(session, self.path())
+    }
+    /// The prompt hook's notice for a session now working in `cwd`.
+    fn notice_in(&self, session: &str, cwd: &Path) -> String {
+        let out = self.hook_in("UserPromptSubmit", session, cwd, &[]);
         if out.stdout.is_empty() {
             return String::new();
         }
@@ -270,4 +280,78 @@ fn a_new_link_brings_its_projects_memories_to_the_next_prompt() {
         format!("+ {} Run the fuzzer before merging", id8(&fuzz))
     );
     assert_eq!(home.notice("s2"), "");
+}
+
+// An agent moves between a workspace and its repositories; that alone never
+// drops a project the session has seen, so the prompt hook stays quiet.
+// Taking a project off the workspace's list still drops it, and its
+// memories are marked as leaving with it, not as no longer active.
+#[test]
+fn a_session_keeps_the_projects_it_has_seen_when_its_folder_changes() {
+    let home = Home::new();
+    let work = home.path().join("work");
+    let mut rules = Vec::new();
+    for name in ["a", "b", "c"] {
+        let key = format!("github.com/acme/{name}");
+        // A repository with its own remote, as a workspace's checkouts are.
+        let repo = work.join(name);
+        std::fs::create_dir_all(&repo).unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["remote", "add", "origin", &format!("https://{key}.git")],
+        ] {
+            let out = Command::new("git")
+                .args(&args)
+                .current_dir(&repo)
+                .sandboxed(home.path())
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{out:?}");
+        }
+        let title = format!("Rule for {name}");
+        let saved = home.cli(&[
+            "record",
+            "--type",
+            "preference",
+            "--category",
+            "workflow",
+            "--title",
+            &title,
+            "--content",
+            &title,
+            "--scope",
+            "project",
+            "--project",
+            &key,
+        ]);
+        assert_eq!(saved["stored"], true, "{saved}");
+        rules.push(saved["id"].as_str().unwrap().to_owned());
+    }
+    std::fs::write(work.join(".user-memory"), "@a\n@b\n@c\n").unwrap();
+    home.hook_in("SessionStart", "s", &work, &[]);
+    assert_eq!(home.notice_in("s", &work.join("a")), "");
+    assert_eq!(home.notice_in("s", &work), "");
+    assert_eq!(home.notice_in("s", &work.join("a")), "");
+    // From the workspace, the list no longer gives c, and no other folder
+    // the session saw it from does: it leaves.
+    std::fs::write(work.join(".user-memory"), "@a\n@b\n").unwrap();
+    let notice = home.notice_in("s", &work);
+    let lines: Vec<&str> = notice.lines().collect();
+    assert_eq!(
+        lines[0], "Projects changed: - github.com/acme/c (no longer listed)",
+        "{notice}"
+    );
+    assert!(
+        lines.contains(
+            &format!("< {} Rule for c (project no longer loaded)", id8(&rules[2])).as_str()
+        ),
+        "{notice}"
+    );
+    assert!(
+        !notice.contains(&format!("- {}", id8(&rules[2]))),
+        "{notice}"
+    );
+    // a, which the session also saw from its own folder, stays.
+    std::fs::write(work.join(".user-memory"), "@b\n").unwrap();
+    assert_eq!(home.notice_in("s", &work), "");
 }

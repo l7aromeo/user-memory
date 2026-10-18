@@ -14,6 +14,7 @@ use clap::ValueEnum;
 use live::{LINKED, LISTED, PENDING, THIS_FOLDER};
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeSet,
     io::{IsTerminal, Read},
     path::{Path, PathBuf},
     time::Duration,
@@ -168,7 +169,7 @@ async fn remember(
 ) -> Option<()> {
     let payload: Value = serde_json::from_slice(payload).ok()?;
     let path = live::snapshot_path(client.name(), payload["session_id"].as_str()?)?;
-    let snapshot = snapshot(checkout, origin).await.ok()?;
+    let snapshot = snapshot(checkout, origin, None).await.ok()?;
     live::save(&path, &snapshot).ok()
 }
 
@@ -202,24 +203,70 @@ async fn changes(client: HookClient) -> Option<String> {
     let payload: Value = serde_json::from_slice(&bytes).ok()?;
     let path = live::snapshot_path(client.name(), payload["session_id"].as_str()?)?;
     let checkout = payload["cwd"].as_str().unwrap_or(".");
-    let now = snapshot(PathBuf::from(checkout), origin).await.ok()?;
     let before = live::load(&path);
+    let now = snapshot(PathBuf::from(checkout), origin, before.as_ref())
+        .await
+        .ok()?;
     let _ = live::save(&path, &now);
-    live::notice(&before?, &now)
+    let before = before?;
+    // Memories that left with a project are still active: the index of
+    // those projects alone tells them from memories no longer active.
+    let gone = live::gone(&before, &now);
+    let left = if gone.is_empty() {
+        BTreeSet::new()
+    } else {
+        let remote = setup::configured_remote().ok()?;
+        stamps(remote.as_ref(), &gone, None)
+            .await
+            .ok()?
+            .into_keys()
+            .collect()
+    };
+    live::notice(&before, &now, &left)
 }
 
-/// What the session in `checkout` sees, read fresh: its projects and, from
-/// the shared server or the local store, every active global memory and
-/// those of its projects.
-async fn snapshot(checkout: PathBuf, origin: Option<String>) -> anyhow::Result<live::Snapshot> {
+/// What the session in `checkout` sees: its projects, read fresh and kept
+/// from what it saw `before` in other folders, and, from the shared server
+/// or the local store, every active global memory and those of its projects.
+async fn snapshot(
+    checkout: PathBuf,
+    origin: Option<String>,
+    before: Option<&live::Snapshot>,
+) -> anyhow::Result<live::Snapshot> {
     let remote = setup::configured_remote()?;
+    // One spelling per folder, however the client or the command line gives
+    // it, so a project seen there is matched on the next prompt.
+    let folder = dunce::canonicalize(&checkout)
+        .unwrap_or_else(|_| checkout.clone())
+        .to_string_lossy()
+        .into_owned();
     let seen = look(checkout, origin.as_deref(), remote.as_ref()).await?;
+    let projects = live::kept(
+        seen.projects,
+        before.and_then(|b| b.projects.as_deref()),
+        &folder,
+    );
+    let keys: Vec<String> = projects.iter().map(|p| p.key.clone()).collect();
+    Ok(live::Snapshot {
+        stamps: stamps(remote.as_ref(), &keys, origin.as_deref()).await?,
+        projects: Some(projects),
+    })
+}
+
+/// The stamps of every active global memory and those of `projects` (and
+/// of the projects `origin` linked), from the shared server or the local
+/// store.
+async fn stamps(
+    remote: Option<&crate::remote::Connection>,
+    projects: &[String],
+    origin: Option<&str>,
+) -> anyhow::Result<memory::Stamps> {
     let input = json!({
-        "projects": seen.keys(),
+        "projects": projects,
         "origin_links": origin,
         "stamps": true,
     });
-    let reply = match &remote {
+    let reply = match remote {
         Some(connection) => connection.call("index", input).await?,
         None => {
             let input: memory::Index = serde_json::from_value(input)?;
@@ -227,12 +274,7 @@ async fn snapshot(checkout: PathBuf, origin: Option<String>) -> anyhow::Result<l
             tokio::task::spawn_blocking(move || memory::index(&db, &input)).await??
         }
     };
-    let stamps =
-        memory::parse_stamps(&reply).context("The memory server sent no stamps; update it")?;
-    Ok(live::Snapshot {
-        projects: Some(seen.projects),
-        stamps,
-    })
+    memory::parse_stamps(&reply).context("The memory server sent no stamps; update it")
 }
 
 /// The lines naming the projects the session in `path` sees, then the index
@@ -397,6 +439,7 @@ fn seen(folder: &project::Folder, linked: &[String]) -> Seen {
             projects.push(live::Project {
                 key: key.into(),
                 source: source.into(),
+                folders: Vec::new(),
             });
         }
     }
