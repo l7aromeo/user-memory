@@ -152,6 +152,9 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $false
           $refused = & $binary debug-paths 2>&1 | Out-String
           $status = $LASTEXITCODE
+          # GitHub's pwsh wrapper exits with $LASTEXITCODE when the script
+          # ends, so the refusal's 2 would fail the step after every check.
+          $global:LASTEXITCODE = 0
           $PSNativeCommandUseErrorActionPreference = $true
           if ($status -ne 2 -or -not $refused.Contains("unrecognized subcommand 'debug-paths'")) {
             throw "the release build runs the debug-only debug-paths command (status $status)"

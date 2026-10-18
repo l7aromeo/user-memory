@@ -578,6 +578,8 @@ fn the_release_builds_both_windows_targets_on_windows() {
         "$env:CARGO_HOME = $cargoHome",
         "$env:RUSTFLAGS = \"--remap-path-prefix=$workspace=/src --remap-path-prefix=$cargoHome=/cargo --remap-path-prefix=$userProfile=/home\"",
         "cargo build --release --locked --bin user-memory --target $env:TARGET",
+        // The refusal's exit code would otherwise end the step as failed.
+        "$global:LASTEXITCODE = 0",
         "$name = \"user-memory-$env:TARGET.exe\"",
         "[IO.File]::WriteAllText(\"$binary.sha256\", \"$hash  $name`n\")",
     ] {
@@ -721,4 +723,86 @@ fn every_release_build_refuses_the_debug_only_commands() {
             "{line}\n{windows}"
         );
     }
+}
+
+/// Whether pwsh must run rather than skip: in CI, or with REQUIRE_PWSH set,
+/// as for the install.ps1 tests.
+fn pwsh_required() -> bool {
+    let set = |name| std::env::var(name).is_ok_and(|value| !value.is_empty() && value != "false");
+    set("CI") || set("REQUIRE_PWSH")
+}
+
+// The Windows build step ends as GitHub runs it: GitHub's pwsh wrapper
+// exits with $LASTEXITCODE when the script returns, so the debug-paths
+// refusal (exit 2) that the step requires must not end it. Its checks run
+// here, from the refusal on, on a stand-in binary that refuses as a release
+// build does.
+#[cfg(unix)]
+#[test]
+fn the_windows_build_step_ends_well_after_the_refusal_it_requires() {
+    use std::os::unix::fs::PermissionsExt;
+    let found = Command::new("pwsh")
+        .args(["-NoProfile", "-NonInteractive", "-Command", "exit 0"])
+        .output()
+        .is_ok_and(|out| out.status.success());
+    assert!(
+        found || !pwsh_required(),
+        "pwsh is required here, but it does not run"
+    );
+    if !found {
+        eprintln!("pwsh is not installed: skipping the Windows build step's run");
+        return;
+    }
+    let text = repo_file(".github/workflows/release.yml");
+    let docs = YamlLoader::load_from_str(&text).unwrap();
+    let run = docs[0]["jobs"]["build"]["steps"]
+        .as_vec()
+        .unwrap()
+        .iter()
+        .find(|step| step["name"].as_str() == Some("Build on Windows"))
+        .and_then(|step| step["run"].as_str())
+        .unwrap();
+    let tail = &run[run
+        .find("# Debug-only commands never ship")
+        .expect("the refusal check")..];
+    let dir = tempfile::tempdir().unwrap();
+    let name = "user-memory-x86_64-pc-windows-msvc.exe";
+    let binary = dir.path().join(name);
+    fs::write(
+        &binary,
+        "#!/bin/sh\necho \"error: unrecognized subcommand '$1'\" >&2\nexit 2\n",
+    )
+    .unwrap();
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+    let script = dir.path().join("step.ps1");
+    fs::write(
+        &script,
+        format!(
+            "$ErrorActionPreference = 'Stop'\n\
+             $PSNativeCommandUseErrorActionPreference = $true\n\
+             $workspace = 'D:\\a\\user-memory\\user-memory'\n\
+             $userProfile = 'C:\\Users\\runneradmin'\n\
+             $name = '{name}'\n\
+             $binary = '{}'\n\
+             {tail}\n\
+             if ((Test-Path -LiteralPath variable:\\LASTEXITCODE)) {{ exit $LASTEXITCODE }}\n",
+            binary.display()
+        ),
+    )
+    .unwrap();
+    let out = Command::new("pwsh")
+        .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"])
+        .arg(format!(". '{}'", script.display()))
+        .output()
+        .unwrap();
+    let (stdout, stderr) = (
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(out.status.success(), "{}\n{stdout}\n{stderr}", out.status);
+    let sum = fs::read_to_string(dir.path().join(format!("{name}.sha256"))).unwrap();
+    let hash = sum
+        .strip_suffix(&format!("  {name}\n"))
+        .expect("shasum's format");
+    assert!(stdout.contains(&format!("{}…", &hash[..16])), "{stdout}");
 }
