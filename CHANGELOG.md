@@ -18,11 +18,11 @@ On Windows, in PowerShell:
 irm https://github.com/l7aromeo/user-memory/releases/latest/download/install.ps1 | iex
 ```
 
-<!-- VERIFY: the store format and any migration, once every 0.8.0 change is in -->
+- The store keeps its format, so nothing is migrated and nothing needs your
+  input.
 - Restart Claude Code and Codex, and start new sessions, so agents load the
   updated tools.
-<!-- VERIFY: whether Codex must approve changed hooks -->
-<!-- VERIFY: the next two items match the code on main -->
+- Codex's hooks are unchanged, so Codex needs no new approval.
 - `update` keeps a memory's stated reason through a correction, as it keeps
   the evidence; give `reason` to replace it, or an empty one to clear it.
   Before, a content fix erased it. Anything that relied on a content update
@@ -52,7 +52,6 @@ irm https://github.com/l7aromeo/user-memory/releases/latest/download/install.ps1
 
 ### New
 
-<!-- VERIFY: the other new items; the next four items match the code on main -->
 - **Short ids everywhere.** `update`, `forget` and `record`'s `confirms`,
   `supersedes`, `distinct_from` and `evidence_ids` accept the 8-character
   id the index shows, as `read` does.
@@ -91,7 +90,6 @@ irm https://github.com/l7aromeo/user-memory/releases/latest/download/install.ps1
 
 ### Fixed
 
-<!-- VERIFY: the other fixes; the next two items match the code on main -->
 - `record`'s refusal of a title that is too long says how many characters
   to remove.
 - The session start's hint to link another repository says "unless the
