@@ -1448,7 +1448,7 @@ fn check_embedding(saved: Option<&Installation>, db: &Path) -> Result<Option<Str
     let saved = saved.map_or(&empty, |saved| &saved.embedding);
     for name in embedding::SETTINGS {
         if let Some((value, source)) = embedding::lookup(saved, name) {
-            println!("  {name}={value} ({source})");
+            println!("  {name}={} ({source})", one_line(&value));
         }
     }
     let setting = |name: &str| embedding::lookup(saved, name).map(|(value, _)| value);
@@ -1482,6 +1482,21 @@ fn check_embedding(saved: Option<&Installation>, db: &Path) -> Result<Option<Str
         None => println!("Embedding: off; search uses keywords only"),
     }
     Ok(None)
+}
+
+/// `value` on one line: a newline, tab or other control character shown as
+/// its escape, as `.env` writes the newline in a query instruction.
+fn one_line(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_default().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
 }
 
 fn verify_client(client: &InstalledClient, paths: &Paths) -> Result<()> {

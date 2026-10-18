@@ -391,6 +391,43 @@ fn doctor_checks_the_named_store_where_nothing_is_installed() {
     );
 }
 
+/// Doctor lists each embedding setting on one line with its source, even a
+/// query instruction whose value holds a newline, as Docker passes it.
+#[test]
+fn doctor_shows_a_multi_line_setting_on_one_line() {
+    let s = Sandbox::new();
+    let db = s.path("data/memories.sqlite3");
+    let run = |args: &[&str]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_user-memory"));
+        command
+            .args(args)
+            .sandboxed(s.path("home"))
+            .env("USER_MEMORY_NO_UPDATE_CHECK", "1")
+            .env_remove("USER_MEMORY_URL")
+            .env("USER_MEMORY_DB", &db);
+        for key in EMBED_ENV {
+            command.env_remove(key);
+        }
+        command
+            .env(
+                "USER_MEMORY_EMBED_QUERY_INSTRUCTION",
+                "Instruct: find the memory\nQuery:",
+            )
+            .output()
+            .unwrap()
+    };
+    assert_success(&run(&["index"]));
+    let out = run(&["doctor"]);
+    assert_success(&out);
+    assert!(
+        stdout(&out).contains(
+            "  USER_MEMORY_EMBED_QUERY_INSTRUCTION=Instruct: find the memory\\nQuery: (environment)\n"
+        ),
+        "{}",
+        stdout(&out)
+    );
+}
+
 /// An install with a part missing is not the server's container: with the
 /// binary gone doctor asks for setup, and with the receipt gone it still
 /// checks the clients, whatever store is named.
