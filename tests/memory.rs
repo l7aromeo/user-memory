@@ -4191,6 +4191,15 @@ fn the_cli_takes_projects_as_the_tools_name_it() {
             "{command}: {stdout}"
         );
     }
+    // The CLI's help says it takes a folder, which only the tools refuse.
+    for command in ["index", "read", "search"] {
+        let help = String::from_utf8(s.run(&[command, "--help"]).stdout).unwrap();
+        assert!(
+            help.contains("a folder such as . whose project is used"),
+            "{help}"
+        );
+        assert!(!help.contains("never local paths"), "{help}");
+    }
     let out = s.run(&[
         "read",
         "--category",
