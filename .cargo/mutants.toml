@@ -1,0 +1,16 @@
+# cargo-mutants settings. Run from the repository root:
+#   just mutants
+# String literals (SQL) are not mutated by cargo-mutants; scripts/sql-mutants
+# covers them.
+
+# Match the CI/test invocation.
+additional_cargo_args = ["--locked"]
+# Build each mutant with the `mutants` profile in Cargo.toml: the test profile
+# without debug information, which takes less time to build and link.
+profile = "mutants"
+# Integration tests spawn the binary and a local HTTP host; leave headroom for
+# parallel jobs on a loaded machine instead of reporting false timeouts.
+timeout_multiplier = 4.0
+minimum_test_timeout = 60
+# Mutants that only trip lints should still be built and tested.
+cap_lints = true

@@ -1,0 +1,35 @@
+# SQL mutations for src/memory/review.rs. Format: see scripts/sql-mutants.
+
+# --- Memories under review ---
+
+name: review-pool-includes-superseded
+file: src/memory/review.rs
+search: WHERE status IN ('confirmed','tentative','stale') AND
+replace: WHERE 1 AND
+why: Superseded memories, already replaced, are proposed for merging again.
+
+name: review-pool-drops-stale
+file: src/memory/review.rs
+search: status IN ('confirmed','tentative','stale')
+replace: status IN ('confirmed','tentative')
+why: Stale patterns are never offered for forgetting or re-deriving.
+
+name: review-pool-ignores-project-name
+file: src/memory/review.rs
+search: (scope='project' AND project IN (SELECT value FROM json_each(?1)))
+replace: (scope='project')
+why: Reviewing one project groups memories of every other project.
+
+name: review-pool-drops-project-memories
+file: src/memory/review.rs
+search:  OR (scope='project' AND project IN (SELECT value FROM json_each(?1))))
+replace: )
+why: Reviewing a project never sees its own memories, so redundant copies go unnoticed.
+
+# --- Pairs the user marked as different ---
+
+name: review-ignores-distinct-pairs
+file: src/memory/review.rs
+search: SELECT a,b FROM memory_distinct"
+replace: SELECT a,b FROM memory_distinct WHERE 0"
+why: Memories the user already declared different keep being grouped.

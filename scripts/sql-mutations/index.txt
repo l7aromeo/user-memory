@@ -1,0 +1,88 @@
+# SQL mutations for src/memory/index.rs. Format: see scripts/sql-mutants.
+
+# --- Keyword index structure and backfill ---
+
+name: search-backfill-missing
+file: src/memory/index.rs
+search: INSERT INTO memory_search(id,memory_type,category,title,content,context,reason,evidence) SELECT id,memory_type,category,title,content,context,reason,evidence FROM memories;\nCREATE TABLE
+replace: CREATE TABLE
+why: Memories stored before the index existed are never found by keyword.
+
+name: search-query-requires-every-word
+file: src/memory/index.rs
+search: .join(" OR ")
+replace: .join(" AND ")
+why: A topic only finds memories containing all of its words.
+
+name: search-query-unquoted
+file: src/memory/index.rs
+search: format!("\"{}\"", t.replace('"', "\"\""))
+replace: t.to_string()
+expect: survive
+why: Equivalent today: tokens are lowercased alphanumerics, and FTS5 operators (AND, OR, NOT, NEAR) are uppercase-only barewords. Quoting guards against a future tokenizer that keeps punctuation or case.
+
+# --- Triggers keeping the index in step with memories ---
+
+name: search-insert-trigger-noop
+file: src/memory/index.rs
+search: VALUES (NEW.id,NEW.memory_type,NEW.category,NEW.title,NEW.content,NEW.context,NEW.reason,NEW.evidence);
+replace: SELECT NEW.id,NEW.memory_type,NEW.category,NEW.title,NEW.content,NEW.context,NEW.reason,NEW.evidence WHERE 0;
+why: New memories are never found by keyword.
+
+name: search-changed-trigger-noop
+file: src/memory/index.rs
+search: evidence=NEW.evidence WHERE id=OLD.id;
+replace: evidence=NEW.evidence WHERE 0;
+why: Corrected memories are found by their old words, not their new ones.
+
+name: search-changed-trigger-misses-content
+file: src/memory/index.rs
+search: AFTER UPDATE OF memory_type,category,title,content,context,reason,evidence ON
+replace: AFTER UPDATE OF memory_type,category,title,context,reason,evidence ON
+why: A store-level content edit leaves the old words indexed.
+
+name: search-deleted-trigger-keeps-text
+file: src/memory/index.rs
+search: DELETE FROM memory_search WHERE id=OLD.id;
+replace: DELETE FROM memory_search WHERE 0;
+why: Forgotten memories stay in the keyword index.
+
+name: vectors-deleted-trigger-keeps-vectors
+file: src/memory/index.rs
+search: DELETE FROM memory_vectors WHERE id=OLD.id;
+replace: DELETE FROM memory_vectors WHERE 0;
+why: Embeddings of forgotten memories stay in the store.
+
+# --- Vector reuse ---
+
+name: vectors-ignore-model
+file: src/memory/index.rs
+search: WHERE id=?1 AND model=?2 AND dimensions=?3
+replace: WHERE id=?1 AND ?2!='' AND dimensions=?3
+why: Vectors from another model are compared with the current model's query.
+
+name: vectors-ignore-dimensions
+file: src/memory/index.rs
+search: AND dimensions=?3 AND source=?4
+replace: AND ?3>=0 AND source=?4
+why: Vectors truncated to another length are reused after USER_MEMORY_EMBED_DIMENSIONS changes.
+
+name: vectors-ignore-source
+file: src/memory/index.rs
+search: AND source=?4",
+replace: AND ?4!=''",
+why: Corrected memories keep the vector of their old text.
+
+# --- Reindex ---
+
+name: reindex-keeps-old-search-rows
+file: src/memory/index.rs
+search: tx.execute_batch("DELETE FROM memory_search;\nINSERT
+replace: tx.execute_batch("INSERT
+why: Reindexing duplicates every keyword row.
+
+name: reindex-keeps-orphan-vectors
+file: src/memory/index.rs
+search: \nDELETE FROM memory_vectors WHERE id NOT IN (SELECT id FROM memories);")?;
+replace: ")?;
+why: Vectors of memories deleted without the trigger are never cleaned up.

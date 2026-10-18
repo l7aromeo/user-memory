@@ -1,0 +1,108 @@
+# SQL mutations for src/memory/transfer.rs. Format: see scripts/sql-mutants.
+
+# --- Export ---
+
+name: export-memories-by-id
+file: src/memory/transfer.rs
+search: "{SELECT} ORDER BY rowid"
+replace: "{SELECT} ORDER BY id"
+why: Exports lose insertion order, so a round trip reorders same-second memories.
+
+name: export-origins-unordered
+file: src/memory/transfer.rs
+search: memory_origins ORDER BY memory_id,origin"
+replace: memory_origins ORDER BY memory_id,origin DESC"
+why: Origins are exported in an arbitrary order, so exports of one store differ.
+
+name: export-pairs-unordered
+file: src/memory/transfer.rs
+search: memory_distinct ORDER BY a,b"
+replace: memory_distinct ORDER BY b DESC"
+why: Distinct pairs are exported in an arbitrary order.
+
+name: export-time-format
+file: src/memory/transfer.rs
+search: strftime('%Y-%m-%dT%H:%M:%SZ','now')
+replace: strftime('%Y-%m-%d %H:%M:%S','now')
+why: exported_at loses its ISO 8601 UTC form.
+
+# --- Import: predictions ---
+
+# will_stale comes from trying the replacements and rolling them back, so the
+# triggers' own entries in schema.txt cover it.
+
+# --- Import: writes ---
+
+name: insert-swaps-timestamps
+file: src/memory/transfer.rs
+search: (id,created_at,updated_at,memory_type
+replace: (id,updated_at,created_at,memory_type
+why: Imported memories swap creation and modification times.
+
+name: replace-keeps-store-timestamps
+file: src/memory/transfer.rs
+search: created_at=?14,updated_at=?15,last_confirmed_at=?16,title
+replace: created_at=?14,last_confirmed_at=?16,title
+why: use-file replaces fields but keeps the store's modification time.
+
+name: replace-keeps-store-origins
+file: src/memory/transfer.rs
+search: DELETE FROM memory_origins WHERE memory_id=?1 AND
+replace: DELETE FROM memory_origins WHERE 0 AND
+why: use-file keeps origins the file no longer lists.
+
+name: replace-deletes-every-origin
+file: src/memory/transfer.rs
+search:  AND origin NOT IN (SELECT value FROM json_each(?2))
+replace:  AND ?2 IS NOT NULL
+why: Removing every origin before re-inserting the file's leaves, for a moment, fewer than two conversations behind a pattern, which then goes stale though no conversation was lost.
+
+name: replace-keeps-store-first-seen
+file: src/memory/transfer.rs
+search: DO UPDATE SET first_seen=excluded.first_seen"
+replace: DO UPDATE SET first_seen=first_seen"
+why: use-file keeps the store's first_seen for origins both sides list.
+
+name: replace-is-insert-only
+file: src/memory/transfer.rs
+search: VALUES (?1,?2,?3) ON CONFLICT(memory_id,origin) DO UPDATE SET first_seen=excluded.first_seen"
+replace: VALUES (?1,?2,?3)"
+why: use-file fails on any origin the store already holds.
+
+name: merge-takes-the-files-first-seen
+file: src/memory/transfer.rs
+search: first_seen=min(first_seen,excluded.first_seen)
+replace: first_seen=excluded.first_seen
+why: Merging moves an origin's first sighting later.
+
+name: merge-confirmation-moves-back
+file: src/memory/transfer.rs
+search:  AND (last_confirmed_at IS NULL OR last_confirmed_at<?2)
+replace: 
+why: An older export moves last_confirmed_at back.
+
+name: merge-confirmation-skips-unconfirmed
+file: src/memory/transfer.rs
+search: last_confirmed_at IS NULL OR 
+replace: 
+why: A memory never confirmed in this store ignores the file's confirmation.
+
+name: merge-confirmation-ties
+file: src/memory/transfer.rs
+search: last_confirmed_at<?2)
+replace: last_confirmed_at<=?2)
+expect: survive
+why: Equivalent: writing an equal timestamp leaves the row unchanged.
+
+name: import-pairs-not-ignored
+file: src/memory/transfer.rs
+search: INSERT OR IGNORE INTO memory_distinct
+replace: INSERT INTO memory_distinct
+why: Importing an export into a store that already holds its distinct pairs fails.
+
+name: use-file-keeps-store-title
+file: src/memory/transfer.rs
+search: last_confirmed_at=?16,title=?17 WHERE id=?1
+replace: last_confirmed_at=?16,title=title WHERE id=?1
+why: use-file keeps the store's title, so the file's title never lands.
+

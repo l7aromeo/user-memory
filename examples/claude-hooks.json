@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'/ABS/PATH/TO/user-memory' session-start --client claude",
+            "timeout": 10,
+            "statusMessage": "Loading user memory"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'/ABS/PATH/TO/user-memory' prompt-submit --client claude",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

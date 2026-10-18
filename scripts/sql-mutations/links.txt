@@ -1,0 +1,31 @@
+# SQL mutations for src/memory/links.rs. Format: see scripts/sql-mutants.
+
+name: linked-ignores-origin
+file: src/memory/links.rs
+search: FROM conversation_projects WHERE origin=?1 ORDER BY rowid
+replace: FROM conversation_projects WHERE ?1=?1 ORDER BY rowid
+why: A conversation loads every other conversation's links.
+
+name: linked-order-lost
+file: src/memory/links.rs
+search: WHERE origin=?1 ORDER BY rowid
+replace: WHERE origin=?1 ORDER BY project
+why: Links list by name, not in the order the conversation made them.
+
+name: unlink-ignores-project
+file: src/memory/links.rs
+search: "DELETE FROM conversation_projects WHERE origin=?1 AND project=?2"
+replace: "DELETE FROM conversation_projects WHERE origin=?1 AND ?2=?2"
+why: Unlinking one project removes all of the conversation's links.
+
+name: unlink-ignores-origin
+file: src/memory/links.rs
+search: "DELETE FROM conversation_projects WHERE origin=?1 AND project=?2"
+replace: "DELETE FROM conversation_projects WHERE ?1=?1 AND project=?2"
+why: Unlinking a project removes it from every conversation.
+
+name: link-replaces-existing
+file: src/memory/links.rs
+search: "INSERT OR IGNORE INTO conversation_projects (origin,project) VALUES (?1,?2)"
+replace: "INSERT OR REPLACE INTO conversation_projects (origin,project) VALUES (?1,?2)"
+why: Linking a linked project again reports it as added, and moves it to the end of the list.

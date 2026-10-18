@@ -1,0 +1,10 @@
+# cargo-nextest settings (https://nexte.st/docs/configuration/).
+
+# The workflows run with NEXTEST_PROFILE=ci: one run reports every failing
+# test, where a local `just check` keeps the default and stops at the first.
+# A test still running after 5 minutes is ended and fails, so a hang costs
+# minutes rather than the job's whole timeout. The slowest test takes about
+# a minute (59 s, a Docker install test on Ubuntu).
+[profile.ci]
+fail-fast = false
+slow-timeout = { period = "60s", terminate-after = 5 }

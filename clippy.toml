@@ -1,0 +1,2 @@
+# Tests may unwrap: a failed unwrap there is a failed test.
+allow-unwrap-in-tests = true

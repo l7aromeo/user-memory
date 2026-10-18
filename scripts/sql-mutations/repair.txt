@@ -1,0 +1,31 @@
+# SQL mutations for src/memory/repair.rs. Format: see scripts/sql-mutants.
+
+name: integrity-quick-only
+file: src/memory/repair.rs
+search: "PRAGMA integrity_check"
+replace: "PRAGMA quick_check"
+why: Doctor, repair and the migration's backup check miss an index whose entries no longer match its rows while their number does.
+
+name: integrity-unchecked
+file: src/memory/repair.rs
+search: "PRAGMA integrity_check"
+replace: "SELECT 'ok'"
+why: Every store passes: doctor never reports damage, repair never repairs and a migration copies a damaged store.
+
+name: repair-skips-reindex
+file: src/memory/repair.rs
+search: execute_batch("REINDEX;
+replace: execute_batch("SELECT 1;
+why: A damaged index on the memories is never rebuilt, so the repair fails and the store stays damaged.
+
+name: repair-skips-whole-file-rewrite
+file: src/memory/repair.rs
+search: execute_batch("VACUUM")
+replace: execute_batch("SELECT 1")
+why: Damage beyond the indexes, such as a miscounted free-page list, is never mended.
+
+name: repair-skips-search-rebuild
+file: src/memory/repair.rs
+search: VALUES('rebuild')
+replace: VALUES('optimize')
+why: A damaged keyword index is never rebuilt, so the repair fails and the store stays damaged.

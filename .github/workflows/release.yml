@@ -1,0 +1,283 @@
+# Builds a client release on GitHub's runners; publishing it, as a release
+# of this repository, is a separate run that only the user starts.
+#
+# - A pushed tag vX.Y.Z (matching Cargo.toml) builds, checks and uploads the
+#   assembled release as the `release` artifact, and stops. A tag never
+#   publishes on its own.
+# - A push to a branch named release-dry-run/..., or a manual run without
+#   `publish`, builds and checks the same way.
+# - A manual run with `tag` and `publish` (the Run workflow button, or
+#   `gh workflow run release.yml -f tag=v0.5.0 -f publish=true`) publishes
+#   exactly what that tag's run built and checked: it finds the tag's
+#   successful run, downloads its artifact, checks that it was built from
+#   the tag's commit, checks it again, and never rebuilds. It refuses a tag
+#   that is not on main, a tag without a successful run, and a release that
+#   already exists. Only this job may write to the repository, with the
+#   workflow's own token.
+#
+# scripts/client-release builds, assembles and checks the release in every
+# job, so a local dry run and this workflow lay it out and check it the same
+# way; it never publishes. Its output goes to
+# the runner's temp folder: it releases only a clean checkout.
+#
+# The script's own login-name check would test the runner's user, so it is
+# cleared here: put your login name and email in the RELEASE_DENYLIST
+# secret instead, one per line, with any private hosts.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+    branches: ["release-dry-run/**"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: With publish, the version tag whose build to publish, such as v0.5.0
+        type: string
+        default: ""
+      publish:
+        description: Publish the tag's release, built and checked by its own run; without this, build and check this branch
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    # Building is for pushes and for manual runs that do not publish.
+    if: ${{ !inputs.publish }}
+    runs-on: ubuntu-latest
+    # The longest green run took 7 s.
+    timeout-minutes: 5
+    outputs:
+      rust: ${{ steps.read.outputs.rust }}
+    steps:
+      - uses: actions/checkout@v7
+      # A release builds with the current stable Rust, unless the Dockerfile
+      # says why it stays older. Only here: it reads the network.
+      - name: The Rust toolchain is the current stable
+        run: sh scripts/check-rust-stable
+      - name: Read the version and the Rust toolchain
+        id: read
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          # The server's Dockerfile names the Rust image every build uses.
+          rust=$(sed -n 's/^ARG RUST_IMAGE=rust:\([0-9.]*\)-.*/\1/p' Dockerfile)
+          [ -n "$version" ] && [ -n "$rust" ] || { echo "::error::Cargo.toml or the Dockerfile names no version"; exit 1; }
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::the tag $GITHUB_REF_NAME does not match Cargo.toml's version $version"
+            exit 1
+          fi
+          echo "rust=$rust" >> "$GITHUB_OUTPUT"
+          echo "Releasing v$version with Rust $rust"
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-15
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+          # Linux builds run in the Dockerfile's Rust image, so the binaries
+          # need no newer glibc than Debian bookworm's, as before.
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          # Windows builds run here: scripts/client-release is zsh, and
+          # MSVC builds only on Windows.
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2025
+          - target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    # About twice the longest green build (711 s, x86_64-apple-darwin),
+    # rounded up to 5 minutes, and 5 more for the Windows builds, which have
+    # no release run yet.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: The runner
+        shell: bash
+        run: |
+          echo "runner: $(uname -sm)"
+      - name: Install zsh
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zsh
+      - name: Install the Rust toolchain
+        if: runner.os == 'macOS' || runner.os == 'Windows'
+        shell: bash
+        run: |
+          rustup toolchain install ${{ needs.version.outputs.rust }} --profile minimal --target ${{ matrix.target }}
+          rustup default ${{ needs.version.outputs.rust }}
+      - name: Build
+        if: runner.os != 'Windows'
+        run: zsh scripts/client-release --build-only --target ${{ matrix.target }} --out "$RUNNER_TEMP/build"
+      # What scripts/client-release --build-only does elsewhere: the release
+      # build with this checkout and the runner's profile remapped out of the
+      # binary, checked, and its checksum in shasum's format.
+      - name: Build on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+          # aws-lc-sys assembles its x64 code with NASM, which the image lacks.
+          AWS_LC_SYS_PREBUILT_NASM: ${{ matrix.target == 'x86_64-pc-windows-msvc' && '1' || '' }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $workspace = $env:GITHUB_WORKSPACE
+          $userProfile = $env:USERPROFILE
+          $env:RUSTFLAGS = "--remap-path-prefix=$workspace=/src --remap-path-prefix=$userProfile=/home"
+          cargo build --release --locked --bin user-memory --target $env:TARGET
+          $out = Join-Path $env:RUNNER_TEMP 'build'
+          New-Item -ItemType Directory -Force $out | Out-Null
+          $name = "user-memory-$env:TARGET.exe"
+          $binary = Join-Path $out $name
+          Copy-Item "target/$env:TARGET/release/user-memory.exe" $binary
+          # Debug-only commands never ship: the release build refuses them.
+          $PSNativeCommandUseErrorActionPreference = $false
+          $refused = & $binary debug-paths 2>&1 | Out-String
+          $status = $LASTEXITCODE
+          $PSNativeCommandUseErrorActionPreference = $true
+          if ($status -ne 2 -or -not $refused.Contains("unrecognized subcommand 'debug-paths'")) {
+            throw "the release build runs the debug-only debug-paths command (status $status)"
+          }
+          foreach ($path in $workspace, $userProfile) {
+            if (Select-String -LiteralPath $binary -SimpleMatch -Pattern $path -Quiet) {
+              throw "$name names this runner's $path"
+            }
+          }
+          $sha = [Security.Cryptography.SHA256]::Create()
+          $hash = -join ($sha.ComputeHash([IO.File]::ReadAllBytes($binary)) | ForEach-Object { $_.ToString('x2') })
+          [IO.File]::WriteAllText("$binary.sha256", "$hash  $name`n")
+          "$($hash.Substring(0, 16))…  $([math]::Round((Get-Item $binary).Length / 1MB, 1)) MB"
+      - name: The binary
+        if: runner.os != 'Windows'
+        run: |
+          binary="$RUNNER_TEMP/build/user-memory-${{ matrix.target }}"
+          file "$binary"
+          if [ "${{ runner.os }}" = Linux ]; then
+            echo "needs glibc $(readelf -W --dyn-syms "$binary" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1 | sed 's/GLIBC_//')"
+          fi
+          # Debug-only commands never ship: the release build refuses them.
+          refused=$("$binary" debug-paths 2>&1) && status=0 || status=$?
+          if [ "$status" -ne 2 ] || ! printf '%s' "$refused" | grep -qF "unrecognized subcommand 'debug-paths'"; then
+            echo "::error::the release build runs the debug-only debug-paths command (status $status)"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v7
+        with:
+          name: binary-${{ matrix.target }}
+          path: ${{ runner.temp }}/build/user-memory-${{ matrix.target }}*
+          if-no-files-found: error
+
+  assemble:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    # About twice the longest green run (381 s), rounded up to 5 minutes.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install zsh
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zsh
+      - name: Install the Rust toolchain and cargo-about
+        run: |
+          rustup toolchain install ${{ needs.version.outputs.rust }} --profile minimal
+          rustup default ${{ needs.version.outputs.rust }}
+          cargo install cargo-about --locked --features cli
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: binary-*
+          path: ${{ runner.temp }}/binaries
+          merge-multiple: true
+      - name: The release denylist
+        env:
+          RELEASE_DENYLIST: ${{ secrets.RELEASE_DENYLIST }}
+        run: |
+          mkdir -p ~/.config/user-memory
+          printf '%s\n' "$RELEASE_DENYLIST" > ~/.config/user-memory/release-denylist
+      - name: Assemble and check the release
+        env:
+          USER: ""
+        run: zsh scripts/client-release --binaries "$RUNNER_TEMP/binaries" --out "$RUNNER_TEMP/release"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release
+          path: ${{ runner.temp }}/release
+          include-hidden-files: true
+          if-no-files-found: error
+
+  publish:
+    # Only the user's manual run with `publish` gets here: no push does.
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    environment: release
+    runs-on: ubuntu-latest
+    # The longest green run took 28 s.
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Install zsh
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zsh
+      - name: Find the tag's build
+        id: build
+        env:
+          TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          case "$TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::publish needs tag, a version tag such as v0.5.0, not '$TAG'"; exit 1 ;;
+          esac
+          commit=$(git rev-list -n 1 "refs/tags/$TAG" 2>/dev/null) ||
+            { echo "::error::there is no tag $TAG"; exit 1; }
+          git merge-base --is-ancestor "$commit" origin/main ||
+            { echo "::error::$TAG ($commit) is not on main"; exit 1; }
+          run=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/release.yml/runs?event=push&branch=$TAG&status=success&per_page=50" \
+            --jq "[.workflow_runs[] | select(.head_sha == \"$commit\")][0].id // empty")
+          [ -n "$run" ] || { echo "::error::no successful run of this workflow built $TAG ($commit); push the tag and let it finish first"; exit 1; }
+          echo "Publishing the release run $run built from $TAG ($commit)"
+          gh run download "$run" --name release --dir "$RUNNER_TEMP/release"
+          [ "$(cat "$RUNNER_TEMP/release/.tag")" = "$TAG" ] ||
+            { echo "::error::run $run built $(cat "$RUNNER_TEMP/release/.tag"), not $TAG"; exit 1; }
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+      - name: The release denylist
+        env:
+          RELEASE_DENYLIST: ${{ secrets.RELEASE_DENYLIST }}
+        run: |
+          mkdir -p ~/.config/user-memory
+          printf '%s\n' "$RELEASE_DENYLIST" > ~/.config/user-memory/release-denylist
+      - name: Check the release again
+        env:
+          COMMIT: ${{ steps.build.outputs.commit }}
+          USER: ""
+        run: zsh scripts/client-release --verify "$RUNNER_TEMP/release" --commit "$COMMIT"
+      - name: Publish the release
+        env:
+          TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::$GITHUB_REPOSITORY already has the release $TAG"
+            exit 1
+          fi
+          cd "$RUNNER_TEMP/release"
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" \
+            --notes-file "notes/$TAG.md" \
+            install.sh uninstall.sh install.ps1 uninstall.ps1 THIRD_PARTY_NOTICES.txt \
+            user-memory-*
+          echo "Published https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"

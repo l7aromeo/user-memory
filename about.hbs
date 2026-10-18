@@ -1,0 +1,17 @@
+Third-party software in user-memory
+===================================
+
+The user-memory client includes the open-source components below, each under
+its own license, reproduced here as its copyright holders require.
+{{#each licenses}}
+
+-------------------------------------------------------------------------------
+{{{name}}}
+
+Used by:
+{{#each used_by}}
+  {{crate.name}} {{crate.version}}
+{{/each}}
+
+{{{text}}}
+{{/each}}

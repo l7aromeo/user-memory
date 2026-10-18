@@ -1,0 +1,24 @@
+# Licenses accepted in the released client's dependencies; generating
+# THIRD_PARTY_NOTICES.txt fails on any other, so a new one is reviewed first.
+accepted = [
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "Unicode-3.0",
+    "Zlib",
+]
+# Only what ships in the released binaries.
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+]
+ignore-dev-dependencies = true
+ignore-build-dependencies = true
+# The client's own licence is in LICENSE-MIT and LICENSE-APACHE; list only
+# its dependencies.
+private = { ignore = true }

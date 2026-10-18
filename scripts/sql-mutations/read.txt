@@ -1,0 +1,5 @@
+# SQL mutations for src/memory/read.rs. Format: see scripts/sql-mutants.
+
+# --- Recall candidate filter (src/memory/read.rs) ---
+
+# --- Keyword prefilter over the FTS5 index (src/memory/read.rs) ---

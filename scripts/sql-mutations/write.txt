@@ -1,0 +1,261 @@
+# SQL mutations for src/memory/write.rs. Format: see scripts/sql-mutants.
+
+# --- Duplicate detection (src/memory/write.rs) ---
+
+name: duplicate-matches-inactive
+file: src/memory/write.rs
+search: AND {ACTIVE} AND (?11=''
+replace: AND (?11=''
+why: Re-recording an invalidated inference or a superseded memory returns the inactive row.
+
+name: duplicate-ignores-tentative
+file: src/memory/write.rs
+search: "status IN ('confirmed','tentative')"
+replace: "status IN ('confirmed')"
+why: Repeating an observation creates a second copy that counts as independent evidence.
+
+name: duplicate-ignores-confirmed
+file: src/memory/write.rs
+search: "status IN ('confirmed','tentative')"
+replace: "status IN ('tentative')"
+why: Restating an explicit preference creates a second copy.
+
+name: duplicate-ignores-type
+file: src/memory/write.rs
+search: WHERE memory_type=?1 AND category=?2
+replace: WHERE category=?2
+why: The same content as a preference and as a goal collapses into one memory.
+
+name: duplicate-ignores-category
+file: src/memory/write.rs
+search: AND category=?2 AND content=?3
+replace: AND content=?3
+why: The same content in two categories collapses into one memory.
+
+name: duplicate-ignores-context
+file: src/memory/write.rs
+search: AND context=?4 AND reason=?5
+replace: AND reason=?5
+why: A preference under a different condition is silently dropped.
+
+name: duplicate-ignores-reason
+file: src/memory/write.rs
+search: AND reason=?5 AND scope=?6
+replace: AND scope=?6
+why: A preference with a different stated reason is silently dropped.
+
+name: duplicate-ignores-scope
+file: src/memory/write.rs
+search: AND scope=?6 AND project=?7
+replace: AND project=?7
+expect: survive
+why: Equivalent: normalize() makes scope a function of project (project scope iff non-blank project).
+
+name: duplicate-ignores-project
+file: src/memory/write.rs
+search: AND project=?7 AND source=?8
+replace: AND source=?8
+why: A memory for project B resolves to project A's row.
+
+name: duplicate-ignores-source
+file: src/memory/write.rs
+search: AND source=?8 AND evidence=?9
+replace: AND evidence=?9
+why: An inference with the same text as an explicit memory resolves to the explicit row.
+
+name: duplicate-ignores-evidence
+file: src/memory/write.rs
+search: AND evidence=?9 AND evidence_ids=?10
+replace: AND evidence_ids=?10
+why: A second observation with new evidence is silently dropped.
+
+name: duplicate-ignores-evidence-ids
+file: src/memory/write.rs
+search: AND evidence_ids=?10 AND {ACTIVE}
+replace: AND {ACTIVE}
+why: An inference backed by different evidence resolves to the old inference.
+
+name: duplicate-ignores-origin
+file: src/memory/write.rs
+search: AND {ACTIVE} AND (?11='' AND NOT EXISTS (SELECT 1 FROM memory_origins WHERE memory_id=memories.id) OR EXISTS (SELECT 1 FROM memory_origins WHERE memory_id=memories.id AND origin=?11)) LIMIT 1
+replace: AND {ACTIVE} LIMIT 1
+why: The same observation in another conversation collapses into one, losing independent evidence.
+
+name: duplicate-originless-matches-any
+file: src/memory/write.rs
+search: ?11='' AND NOT EXISTS (SELECT 1 FROM memory_origins WHERE memory_id=memories.id) OR
+replace: ?11='' OR
+why: A record without a conversation is merged into one that came from a conversation.
+
+name: duplicate-origin-of-another-memory
+file: src/memory/write.rs
+search: WHERE memory_id=memories.id AND origin=?11
+replace: WHERE origin=?11
+why: Any memory's origin makes an exact repeat from that conversation a duplicate of a memory it never stated.
+
+# --- Insert, update and delete statements (src/memory/write.rs) ---
+
+name: insert-swaps-context-and-content
+file: src/memory/write.rs
+search: INSERT INTO memories (id,memory_type,category,context,title,content,
+replace: INSERT INTO memories (id,memory_type,category,content,title,context,
+why: Stored context and content are exchanged.
+
+name: insert-drops-origin
+file: src/memory/write.rs
+search: "INSERT OR IGNORE INTO memory_origins (memory_id,origin) VALUES (?1,?2)"
+replace: "INSERT OR IGNORE INTO memory_origins (memory_id,origin) SELECT ?1,?2 WHERE 0"
+why: Memories lose the conversation they came from, so forgetting by origin misses them.
+
+name: update-keeps-origins
+file: src/memory/write.rs
+search: "DELETE FROM memory_origins WHERE memory_id=?1",
+replace: "DELETE FROM memory_origins WHERE 0 AND memory_id=?1",
+why: Corrected content still claims the conversations that stated the old content.
+
+name: update-clears-all-origins
+file: src/memory/write.rs
+search: "DELETE FROM memory_origins WHERE memory_id=?1",
+replace: "DELETE FROM memory_origins WHERE 1 OR memory_id=?1",
+why: Correcting one memory erases the conversations of every memory.
+
+name: supersede-keeps-status
+file: src/memory/write.rs
+search: SET status='superseded',superseded_by=?1,
+replace: SET superseded_by=?1,
+why: The replaced memory stays active beside its replacement.
+
+name: supersede-without-link
+file: src/memory/write.rs
+search: status='superseded',superseded_by=?1,updated_at
+replace: status='superseded',updated_at
+why: A superseded memory does not say what replaced it.
+
+name: supersede-keeps-updated-at
+file: src/memory/write.rs
+search: superseded_by=?1,updated_at=CURRENT_TIMESTAMP WHERE
+replace: superseded_by=?1 WHERE
+why: Superseding keeps the old modification time.
+
+name: supersede-touches-every-row
+file: src/memory/write.rs
+search: CURRENT_TIMESTAMP WHERE id=?2
+replace: CURRENT_TIMESTAMP WHERE id=?2 OR 1
+why: Replacing one memory supersedes every memory, including the replacement.
+
+name: update-keeps-source
+file: src/memory/write.rs
+search: project=?8,source='explicit',status=
+replace: project=?8,status=
+why: A confirmed observation stays labelled observed.
+
+name: update-keeps-status
+file: src/memory/write.rs
+search: source='explicit',status='confirmed',evidence=
+replace: source='explicit',evidence=
+why: A confirmed observation stays tentative.
+
+name: update-keeps-evidence
+file: src/memory/write.rs
+search: status='confirmed',evidence='',evidence_ids='[]',updated_at
+replace: status='confirmed',updated_at
+why: A confirmed explicit memory keeps stale observation notes and evidence links.
+
+name: update-keeps-updated-at
+file: src/memory/write.rs
+search: evidence_ids='[]',updated_at=CURRENT_TIMESTAMP WHERE id=?9
+replace: evidence_ids='[]' WHERE id=?9
+why: Corrections keep their old modification time and rank as old.
+
+name: update-touches-every-row
+file: src/memory/write.rs
+search: CURRENT_TIMESTAMP WHERE id=?9
+replace: CURRENT_TIMESTAMP WHERE id=?9 OR 1
+why: Correcting one memory overwrites every memory.
+
+name: forget-deletes-every-row
+file: src/memory/write.rs
+search: "DELETE FROM memories WHERE id=?1", [id.to_string()]
+replace: "DELETE FROM memories WHERE id=?1 OR 1", [id.to_string()]
+why: Forgetting one memory deletes all of them.
+
+name: forget-origin-removes-every-origin
+file: src/memory/write.rs
+search: DELETE FROM memory_origins WHERE origin=?1 RETURNING memory_id
+replace: DELETE FROM memory_origins WHERE origin=?1 OR 1 RETURNING memory_id
+why: Forgetting one conversation forgets every conversation.
+
+name: forget-origin-deletes-kept
+file: src/memory/write.rs
+search:  AND NOT EXISTS (SELECT 1 FROM memory_origins WHERE memory_id=?1)",
+replace: ",
+why: A memory another conversation also stated is deleted.
+
+name: forget-origin-keeps-all
+file: src/memory/write.rs
+search: "DELETE FROM memories WHERE id=?1 AND NOT EXISTS
+replace: "DELETE FROM memories WHERE 0 AND id=?1 AND NOT EXISTS
+why: Forgetting a conversation keeps memories only it stated.
+
+# --- Duplicate resolution (src/memory/write.rs) ---
+
+name: merge-drops-origins
+file: src/memory/write.rs
+search: json_each(?2)) GROUP BY origin
+replace: json_each(?2)) AND 0 GROUP BY origin
+why: A merge forgets the conversations that stated the merged duplicates.
+
+name: merge-takes-every-origin
+file: src/memory/write.rs
+search: FROM memory_origins WHERE memory_id IN (SELECT value FROM json_each(?2))
+replace: FROM memory_origins WHERE 1
+why: A merge claims every conversation in the store.
+
+name: confirm-keeps-old-timestamp
+file: src/memory/write.rs
+search: SET last_confirmed_at=CURRENT_TIMESTAMP WHERE id=?1
+replace: SET last_confirmed_at=last_confirmed_at WHERE id=?1
+why: A confirmation leaves no trace of when the user last said it.
+
+name: confirm-stamps-every-memory
+file: src/memory/write.rs
+search: last_confirmed_at=CURRENT_TIMESTAMP WHERE id=?1"
+replace: last_confirmed_at=CURRENT_TIMESTAMP WHERE id=?1 OR 1"
+why: Confirming one memory marks every memory as recently confirmed.
+
+name: distinct-pairs-not-saved
+file: src/memory/write.rs
+search: "INSERT OR IGNORE INTO memory_distinct (a,b) VALUES (?1,?2)"
+replace: "INSERT OR IGNORE INTO memory_distinct (a,b) SELECT ?1,?2 WHERE 0"
+why: Pairs the user called different are forgotten, so review keeps grouping them.
+
+name: distinct-pairs-unordered
+file: src/memory/write.rs
+search: memory_distinct (a,b) VALUES (?1,?2)
+replace: memory_distinct (a,b) VALUES (?2,?1)
+why: Pairs are stored in the wrong order and violate the ordering CHECK.
+
+name: reword-touches-every-row
+file: src/memory/write.rs
+search: "UPDATE memories SET title=?2,updated_at=CURRENT_TIMESTAMP WHERE id=?1"
+replace: "UPDATE memories SET title=?2,updated_at=CURRENT_TIMESTAMP WHERE id=?1 OR 1"
+why: Rewording one memory's title rewrites every title.
+
+name: reword-changes-nothing
+file: src/memory/write.rs
+search: "UPDATE memories SET title=?2,updated_at=CURRENT_TIMESTAMP WHERE id=?1"
+replace: "UPDATE memories SET title=title,updated_at=CURRENT_TIMESTAMP WHERE id=?1 AND ?2 IS NOT NULL"
+why: A title update reports success but keeps the old wording.
+
+name: reword-keeps-updated-at
+file: src/memory/write.rs
+search: "UPDATE memories SET title=?2,updated_at=CURRENT_TIMESTAMP WHERE id=?1"
+replace: "UPDATE memories SET title=?2 WHERE id=?1"
+why: A title update leaves updated_at, so the memory looks unchanged since before it.
+
+
+name: forget-origin-unlinks-every-conversation
+file: src/memory/write.rs
+search: "DELETE FROM conversation_projects WHERE origin=?1",
+replace: "DELETE FROM conversation_projects WHERE ?1=?1",
+why: Forgetting one conversation removes every conversation's links.

@@ -1,0 +1,103 @@
+# SQL mutations for src/memory/selection.rs. Format: see scripts/sql-mutants.
+
+# --- Scope (src/memory/selection.rs) ---
+
+name: scope-default-drops-project-memories
+file: src/memory/selection.rs
+search: ELSE scope='global' OR (scope='project' AND project IN (SELECT value FROM json_each(?2))) END
+replace: ELSE scope='global' END
+why: A requested project's memories never reach it.
+
+name: scope-default-any-project
+file: src/memory/selection.rs
+search: OR (scope='project' AND project IN (SELECT value FROM json_each(?2))) END
+replace: OR (scope='project') END
+why: Every project's memories leak into a request that names one, or none.
+
+name: scope-all-misses-projects
+file: src/memory/selection.rs
+search: WHEN 'all' THEN 1
+replace: WHEN 'all' THEN scope='global'
+why: scope all, for review and inspection, misses every project memory.
+
+name: scope-global-includes-projects
+file: src/memory/selection.rs
+search: WHEN 'global' THEN scope='global'
+replace: WHEN 'global' THEN 1
+why: scope global still lists project memories.
+
+name: scope-project-any-project
+file: src/memory/selection.rs
+search: WHEN 'project' THEN scope='project' AND project IN (SELECT value FROM json_each(?2))
+replace: WHEN 'project' THEN scope='project'
+why: scope project lists every project's memories, not the listed ones.
+
+# --- Filters ---
+
+name: type-filter-ignored
+file: src/memory/selection.rs
+search: AND (?3='' OR memory_type=?3)
+replace: AND (1)
+why: A type filter returns memories of every type.
+
+name: type-filter-required
+file: src/memory/selection.rs
+search: (?3='' OR memory_type=?3)
+replace: (memory_type=?3)
+why: Without a type filter nothing is returned.
+
+name: category-filter-ignored
+file: src/memory/selection.rs
+search: AND (?4='[]' OR category IN (SELECT value FROM json_each(?4)))
+replace: AND (1)
+why: A category filter (and a category read) returns every category.
+
+name: category-filter-required
+file: src/memory/selection.rs
+search: (?4='[]' OR category IN
+replace: (category IN
+why: Without a category filter nothing is returned.
+
+name: source-filter-ignored
+file: src/memory/selection.rs
+search: AND (?5='' OR source=?5)
+replace: AND (1)
+why: A source filter returns memories of every provenance.
+
+name: status-filter-ignored
+file: src/memory/selection.rs
+search: AND status IN (SELECT value FROM json_each(?6))
+replace: AND 1
+why: Stale and superseded memories appear by default, and a status filter selects nothing.
+
+name: origin-filter-ignored
+file: src/memory/selection.rs
+search: AND (?7='' OR EXISTS (SELECT 1 FROM memory_origins WHERE memory_id=memories.id AND origin=?7))
+replace: AND (1)
+why: An origin filter returns memories of every conversation.
+
+name: origin-filter-any-memory
+file: src/memory/selection.rs
+search: WHERE memory_id=memories.id AND origin=?7
+replace: WHERE origin=?7
+why: Once any memory has the origin, every memory passes the filter.
+
+# --- Keyword prefilter for search topics ---
+
+name: keyword-prefilter-removed
+file: src/memory/selection.rs
+search:  AND (id IN (SELECT id FROM memory_search WHERE memory_search MATCH ?8) OR category IN (SELECT value FROM json_each(?9)))
+replace:  AND (?8!='' OR ?9!='')
+why: Keyword search bypasses the FTS5 index: results look the same while the index is intact (scoring drops non-matches), but the index no longer decides candidates, so a damaged index goes unnoticed.
+
+name: keyword-ignores-text
+file: src/memory/selection.rs
+search: AND (id IN (SELECT id FROM memory_search WHERE memory_search MATCH ?8) OR category
+replace: AND (category
+why: Topic words in content, context or reason no longer find memories.
+
+name: keyword-ignores-aliases
+file: src/memory/selection.rs
+search:  OR category IN (SELECT value FROM json_each(?9)))
+replace: )
+why: A topic naming a category synonym misses memories filed under another label.

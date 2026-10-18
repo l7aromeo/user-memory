@@ -1,0 +1,3 @@
+# LF in every checkout, Windows included: the binary embeds the skill files
+# as they are checked out, and the tests compare text byte for byte.
+* text=auto eol=lf

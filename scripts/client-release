@@ -1,0 +1,327 @@
+#!/bin/zsh
+# Builds the user-memory client for each supported platform and assembles a
+# release of it in a folder: the binaries with their SHA-256 files,
+# install.sh, uninstall.sh, install.ps1, uninstall.ps1, the third-party
+# notices and the release's notes. It never publishes: release.yml's publish
+# job, which only the user starts, creates the GitHub release from the
+# folder its tag's run assembled. Run locally, it is the release dry run.
+#
+# Usage: scripts/client-release --out DIR [--build-only | --binaries DIR]
+#                               [--target TRIPLE]...
+#        scripts/client-release --verify DIR [--commit SHA]
+#        scripts/client-release --changelog
+#   --out DIR       build and assemble the release into DIR, which must be
+#                   empty or new
+#   --build-only    only compile the targets into --out DIR, for a release
+#                   assembled elsewhere with --binaries
+#   --binaries DIR  assemble a release from binaries compiled with
+#                   --build-only, in place of compiling them; all six
+#   --target T      build only T (repeatable; default: every target this
+#                   machine builds)
+#   --verify DIR    check an assembled release again before it is
+#                   published: every asset, every checksum, the notes
+#   --commit SHA    with --verify: refuse a release built from another commit
+#   --changelog     print CHANGELOG.md as the release notes make it
+#
+# The release is v<Cargo.toml version>. Builds come from `git archive HEAD`
+# of a clean tree, whose commit the release records. macOS targets build
+# with the local toolchain, Linux targets in the same rust image as the
+# server's Dockerfile. Windows targets build only on Windows, which
+# release.yml does on its Windows runners; a release with them is assembled
+# with --binaries. A Windows build is user-memory-<target>.exe.
+#
+# Each release needs hand-written notes, release-notes/v<version>.md: they
+# become the release's text. CHANGELOG.md is made from all of them, newest
+# first, and committed with them; a release whose CHANGELOG.md is not what
+# --changelog prints is refused, so it is never edited by hand. Before
+# anything is built, the committed tree is checked for this machine's login
+# name, the git user's email and the denylist's entries, and the docs and
+# notes also for home paths and notes left to verify; then the docs test
+# runs.
+#
+# Everything runs from main, called on the last line, so editing or pulling
+# this file during a long release never changes what is running.
+set -e
+
+script=$0
+
+# A target's build in the release: user-memory-<target>, with .exe for Windows.
+asset() {
+    if [[ $1 == *-pc-windows-msvc ]]; then
+        print -r -- user-memory-$1.exe
+    else
+        print -r -- user-memory-$1
+    fi
+}
+
+main() {
+    all_targets=(aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
+        x86_64-pc-windows-msvc aarch64-pc-windows-msvc)
+    installers=(install.sh uninstall.sh install.ps1 uninstall.ps1)
+    build_only=false
+    binaries=
+    built_from=
+    out=
+    verify=
+    changelog=false
+    targets=()
+    # Private, never committed: one string per line (a login, hosts,
+    # addresses) that nothing committed may contain, matched without case or
+    # surrounding space; blank lines and # comments are ignored.
+    denylist=$HOME/.config/user-memory/release-denylist
+
+    usage() { sed -n '9,24s/^# \{0,1\}//p' $script }
+    die() { print -u2 "client-release: $*"; exit 1 }
+
+    # Refuses the tree in $1 when a file in it contains the login name, the
+    # git user's email or a denylist entry, which would name this machine or
+    # its owner; the docs and notes (Markdown files) also when one holds a
+    # home path other than the docs' /Users/you and /home/you, or a note left
+    # to verify. Names each file and line, never the matched text.
+    check_tree() {
+        local dir=$1 file entry found=()
+        local email=$(git -C ${script:A:h} config user.email 2>/dev/null)
+        local entries=()
+        if [[ -e $denylist ]]; then
+            [[ -r $denylist ]] || die "cannot read $denylist"
+            entries=(${(f)"$(sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^#/d' $denylist)"})
+        fi
+        hits() {
+            local why=$1; shift
+            local lines=$(grep -I -n "$@" $dir/$file | cut -d: -f1 | paste -sd, -)
+            [[ -z $lines ]] || found+="$file line $lines: $why"
+        }
+        for file in ${(f)"$(cd $dir && find . -type f | sed 's|^\./||' | LC_ALL=C sort)"}; do
+            [[ -z $USER ]] || hits "the login name" -F -w -i -e $USER
+            [[ -z $email ]] || hits "the git user's email" -F -i -e $email
+            for entry in $entries; do
+                hits "an entry of $denylist" -F -i -e $entry
+            done
+            if [[ $file == *.md ]]; then
+                local lines=$(grep -n -E '/(Users|home)/[^/[:space:]]' $dir/$file | grep -v -E '/(Users|home)/you(/|$)' | cut -d: -f1 | paste -sd, -)
+                [[ -z $lines ]] || found+="$file line $lines: a home path"
+                hits "a note to verify before publishing" -F -e '<!-- VERIFY'
+            fi
+        done
+        (( ! $#found )) || die "the tree is not fit to publish:\n  ${(j:\n  :)found}"
+    }
+
+    # Writes the changelog made from the notes files in $1 to stdout: the
+    # newest version first, each under its tag, with every heading one level
+    # deeper (outside code blocks).
+    make_changelog() {
+        print "# Changelog\n"
+        print "What changed in each release, newest first.\n"
+        local notes
+        for notes in $1/v*.md(.nOn); do
+            print "## ${notes:t:r}\n"
+            awk '/^```/ { fenced = !fenced } !fenced && /^#/ { $0 = "#" $0 } { print }' $notes
+            print
+        done
+    }
+
+    # Refuses the assembled release in $1 unless it holds its notes, every
+    # installer, the notices and, for each target in $targets, the build
+    # with a checksum it matches. The notes are its published text, so they
+    # are checked as the tree was.
+    check_release() {
+        local dir=$1 file target name
+        [[ -f $dir/.tag && -f $dir/.commit ]] || die "$dir is not a client release"
+        local tag=$(<$dir/.tag)
+        [[ -f $dir/notes/$tag.md ]] || die "$dir/notes/$tag.md is missing; a release needs its notes"
+        for file in $installers THIRD_PARTY_NOTICES.txt; do
+            [[ -f $dir/$file ]] || die "$dir has no $file"
+        done
+        for target in $targets; do
+            name=$(asset $target)
+            [[ -f $dir/$name && -f $dir/$name.sha256 ]] || die "$dir has no build for $target"
+            (cd $dir && shasum -a 256 -c --status $name.sha256) ||
+                die "$dir/$name does not match its checksum"
+        done
+        check_tree $dir/notes
+    }
+
+    while (( $# )); do
+        case $1 in
+            --out) (( $# >= 2 )) || die "--out needs a directory"; out=${2:a}; shift 2 ;;
+            --build-only) build_only=true; shift ;;
+            --binaries) (( $# >= 2 )) || die "--binaries needs a directory"; binaries=${2:a}; shift 2 ;;
+            --verify) (( $# >= 2 )) || die "--verify needs a directory"; verify=${2:a}; shift 2 ;;
+            --commit)
+                (( $# >= 2 )) || die "--commit needs a commit"
+                [[ $2 =~ '^[0-9a-f]{7,40}$' ]] || die "--commit takes a commit hash, not $2"
+                built_from=$2; shift 2 ;;
+            --changelog) changelog=true; shift ;;
+            --target)
+                (( $# >= 2 )) || die "--target needs a target triple"
+                (( ${all_targets[(Ie)$2]} )) || die "unknown target $2 (one of: $all_targets)"
+                targets+=$2; shift 2 ;;
+            -h|--help) usage; exit 0 ;;
+            *) die "unknown option $1 (see --help)" ;;
+        esac
+    done
+
+    if $changelog; then
+        [[ -z $out$verify$binaries$built_from$targets ]] && ! $build_only ||
+            die "--changelog takes no other option"
+        make_changelog ${script:A:h:h}/release-notes
+        return
+    fi
+    if [[ -n $verify ]]; then
+        [[ -z $out$binaries$targets ]] && ! $build_only ||
+            die "--verify checks an assembled release; give it alone, or with --commit"
+        # The publish run publishes only a whole release.
+        targets=($all_targets)
+        check_release $verify
+        if [[ -n $built_from ]]; then
+            local made_from=$(<$verify/.commit)
+            [[ $built_from == $made_from* || $made_from == $built_from* ]] ||
+                die "$verify was built from $made_from, not $built_from"
+        fi
+        print "Release $(<$verify/.tag) in $verify is complete and checked."
+        return
+    fi
+    [[ -z $built_from ]] || die "--commit checks an assembled release; use it with --verify"
+    [[ -n $out ]] || die "give --out DIR (see --help)"
+    ! $build_only || [[ -z $binaries ]] || die "--build-only compiles binaries, --binaries takes them; give one"
+    if (( ! $#targets )); then
+        if [[ -n $binaries ]]; then
+            targets=($all_targets)
+        else
+            targets=(${all_targets:#*-pc-windows-msvc})
+            print "Windows targets build on Windows (release.yml's Windows runners); not built here."
+        fi
+    fi
+
+    local root=$(git rev-parse --show-toplevel)
+    cd $root
+    # Only committed code is released, so the tag names what was built.
+    [[ -z $(git status --porcelain) ]] || die "the working tree has uncommitted changes; commit or stash them first"
+    local version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+    [[ -n $version ]] || die "Cargo.toml has no package version"
+    mkdir -p $out
+    [[ -z $(ls -A $out) ]] || die "$out is not empty"
+    out=${out:A}
+    print v$version > $out/.tag
+    git rev-parse --short HEAD > $out/.commit
+    local source_tar=$(mktemp "${TMPDIR:-/tmp}/user-memory-source.XXXXXX")
+    local tree=$(mktemp -d "${TMPDIR:-/tmp}/user-memory-tree.XXXXXX")
+    trap "rm -rf $source_tar $tree" EXIT
+    git archive --format=tar HEAD > $source_tar
+    if ! $build_only; then
+        # The tree is checked before anything is built, so a file that names
+        # this machine, or a doc that disagrees with the code, stops the
+        # release at once.
+        tar -x -C $tree -f $source_tar
+        check_tree $tree
+        [[ -f $tree/release-notes/v$version.md ]] ||
+            die "release-notes/v$version.md is missing; write this release's notes first"
+        [[ -f $tree/CHANGELOG.md ]] && cmp -s $tree/CHANGELOG.md =(make_changelog $tree/release-notes) ||
+            die "CHANGELOG.md is not made from release-notes; run: scripts/client-release --changelog > CHANGELOG.md"
+        mkdir $out/notes
+        cp $tree/release-notes/v$version.md $out/notes/
+        command -v cargo >/dev/null || die "the docs test needs cargo"
+        # Its output shows only on failure, so a release that stops here
+        # says which doc and quote disagree.
+        local docs_log=$(mktemp "${TMPDIR:-/tmp}/user-memory-docs-test.XXXXXX")
+        if ! cargo test --locked --quiet --test docs > $docs_log 2>&1; then
+            cat $docs_log >&2
+            rm -f $docs_log
+            die "the docs disagree with the code (above); run: cargo test --test docs"
+        fi
+        rm -f $docs_log
+        for file in $installers; do cp $tree/$file $out/$file; done
+        chmod 755 $out/install.sh $out/uninstall.sh
+        chmod 644 $out/install.ps1 $out/uninstall.ps1
+        # The binaries carry these dependencies, whose licenses require
+        # their notices to ship with them; about.toml lists the accepted ones.
+        command -v cargo-about >/dev/null ||
+            die "the third-party notices need cargo-about; run: cargo install cargo-about --locked --features cli"
+        (cd $tree && cargo about generate --locked --fail -o $out/THIRD_PARTY_NOTICES.txt about.hbs) ||
+            die "could not generate the third-party notices; a dependency may have a license about.toml does not accept"
+        chmod 644 $out/THIRD_PARTY_NOTICES.txt
+    fi
+    local host=
+    [[ -n $binaries ]] || host=$(rustc -vV | sed -n 's/^host: //p')
+
+    for target in $targets; do
+        print "== $target (v$version, $(<$out/.commit))"
+        local name=$(asset $target)
+        local binary=$out/$name
+        if [[ -n $binaries ]]; then
+            # Compiled elsewhere with --build-only, or on Windows by
+            # release.yml, one runner per target; its checksum travels
+            # with it, and is checked with every other below.
+            [[ -f $binaries/$name && -f $binaries/$name.sha256 ]] ||
+                die "$binaries has no build for $target"
+            install -m 755 $binaries/$name $binary
+            install -m 644 $binaries/$name.sha256 $binary.sha256
+            continue
+        fi
+        case $target in
+            *-pc-windows-msvc)
+                die "$target builds only on Windows: release.yml builds it on a Windows runner, and the release is assembled with --binaries"
+                ;;
+            *-apple-darwin)
+                [[ $host == *-apple-darwin ]] || die "$target builds only on macOS"
+                rustup target list --installed | grep -qx $target ||
+                    die "rustup has no $target; run: rustup target add $target"
+                # A fixed source dir and a target dir outside it keep rebuilds
+                # incremental: RUSTFLAGS names the source path, so a fresh temp
+                # dir each run would rebuild everything.
+                local work=$root/target/client-release-src
+                rm -rf $work && mkdir -p $work
+                tar -x -C $work -f $source_tar
+                # Panic locations embed source paths; the published binaries must
+                # not carry this machine's home directory or checkout location.
+                (cd $work && CARGO_TARGET_DIR=$root/target/client-release \
+                    RUSTFLAGS="--remap-path-prefix=$work=/src --remap-path-prefix=$HOME=/home" \
+                    cargo build --release --locked --bin user-memory --target $target)
+                install -m 755 $root/target/client-release/$target/release/user-memory $binary
+                rm -rf $work
+                ;;
+            *-unknown-linux-gnu)
+                command -v docker >/dev/null || die "$target builds in Docker, which is not available"
+                # The server's Dockerfile names the Rust image every build uses.
+                local rust_image=$(sed -n 's/^ARG RUST_IMAGE=//p' Dockerfile)
+                [[ -n $rust_image ]] || die "the Dockerfile names no RUST_IMAGE"
+                local platform=linux/${${target%%-*}/x86_64/amd64}
+                platform=${platform/aarch64/arm64}
+                local stage=$(mktemp -d "${TMPDIR:-/tmp}/user-memory-stage.XXXXXX")
+                # Same image and packages as the server's Dockerfile; the cargo
+                # registry is cached in a named volume between releases.
+                docker run --rm -i --platform $platform \
+                    -v user-memory-release-cargo:/usr/local/cargo/registry \
+                    -v $stage:/out \
+                    $rust_image sh -ec '
+                        apt-get update -qq && apt-get install -y -qq --no-install-recommends cmake >/dev/null
+                        mkdir /src && tar -x -C /src && cd /src
+                        cargo build --release --locked --bin user-memory
+                        install -m 755 target/release/user-memory /out/user-memory
+                    ' < $source_tar
+                install -m 755 $stage/user-memory $binary
+                rm -rf $stage
+                ;;
+        esac
+        # The binaries must not carry this machine's home folder, such
+        # as a runner's /home/runner, despite the remapping above.
+        [[ -z $HOME ]] || ! LC_ALL=C grep -qaF -- $HOME $binary ||
+            die "$binary names this machine's home folder $HOME"
+        (cd $out && shasum -a 256 $name > $name.sha256)
+        chmod 644 $out/$name.sha256
+        print "   $(cut -c1-16 $binary.sha256)…  $(du -h $binary | cut -f1)"
+        # The oldest glibc a Linux binary runs on: the build image's.
+        if [[ $target == *-linux-gnu ]] && command -v readelf >/dev/null; then
+            print "   needs glibc $(readelf -W --dyn-syms $binary | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1 | sed 's/GLIBC_//')"
+        fi
+    done
+    if $build_only; then
+        print "\nBuilt $targets into $out; assemble the release with --binaries $out."
+        return
+    fi
+    check_release $out
+    print "\nRelease v$version written to $out and checked; nothing was published."
+    print "release.yml's publish run publishes a tag's release, built by that tag's own run."
+}
+
+main "$@"

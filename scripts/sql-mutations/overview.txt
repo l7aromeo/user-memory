@@ -1,0 +1,7 @@
+# SQL mutations for src/memory/overview.rs. Format: see scripts/sql-mutants.
+
+name: empty-selection-calls-the-store-empty
+file: src/memory/overview.rs
+search: "SELECT EXISTS (SELECT 1 FROM memories)"
+replace: "SELECT 0"
+why: An index that selects nothing from a store holding memories says nothing was ever recorded.

@@ -1,0 +1,216 @@
+#!/usr/bin/env bash
+# Mutation testing for SQL string literals, which cargo-mutants never mutates.
+#
+# Usage: scripts/sql-mutants [--check] [NAME...]
+#   --check  only verify that every catalog entry still matches its source
+#   NAME     run only these mutations (default: the whole catalog)
+#
+# Catalogs (scripts/sql-mutations/*.txt, one per source file) hold exact
+# literal search/replace pairs. Each search string must occur exactly once in
+# its file, otherwise the run stops before testing anything, so rewritten SQL
+# cannot silently retire entries. Mutations are applied to a pristine export of
+# HEAD in a temporary directory; the working tree is never modified, even when
+# interrupted.
+#
+# A mutation is killed when `cargo test --locked` fails. Entries marked
+# `expect: survive` document equivalent mutants and must keep surviving.
+#
+# Environment: SQL_MUTANTS_TIMEOUT (seconds per test run, default 300),
+# SQL_MUTANTS_TARGET_DIR (build cache, default target/sql-mutants).
+#
+# Catalog format: one entry per block, blocks separated by a blank line;
+# lines starting with # are comments.
+#   name:    unique identifier across all catalogs
+#   file:    path relative to the repository root
+#   search:  exact literal text; must occur exactly once in file (\n = newline)
+#   replace: literal replacement (may be empty)
+#   expect:  killed (default) or survive, for a documented equivalent mutant
+#   why:     what the mutation breaks, or why it is equivalent
+# When SQL is rewritten, rewrite or delete STALE entries deliberately; never
+# loosen a search string to make it match something else.
+set -euo pipefail
+
+root=$(git rev-parse --show-toplevel)
+catalogs=("$root"/scripts/sql-mutations/*.txt)
+timeout=${SQL_MUTANTS_TIMEOUT:-300}
+target=${SQL_MUTANTS_TARGET_DIR:-$root/target/sql-mutants}
+
+check_only=false
+selected=()
+for arg in "$@"; do
+    case $arg in
+        --check) check_only=true ;;
+        -h | --help) sed -n '2,31s/^# \{0,1\}//p' "$0"; exit 0 ;;
+        -*) echo "Unknown option: $arg" >&2; exit 2 ;;
+        *) selected+=("$arg") ;;
+    esac
+done
+
+# Literal values in the catalog may use \n for a newline.
+decode() { printf '%s' "${1//\\n/$'\n'}"; }
+# File contents, keeping trailing newlines.
+slurp() { local text; text=$(cat "$1"; printf x); printf '%s' "${text%x}"; }
+occurrences() {
+    local stripped=${1//"$2"/}
+    echo $(((${#1} - ${#stripped}) / ${#2}))
+}
+
+names=() files=() searches=() replaces=() expects=()
+add_entry() {
+    [[ -n $name$file$search$replace ]] || return 0
+    local where="catalog entry ${name:-#$((${#names[@]} + 1))}"
+    [[ -n $name && -n $file && -n $search ]] || { echo "$where: name, file and search are required" >&2; exit 2; }
+    [[ $expect == killed || $expect == survive ]] || { echo "$where: expect must be killed or survive" >&2; exit 2; }
+    [[ $search != "$replace" ]] || { echo "$where: replace equals search" >&2; exit 2; }
+    local existing
+    for existing in ${names[@]+"${names[@]}"}; do
+        [[ $existing != "$name" ]] || { echo "$where: duplicate name" >&2; exit 2; }
+    done
+    names+=("$name") files+=("$file") searches+=("$(decode "$search")")
+    replaces+=("$(decode "$replace")") expects+=("$expect")
+}
+reset_entry() { name='' file='' search='' replace='' expect=killed; }
+[[ -f ${catalogs[0]} ]] || { echo "No catalogs in scripts/sql-mutations/" >&2; exit 2; }
+for catalog in "${catalogs[@]}"; do
+    reset_entry
+    while IFS= read -r line || [[ -n $line ]]; do
+        case $line in
+            '#'*) ;;
+            '') add_entry; reset_entry ;;
+            'name: '*) name=${line#name: } ;;
+            'file: '*) file=${line#file: } ;;
+            'search: '*) search=${line#search: } ;;
+            'replace:'*) replace=${line#replace:}; replace=${replace# } ;;
+            'expect: '*) expect=${line#expect: } ;;
+            'why: '*) ;;
+            *) echo "Unrecognized line in ${catalog#"$root"/}: $line" >&2; exit 2 ;;
+        esac
+    done <"$catalog"
+    add_entry
+    done
+
+stale=0
+for i in "${!names[@]}"; do
+    path="$root/${files[$i]}"
+    if [[ ! -f $path ]]; then
+        echo "STALE ${names[$i]}: ${files[$i]} does not exist" >&2
+        stale=1
+        continue
+    fi
+    count=$(occurrences "$(slurp "$path")" "${searches[$i]}")
+    if [[ $count != 1 ]]; then
+        echo "STALE ${names[$i]}: search string occurs $count times in ${files[$i]} (expected exactly 1)" >&2
+        stale=1
+    fi
+done
+for wanted in ${selected[@]+"${selected[@]}"}; do
+    found=false
+    for existing in "${names[@]}"; do [[ $existing == "$wanted" ]] && found=true; done
+    $found || { echo "No catalog entry named $wanted" >&2; exit 2; }
+done
+if ((stale)); then
+    echo "Update the catalogs in scripts/sql-mutations/ to match the current SQL." >&2
+    exit 2
+fi
+echo "Catalog: ${#names[@]} mutations match the source."
+$check_only && exit 0
+
+if [[ -n $(git -C "$root" status --porcelain) ]]; then
+    echo "Refusing to run on a dirty tree; commit or stash changes so results describe HEAD." >&2
+    exit 2
+fi
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/sql-mutants.XXXXXX")
+job=''
+cleanup() {
+    if [[ -n $job ]]; then
+        kill -TERM -- "-$job" 2>/dev/null || true
+        wait "$job" 2>/dev/null || true
+    fi
+    rm -rf "$work"
+}
+trap cleanup EXIT
+trap 'echo; echo "Interrupted; working tree untouched." >&2; exit 130' INT TERM
+git -C "$root" archive --format=tar HEAD | tar -x -C "$work"
+# git archive stamps files with the commit time, and the build cache outlives a
+# run whose last mutation was restored without a rebuild. Fresh times make cargo
+# rebuild from this export instead of reusing that mutant.
+find "$work" -type f -exec touch {} +
+logs="$target/logs"
+mkdir -p "$logs"
+export CARGO_TARGET_DIR="$target"
+
+# Runs cargo in its own process group so a timeout or Ctrl-C stops the tests too.
+run_cargo() {
+    local log=$1 elapsed=0 status
+    shift
+    set -m
+    (cd "$work" && exec cargo "$@" >"$log" 2>&1) &
+    job=$!
+    set +m
+    while kill -0 "$job" 2>/dev/null; do
+        if ((elapsed >= timeout)); then
+            kill -TERM -- "-$job" 2>/dev/null || true
+            wait "$job" 2>/dev/null || true
+            job=''
+            return 124
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+    status=0
+    wait "$job" || status=$?
+    job=''
+    return "$status"
+}
+
+echo "Baseline: cargo test --locked on HEAD $(git -C "$root" rev-parse --short HEAD)"
+if ! run_cargo "$logs/baseline.log" test --locked; then
+    echo "Baseline tests fail; see $logs/baseline.log" >&2
+    exit 1
+fi
+
+unexpected=0
+summary=()
+for i in "${!names[@]}"; do
+    name=${names[$i]}
+    if ((${#selected[@]})); then
+        keep=false
+        for wanted in "${selected[@]}"; do [[ $wanted == "$name" ]] && keep=true; done
+        $keep || continue
+    fi
+    path="$work/${files[$i]}"
+    cp "$path" "$work/.original"
+    text=$(slurp "$path")
+    prefix=${text%%"${searches[$i]}"*}
+    suffix=${text#*"${searches[$i]}"}
+    printf '%s' "$prefix${replaces[$i]}$suffix" >"$path"
+    log="$logs/$name.log"
+    if ! run_cargo "$log" test --locked --no-run; then
+        result=unviable
+    else
+        status=0
+        run_cargo "$log" test --locked || status=$?
+        case $status in
+            0) result=survived ;;
+            124) result=timeout ;;
+            *) result=killed ;;
+        esac
+    fi
+    cp "$work/.original" "$path"
+    case ${expects[$i]}:$result in
+        killed:killed | killed:timeout | survive:survived) mark='' ;;
+        *) mark="  UNEXPECTED (expected ${expects[$i]})"; unexpected=$((unexpected + 1)) ;;
+    esac
+    line=$(printf '%-46s %s%s' "$name" "$result" "$mark")
+    echo "$line"
+    summary+=("$line")
+done
+
+echo
+echo "Results ($((${#summary[@]})) mutations, logs in $logs):"
+printf '%s\n' "${summary[@]}"
+if ((unexpected)); then
+    echo "$unexpected unexpected result(s)." >&2
+    exit 1
+fi

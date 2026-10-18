@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+project_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "Rust is needed to build this source checkout. Install it from https://rustup.rs, then run ./setup again." >&2
+  exit 1
+fi
+
+echo "Building user memory…"
+cargo build --release --locked --manifest-path "$project_dir/Cargo.toml" --target-dir "$project_dir/target"
+# An explicit target directory keeps this entry point reliable even when a
+# user's Cargo configuration sends normal build artifacts somewhere else.
+# Embedding settings (USER_MEMORY_EMBED_*) come from the checkout's .env unless
+# --env-file names another file; the binary ignores every other key there.
+env_file=()
+case " $* " in
+  *" --env-file "* | *" --env-file="*) ;;
+  *) [ -f "$project_dir/.env" ] && env_file=(--env-file "$project_dir/.env") ;;
+esac
+exec "$project_dir/target/release/user-memory" setup "${env_file[@]+"${env_file[@]}"}" "$@"

@@ -1,0 +1,64 @@
+# The checks a commit must pass, on both platforms the client ships for:
+# formatting, lints as errors, every test, and the eval harness's own tests.
+# It needs no secrets; tests that use Docker, Codex or an embedding server
+# run only where those are opted into, which these runners never are.
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    # About twice the longest green run, rounded up to 5 minutes: 949 s on
+    # Ubuntu, 153 s on macOS.
+    timeout-minutes: 35
+    env:
+      # One run reports every failing test (.config/nextest.toml).
+      NEXTEST_PROFILE: ci
+    steps:
+      - uses: actions/checkout@v7
+      # The toolchain the server image and the release builds use (Dockerfile).
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: "1.99.1"
+          components: rustfmt, clippy
+      # shellcheck at its latest stable release (tests/ci.rs SHELLCHECK); the
+      # runner's own is older and warns differently. The script tests use it.
+      # cargo-nextest (tests/ci.rs NEXTEST) runs the tests in `just check`.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,shellcheck@0.11.0,cargo-nextest@0.9.148
+      # Quoted: an unquoted ": " would end the YAML scalar.
+      - run: "shellcheck --version | grep -Fx 'version: 0.11.0'"
+      # PSScriptAnalyzer at its latest stable release (tests/ci.rs
+      # PSSCRIPTANALYZER), for the install.ps1 tests, which need it with pwsh
+      # in CI. Both images ship pwsh and this version; installing pins it.
+      - run: pwsh -NoProfile -Command "Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Scope CurrentUser -Force"
+      # Fails the run unless that version is the one available.
+      - run: pwsh -NoProfile -Command "if (-not ((Get-Module -ListAvailable PSScriptAnalyzer).Version -contains [version]'1.25.0')) { exit 1 }"
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+      - run: just check
+      - run: python3 -I evals/test_run.py

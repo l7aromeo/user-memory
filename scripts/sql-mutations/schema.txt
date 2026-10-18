@@ -1,0 +1,337 @@
+# SQL mutations for src/memory/schema.rs. Format: see scripts/sql-mutants.
+
+# --- Invalidation triggers (src/memory/schema.rs) ---
+
+name: evidence-check-removed
+file: src/memory/schema.rs
+search: ,\n    CHECK(source='inferred' OR evidence_ids='[]'),
+replace: ,
+why: Explicit or observed memories stored directly with evidence IDs are accepted.
+
+name: status-check-removed
+file: src/memory/schema.rs
+search: ,\n    CHECK(status IN ('confirmed','tentative','stale','superseded')),
+replace: ,
+why: The store accepts statuses that no reader understands.
+
+name: status-check-rejects-stale
+file: src/memory/schema.rs
+search: 'tentative','stale','superseded'
+replace: 'tentative','superseded'
+why: Invalidating an inference fails, so correcting or forgetting its evidence fails.
+
+name: superseded-link-check-removed
+file: src/memory/schema.rs
+search: ,\n    CHECK((status='superseded')=(superseded_by IS NOT NULL))\n);
+replace: \n);
+why: A memory can be superseded without naming its replacement, or name one while active.
+
+name: evidence-check-allows-observed
+file: src/memory/schema.rs
+search: CHECK(source='inferred' OR evidence_ids='[]')
+replace: CHECK(source IN ('inferred','observed') OR evidence_ids='[]')
+why: Observed memories stored directly with evidence IDs are accepted.
+
+name: deleted-trigger-ignores-evidence
+file: src/memory/schema.rs
+search: WHERE status!='superseded' AND EXISTS (SELECT 1 FROM json_each(evidence_ids) WHERE value=OLD.id);\nEND;\nCREATE TRIGGER IF NOT EXISTS memory_support_changed
+replace: WHERE status!='superseded' AND EXISTS (SELECT 1 FROM json_each(evidence_ids));\nEND;\nCREATE TRIGGER IF NOT EXISTS memory_support_changed
+why: Forgetting any memory invalidates every inference.
+
+name: deleted-trigger-restales-superseded
+file: src/memory/schema.rs
+search: WHERE status!='superseded' AND EXISTS (SELECT 1 FROM json_each(evidence_ids) WHERE value=OLD.id);\nEND;\nCREATE TRIGGER IF NOT EXISTS memory_support_changed
+replace: WHERE EXISTS (SELECT 1 FROM json_each(evidence_ids) WHERE value=OLD.id);\nEND;\nCREATE TRIGGER IF NOT EXISTS memory_support_changed
+why: Forgetting evidence of a superseded inference violates the supersession CHECK, so the forget fails.
+
+name: changed-trigger-restales-superseded
+file: src/memory/schema.rs
+search: WHERE status!='superseded' AND EXISTS (SELECT 1 FROM json_each(evidence_ids) WHERE value=OLD.id);\nEND;\nCREATE TRIGGER IF NOT EXISTS memory_support_moved
+replace: WHERE EXISTS (SELECT 1 FROM json_each(evidence_ids) WHERE value=OLD.id);\nEND;\nCREATE TRIGGER IF NOT EXISTS memory_support_moved
+why: Correcting evidence of a superseded inference violates the supersession CHECK, so the correction fails.
+
+name: deleted-trigger-disabled
+file: src/memory/schema.rs
+search: AFTER DELETE ON memories BEGIN\n    UPDATE memories SET status='stale',
+replace: AFTER DELETE ON memories BEGIN\n    UPDATE memories SET status=status,
+why: Inferences survive the deletion of their evidence.
+
+# Triggers no longer test source='inferred': the evidence CHECK lets only
+# inferred memories hold evidence_ids, so that guard was redundant.
+
+name: changed-trigger-ignores-evidence
+file: src/memory/schema.rs
+search: WHERE value=OLD.id);\nEND;\nCREATE TRIGGER IF NOT EXISTS memory_support_moved
+replace: );\nEND;\nCREATE TRIGGER IF NOT EXISTS memory_support_moved
+why: Correcting any memory invalidates every inference.
+
+name: changed-trigger-disabled
+file: src/memory/schema.rs
+search: NEW.evidence='')) BEGIN\n    UPDATE memories SET status='stale',
+replace: NEW.evidence='')) BEGIN\n    UPDATE memories SET status=status,
+why: Inferences survive corrections to their evidence.
+
+name: changed-trigger-fires-without-change
+file: src/memory/schema.rs
+search: WHEN (OLD.memory_type,
+replace: WHEN 1 OR (OLD.memory_type,
+why: Reconfirming unchanged evidence invalidates inferences.
+
+name: changed-trigger-never-fires
+file: src/memory/schema.rs
+search: AFTER UPDATE OF memory_type,category,context,content,source,status,evidence ON
+replace: AFTER UPDATE OF id ON
+why: No update ever reaches the trigger.
+
+name: origin-removed-trigger-disabled
+file: src/memory/schema.rs
+search: AFTER DELETE ON memory_origins BEGIN\n    UPDATE memories SET status='stale',
+replace: AFTER DELETE ON memory_origins BEGIN\n    UPDATE memories SET status=status,
+why: An inference whose supports lost a conversation keeps counting it as independent evidence.
+
+name: origin-removed-trigger-restales-superseded
+file: src/memory/schema.rs
+search: WHERE status!='superseded' AND EXISTS (SELECT 1 FROM json_each(evidence_ids) WHERE value=OLD.memory_id)
+replace: WHERE EXISTS (SELECT 1 FROM json_each(evidence_ids) WHERE value=OLD.memory_id)
+why: Forgetting a conversation of a superseded inference's support violates the supersession CHECK, so the forget fails.
+
+name: origin-removed-trigger-ignores-evidence
+file: src/memory/schema.rs
+search: (SELECT 1 FROM json_each(evidence_ids) WHERE value=OLD.memory_id)
+replace: (SELECT 1)
+why: Removing a conversation from any memory stales every inference left with fewer than two.
+
+name: changed-trigger-misses-direct-content-update
+file: src/memory/schema.rs
+search: AFTER UPDATE OF memory_type,category,context,content,source,
+replace: AFTER UPDATE OF memory_type,category,context,source,
+why: A store-level content edit that does not touch other columns skips invalidation.
+
+name: changed-trigger-ignores-category
+file: src/memory/schema.rs
+search: WHEN (OLD.memory_type,OLD.category,
+replace: WHEN (OLD.memory_type,NEW.category,
+why: Recategorizing evidence keeps dependent inferences active.
+
+name: changed-trigger-stales-confirmed-source
+file: src/memory/schema.rs
+search: OR (OLD.source IS NOT NEW.source AND NOT (OLD.source='observed' AND NEW.source='explicit'))
+replace: OR (OLD.source IS NOT NEW.source)
+why: Confirming an observation as explicit stales the inferences it supports.
+
+name: changed-trigger-ignores-source-change
+file: src/memory/schema.rs
+search: OR (OLD.source IS NOT NEW.source AND
+replace: OR (0 AND
+why: An explicit memory turned observed keeps the inferences it supports active.
+
+name: origins-cascade-missing
+file: src/memory/schema.rs
+search: memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+replace: memory_id TEXT NOT NULL REFERENCES memories(id),
+why: Forgetting a memory that has origins fails on the foreign key.
+
+name: origin-length-check-removed
+file: src/memory/schema.rs
+search: origin TEXT NOT NULL CHECK(length(origin) BETWEEN 1 AND 240),\n    first_seen
+replace: origin TEXT NOT NULL CHECK(1),\n    first_seen
+why: The store accepts empty or over-long origins.
+
+name: distinct-a-cascade-missing
+file: src/memory/schema.rs
+search: a TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+replace: a TEXT NOT NULL REFERENCES memories(id),
+why: Forgetting a memory named first in a distinct pair fails on the foreign key.
+
+name: distinct-b-cascade-missing
+file: src/memory/schema.rs
+search: b TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+replace: b TEXT NOT NULL REFERENCES memories(id),
+why: Forgetting a memory named second in a distinct pair fails on the foreign key.
+
+name: distinct-order-check-removed
+file: src/memory/schema.rs
+search: CHECK(a < b)
+replace: CHECK(1)
+why: The same pair can be stored twice in both orders, or a memory paired with itself.
+
+name: foreign-keys-off
+file: src/memory/schema.rs
+search: "foreign_keys", true
+replace: "foreign_keys", false
+why: Forgetting a memory leaves its origin and distinct rows behind.
+
+name: origins-unsorted
+file: src/memory/schema.rs
+search: WHERE memory_id=memories.id ORDER BY origin))
+replace: WHERE memory_id=memories.id ORDER BY origin DESC))
+why: Memories report their conversations in reverse order.
+
+name: origins-of-every-memory
+file: src/memory/schema.rs
+search: FROM memory_origins WHERE memory_id=memories.id ORDER BY
+replace: FROM memory_origins WHERE 1 ORDER BY
+why: Every memory reports every conversation in the store.
+
+name: changed-trigger-ignores-status
+file: src/memory/schema.rs
+search: OR (OLD.status IS NOT NEW.status AND
+replace: OR (0 AND
+why: A support made tentative or superseded keeps dependent inferences active.
+
+name: changed-trigger-stales-confirmed-status
+file: src/memory/schema.rs
+search: OR (OLD.status IS NOT NEW.status AND NOT (OLD.status='tentative' AND NEW.status='confirmed'))
+replace: OR (OLD.status IS NOT NEW.status)
+why: Confirming a tentative support stales the inferences it supports.
+
+name: changed-trigger-ignores-evidence-note
+file: src/memory/schema.rs
+search: OR (OLD.evidence IS NOT NEW.evidence AND
+replace: OR (0 AND
+why: Rewriting a support's evidence note keeps dependent inferences active.
+
+name: changed-trigger-confirmation-keeps-any-note
+file: src/memory/schema.rs
+search:  AND NEW.evidence='')) BEGIN
+replace: )) BEGIN
+why: An observation made explicit with a rewritten evidence note keeps the inferences it supports active.
+
+name: changed-trigger-stales-dropped-note
+file: src/memory/schema.rs
+search: OR (OLD.evidence IS NOT NEW.evidence AND NOT (OLD.source='observed' AND NEW.source='explicit' AND NEW.evidence=''))
+replace: OR (OLD.evidence IS NOT NEW.evidence)
+why: Confirming an observation drops its evidence note and so stales the inferences it supports.
+
+name: stale-marking-keeps-updated-at
+file: src/memory/schema.rs
+search: NEW.evidence='')) BEGIN\n    UPDATE memories SET status='stale',updated_at=CURRENT_TIMESTAMP\n
+replace: NEW.evidence='')) BEGIN\n    UPDATE memories SET status='stale'\n
+why: Invalidated inferences keep their old modification time.
+
+name: origin-count-stales-any-loss
+file: src/memory/schema.rs
+search: ) < 2;
+replace: ) < 99;
+why: Losing one of several conversations stales an inference though two independent ones remain.
+
+name: origin-count-keeps-one
+file: src/memory/schema.rs
+search: ) < 2;
+replace: ) < 1;
+why: An inference left with a single conversation behind it stays active.
+
+name: origin-count-repeats-conversations
+file: src/memory/schema.rs
+search: COUNT(DISTINCT o.origin)
+replace: COUNT(o.origin)
+why: One conversation behind two supports counts twice, so an inference left with one stays active.
+
+name: origin-count-ignores-unattributed
+file: src/memory/schema.rs
+search: + (SELECT COUNT(*) FROM json_each(memories.evidence_ids) e WHERE NOT EXISTS
+replace: + 0*(SELECT COUNT(*) FROM json_each(memories.evidence_ids) e WHERE NOT EXISTS
+why: A support with no conversation stops counting as its own, staling an inference that still has two.
+
+# --- UUID identity CHECK (src/memory/schema.rs) ---
+
+name: uuid-check-length
+file: src/memory/schema.rs
+search: CHECK(length(id)=36 AND
+replace: CHECK(
+why: Accepts an ID with an extra trailing hyphen.
+
+name: uuid-check-first-hyphen
+file: src/memory/schema.rs
+search: AND substr(id,9,1)='-' AND
+replace: AND
+why: Accepts an ID whose first hyphen is misplaced.
+
+name: uuid-check-version
+file: src/memory/schema.rs
+search: AND substr(id,15,1)='4' AND
+replace: AND
+why: Accepts non-v4 UUIDs.
+
+name: uuid-check-variant
+file: src/memory/schema.rs
+search: AND substr(id,20,1) IN ('8','9','a','b') AND
+replace: AND
+why: Accepts UUIDs with a non-RFC 4122 variant.
+
+name: uuid-check-hex-digits
+file: src/memory/schema.rs
+search: AND replace(id,'-','') NOT GLOB '*[^0-9a-f]*'),
+replace: ),
+why: Accepts uppercase or non-hex IDs that the app can never look up again.
+
+
+# --- Schema version (src/memory/schema.rs) ---
+
+name: version-read-constant
+file: src/memory/schema.rs
+search: "PRAGMA user_version"
+replace: "SELECT 1"
+why: Every store looks current, so a store from another version is half upgraded and fails with raw SQL errors.
+
+name: version-stamp-missing
+file: src/memory/schema.rs
+search: "user_version", SCHEMA_VERSION
+replace: "application_id", SCHEMA_VERSION
+why: New stores are never stamped, so the next connection refuses its own store.
+
+name: version-refusal-ignores-tables
+file: src/memory/schema.rs
+search: "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
+replace: "SELECT 0 FROM sqlite_master WHERE type='table'"
+why: An unversioned store from before versioning is adopted and modified instead of refused.
+
+name: version-refusal-miscounts-memories
+file: src/memory/schema.rs
+search: "SELECT COUNT(*) FROM memories"
+replace: "SELECT 0 FROM memories"
+why: The refusal misreports how many memories the old store holds.
+
+# --- Conversation links (src/memory/schema.rs) ---
+
+name: link-origin-length-check-removed
+file: src/memory/schema.rs
+search: origin TEXT NOT NULL CHECK(length(origin) BETWEEN 1 AND 240),\n    project TEXT
+replace: origin TEXT NOT NULL CHECK(1),\n    project TEXT
+why: The store accepts links with empty or over-long origins.
+
+name: link-project-length-check-removed
+file: src/memory/schema.rs
+search: project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 240),\n    linked_at
+replace: project TEXT NOT NULL CHECK(1),\n    linked_at
+why: The store accepts links to empty or over-long project keys.
+
+name: link-primary-key-removed
+file: src/memory/schema.rs
+search: ,\n    PRIMARY KEY(origin, project)\n);
+replace: \n);
+why: Linking a project twice stores two rows, and listing shows it twice.
+
+name: moved-trigger-never-fires
+file: src/memory/schema.rs
+search: AFTER UPDATE OF scope,project ON
+replace: AFTER UPDATE OF id ON
+why: A support moved to another project keeps the patterns there that can no longer cite it.
+
+name: moved-trigger-disabled
+file: src/memory/schema.rs
+search: AND (scope!='project' OR project IS NOT NEW.project);
+replace: AND 0;
+why: A support moved out of its pattern's project keeps the pattern active.
+
+name: moved-trigger-stales-every-move
+file: src/memory/schema.rs
+search: \n    AND (scope!='project' OR project IS NOT NEW.project);
+replace: ;
+why: Moving a whole project, or a support into its pattern's project, stales patterns that still hold.
+
+name: moved-trigger-stales-global-move
+file: src/memory/schema.rs
+search:  AND NOT (NEW.scope='global' AND NEW.project='') BEGIN
+replace:  BEGIN
+why: Making a support global stales its patterns, though global evidence supports any pattern.

@@ -1,0 +1,45 @@
+# SQL mutations for src/memory/migrate.rs. Format: see scripts/sql-mutants.
+
+# --- Migrations (src/memory/migrate.rs) ---
+
+name: migrate-backup-name-unstamped
+file: src/memory/migrate.rs
+search: "SELECT strftime('%Y%m%dT%H%M%SZ','now')"
+replace: "SELECT 'backup'"
+why: Backups lose their time, and a second migration could not create its own backup.
+
+name: backup-counts-through-damaged-index
+file: src/memory/migrate.rs
+search: FROM memories NOT INDEXED", [], |r| {
+replace: FROM memories", [], |r| {
+why: Counted through a damaged index that holds a stale entry, a store seems to have one memory more than it does, and the repair that mends the index then reports a memory lost.
+
+name: migrate-ignores-broken-references
+file: src/memory/migrate.rs
+search: "SELECT COUNT(*) FROM pragma_foreign_key_check"
+replace: "SELECT 0 FROM pragma_foreign_key_check"
+why: A step that leaves conversations or distinct pairs pointing at missing memories is committed.
+
+name: migrate-with-foreign-keys
+file: src/memory/migrate.rs
+search: "foreign_keys", false
+replace: "foreign_keys", true
+why: Rebuilding the memories table cascade-deletes every conversation and distinct pair that refers to it.
+
+name: migrate-v3-renumbers-rows
+file: src/memory/migrate.rs
+search: SELECT m.rowid,m.id,
+replace: SELECT m.rowid+100,m.id,
+why: Rebuilt rows get new rowids, and recall breaks recency ties by rowid.
+
+name: migrate-v3-titles-unindexed
+file: src/memory/migrate.rs
+search: INSERT INTO memory_search(id,memory_type,category,title,content,context,reason,evidence) SELECT id,memory_type,category,title,content,context,reason,evidence FROM memories;
+replace: SELECT 1;
+why: The rebuilt search index is empty, so migrated memories are never found by keyword.
+
+name: v4-keeps-old-support-trigger
+file: src/memory/migrate.rs
+search: const V4_TRIGGERS: &str = "DROP TRIGGER memory_support_changed;
+replace: const V4_TRIGGERS: &str = "SELECT 1;
+why: The v4 step cannot create the split trigger over the old one, so every v3 store fails to migrate.

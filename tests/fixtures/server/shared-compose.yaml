@@ -1,0 +1,52 @@
+# Written by the user-memory installer; running it again rewrites this file.
+# Manage it with: docker compose -f /d/compose.yaml stop|start|logs
+# The volume is the one the repository's compose.yaml uses by default: both
+# serve the same memories, so never run them at the same time.
+name: user-memory
+services:
+  memory:
+    build: .
+    image: user-memory:installed
+    restart: unless-stopped
+    init: true
+    stop_signal: SIGINT
+    stop_grace_period: 15s
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      # A string test runs through the container's shell (same as CMD-SHELL).
+      test: "USER_MEMORY_URL=http://127.0.0.1:8765/mcp USER_MEMORY_TOKEN_FILE=/data/access-token user-memory index >/dev/null"
+      interval: 30s
+      timeout: 25s
+      start_period: 20s
+      retries: 3
+    # The semantic search settings, empty for keyword search only; kept
+    # when the installer runs again.
+    env_file: embedding.env
+    # This machine, for an embeddings endpoint such as Ollama running here.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:8765:8765"
+      - "10.0.0.5:8765:8765"
+    volumes:
+      - memory-data:/data
+    command:
+      - host
+      - --listen
+      - 0.0.0.0:8765
+      - --db
+      - /data/memories.sqlite3
+      - --token-file
+      - /data/access-token
+      - --allowed-host
+      - localhost
+      - --allowed-host
+      - 127.0.0.1
+      - --allowed-host=memory.example.com
+      - --allowed-host=memory.internal
+
+volumes:
+  memory-data:
+    name: user-memory-data

@@ -1,0 +1,44 @@
+#!/bin/sh
+# Refuses a release whose Rust toolchain, the Dockerfile's RUST_IMAGE that
+# every build uses, is older than the current stable Rust release, unless
+# the comment line just above that ARG starts with "# Pinned below stable:"
+# and says why, as for a minimum supported Rust version.
+#
+# Usage: scripts/check-rust-stable
+#   RUST_STABLE_CHANNEL  the stable channel to read (default: the official
+#                        manifest, static.rust-lang.org); a file:// URL works
+#   DOCKERFILE           the Dockerfile to read (default: the repository's)
+#
+# It reads the network, so the release workflow runs it, not `just check`.
+set -eu
+
+channel=${RUST_STABLE_CHANNEL:-https://static.rust-lang.org/dist/channel-rust-stable.toml}
+dockerfile=${DOCKERFILE:-$(dirname "$0")/../Dockerfile}
+
+fail() {
+    printf 'check-rust-stable: %s\n' "$*" >&2
+    exit 1
+}
+
+pinned=$(sed -n 's/^ARG RUST_IMAGE=rust:\([0-9][0-9.]*\)-.*/\1/p' "$dockerfile")
+[ -n "$pinned" ] || fail "$dockerfile names no RUST_IMAGE=rust:<version>-…"
+# The manifest's [pkg.rust] section holds version = "1.99.1 (<hash> <date>)".
+manifest=$(curl -fsSL "$channel") || fail "cannot read the stable channel $channel"
+stable=$(printf '%s\n' "$manifest" |
+    awk '/^\[pkg\.rust\]$/ { section = 1; next }
+         /^\[/ { section = 0 }
+         section && /^version = "/ { sub(/^version = "/, ""); sub(/ .*/, ""); print; exit }')
+[ -n "$stable" ] || fail "$channel names no stable Rust version"
+
+# The newer of the two, comparing each dotted part as a number.
+newer=$(printf '%s\n%s\n' "$pinned" "$stable" | sort -t. -k1,1n -k2,2n -k3,3n | tail -n 1)
+if [ "$pinned" = "$stable" ] || [ "$newer" = "$pinned" ]; then
+    echo "Rust $pinned is current (stable is $stable)."
+    exit 0
+fi
+
+reason=$(awk '/^ARG RUST_IMAGE=/ { print previous; exit } { previous = $0 }' "$dockerfile" |
+    sed -n 's/^# Pinned below stable: *\(..*\)$/\1/p')
+[ -n "$reason" ] ||
+    fail "the Dockerfile pins Rust $pinned, but the current stable is $stable; update RUST_IMAGE, or say why it stays with a comment line just above it: # Pinned below stable: <reason>"
+echo "Rust $pinned stays below stable $stable: $reason"

@@ -1,0 +1,86 @@
+# The checks a commit must pass, on Windows: x64 and ARM64, as the client
+# ships for both. It runs for every push to main and for pull requests that
+# change code, tests, scripts or workflows; a docs-only change skips it.
+# There is no Docker on these runners (Windows images cannot run Linux
+# containers), so the Docker server is covered by the fake Docker.
+name: windows
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "scripts/**"
+      - ".github/workflows/**"
+      - "install.ps1"
+      - "uninstall.ps1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-latest
+          - arch: arm64
+            runner: windows-11-arm
+    name: check (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    # About twice the longest complete run (1,039 s on x64, every test run),
+    # rounded up to 5 minutes; nextest ends a hung test after 5 minutes.
+    timeout-minutes: 35
+    env:
+      # One run reports every failing test (.config/nextest.toml).
+      NEXTEST_PROFILE: ci
+      # The install.ps1 tests fail rather than skip without pwsh and
+      # PSScriptAnalyzer (CI, set by GitHub, does the same).
+      REQUIRE_PWSH: "1"
+      # aws-lc-sys assembles its x64 code with NASM, which the image lacks;
+      # this uses the copy it ships.
+      AWS_LC_SYS_PREBUILT_NASM: ${{ matrix.arch == 'x64' && '1' || '' }}
+    steps:
+      - uses: actions/checkout@v7
+      # The toolchain the server image and the release builds use (Dockerfile).
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: "1.99.1"
+          components: rustfmt, clippy
+      # cargo-nextest (tests/ci.rs NEXTEST) runs the tests in `just check`.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-nextest@0.9.148
+      # PSScriptAnalyzer at the version tests/ci.rs pins, as in the check workflow.
+      - run: pwsh -NoProfile -Command "Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Scope CurrentUser -Force"
+      - run: pwsh -NoProfile -Command "if (-not ((Get-Module -ListAvailable PSScriptAnalyzer).Version -contains [version]'1.25.0')) { exit 1 }"
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-${{ matrix.arch }}-
+      - run: just check
+      # The install.ps1 tests again under Windows PowerShell 5.1, which every
+      # Windows has and the installer supports. It keeps its own modules, so
+      # it gets its own PSScriptAnalyzer, pinned as above; its PowerShellGet
+      # needs the NuGet provider first, and TLS 1.2 for the gallery.
+      - run: powershell -NoProfile -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Install-PackageProvider NuGet -MinimumVersion 2.8.5.201 -Scope CurrentUser -Force | Out-Null; Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Scope CurrentUser -Force"
+      - run: powershell -NoProfile -Command "if (-not ((Get-Module -ListAvailable PSScriptAnalyzer).Version -contains [version]'1.25.0')) { exit 1 }"
+      - run: cargo nextest run --locked --test windows_install
+        env:
+          USER_MEMORY_TEST_POWERSHELL: powershell

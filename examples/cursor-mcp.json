@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "user-memory": {
+      "command": "/ABS/PATH/TO/user-memory",
+      "args": ["serve"]
+    }
+  }
+}

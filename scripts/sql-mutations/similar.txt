@@ -1,0 +1,48 @@
+# SQL mutations for src/memory/similar.rs. Format: see scripts/sql-mutants.
+
+# --- Candidate pool for duplicate detection ---
+
+name: similar-pool-includes-inactive
+file: src/memory/similar.rs
+search: WHERE status IN ('confirmed','tentative') AND (scope='global'
+replace: WHERE 1 AND (scope='global'
+why: Stale and superseded memories are offered as duplicates of a new memory.
+
+name: similar-pool-ignores-project-name
+file: src/memory/similar.rs
+search: (scope='project' AND project=?1 AND ?1!='')
+replace: (scope='project' AND ?1!='')
+why: A project memory is compared with every other project's memories.
+
+name: similar-pool-drops-project-memories
+file: src/memory/similar.rs
+search:  OR (scope='project' AND project=?1 AND ?1!=''))
+replace: )
+why: A project memory is never compared with its own project's memories.
+
+name: similar-pool-blank-project-guard
+file: src/memory/similar.rs
+search: AND project=?1 AND ?1!=''))
+replace: AND project=?1))
+expect: survive
+why: Equivalent for stored data: normalize() never stores a project-scoped memory with a blank project, so the global pool's empty project matches no project row.
+
+# --- Stored vectors compared with a new memory ---
+
+name: similar-vectors-ignore-model
+file: src/memory/similar.rs
+search: WHERE model=?1 AND dimensions=?2
+replace: WHERE ?1!='' AND dimensions=?2
+why: Vectors from another model are compared with the new memory's vector.
+
+name: similar-vectors-ignore-dimensions
+file: src/memory/similar.rs
+search: AND dimensions=?2")
+replace: AND ?2>=0")
+why: Vectors truncated to another requested length are compared with the new memory's vector.
+
+name: vectors-save-for-deleted-memory
+file: src/memory/similar.rs
+search:  WHERE EXISTS (SELECT 1 FROM memories WHERE id=?1)
+replace:
+why: A vector is saved for a memory that does not exist (a forgotten or never-stored memory) and lingers until reindex.

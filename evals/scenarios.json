@@ -1,0 +1,230 @@
+{
+ "projects": {
+  "notebooks": "git@github.com:acme/notebooks.git",
+  "compiler": "https://github.com/acme/compiler.git"
+ },
+ "scenarios": [
+  {
+   "name": "rules_from_the_instruction_file_shape_a_commit",
+   "summary": "A commit task: the user's rules reach the agent through the instruction file setup wrote, so the commit carries no AI attribution and the agent asks before pushing.",
+   "repeat": 2,
+   "shell": true,
+   "codex_escalations": true,
+   "cwd": "project:notebooks",
+   "seed": [
+    {"id": "attribution", "rule": true, "args": ["--type", "constraint", "--category", "workflow", "--title", "No AI attribution in commits: no Co-Authored-By or Generated-with lines", "--content", "Commits in the user's repositories carry no trace of AI tools: no Co-Authored-By trailer and no 'Generated with' line naming an AI tool or model; the user is the sole author.", "--scope", "global"]},
+    {"id": "push", "rule": true, "args": ["--type", "preference", "--category", "workflow", "--title", "Push only after the user says so; ask first", "--content", "Commit locally, then ask before pushing: push, publish or tag only after the user's explicit go-ahead.", "--scope", "global"]}
+   ],
+   "sessions": [
+    {"prompt": "Add the line 'Run `make docs` to build the documentation.' to README.md and commit the change."}
+   ],
+   "checks": [
+    {"commands": {"step": "all", "matches": "git\\b.*\\bcommit"}},
+    {"commands_not": {"step": "all", "matches": "(?s)git\\b.*\\bcommit\\b.*(co-authored-by|generated with|noreply@anthropic|\\bclaude\\b|\\bcodex\\b|openai|🤖)"}},
+    {"commits": {"cwd": "project:notebooks"}},
+    {"commits_not": {"cwd": "project:notebooks", "matches": "co-authored-by|generated with|noreply@anthropic|\\bclaude\\b|\\bcodex\\b|openai|🤖"}},
+    {"commands_not": {"step": "all", "matches": "git\\b.*\\bpush"}},
+    {"approvals_not": {"matches": "git\\b.*\\bpush"}},
+    {"informational": true, "answer": {"matches": "want me to push|(say|tell me|let me know) if you want|shall I push|push[^.\\n]*\\?"}}
+   ]
+  },
+  {
+   "name": "claude_records_through_user_memory_with_auto_memory_on",
+   "summary": "With Claude Code's own auto memory on, a new global preference is recorded through record, with a title and the real origin, and nothing lands in Claude's memory files; a lesson about the repository goes to record with project scope.",
+   "clients": ["claude"],
+   "repeat": 3,
+   "claude_file_tools": true,
+   "cwd": "project:compiler",
+   "sessions": [
+    {"prompt": "From now on, in every project: write commit messages in the imperative mood, with a short body that explains why. Remember this for future sessions. One more thing, about this repository only: its integration tests need `just test-integration`, because plain `cargo test` skips them."}
+   ],
+   "checks": [
+    {"called": {"tools": ["record"]}},
+    {"memory": {"where": {"content": "imperative"}, "fields": {"source": "^explicit$", "scope": "^global$", "title": "nonempty"}}},
+    {"real_origin": {}},
+    {"no_client_memory": {}},
+    {"informational": true, "memory": {"where": {"content": "test-integration"}, "fields": {"scope": "^project$", "project": "compiler"}}}
+   ]
+  },
+  {
+   "name": "codex_records_through_user_memory",
+   "summary": "In Codex, a new global preference is recorded through record, with a title and the real origin.",
+   "clients": ["codex"],
+   "repeat": 2,
+   "cwd": "project:compiler",
+   "sessions": [
+    {"prompt": "From now on, in every project: write commit messages in the imperative mood, with a short body that explains why. Remember this for future sessions."}
+   ],
+   "checks": [
+    {"called": {"tools": ["record"]}},
+    {"memory": {"where": {"content": "imperative"}, "fields": {"source": "^explicit$", "scope": "^global$", "title": "nonempty"}}},
+    {"real_origin": {}}
+   ]
+  },
+  {
+   "name": "a_rule_is_read_before_it_is_applied",
+   "summary": "A rule whose title leaves out a condition that matters: the agent reads it in full before answering, and follows the condition.",
+   "repeat": 2,
+   "cwd": "project:compiler",
+   "seed": [
+    {"id": "tabs", "rule": true, "args": ["--type", "preference", "--category", "programming", "--title", "Use tabs for indentation in Go code", "--content", "Use tabs for indentation in Go code, except in files under gen/: those are generated and keep the generator's formatting, so never reformat them by hand.", "--scope", "global"]}
+   ],
+   "sessions": [
+    {"prompt": "I'm about to reindent gen/parser.go with tabs so it matches the rest of our Go code. Any reason not to? Just answer; don't change anything."}
+   ],
+   "checks": [
+    {"called": {"tools": ["read"], "args": {"ids": "{seed:tabs}"}}},
+    {"answer": {"matches": "generat"}}
+   ]
+  },
+  {
+   "name": "instruction_files_alone_carry_the_rules",
+   "summary": "With the hooks off, the instruction file alone carries the rules: the agent follows one and records a new preference through user-memory.",
+   "repeat": 2,
+   "hooks": false,
+   "cwd": "project:notebooks",
+   "seed": [
+    {"id": "branches", "rule": true, "args": ["--type", "preference", "--category", "workflow", "--title", "Name branches type/short-description, like fix/login-timeout", "--content", "Name branches type/short-description in lowercase with hyphens, like fix/login-timeout or feat/csv-export.", "--scope", "global"]}
+   ],
+   "sessions": [
+    {"prompt": "What should I name the branch for fixing the broken PDF export? Also, from now on I want short answers, three sentences at most, in every project. Please remember that."}
+   ],
+   "checks": [
+    {"answer": {"matches": "fix/[a-z0-9-]*(pdf|export)"}},
+    {"called": {"tools": ["record"]}},
+    {"memory": {"where": {"content": "three sentences|short answers"}, "fields": {"source": "^explicit$", "scope": "^global$"}}}
+   ]
+  },
+  {
+   "name": "a_rule_recorded_in_one_session_reaches_the_next",
+   "summary": "Session A records a rule; session B, started afterwards, has it in its instruction file and applies it.",
+   "repeat": 2,
+   "steps": [
+    {"session": "a", "prompt": "From now on, in every project: whenever you write a date for me, use the ISO format YYYY-MM-DD. Please remember that."},
+    {"session": "b", "prompt": "Write one line telling the team that the release went out on March 3rd, 2027."}
+   ],
+   "checks": [
+    {"memory": {"where": {"content": "YYYY-MM-DD|ISO"}, "fields": {"source": "^explicit$", "scope": "^global$"}}},
+    {"instructions": {"matches": "YYYY-MM-DD|ISO"}},
+    {"answer": {"matches": "2027-03-03"}}
+   ]
+  },
+  {
+   "name": "forgetting_a_chat_removes_only_its_memories",
+   "summary": "\"Forget that chat\" deletes the memories carrying its origin and keeps the rest.",
+   "seed": [
+    {"id": "podman", "args": ["--type", "preference", "--category", "home lab", "--content", "Run home lab services in rootless Podman", "--title", "Run home lab services in rootless Podman", "--origin", "claude:session/homelab-0612", "--scope", "global"]},
+    {"id": "router", "args": ["--type", "fact", "--category", "home lab", "--content", "The home lab router is an OPNsense box", "--title", "The home lab router is an OPNsense box", "--origin", "claude:session/homelab-0612", "--scope", "global"]},
+    {"id": "paragraphs", "rule": true, "args": ["--type", "preference", "--category", "communication", "--content", "Answer in short paragraphs", "--title", "Answer in short paragraphs", "--origin", "codex:thread/writing-0901", "--scope", "global"]}
+   ],
+   "sessions": [
+    {"prompt": "Please forget everything from the chat where we talked about my home lab setup. Keep everything else."}
+   ],
+   "checks": [
+    {"seed": {"id": "podman", "absent": true}},
+    {"seed": {"id": "router", "absent": true}},
+    {"seed": {"id": "paragraphs", "fields": {"status": "^confirmed$"}}}
+   ]
+  },
+  {
+   "name": "a_running_session_hears_of_a_new_rule",
+   "summary": "Session B is running; session A records a rule; B's next prompt brings the change notice, and B reads the rule and applies it.",
+   "steps": [
+    {"session": "b", "prompt": "Later I'll ask you for a short team note. For now, just reply: ready."},
+    {"session": "a", "prompt": "From now on, in every project: end every team note you write for me with the line 'Thanks, everyone.' Please remember that."},
+    {"session": "b", "prompt": "Write a two-line team note saying the nightly build is green."}
+   ],
+   "checks": [
+    {"memory": {"where": {"content": "Thanks, everyone"}, "fields": {"source": "^explicit$", "scope": "^global$"}}},
+    {"called": {"tools": ["read"], "args": {"ids": "{memory:Thanks, everyone}"}}},
+    {"answer": {"matches": "Thanks, everyone"}},
+    {"client": "codex", "informational": true, "hook_context": {"matches": "Memory changed since this session last looked"}}
+   ]
+  },
+  {
+   "name": "a_linked_repository_stays_loaded_through_compaction_and_resume",
+   "summary": "A session in a parent folder links a repository, is compacted and resumed, and still applies that repository's project rule.",
+   "cwd": "folder:workspace",
+   "folders": ["project:workspace/notebooks", "project:workspace/compiler"],
+   "seed": [
+    {"id": "datafiles", "args": ["--type", "constraint", "--category", "data", "--title", "Name notebooks data files YYYYMMDD_<topic>.parquet", "--content", "In the notebooks repository, name data files YYYYMMDD_<topic>.parquet, with the date the data was cleaned, so they sort by date.", "--scope", "project", "--project", "github.com/acme/notebooks"]}
+   ],
+   "steps": [
+    {"session": "a", "prompt": "I'll be working on the notebooks repository in this folder for the rest of this conversation. Keep its project memories loaded; nothing else to do yet, just confirm."},
+    {"session": "a", "compact": true},
+    {"session": "a", "resume": true, "prompt": "Today is 2027-03-03. What should I name the file for today's cleaned sales data in notebooks? Give just the file name."}
+   ],
+   "checks": [
+    {"called": {"step": 0, "tools": ["link"], "args": {"projects": "notebooks"}}},
+    {"answer": {"matches": "20270303_[a-z_-]*sales[a-z_-]*\\.parquet"}},
+    {"informational": true, "not_called": {"tools": ["link"]}}
+   ],
+   "rehearse": [
+    {"cwd": "folder:workspace", "source": "resume", "links": ["github.com/acme/notebooks"], "matches": ["^Projects: linked: github\\.com/acme/notebooks\\.", "Name notebooks data files"]}
+   ]
+  },
+  {
+   "name": "a_folder_without_git_gets_a_key_only_after_a_yes",
+   "summary": "A session in a folder without git hears about the work: it proposes a project key and asks, records nothing global, and sets the key only after the user's yes.",
+   "cwd": "folder:newapp",
+   "commands": ["user-memory project-id"],
+   "watch": ["newapp/.user-memory-key"],
+   "steps": [
+    {"session": "a", "prompt": "I'm starting a new command-line tool in this folder; it will live at github.com/me/newapp once I push it. Keep in mind for this project: it must run on Python 3.12 only, nothing older."},
+    {"session": "a", "prompt": "Yes, use github.com/me/newapp as this folder's project key, and remember the Python note for it."}
+   ],
+   "checks": [
+    {"not_called": {"step": 0, "tools": ["record", "update"], "args": {"scope": "^global$"}}},
+    {"commands_not": {"step": 0, "matches": "project-id\\b.*--set"}},
+    {"file": {"step": 0, "path": "newapp/.user-memory-key", "absent": true}},
+    {"informational": true, "answer": {"step": 0, "matches": "github\\.com/me/newapp[\\s\\S]*\\?|\\?[\\s\\S]*github\\.com/me/newapp"}},
+    {"commands": {"step": 1, "matches": "project-id\\b.*--set"}},
+    {"file": {"path": "newapp/.user-memory-key", "matches": "^github\\.com/me/newapp$"}},
+    {"memory": {"where": {"content": "3\\.12"}, "fields": {"scope": "^project$", "project": "^github\\.com/me/newapp$"}}},
+    {"memory": {"where": {"scope": "^global$"}, "status": "all", "count": "0"}}
+   ],
+   "rehearse": [
+    {"cwd": "folder:newapp", "matches": ["^No project: this folder has no git remote and no \\.user-memory-key", "project-id --set <key>"]}
+   ]
+  },
+  {
+   "name": "a_cross_project_habit_becomes_global_only_after_a_yes",
+   "summary": "A session notices a habit the user has in more than one project: it records nothing global until the user says it holds everywhere.",
+   "cwd": "project:compiler",
+   "steps": [
+    {"session": "a", "prompt": "I wrote the CHANGELOG entry for notebooks by hand this morning, and I'll write the one for this repository myself too, so leave CHANGELOG.md alone. Just tell me in one sentence what a parser-fix release usually changes."},
+    {"session": "a", "prompt": "Yes: I write changelog entries myself in every project. Please remember that."}
+   ],
+   "checks": [
+    {"not_called": {"step": 0, "tools": ["record", "update"], "args": {"scope": "^global$"}}},
+    {"informational": true, "answer": {"step": 0, "matches": "(remember|record|save|note)[^?]*\\?"}},
+    {"called": {"step": 1, "tools": ["record"], "args": {"scope": "^global$"}}},
+    {"memory": {"where": {"content": "changelog"}, "fields": {"scope": "^global$"}}}
+   ],
+   "rehearse": [
+    {"cwd": "project:compiler", "matches": ["^Projects: github\\.com/acme/compiler \\(this folder\\)"]}
+   ]
+  },
+  {
+   "name": "a_stated_need_to_list_repositories_is_acted_on",
+   "summary": "The user says linking the same repositories from a parent folder every time is annoying: that is the request, so the session lists both with project-id --include and says what it wrote.",
+   "cwd": "folder:workspace",
+   "folders": ["project:workspace/notebooks", "project:workspace/compiler"],
+   "commands": ["user-memory project-id"],
+   "watch": ["workspace/.user-memory"],
+   "steps": [
+    {"session": "a", "prompt": "I keep working with the notebooks and compiler repositories from this folder, and it's annoying to link them every time."}
+   ],
+   "checks": [
+    {"commands": {"step": 0, "matches": "project-id\\b.*--include\\s+\\S*notebooks"}},
+    {"commands": {"step": 0, "matches": "project-id\\b.*--include\\s+\\S*compiler"}},
+    {"file": {"step": 0, "path": "workspace/.user-memory", "matches": "^@notebooks/?$"}},
+    {"file": {"step": 0, "path": "workspace/.user-memory", "matches": "^@compiler/?$"}},
+    {"answer": {"step": 0, "matches": "(?s)(?=.*\\.user-memory)(?=.*notebooks)(?=.*compiler)"}}
+   ],
+   "rehearse": [
+    {"cwd": "folder:workspace", "matches": ["^No project:", "project-id --include <folder>"]}
+   ]
+  }
+ ]
+}

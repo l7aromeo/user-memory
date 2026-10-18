@@ -1,0 +1,53 @@
+[package]
+name = "user-memory"
+version = "0.6.1"
+edition = "2024"
+description = "Typed user memory and grounded patterns for adaptable agents via local or remote MCP"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/l7aromeo/user-memory"
+homepage = "https://github.com/l7aromeo/user-memory"
+publish = false
+
+# The fake command-line programs the tests put on PATH (tests/fake/cli.rs).
+# Releases build only `--bin user-memory`, so it never ships.
+[[bin]]
+name = "user-memory-fake"
+path = "tests/fake/cli.rs"
+test = false
+doc = false
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+rmcp = { version = "3", features = ["server", "client", "macros", "schemars", "transport-io", "transport-streamable-http-server", "transport-streamable-http-client-reqwest"] }
+rusqlite = { version = "0.37", features = ["bundled", "backup"] }
+schemars = { version = "1", features = ["uuid1"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time"] }
+axum = "0.8"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream"] }
+rand = "0.9"
+subtle = "2"
+dunce = "1.0.5"
+
+# The owner-only ACL and the PATH broadcast (src/platform/windows.rs), the
+# user PATH in the registry, and the skill folder's junction.
+[target."cfg(windows)".dependencies]
+junction = "2.1.0"
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+windows-registry = "0.100.0"
+
+[dev-dependencies]
+tempfile = "3"
+yaml-rust2 = { version = "0.13", default-features = false }
+
+[lints.clippy]
+unwrap_used = "deny"
+
+# Builds for cargo-mutants (.cargo/mutants.toml): the test profile without
+# debug information, which cargo-mutants rebuilds for every mutant.
+[profile.mutants]
+inherits = "test"
+debug = "none"

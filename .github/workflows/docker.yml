@@ -1,0 +1,61 @@
+# The installer's Docker server, run for real: install shared through an
+# allowed host, upgrade of an older store with its migration, uninstall
+# keeping and purging the memories, and a server-only host. GitHub's Ubuntu runners have Docker;
+# check.yml runs every other test. It needs no secrets, and what it builds is
+# named per run and removed by the test.
+name: docker
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    paths:
+      - install.sh
+      - uninstall.sh
+      - Dockerfile
+      - compose*.yaml
+      - src/**
+      - tests/install.rs
+      - Cargo.toml
+      - Cargo.lock
+      - scripts/client-release
+      - .github/workflows/docker.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    # About twice the longest green run (517 s), rounded up to 5 minutes.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install zsh
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zsh
+      # The server build, made in the Dockerfile's Rust image as a release
+      # makes it.
+      - name: Build the server for Docker
+        run: zsh scripts/client-release --build-only --target x86_64-unknown-linux-gnu --out "$RUNNER_TEMP/build"
+      # The toolchain the server image and the release builds use (Dockerfile).
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: "1.99.1"
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: docker-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: docker-${{ runner.os }}-
+      - name: Run the Docker installer tests
+        env:
+          USER_MEMORY_TEST_DOCKER_BINARY: ${{ runner.temp }}/build/user-memory-x86_64-unknown-linux-gnu
+        run: cargo test --locked --test install a_real_docker_server -- --nocapture
