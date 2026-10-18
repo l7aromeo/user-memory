@@ -46,7 +46,7 @@ pub struct Search {
 
 #[derive(Args, Deserialize, Serialize, JsonSchema)]
 pub struct Read {
-    /// Up to 20 memory ids, each in full or as the first 8 characters the index shows. Give ids or a category, not both; with ids, status applies and projects and scope are ignored.
+    /// Up to 20 memory ids, each in full or as the first 8 characters the index shows. Give ids or a category, not both; with ids, status applies and projects and scope are ignored. Ids that match nothing are listed under unknown.
     #[serde(default)]
     pub ids: Vec<String>,
     /// With a category: which memories of it, as for index and search.

@@ -255,7 +255,7 @@ impl UserMemoryServer {
         })
     }
     #[tool(
-        description = "Whole memories by id (full, or the index's 8 characters; up to 20) or by category. Read a rule before acting on it. Unmatched ids are reported."
+        description = "Whole memories by up to 20 ids (full or the index's 8 characters), or a whole category when you need all of it. Read a rule before acting on it."
     )]
     fn read(&self, Parameters(input): Parameters<memory::Read>) -> Reply {
         guarded(None, || match memory::read(&self.db, &input) {

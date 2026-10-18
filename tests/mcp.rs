@@ -141,6 +141,19 @@ fn initialization_delivers_portable_memory_guidance_and_keeps_tools_available() 
         total <= 4128,
         "instructions and tool descriptions grew to {total} bytes"
     );
+    // A category read loads every memory of it, about 1.2k characters each:
+    // the description steers an agent to the ids the index shows.
+    let description = |tool: &str| {
+        tools.iter().find(|t| t["name"] == tool).unwrap()["description"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    assert!(
+        description("read").contains("or a whole category when you need all of it"),
+        "{}",
+        description("read")
+    );
     let mut names: Vec<_> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     names.sort();
     assert_eq!(
