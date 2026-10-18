@@ -147,11 +147,30 @@ pub(super) fn rank(
     Ok(order.into_iter().filter_map(|i| items[i].take()).collect())
 }
 
+/// `memories` as read and search return them: each without its empty
+/// fields (an empty text or list, or a null), which a field left out says
+/// as well and which cost an agent's context about a third of each memory.
+/// Exports keep every field.
+fn compact(memories: &[Memory]) -> Result<Value> {
+    let mut memories = serde_json::to_value(memories)?;
+    for memory in memories.as_array_mut().into_iter().flatten() {
+        if let Some(fields) = memory.as_object_mut() {
+            fields.retain(|_, value| match value {
+                Value::Null => false,
+                Value::String(text) => !text.is_empty(),
+                Value::Array(items) => !items.is_empty(),
+                _ => true,
+            });
+        }
+    }
+    Ok(memories)
+}
+
 /// `found` as one page of a result: `memories`, and `next_cursor` when more remain.
 fn paged(found: Vec<Memory>, paging: &Paging) -> Result<Value> {
     let ids: Vec<Uuid> = found.iter().map(|m| m.id).collect();
     let (memories, next) = page(found, &ids, paging)?;
-    let mut result = json!({ "memories": memories });
+    let mut result = json!({ "memories": compact(&memories)? });
     if let Some(next) = next {
         result["next_cursor"] = json!(next);
     }
@@ -260,7 +279,7 @@ pub fn read(db: &Path, input: &Read) -> Result<Value> {
             }
         }
     }
-    let mut result = json!({ "memories": memories });
+    let mut result = json!({ "memories": compact(&memories)? });
     if !unknown.is_empty() {
         result["unknown"] = json!(unknown);
     }

@@ -219,7 +219,8 @@ fn memory_from_one_conversation_is_found_in_another_with_its_origin() {
     );
     assert_eq!(find(&found, &rust)["confirmations"], 1);
     let all = s.search(&[]);
-    assert_eq!(find(&all, &plain)["origins"], serde_json::json!([]));
+    // Read and search leave empty fields out.
+    assert_eq!(find(&all, &plain).get("origins"), None);
     assert_eq!(find(&all, &plain)["confirmations"], 0);
     let later = s.stored(&[
         "--type",
@@ -526,10 +527,7 @@ fn changed_preference_supersedes_the_old_one_and_stales_dependents() {
     let active = s.search(&["formatting", "--page-size", "20"]);
     assert!(!ids(&active).contains(&tabs.as_str()));
     assert!(!ids(&active).contains(&pattern.as_str()));
-    assert_eq!(
-        find(&active, &spaces).get("superseded_by"),
-        Some(&Value::Null)
-    );
+    assert_eq!(find(&active, &spaces).get("superseded_by"), None);
     let profile = s.index(&[]);
     assert!(profile.contains("Indent with four spaces"));
     assert!(!profile.contains("Indent with tabs"));

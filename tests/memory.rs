@@ -204,7 +204,7 @@ fn preferences_and_custom_types_are_first_class_memories_without_invented_reason
     assert_eq!(rust["category"], "programming");
     assert_eq!(rust["source"], "explicit");
     assert_eq!(rust["status"], "confirmed");
-    assert_eq!(rust["reason"], "");
+    assert_eq!(rust.get("reason"), None);
     let profile = s.run(&["index"]);
     assert!(String::from_utf8_lossy(&profile.stdout).contains("Prefer Rust"));
 }
@@ -548,7 +548,7 @@ fn changing_content_does_not_reuse_the_previous_choices_reason() {
         s.value(&["update", &id, "--content", "Prefer Python for prototypes"])["updated"],
         true
     );
-    assert_eq!(s.value(&["search", "Python"])[0]["reason"], "");
+    assert_eq!(s.value(&["search", "Python"])[0].get("reason"), None);
 }
 
 #[test]
@@ -942,8 +942,8 @@ fn confirming_an_observation_makes_it_explicit_and_keeps_inferences() {
     assert_eq!(confirmed["status"], "confirmed");
     // The observation stays as the evidence; the agent's guessed reason goes.
     assert_eq!(confirmed["evidence"], "User asked for a demo during review");
-    assert_eq!(confirmed["reason"], "");
-    assert_eq!(confirmed["evidence_ids"], serde_json::json!([]));
+    assert_eq!(confirmed.get("reason"), None);
+    assert_eq!(confirmed.get("evidence_ids"), None);
     // Confirming strengthens the support, so the inference stands.
     assert_eq!(status(&s, &inferred), "tentative");
 }
@@ -1573,7 +1573,7 @@ fn origins_are_short_cleaned_references_reported_on_every_memory() {
     assert_eq!(inactive(&s, &id)["confirmations"], 1);
     assert_eq!(inactive(&s, &id)["last_confirmed_at"], Value::Null);
     let plain = stored(&s, &["--content", "Wrap at 100 columns"]);
-    assert_eq!(inactive(&s, &plain)["origins"], serde_json::json!([]));
+    assert_eq!(inactive(&s, &plain).get("origins"), None);
     assert_eq!(inactive(&s, &plain)["confirmations"], 0);
     // Exact repeats are duplicates only within the same conversation, or when
     // neither side names one.
@@ -2508,9 +2508,9 @@ fn an_update_keeps_the_evidence_until_it_gives_new_evidence() {
         "Mark memories distinct separately from changing one"
     );
     assert_eq!(evidence(&s), "- said again: short replies");
-    // Empty evidence clears it.
+    // Empty evidence clears it, and read leaves an empty field out.
     s.value(&["update", &a, "--evidence", ""]);
-    assert_eq!(evidence(&s), "");
+    assert_eq!(evidence(&s), Value::Null);
 }
 
 // A confirmed inference is the user's own statement now: it no longer rests
@@ -2541,7 +2541,7 @@ fn confirming_an_inference_drops_its_supports_and_keeps_its_evidence() {
     assert_eq!(out["updated"], true, "{out}");
     let confirmed = inactive(&s, &p);
     assert_eq!(confirmed["source"], "explicit");
-    assert_eq!(confirmed["evidence_ids"], json!([]));
+    assert_eq!(confirmed.get("evidence_ids"), None);
     assert_eq!(confirmed["evidence"], "Asked for examples twice");
 }
 
@@ -4088,4 +4088,40 @@ fn the_default_store_is_under_home_whatever_xdg_data_home_says() {
             .is_file()
     );
     assert!(!data.exists());
+}
+
+/// Read and search leave a memory's empty fields out, which an agent would
+/// otherwise load with every memory; an export keeps every field.
+#[test]
+fn read_and_search_leave_empty_fields_out_and_exports_keep_them() {
+    let s = Store::new();
+    let id = s.add("preference", "Prefer tabs");
+    let empty = [
+        "context",
+        "reason",
+        "project",
+        "evidence",
+        "evidence_ids",
+        "origins",
+        "last_confirmed_at",
+        "superseded_by",
+    ];
+    let read = s.value(&["read", &id])["memories"][0].clone();
+    let found = s.value(&["search", "tabs"])[0].clone();
+    for memory in [&read, &found] {
+        for field in empty {
+            assert_eq!(memory.get(field), None, "{field}: {memory}");
+        }
+        assert_eq!(memory["id"], id, "{memory}");
+        assert_eq!(memory["content"], "Prefer tabs", "{memory}");
+        assert_eq!(memory["confirmations"], 0, "{memory}");
+    }
+    let export: Value = serde_json::from_slice(&s.run(&["export", "-"]).stdout).unwrap();
+    let exported = &export["memories"][0];
+    for field in empty {
+        assert!(
+            exported.get(field).is_some(),
+            "export lost {field}: {exported}"
+        );
+    }
 }

@@ -286,6 +286,11 @@ a `reason` beside a false success field such as `"stored": false`, is a
 normal reply. The CLI's memory commands, run against a server, end with that
 reason and a failing status, as they do on a local store.
 
+`read` and `search` return each memory without its empty fields: an empty
+text such as `reason` or `context`, an empty list such as `origins` or
+`evidence_ids`, and a null such as `superseded_by`. A field left out is empty.
+Exports keep every field.
+
 `index` and `link` also accept fields that only user-memory's own client
 sends, for its session hooks and instruction files (`stamps`, `instructions`,
 `folder_projects` and the like). The tools' published schemas leave them out,
