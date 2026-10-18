@@ -727,6 +727,7 @@ fn every_release_build_refuses_the_debug_only_commands() {
 
 /// Whether pwsh must run rather than skip: in CI, or with REQUIRE_PWSH set,
 /// as for the install.ps1 tests.
+#[cfg(unix)]
 fn pwsh_required() -> bool {
     let set = |name| std::env::var(name).is_ok_and(|value| !value.is_empty() && value != "false");
     set("CI") || set("REQUIRE_PWSH")
