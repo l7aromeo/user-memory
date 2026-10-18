@@ -1505,3 +1505,25 @@ fn one_page(value: Value, page_size_given: bool) -> Value {
     );
     value["memories"].clone()
 }
+
+/// A search says whether meaning ranked it, so an agent can tell "nothing
+/// matches" from "semantic search is off": only with a topic and an
+/// endpoint that answered.
+#[test]
+fn a_search_says_whether_meaning_ranked_it() {
+    let s = Store::new();
+    let fake = Embedder::start(200);
+    preferences(&s);
+    let semantic = |embed: &[(&str, &str)], args: &[&str]| -> Value {
+        let mut full = vec!["search"];
+        full.extend_from_slice(args);
+        let reply: Value = serde_json::from_slice(&s.output(embed, &full).stdout).unwrap();
+        reply["semantic"].clone()
+    };
+    let endpoint = [("USER_MEMORY_EMBED_URL", fake.url.as_str())];
+    assert_eq!(semantic(&endpoint, &["language"]), true);
+    assert_eq!(semantic(&endpoint, &[]), false, "no topic");
+    assert_eq!(semantic(&[], &["language"]), false, "no endpoint");
+    let down = [("USER_MEMORY_EMBED_URL", "http://127.0.0.1:9/v1")];
+    assert_eq!(semantic(&down, &["language"]), false, "endpoint down");
+}

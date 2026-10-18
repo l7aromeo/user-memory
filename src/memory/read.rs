@@ -91,6 +91,15 @@ fn add_ranking(order: &[usize], fused: &mut [f64]) {
     }
 }
 
+/// What a topic matched, best first, and whether meaning ranked it beside
+/// the keywords.
+pub(super) struct Ranked {
+    pub(super) memories: Vec<Memory>,
+    /// An embeddings endpoint is configured and answered for this topic;
+    /// false without a topic, without an endpoint, or when it failed.
+    pub(super) semantic: bool,
+}
+
 /// Memories matching `topic`, best first. Without a topic every candidate
 /// matches. Semantic similarity, when available, adds the `limit` most similar
 /// memories to the keyword matches and fuses both rankings.
@@ -99,7 +108,7 @@ pub(super) fn rank(
     filter: &Filter,
     topic: &str,
     limit: usize,
-) -> Result<Vec<Memory>> {
+) -> Result<Ranked> {
     let query = tokenize(topic);
     let semantic = if query.is_empty() {
         None
@@ -111,6 +120,7 @@ pub(super) fn rank(
     let scores: Vec<usize> = items.iter().map(|m| keyword_score(&query, m)).collect();
     let mut matched: Vec<bool> = scores.iter().map(|&s| query.is_empty() || s > 0).collect();
     let mut fused = vec![0.0; items.len()];
+    let mut semantic_ranked = false;
     let mut by_keyword: Vec<usize> = (0..items.len()).filter(|&i| scores[i] > 0).collect();
     by_keyword.sort_by(|&a, &b| {
         scores[b]
@@ -133,6 +143,7 @@ pub(super) fn rank(
                     matched[i] = true;
                 }
                 add_ranking(&by_meaning, &mut fused);
+                semantic_ranked = true;
             }
             Err(err) => embed::warn(format!("{err:#}")),
         }
@@ -146,7 +157,10 @@ pub(super) fn rank(
             .then_with(|| recency(&items[b]).cmp(&recency(&items[a])))
     });
     let mut items: Vec<Option<Memory>> = items.into_iter().map(Some).collect();
-    Ok(order.into_iter().filter_map(|i| items[i].take()).collect())
+    Ok(Ranked {
+        memories: order.into_iter().filter_map(|i| items[i].take()).collect(),
+        semantic: semantic_ranked,
+    })
 }
 
 /// `memories` as read and search return them: each without its empty
@@ -192,10 +206,11 @@ pub fn search(db: &Path, input: &Search) -> Result<Value> {
         cursor: input.paging.cursor.clone(),
         page_size: Some(input.paging.page_size.unwrap_or(SEARCH_PAGE)),
     };
-    paged(
-        rank(&conn, &filter, &input.topic, SEMANTIC_MATCHES)?,
-        &paging,
-    )
+    let ranked = rank(&conn, &filter, &input.topic, SEMANTIC_MATCHES)?;
+    let mut result = paged(ranked.memories, &paging)?;
+    // Lets an agent tell "nothing found" from "semantic search is off".
+    result["semantic"] = json!(ranked.semantic);
+    Ok(result)
 }
 
 /// The order memories take inside an index group or a category read: project

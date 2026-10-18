@@ -781,6 +781,10 @@ topic as `topic`, or `query`.
   `embedding sync` re-embeds every memory. Vectors from another model or
   length are never mixed. If the endpoint is unusable, search uses keywords
   only and prints one warning.
+- Each result says `"semantic": true` when meaning ranked it beside the
+  keywords, and `false` without a topic, without an endpoint, or when the
+  endpoint failed. A search with no match and `semantic: false` may have
+  missed a memory phrased differently.
 
 ## The index
 

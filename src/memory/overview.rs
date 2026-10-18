@@ -122,6 +122,7 @@ pub fn index(db: &Path, input: &Index) -> Result<String> {
         Vec::new()
     } else {
         rank(&conn, &filter, &input.topic, TOPIC_MATCHES)?
+            .memories
             .into_iter()
             .map(|m| m.id)
             .collect()
