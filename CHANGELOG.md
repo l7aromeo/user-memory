@@ -23,7 +23,6 @@ irm https://github.com/l7aromeo/user-memory/releases/latest/download/install.ps1
   updated tools.
 <!-- VERIFY: whether Codex must approve changed hooks -->
 <!-- VERIFY: behaviour changes that need a note: update keeps the reason and the source -->
-<!-- VERIFY: the next three items match the code on main -->
 - Scripts that read the JSON of `read` and `search`: a memory's empty
   fields are now left out. Empty texts (`reason`, `context`, `evidence`,
   `project` of a global memory), empty lists (`origins`, `evidence_ids`)
@@ -45,7 +44,7 @@ irm https://github.com/l7aromeo/user-memory/releases/latest/download/install.ps1
 
 ### New
 
-<!-- VERIFY: the other new items; the next item matches the code on main -->
+<!-- VERIFY: the other new items -->
 - **Gentler tool calls.** `search` takes `query` for `topic`, and the tools
   take `limit` for `page_size`. Search results say whether they searched
   by meaning (`semantic`). The CLI takes `--projects` for `--project` on
