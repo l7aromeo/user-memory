@@ -109,7 +109,7 @@ pub struct Update {
     #[arg(long, allow_hyphen_values = true)]
     #[serde(default)]
     pub title: Option<String>,
-    /// Corrected content, at most 4,000 characters.
+    /// Corrected content, at most 4,000 characters. When it changes the choice itself, give its reason too ("" for none), or record the new choice with supersedes.
     #[arg(long, allow_hyphen_values = true)]
     #[serde(default)]
     pub content: Option<String>,
@@ -117,7 +117,7 @@ pub struct Update {
     #[arg(long, allow_hyphen_values = true)]
     #[serde(default)]
     pub context: Option<String>,
-    /// Corrected reason, at most 2,000 characters.
+    /// The user's stated reason, at most 2,000 characters; replaces the stored reason, which the update otherwise keeps ("" clears it).
     #[arg(long, allow_hyphen_values = true)]
     #[serde(default)]
     pub reason: Option<String>,
@@ -625,17 +625,15 @@ pub fn update(db: &Path, input: Update) -> Result<Value> {
         tx.commit()?;
         return Ok(json!({"updated":true,"id":input.memory_id,"status":old.status}));
     }
-    let changed_content = input
-        .content
-        .as_ref()
-        .is_some_and(|content| clean(content, usize::MAX) != old.content);
-    let reason = input
-        .reason
-        .unwrap_or(if changed_content || old.source != "explicit" {
-            String::new()
-        } else {
-            old.reason
-        });
+    // The user's stated reason stays through a correction, as the evidence
+    // does, unless the update gives a new one ("" clears it). An observation
+    // or inference carries the agent's explanation instead, which is not the
+    // user's reason once the update makes it their statement.
+    let reason = input.reason.unwrap_or(if old.source == "explicit" {
+        old.reason
+    } else {
+        String::new()
+    });
     let mut next = Record {
         memory_type: input.memory_type.unwrap_or(old.memory_type),
         category: input.category.unwrap_or(old.category),

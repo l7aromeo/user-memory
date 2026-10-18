@@ -134,9 +134,11 @@ Details:
   correction came from, and `replace_origins` with it leaves only that one,
   for a full restatement in a new conversation. A content change still stales
   dependent inferences. It keeps the evidence too, often the user's own
-  words: `evidence` replaces it, and an empty one clears it. The memory
-  becomes the user's confirmed explicit statement, so an inference drops the
-  supporting memories it cited: only inferences cite them.
+  words, and the user's stated reason: `evidence` or `reason` replaces it,
+  and an empty one clears it. The memory becomes the user's confirmed
+  explicit statement, so an inference drops the supporting memories it
+  cited (only inferences cite them), and an observation or inference drops
+  the agent's explanation in `reason`, which the user never stated.
 - Embedding happens before the store is locked, so a cold local model (up to
   about six seconds on first use) delays only that record, never other
   writers. `doctor` says when the configured model has no calibrated cutoff

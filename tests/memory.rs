@@ -529,8 +529,10 @@ fn duplicate_recording_does_not_manufacture_independent_evidence() {
     );
 }
 
+// A correction that changes the choice gives the new choice's reason, or an
+// empty one, since the stored reason is otherwise kept.
 #[test]
-fn changing_content_does_not_reuse_the_previous_choices_reason() {
+fn a_changed_choice_gives_its_own_reason() {
     let s = Store::new();
     let saved = s.value(&[
         "record",
@@ -544,10 +546,15 @@ fn changing_content_does_not_reuse_the_previous_choices_reason() {
         "Performance and safety",
     ]);
     let id = saved["id"].as_str().unwrap().to_string();
-    assert_eq!(
-        s.value(&["update", &id, "--content", "Prefer Python for prototypes"])["updated"],
-        true
-    );
+    let out = s.value(&[
+        "update",
+        &id,
+        "--content",
+        "Prefer Python for prototypes",
+        "--reason",
+        "",
+    ]);
+    assert_eq!(out["updated"], true, "{out}");
     assert_eq!(s.value(&["search", "Python"])[0].get("reason"), None);
 }
 
@@ -2511,6 +2518,33 @@ fn an_update_keeps_the_evidence_until_it_gives_new_evidence() {
     // Empty evidence clears it, and read leaves an empty field out.
     s.value(&["update", &a, "--evidence", ""]);
     assert_eq!(evidence(&s), Value::Null);
+}
+
+// The reason of an explicit memory is the user's stated why, so a correction
+// keeps it, as it keeps the evidence, until the update gives a new one.
+#[test]
+fn an_update_keeps_the_stated_reason_until_it_gives_a_new_one() {
+    let s = Store::new();
+    let a = stored(
+        &s,
+        &[
+            "--type",
+            "preference",
+            "--content",
+            "Ask before evry push",
+            "--reason",
+            "A push deploys production",
+        ],
+    );
+    let reason = |s: &Store| inactive(s, &a)["reason"].clone();
+    let out = s.value(&["update", &a, "--content", "Ask before every push"]);
+    assert_eq!(out["updated"], true, "{out}");
+    assert_eq!(reason(&s), "A push deploys production", "a content fix");
+    s.value(&["update", &a, "--reason", "- pushes deploy production"]);
+    assert_eq!(reason(&s), "- pushes deploy production");
+    // Empty reason clears it, and read leaves an empty field out.
+    s.value(&["update", &a, "--reason", ""]);
+    assert_eq!(reason(&s), Value::Null);
 }
 
 // A confirmed inference is the user's own statement now: it no longer rests
