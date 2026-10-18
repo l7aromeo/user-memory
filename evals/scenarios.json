@@ -225,6 +225,26 @@
    "rehearse": [
     {"cwd": "folder:workspace", "matches": ["^No project:", "project-id --include <folder>"]}
    ]
+  },
+  {
+   "name": "a_project_lesson_is_found_through_search",
+   "summary": "With the hooks off, the answer is a project lesson that no instruction file holds: the agent looks it up in user-memory, by search or index, and applies it.",
+   "repeat": 2,
+   "hooks": false,
+   "cwd": "project:compiler",
+   "seed": [
+    {"id": "fuzz", "args": ["--type", "fact", "--category", "tooling", "--title", "Parser fuzzing builds only on the nightly toolchain", "--content", "Run the parser fuzzer with cargo +nightly fuzz run parser: cargo-fuzz needs nightly, and the stable toolchain this repository pins cannot build it.", "--scope", "project", "--project", "github.com/acme/compiler"]},
+    {"id": "bench", "args": ["--type", "fact", "--category", "tooling", "--title", "Benchmarks run on the dedicated runner only", "--content", "Benchmarks in this repository are compared only from the dedicated benchmark runner; numbers from laptops are not comparable.", "--scope", "project", "--project", "github.com/acme/compiler"]},
+    {"id": "codegen", "args": ["--type", "fact", "--category", "tooling", "--title", "Regenerate the AST types after editing grammar.ron", "--content", "After editing grammar.ron, run scripts/gen-ast to regenerate the AST types before building.", "--scope", "project", "--project", "github.com/acme/compiler"]}
+   ],
+   "sessions": [
+    {"prompt": "What's the command to run the parser fuzzer in this repository? Just tell me; don't run anything."}
+   ],
+   "checks": [
+    {"answer": {"matches": "\\+nightly"}},
+    {"called": {"tools": ["search", "index", "read"]}},
+    {"informational": true, "called": {"tools": ["search"]}}
+   ]
   }
  ]
 }
