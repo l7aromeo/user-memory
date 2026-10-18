@@ -2577,7 +2577,14 @@ fn records_need_a_one_line_title_that_fits() {
     let refused = s.value(&[&base[..], &["--title", &long]].concat());
     assert_eq!(
         refused["reason"],
-        "title has 121 characters; the limit is 120; shorten it"
+        "title has 121 characters; the limit is 120; remove at least 1 character"
+    );
+    // Agents miss by a few characters: the refusal says by how many.
+    let longer = "s".repeat(127);
+    let refused = s.value(&[&base[..], &["--title", &longer]].concat());
+    assert_eq!(
+        refused["reason"],
+        "title has 127 characters; the limit is 120; remove at least 7 characters"
     );
     assert!(s.value(&["search"]).as_array().unwrap().is_empty());
     let fits = "s".repeat(120);
@@ -2946,7 +2953,7 @@ fn labels_titles_and_project_keys_over_their_limits_are_refused() {
         ("--type", 40, "shorten it"),
         ("--category", 80, "shorten it"),
         ("--project", 240, rename),
-        ("--title", 120, "shorten it"),
+        ("--title", 120, "remove at least 1 character"),
     ] {
         let over = "w".repeat(limit + 1);
         let refused = record(field, &over, "Ask first");

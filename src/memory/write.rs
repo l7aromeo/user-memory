@@ -247,7 +247,15 @@ fn title_problem(title: &str) -> Option<String> {
                 .into(),
         );
     }
-    too_long("title", title, TITLE_LIMIT, SHORTEN)
+    // Agents often miss by a few characters, so the refusal says by how many.
+    let over = title.chars().count().saturating_sub(TITLE_LIMIT);
+    let unit = if over == 1 { "character" } else { "characters" };
+    too_long(
+        "title",
+        title,
+        TITLE_LIMIT,
+        &format!("remove at least {over} {unit}"),
+    )
 }
 
 /// Refusal for a field over its limit, naming the field, its length, the
