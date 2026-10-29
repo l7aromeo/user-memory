@@ -337,5 +337,86 @@ class CodexStart(unittest.TestCase):
         self.assertEqual((seen["env"], seen["cwd"]), (sandbox.env, home))
 
 
+class TrialPruning(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp()).resolve()
+
+    def batch(self, name):
+        folder = self.root / name
+        (folder / "trial-claude-x/home").mkdir(parents=True)
+        (folder / "trial-claude-x/home/store").write_text("memories")
+        return folder
+
+    def names(self):
+        return sorted(p.name for p in self.root.iterdir())
+
+    def test_a_new_batch_keeps_only_the_newest_ones(self):
+        for name in ["20261017-141725", "20261017-152039", "20261019-060406"]:
+            self.batch(name)
+        original = run.TRIALS
+        run.TRIALS = self.root
+        try:
+            trials = run.start_trials("20261029-120000", keep=2)
+        finally:
+            run.TRIALS = original
+        self.assertEqual(trials, self.root / "20261029-120000")
+        self.assertEqual(self.names(), ["20261019-060406", "20261029-120000"])
+        self.assertEqual(trials.stat().st_mode & 0o777, 0o700)
+
+    def test_fewer_batches_than_kept_are_left_alone(self):
+        for name in ["20261017-141725", "20261019-060406"]:
+            self.batch(name)
+        self.assertEqual(run.prune_trials(self.root, keep=2), [])
+        self.assertEqual(self.names(), ["20261017-141725", "20261019-060406"])
+
+    def test_only_the_harnesss_own_batch_folders_are_removed(self):
+        for name in ["20261017-141725", "20261019-060406"]:
+            self.batch(name)
+        outside = Path(tempfile.mkdtemp()).resolve()
+        (outside / "keep.txt").write_text("not the harness's")
+        (self.root / "20261001-000000").symlink_to(outside)
+        (self.root / "20261002-000000.log").write_text("a file")
+        (self.root / "20261003-000000").write_text("a file named like a batch")
+        (self.root / "notes").mkdir()
+        removed = run.prune_trials(self.root, keep=1)
+        self.assertEqual(removed, ["20261017-141725"])
+        self.assertEqual(self.names(), ["20261001-000000", "20261002-000000.log", "20261003-000000",
+                                        "20261019-060406", "notes"])
+        self.assertTrue((outside / "keep.txt").exists())
+
+    def test_read_only_files_and_folders_in_a_batch_are_removed(self):
+        old = self.batch("20261017-141725")
+        self.batch("20261019-060406")
+        objects = old / "trial-claude-x/project/.git/objects/ab"
+        objects.mkdir(parents=True)
+        (objects / "cdef").write_text("object")
+        (objects / "cdef").chmod(0o444)
+        objects.chmod(0o555)
+        locked = old / "trial-claude-x/home/locked"
+        (locked / "inside").mkdir(parents=True)
+        locked.chmod(0o000)
+        (old / "README").write_text("a file at the top")
+        old.chmod(0o500)
+        self.assertEqual(run.prune_trials(self.root, keep=1), ["20261017-141725"])
+        self.assertEqual(self.names(), ["20261019-060406"])
+
+    def test_a_link_out_of_a_batch_leaves_its_target_as_it_was(self):
+        old = self.batch("20261017-141725")
+        self.batch("20261019-060406")
+        outside = Path(tempfile.mkdtemp()).resolve()
+        outside.chmod(0o755)
+        (old / "trial-claude-x/home/link").symlink_to(outside)
+        run.prune_trials(self.root, keep=1)
+        self.assertEqual(self.names(), ["20261019-060406"])
+        self.assertEqual(outside.stat().st_mode & 0o777, 0o755)
+
+    def test_the_kept_count_comes_from_the_environment(self):
+        self.assertEqual(run.kept_batches({}), run.KEPT_BATCHES)
+        self.assertEqual(run.kept_batches({"USER_MEMORY_EVAL_KEEP_TRIALS": "7"}), 7)
+        for bad in ["0", "-1", "all", ""]:
+            with self.assertRaises(SystemExit, msg=bad):
+                run.kept_batches({"USER_MEMORY_EVAL_KEEP_TRIALS": bad})
+
+
 if __name__ == "__main__":
     unittest.main()

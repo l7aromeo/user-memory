@@ -31,7 +31,11 @@ binaries, projects) go to `$USER_MEMORY_EVAL_TRIALS` (default
 `~/Library/Caches/user-memory-eval/trials`), one 0700 folder per batch:
 outside `/tmp`, `TMPDIR` and the repository, which the harness refuses,
 because Codex's workspace sandbox may write anywhere in `/tmp` and `TMPDIR`
-and could otherwise plant a program a trial later runs outside it.
+and could otherwise plant a program a trial later runs outside it. A batch
+holds whole homes, binaries and projects, so each new batch keeps only the
+newest 3 batch folders there, itself included, and removes the older ones;
+`USER_MEMORY_EVAL_KEEP_TRIALS=N` keeps N. Only folders named like a batch
+(`YYYYMMDD-HHMMSS`) are removed; anything else there stays.
 `--binary` chooses the binary under test (default
 `target/debug/user-memory`).
 
@@ -39,10 +43,13 @@ and could otherwise plant a program a trial later runs outside it.
 
 1. Build the binary under test from a clean export with its own target
    directory, so no stale build is tested, outside `/tmp` for the same
-   reason as the trials, and pass it with `--binary`:
+   reason as the trials, and pass it with `--binary`. Reuse the one `build`
+   folder for every commit: the export is replaced, so no file deleted
+   since an earlier commit is built, and the target folder rebuilds only
+   what changed:
 
        B=~/Library/Caches/user-memory-eval/build
-       mkdir -p $B/export && git archive <commit> | tar -x -C $B/export
+       rm -rf $B/export && mkdir -p $B/export && git archive <commit> | tar -x -C $B/export
        (cd $B/export && CARGO_TARGET_DIR=$B/target cargo build --locked)
 
 2. Create the two eval logins (below) if they are missing; `--dry-run` says.

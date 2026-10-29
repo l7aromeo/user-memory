@@ -69,6 +69,14 @@ CODEX_REQUEST_TIMEOUT = 60
 # it. OUT holds only reports.
 TRIALS = Path(os.environ.get("USER_MEMORY_EVAL_TRIALS",
                              HOME / "Library/Caches/user-memory-eval/trials"))
+# Trial batches kept in TRIALS, the new one included: each holds whole homes,
+# binaries and projects (about 0.7 GB), so old ones are removed when a batch
+# starts. Enough to inspect the last few batches; USER_MEMORY_EVAL_KEEP_TRIALS
+# keeps more.
+KEPT_BATCHES = 3
+# A batch folder's name, the time it started, as main() names it; nothing
+# else in TRIALS is ever removed.
+BATCH_NAME = re.compile(r"\d{8}-\d{6}")
 # The system git, never one found first on a trial's PATH.
 GIT = "/usr/bin/git"
 
@@ -112,6 +120,47 @@ REAL_SESSIONS = HOME / ".local/state/user-memory/sessions"
 # Claude Code keeps a folder per working directory here, named after its
 # path; one named after a trial would mean a session used the real config.
 REAL_CLAUDE_PROJECTS = HOME / ".claude/projects"
+
+
+def kept_batches(environ):
+    """How many trial batches to keep: USER_MEMORY_EVAL_KEEP_TRIALS, or KEPT_BATCHES."""
+    value = environ.get("USER_MEMORY_EVAL_KEEP_TRIALS")
+    if value is None:
+        return KEPT_BATCHES
+    if not value.isdigit() or int(value) < 1:
+        sys.exit(f"USER_MEMORY_EVAL_KEEP_TRIALS must be a whole number of at least 1, not {value!r}")
+    return int(value)
+
+
+def prune_trials(root, keep):
+    """Removes all but the newest `keep` batch folders in `root`; returns their names.
+
+    Only real folders named like a batch go: a symlink, a file or any other
+    name is left alone. A trial may leave read-only or unreadable folders
+    (git objects, a tool's cache), so every folder in a batch is opened up
+    first; symlinks are never followed."""
+    batches = sorted(p.name for p in root.iterdir()
+                     if BATCH_NAME.fullmatch(p.name) and p.is_dir() and not p.is_symlink())
+    old = batches[:-keep]
+    for name in old:
+        top = root / name
+        top.chmod(0o700)
+        for folder, children, _files in os.walk(top):
+            for child in children:
+                path = os.path.join(folder, child)
+                if not os.path.islink(path):
+                    os.chmod(path, 0o700)
+        shutil.rmtree(top)
+    return old
+
+
+def start_trials(name, keep):
+    """Creates the batch folder `name` in TRIALS, 0700, and prunes older batches."""
+    trials = TRIALS / name
+    trials.mkdir(parents=True, mode=0o700)
+    TRIALS.chmod(0o700)
+    prune_trials(TRIALS, keep)
+    return trials
 
 
 def trial_projects():
@@ -1342,11 +1391,10 @@ def main():
         print(f"  plus: no snapshot under {REAL_SESSIONS} named after a trial session")
         print(f"  plus: no new folder under {REAL_CLAUDE_PROJECTS} named after a trial path")
         return
+    keep = kept_batches(os.environ)
     batch = OUT / time.strftime("%Y%m%d-%H%M%S")
     batch.mkdir(parents=True)
-    trials = TRIALS / batch.name
-    trials.mkdir(parents=True, mode=0o700)
-    TRIALS.chmod(0o700)
+    trials = start_trials(batch.name, keep)
     with open(batch / "guard.log", "w") as log:
         guard = Guard(log)
         guard.check("baseline re-read")
