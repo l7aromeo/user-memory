@@ -293,7 +293,7 @@ What each one keeps away from your own files:
 | Without | A build run by hand |
 |---|---|
 | `USER_MEMORY_DB` | Opens the default store, `~/.local/share/user-memory/memories.sqlite3`: your real store on a native install, or a new one there when you use a server. It never reads the installed setup, which sits beside the installed binary, so it does not use your server either. |
-| `HOME` and `XDG_STATE_HOME` | `session-start` and `prompt-submit` save snapshots in your `~/.local/state/user-memory/sessions/`, even with `USER_MEMORY_DB` set. |
+| `HOME` and `XDG_STATE_HOME` | `session-start` and `prompt-submit` save snapshots in your `~/.local/state/user-memory/sessions/`, even with `USER_MEMORY_DB` set. Each is named by the store it saw, so it never replaces your sessions' snapshots, but it stays there until the 30-day clean-up. |
 | `HOME`, `CLAUDE_CONFIG_DIR` and `CODEX_HOME` | `setup` and `uninstall` change your clients' settings, hooks, instruction files and skill, and install or remove the binary and its saved setup in `~/.local/bin`. |
 | `HOME` and `GIT_CONFIG_GLOBAL` | `setup` and `project-id --set` or `--include` add lines to the global git ignore your git configuration names. |
 | `USER_MEMORY_NO_UPDATE_CHECK=1` | `doctor` asks GitHub for the newest release. |
@@ -301,7 +301,7 @@ What each one keeps away from your own files:
 With `USER_MEMORY_DB` set and nothing else, a dev build leaves your store,
 your instruction files and your setup alone: it has no saved setup of its
 own, so it syncs no instruction file. Only the session snapshots above land
-in your home. Two more files are the build's own: automatic backups go in a
+in your home, under names of the build's store. Two more files are the build's own: automatic backups go in a
 `backups` folder beside the throwaway store, and `embedding set` or
 `embedding off` saves its choice in `target/debug/.user-memory.json`, which
 later runs of that build read. Embeddings stay off unless you set
