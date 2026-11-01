@@ -249,6 +249,125 @@ the container, image, network and project folder go, and the volume with
 the memories only when the user confirms deleting them, after an export
 unless they decline it.
 
+## Work without touching your memories
+
+The tests, the evals and `just retrieval-bench` each build a throwaway store
+and home. A build you run by hand does not: it finds its store, settings and
+state from your environment, so it works on your own memories unless you
+point it elsewhere.
+
+### Run a checkout build against a throwaway store
+
+Build first, with your own home, so cargo finds its toolchain, and make a
+folder only you can read for the throwaway store and home:
+
+```bash
+cargo build
+```
+
+```bash
+dev=$(mktemp -d)
+```
+
+Then run the binary in a subshell whose store, home and clients' folders
+all point into that folder, so nothing leaks into your shell:
+
+```bash
+(
+  export HOME="$dev" XDG_DATA_HOME="$dev/.local/share" XDG_STATE_HOME="$dev/.local/state" XDG_CONFIG_HOME="$dev/.config"
+  export CLAUDE_CONFIG_DIR="$dev/.claude" CODEX_HOME="$dev/.codex" GIT_CONFIG_GLOBAL="$dev/.gitconfig"
+  export USER_MEMORY_DB="$dev/memories.sqlite3" USER_MEMORY_NO_UPDATE_CHECK=1
+  unset USER_MEMORY_URL USER_MEMORY_TOKEN_FILE USER_MEMORY_DOCKER_NAME
+  ./target/debug/user-memory index
+  echo "throwaway store in $dev"
+)
+```
+
+These are the variables the binary reads to find files, the same ones the
+tests' sandbox sets (`tests/support/sandbox.rs`). On Windows, set
+`USERPROFILE`, `LOCALAPPDATA` and `APPDATA` in place of `HOME` and the XDG
+folders.
+
+What each one keeps away from your own files:
+
+| Without | A build run by hand |
+|---|---|
+| `USER_MEMORY_DB` | Opens the default store, `~/.local/share/user-memory/memories.sqlite3`: your real store on a native install, or a new one there when you use a server. It never reads the installed setup, which sits beside the installed binary, so it does not use your server either. |
+| `HOME` and `XDG_STATE_HOME` | `session-start` and `prompt-submit` save snapshots in your `~/.local/state/user-memory/sessions/`, even with `USER_MEMORY_DB` set. |
+| `HOME`, `CLAUDE_CONFIG_DIR` and `CODEX_HOME` | `setup` and `uninstall` change your clients' settings, hooks, instruction files and skill, and install or remove the binary and its saved setup in `~/.local/bin`. |
+| `HOME` and `GIT_CONFIG_GLOBAL` | `setup` and `project-id --set` or `--include` add lines to the global git ignore your git configuration names. |
+| `USER_MEMORY_NO_UPDATE_CHECK=1` | `doctor` asks GitHub for the newest release. |
+
+With `USER_MEMORY_DB` set and nothing else, a dev build leaves your store,
+your instruction files and your setup alone: it has no saved setup of its
+own, so it syncs no instruction file. Only the session snapshots above land
+in your home. Two more files are the build's own: automatic backups go in a
+`backups` folder beside the throwaway store, and `embedding set` or
+`embedding off` saves its choice in `target/debug/.user-memory.json`, which
+later runs of that build read. Embeddings stay off unless you set
+`USER_MEMORY_EMBED_URL` ([configuration](../configuration.md#environment)).
+
+### Measure on a copy of your store
+
+To try a change on real data, work on a private copy, never on the live
+store. Reading the live store changes it too: with semantic search on, a
+search saves vectors for the memories that lack one, and a session start
+saves a snapshot. Keep the copy in a folder only you can read (`mktemp -d`
+makes one), outside any repository, and delete it when you are done.
+
+For a native store, the newest [automatic backup](../backup.md#automatic-backups)
+is already a whole, consistent copy, and copying it touches nothing:
+
+```bash
+cp ~/.local/share/user-memory/backups/memories-<date>.sqlite3 "$dev/memories.sqlite3"
+```
+
+For an up-to-the-minute copy, SQLite's own backup reads the store with its
+write-ahead log, while your agents keep using it:
+
+```bash
+sqlite3 ~/.local/share/user-memory/memories.sqlite3 ".backup '$dev/memories.sqlite3'"
+```
+
+Never copy `memories.sqlite3` alone while it is in use: recent writes sit in
+`memories.sqlite3-wal` beside it, so a copy without them is out of date, or
+caught in the middle of a write.
+
+For the installer's Docker server, copy its newest automatic backup out of
+the volume, or export through the container:
+
+```bash
+docker compose -f ~/.local/share/user-memory/docker/compose.yaml cp memory:/data/backups/memories-<date>.sqlite3 "$dev/memories.sqlite3"
+```
+
+```bash
+(umask 077; docker compose -f ~/.local/share/user-memory/docker/compose.yaml exec -T memory user-memory export - > "$dev/memories.json")
+```
+
+An export imports into the throwaway store with
+`./target/debug/user-memory import "$dev/memories.json" --apply`, run in a
+subshell set up as above. It leaves out conversation links and vectors, so a
+measurement that needs them uses a store copy. `user-memory export` works the
+same way from any machine connected to your server.
+
+Whatever you measure, what you write down holds only synthetic memories,
+ids and numbers: fixtures, benchmarks, test data, issues and pull requests
+never quote a real memory or its wording. The retrieval benchmark's
+`evals/retrieval/memories.json` shows the kind of synthetic memory to use.
+
+### Clean up
+
+Delete the throwaway folder, which holds the store, its backups, any copy
+and the session snapshots of the build:
+
+```bash
+rm -rf "$dev"
+```
+
+If you ran `embedding set` with the dev build, also delete
+`target/debug/.user-memory.json`, so the next run starts with no saved
+setting.
+
 ## Changing the stored schema
 
 Every change to the stored schema (tables, triggers, search-index SQL) bumps

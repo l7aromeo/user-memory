@@ -33,6 +33,18 @@ to them rather than repeating them. Propose changes to it in an issue.
   a tested forward migration from the previous version, which setup runs
   after an automatic backup. Never drop or rewrite stored memories to make a
   change simpler.
+- Your own memories are real data too. A build you run by hand gets its own
+  store and home: `USER_MEMORY_DB`, `HOME` and the XDG folders, as
+  [development](docs/dev/development.md#run-a-checkout-build-against-a-throwaway-store)
+  shows. Without them it opens your real store, and `session-start` and
+  `prompt-submit` write into your state folder.
+- Measure on real data only on a private copy of the store, never the live
+  one, and delete the copy afterwards
+  ([measure on a copy](docs/dev/development.md#measure-on-a-copy-of-your-store)).
+  Reading the live store changes it too: with semantic search on, a search
+  saves vectors for memories that lack one.
+- Fixtures, benchmarks, test data and reports hold synthetic memories, ids
+  and numbers, never real memories or their wording.
 
 ## Code
 
