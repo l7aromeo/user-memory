@@ -283,46 +283,73 @@ pub(in crate::memory) fn ready(conn: &Connection) -> Result<bool> {
     Ok(!pending(conn)?)
 }
 
-/// What ranking needs of a candidate, without its text.
-#[derive(Debug)]
-pub(in crate::memory) struct Entry {
-    pub(in crate::memory) id: Uuid,
-    /// A project memory.
-    pub(in crate::memory) local: bool,
-    pub(in crate::memory) updated_at: String,
+/// What ranking needs of the memories a search covers, without their text,
+/// as arrays one search fills and the next reuses. Buffers the size of the
+/// store, allocated by each search and freed at its end, are kept resident
+/// by the allocator for reuse: a keyword-only server on 100,000 memories
+/// grew to 350 MB that way while holding 1 MB of live data.
+#[derive(Debug, Default)]
+pub(in crate::memory) struct Candidates {
+    pub(in crate::memory) ids: Vec<Uuid>,
+    /// Whether each is a project memory.
+    pub(in crate::memory) local: Vec<bool>,
     /// Orders memories stored at the same time: later stored, higher. The
     /// rowid when read from `memories`, the key when read from the index,
     /// which keys memories in the order they were stored.
-    pub(in crate::memory) order: i64,
+    pub(in crate::memory) orders: Vec<i64>,
+    /// Every memory's `updated_at`, one after another, so none needs a
+    /// string of its own.
+    stamps: Vec<u8>,
+    /// Where each memory's `updated_at` ends in `stamps`.
+    stamp_ends: Vec<usize>,
 }
 
-fn entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<Entry> {
-    let id: String = r.get(0)?;
-    Ok(Entry {
-        id: Uuid::parse_str(&id).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
-        })?,
-        local: r.get::<_, String>(1)? == "project",
-        updated_at: r.get(2)?,
-        order: r.get(3)?,
-    })
+impl Candidates {
+    pub(in crate::memory) fn clear(&mut self) {
+        self.ids.clear();
+        self.local.clear();
+        self.orders.clear();
+        self.stamps.clear();
+        self.stamp_ends.clear();
+    }
+
+    pub(in crate::memory) fn push(&mut self, id: Uuid, local: bool, updated_at: &str, order: i64) {
+        self.ids.push(id);
+        self.local.push(local);
+        self.orders.push(order);
+        self.stamps.extend_from_slice(updated_at.as_bytes());
+        self.stamp_ends.push(self.stamps.len());
+    }
+
+    pub(in crate::memory) fn len(&self) -> usize {
+        self.ids.len()
+    }
+
+    /// When memory `i` was last changed, then when it was stored: of two,
+    /// the greater is the more recent. Bytes compare as the text does.
+    pub(in crate::memory) fn recency(&self, i: usize) -> (&[u8], i64) {
+        let start = if i == 0 { 0 } else { self.stamp_ends[i - 1] };
+        (&self.stamps[start..self.stamp_ends[i]], self.orders[i])
+    }
+
+    /// The memory with key `key`, when it is covered and the candidates
+    /// were read from the index, which reads them in key order.
+    fn at_key(&self, key: i64) -> Option<usize> {
+        self.orders.binary_search(&key).ok()
+    }
 }
 
-/// For each of `covered`, the memories a filter covers, the strongest field
-/// holding each of the stemmed `query` terms, in query order, or `None`
-/// when it holds none; read from a [`ready`] index. The index gives only
-/// the keys holding each term, so a word most memories hold costs one
-/// lookup per memory.
+/// For each memory of `covered`, read from a [`ready`] index, and each of
+/// the stemmed `query` terms it holds, calls `held(memory, term, field)`
+/// with the strongest field holding the term. The index gives only the
+/// keys holding each term, so a word most memories hold costs one lookup
+/// per memory.
 pub(in crate::memory) fn hits(
     conn: &Connection,
-    covered: &[Entry],
+    covered: &Candidates,
     query: &[String],
-) -> Result<Vec<Option<Vec<Option<Field>>>>> {
-    let mut slots: HashMap<i64, usize> = HashMap::with_capacity(covered.len());
-    for (i, entry) in covered.iter().enumerate() {
-        slots.insert(entry.order, i);
-    }
-    let mut held: Vec<Option<Vec<Option<Field>>>> = vec![None; covered.len()];
+    mut held: impl FnMut(usize, usize, Field),
+) -> Result<()> {
     let mut matching =
         conn.prepare_cached("SELECT rowid FROM search_words WHERE search_words MATCH ?1")?;
     for (t, term) in query.iter().enumerate() {
@@ -331,24 +358,39 @@ pub(in crate::memory) fn hits(
         for field in Field::ALL {
             let mut rows = matching.query([format!("{} : \"{token}\"", field.column())])?;
             while let Some(r) = rows.next()? {
-                if let Some(&i) = slots.get(&r.get::<_, i64>(0)?) {
-                    held[i].get_or_insert_with(|| vec![None; query.len()])[t] = Some(field);
+                if let Some(i) = covered.at_key(r.get(0)?) {
+                    held(i, t, field);
                 }
             }
         }
     }
-    Ok(held)
+    Ok(())
 }
 
-/// Every memory `filter` covers, without its text, from a ready index.
-pub(in crate::memory) fn entries(conn: &Connection, filter: &Filter) -> Result<Vec<Entry>> {
+/// Reads every memory `filter` covers into `into`, without its text, in
+/// key order, from a ready index.
+pub(in crate::memory) fn covered(
+    conn: &Connection,
+    filter: &Filter,
+    into: &mut Candidates,
+) -> Result<()> {
+    into.clear();
     let (condition, values) = condition(filter)?;
-    Ok(conn
-        .prepare(&format!(
-            "SELECT id,scope,updated_at,key FROM search_keys AS memories WHERE {condition}"
-        ))?
-        .query_map(params_from_iter(values), entry)?
-        .collect::<rusqlite::Result<Vec<_>>>()?)
+    // Keys are the rowids of `search_keys`: SQLite reads them in this order
+    // without sorting.
+    let mut statement = conn.prepare(&format!(
+        "SELECT id,scope,updated_at,key FROM search_keys AS memories WHERE {condition} ORDER BY key"
+    ))?;
+    let mut rows = statement.query(params_from_iter(values))?;
+    while let Some(r) = rows.next()? {
+        into.push(
+            Uuid::parse_str(r.get_ref(0)?.as_str()?)?,
+            r.get_ref(1)?.as_str()? == "project",
+            r.get_ref(2)?.as_str()?,
+            r.get(3)?,
+        );
+    }
+    Ok(())
 }
 
 /// What is wrong with a current keyword index: memories without a key,
@@ -487,25 +529,29 @@ fn embed_missing(conn: &Connection, config: &embed::Config, items: &[Memory]) ->
 }
 
 /// For each candidate, in order, the cosine similarity between `query` and
-/// its current vector, if it has one, after embedding up to
-/// [`RECALL_EMBED_BUDGET`] candidates that lack one, newest first.
+/// its current vector, if it has one, written into `similar`, after
+/// embedding up to [`RECALL_EMBED_BUDGET`] candidates that lack one, newest
+/// first.
 pub(super) fn similarities(
     conn: &Connection,
     config: &embed::Config,
     query: &str,
-    candidates: &[Entry],
-) -> Result<Vec<Option<f32>>> {
+    candidates: &Candidates,
+    similar: &mut Vec<Option<f32>>,
+) -> Result<()> {
     let query = config.embed(&[config.query(query)])?.remove(0);
     let mut guard = vectors::Held::current(conn, config.identity())?;
     let held = guard.as_mut().expect("Held::current always holds vectors");
-    let mut missing: Vec<&Entry> = candidates
-        .iter()
-        .filter(|e| held.length(e.id).is_none())
+    let mut missing: Vec<usize> = (0..candidates.len())
+        .filter(|&i| held.length(candidates.ids[i]).is_none())
         .collect();
-    missing.sort_by_key(|e| std::cmp::Reverse(e.order));
+    missing.sort_by_key(|&i| std::cmp::Reverse(candidates.orders[i]));
     missing.truncate(RECALL_EMBED_BUDGET);
     if !missing.is_empty() {
-        let ids: Vec<String> = missing.iter().map(|e| e.id.to_string()).collect();
+        let ids: Vec<String> = missing
+            .iter()
+            .map(|&i| candidates.ids[i].to_string())
+            .collect();
         let mut texts: HashMap<Uuid, String> = conn
             .prepare(&format!(
                 "{SELECT} WHERE id IN (SELECT value FROM json_each(?1))"
@@ -516,22 +562,27 @@ pub(super) fn similarities(
         // A memory forgotten since the search began has no text to embed.
         let todo: Vec<(Uuid, String)> = missing
             .iter()
-            .filter_map(|e| texts.remove(&e.id).map(|text| (e.id, text)))
+            .filter_map(|&i| {
+                let id = candidates.ids[i];
+                texts.remove(&id).map(|text| (id, text))
+            })
             .collect();
         for ((id, _), vector) in todo.iter().zip(embed_and_save(conn, config, &todo)?) {
             held.insert(*id, &vector);
         }
     }
     let pending = candidates
+        .ids
         .iter()
-        .filter(|e| held.length(e.id).is_none())
+        .filter(|id| held.length(**id).is_none())
         .count();
     if pending > 0 {
         embed::pending(pending);
     }
     if let Some(length) = candidates
+        .ids
         .iter()
-        .filter_map(|e| held.length(e.id))
+        .filter_map(|id| held.length(*id))
         .find(|&length| length != query.len())
     {
         bail!(
@@ -539,8 +590,8 @@ pub(super) fn similarities(
             query.len()
         );
     }
-    let ids: Vec<Uuid> = candidates.iter().map(|e| e.id).collect();
-    Ok(held.cosines(&query, &ids))
+    held.cosines(&query, &candidates.ids, similar);
+    Ok(())
 }
 
 /// Rebuilds the keyword index from the stored memories and, when semantic
@@ -699,11 +750,10 @@ mod held_tests {
             .unwrap()
             .map(|id| Uuid::parse_str(&id.unwrap()).unwrap())
             .collect();
-        let guard = Held::current(conn, model).unwrap();
-        guard
-            .as_ref()
-            .unwrap()
-            .cosines(query, &ids)
+        let mut guard = Held::current(conn, model).unwrap();
+        let mut found = Vec::new();
+        guard.as_mut().unwrap().cosines(query, &ids, &mut found);
+        found
             .into_iter()
             .zip(&ids)
             .filter_map(|(cosine, id)| cosine.map(|cosine| (*id, cosine.to_bits())))
@@ -885,11 +935,12 @@ mod held_tests {
             &current_source(&conn, b),
             &rng.vector(LENGTH + 1),
         );
-        let guard = Held::current(&conn, MODEL).unwrap();
-        let held = guard.as_ref().unwrap();
+        let mut guard = Held::current(&conn, MODEL).unwrap();
+        let held = guard.as_mut().unwrap();
         assert_eq!(held.length(a), Some(LENGTH));
         assert_eq!(held.length(b), Some(LENGTH + 1));
-        let found = held.cosines(&rng.vector(LENGTH), &[a, b]);
+        let mut found = Vec::new();
+        held.cosines(&rng.vector(LENGTH), &[a, b], &mut found);
         assert!(found[0].is_some() && found[1].is_none());
     }
 }
