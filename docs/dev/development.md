@@ -106,6 +106,33 @@ source out.
   USER_MEMORY_TEST_DOCKER_BINARY=/tmp/user-memory-linux/user-memory-aarch64-unknown-linux-gnu cargo test --test install a_real_docker_server
   ```
 
+### macOS: a fresh program killed under load
+
+Under heavy load, a test can fail now and then because a program started
+from a path macOS has not seen before is killed with SIGKILL before it runs
+a line: the rebuilt `target/debug/user-memory`, so setup fails with empty
+output, or a test's freshly linked fake client, so setup reports `ended with
+signal: 9 (SIGKILL)`. AppleSystemPolicy, the Gatekeeper check on a new
+executable, waits for its policy daemon; when that wait is interrupted it
+refuses the program. The kernel log shows, at the failure:
+
+```text
+ASP: Sleep interrupted: ref N, signal 0x100, pid: P
+ASP: Security policy would not allow process: P, <path>
+```
+
+To confirm one, keep this running while the tests run, and read the lines
+around the failure. Use the full path: in zsh, `log` is a builtin.
+
+```bash
+/usr/bin/log stream --style compact --predicate 'process == "kernel" OR process == "amfid" OR eventMessage CONTAINS "memorystatus"'
+```
+
+AMFI's `code signature validation failed` lines are noise: every locally
+built program gets them, passing or not. The tests do not retry: a retry
+would hide real failures of setup and the clients it runs, and the next run
+passes.
+
 ### Windows
 
 The `windows` workflow runs `just check` on Windows x64 (`windows-latest`) and
