@@ -514,7 +514,7 @@ fn project_filters_accept_any_spelling_of_the_same_repository() {
 }
 
 #[test]
-fn project_memories_come_first_with_and_without_a_topic() {
+fn project_memories_win_an_equal_match_but_not_a_clearly_stronger_one() {
     let s = Store::new();
     s.stored(&[
         "--category",
@@ -538,11 +538,18 @@ fn project_memories_come_first_with_and_without_a_topic() {
         "--content",
         "Prefer Rust for tools",
     ]);
-    // The global memories match "rust" more strongly (category alias) and are newer.
+    // An equal match goes to the project memory, though a global one is newer.
     assert_eq!(
-        s.contents(&[], &["programming rust", "--project", "lab"])[0],
+        s.contents(&[], &["rust", "--project", "lab"])[0],
         "Rust nightly is pinned here"
     );
+    // A clearly stronger global match wins: "programming" names the global
+    // memories' category too.
+    assert_eq!(
+        s.contents(&[], &["programming rust", "--project", "lab"])[0],
+        "Prefer Rust for tools"
+    );
+    // Without a topic, project memories come first, then the newest.
     assert_eq!(
         s.contents(&[], &["--project", "lab"]),
         [
@@ -1526,4 +1533,66 @@ fn a_search_says_whether_meaning_ranked_it() {
     assert_eq!(semantic(&[], &["language"]), false, "no endpoint");
     let down = [("USER_MEMORY_EMBED_URL", "http://127.0.0.1:9/v1")];
     assert_eq!(semantic(&down, &["language"]), false, "endpoint down");
+}
+
+/// The memories nearest a topic by meaning are listed only when they are
+/// near the best match, relative to how far apart this topic's matches lie,
+/// not merely because they are among the 20 nearest.
+#[test]
+fn semantic_matches_far_below_the_best_are_not_listed() {
+    let s = Store::new();
+    let fake = Embedder::start(200);
+    let env = [("USER_MEMORY_EMBED_URL", fake.url.as_str())];
+    for (category, content) in [
+        ("tools", "Use Rust for every CLI"),
+        ("tools", "Use Helix as the text editor"),
+        ("food", "Vegetarian recipes only"),
+    ] {
+        s.stored(&["--category", category, "--content", content]);
+    }
+    // No memory shares a word with the topic; only meaning relates them.
+    assert_eq!(
+        s.contents(&env, &["compiler", "--page-size", "20"]),
+        ["Use Rust for every CLI"]
+    );
+    // One partly related memory sits well within the band; the rest stay out,
+    // one that touches the topic only a little among them.
+    s.stored(&[
+        "--category",
+        "tools",
+        "--content",
+        "Rust and Helix together",
+    ]);
+    s.stored(&[
+        "--category",
+        "food",
+        "--content",
+        "Dinner recipes on Sundays",
+    ]);
+    s.stored(&["--category", "tools", "--content", "Typing drills daily"]);
+    s.stored(&[
+        "--category",
+        "misc",
+        "--content",
+        "Helix editor typing, vegetarian recipes, dinner and Rust",
+    ]);
+    assert_eq!(
+        s.contents(&env, &["compiler", "--page-size", "20"]),
+        ["Use Rust for every CLI", "Rust and Helix together"]
+    );
+}
+
+/// Memories equally near a topic all match: none is far below the best.
+#[test]
+fn equally_similar_memories_all_match() {
+    let s = Store::new();
+    let fake = Embedder::start(200);
+    let env = [("USER_MEMORY_EMBED_URL", fake.url.as_str())];
+    for content in ["Rust first", "Rust always", "Rust everywhere"] {
+        s.stored(&["--category", "tools", "--content", content]);
+    }
+    assert_eq!(
+        s.contents(&env, &["compiler", "--page-size", "20"]).len(),
+        3
+    );
 }

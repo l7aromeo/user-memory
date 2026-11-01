@@ -3,8 +3,9 @@
 //! Search considers every memory the selection covers (by default the active
 //! global memories and the requested projects'). Keyword relevance weighs
 //! category over type over text; with an embedding endpoint configured it is
-//! fused with semantic similarity by reciprocal rank. Within the matches,
-//! project memories come before global ones.
+//! fused with semantic similarity by reciprocal rank. A project memory's
+//! fused score counts [`PROJECT_BONUS`] more, so it wins an equal match but
+//! not a clearly stronger one; without a topic, project memories come first.
 
 pub(super) use super::ids::SHORT_ID;
 use super::{
@@ -25,12 +26,37 @@ use serde_json::{Value, json};
 use std::{collections::BTreeSet, path::Path};
 use uuid::Uuid;
 
-/// Smoothing constant of reciprocal rank fusion; 60 is the customary value.
-const FUSION: f64 = 60.0;
+/// Smoothing constant of reciprocal rank fusion. The customary 60 suits lists
+/// of thousands; a store's matches number tens, and 60 flattens their fused
+/// scores until order barely depends on rank. On the retrieval benchmark
+/// (evals/retrieval, qwen3-embedding:4b) fused MRR falls smoothly with it:
+/// 0.80 at 5, 0.76 at 10, 0.71 at 20, and on a real store of 55 memories
+/// 0.80, 0.78, 0.75. Below 5, project memories start losing equal matches.
+const FUSION: f64 = 5.0;
 
-/// Memories a topic matches by meaning alone, on top of every keyword match:
-/// beyond the closest few, similarity rarely means relevance.
+/// How much more a project memory's fused score counts than a global one's:
+/// enough that a project lesson beats a global rule matching as well, not
+/// one matching clearly better. With [`FUSION`] at 5 it is worth about one
+/// rank place in both rankings. On the retrieval benchmark 0.3 keeps every
+/// project lesson that ties a global rule first, with qwen3-embedding,
+/// nomic-embed-text and embeddinggemma alike; 0.2 loses one of the ten on
+/// two of them, and 0.4 lowers fused MRR by 0.02 to 0.03.
+const PROJECT_BONUS: f64 = 0.3;
+
+/// Memories a topic may match by meaning alone, on top of every keyword
+/// match: beyond the closest few, similarity rarely means relevance.
 const SEMANTIC_MATCHES: usize = 20;
+
+/// How far below the best match, as a share of the gap between the best and
+/// the median similarity of the topic's candidates, a memory still matches
+/// by meaning. Relative, because models spread cosines differently: on the
+/// retrieval benchmark the best-to-median gap is 0.29 with qwen3-embedding,
+/// 0.18 with nomic-embed-text and 0.30 with embeddinggemma, so a fixed
+/// cosine margin trimmed nothing for one model and most for another. At
+/// 0.75 no target is lost with any of them (their largest relative gaps are
+/// 1.03, matched by keyword, 0.83 and 0.66) and a topic lists about 10 to 12
+/// memories, not 20; at 0.5 targets start to drop.
+const SEMANTIC_SPREAD: f32 = 0.75;
 
 #[derive(Args, Deserialize, Serialize, JsonSchema)]
 pub struct Search {
@@ -138,8 +164,11 @@ pub(super) fn rank(
                         .total_cmp(&similar[&items[a].id])
                         .then_with(|| recency(&items[b]).cmp(&recency(&items[a])))
                 });
+                let floor = similarity_floor(similar.values().copied());
                 for &i in by_meaning.iter().take(limit) {
-                    matched[i] = true;
+                    if similar[&items[i].id] >= floor {
+                        matched[i] = true;
+                    }
                 }
                 add_ranking(&by_meaning, &mut fused);
                 semantic_ranked = true;
@@ -147,12 +176,20 @@ pub(super) fn rank(
             Err(err) => embed::warn(format!("{err:#}")),
         }
     }
+    let local = |i: usize| items[i].scope == "project";
+    let score = |i: usize| {
+        if local(i) {
+            fused[i] * (1.0 + PROJECT_BONUS)
+        } else {
+            fused[i]
+        }
+    };
     let mut order: Vec<usize> = (0..items.len()).filter(|&i| matched[i]).collect();
+    // Without a topic every score is 0, so project memories come first.
     order.sort_by(|&a, &b| {
-        let local = |i: usize| items[i].scope == "project";
-        local(b)
-            .cmp(&local(a))
-            .then_with(|| fused[b].total_cmp(&fused[a]))
+        score(b)
+            .total_cmp(&score(a))
+            .then_with(|| local(b).cmp(&local(a)))
             .then_with(|| recency(&items[b]).cmp(&recency(&items[a])))
     });
     let mut items: Vec<Option<Memory>> = items.into_iter().map(Some).collect();
@@ -179,6 +216,24 @@ fn compact(memories: &[Memory]) -> Result<Value> {
         }
     }
     Ok(memories)
+}
+
+/// Fewest candidates whose similarities say how far apart a topic's
+/// matches lie: with one or two, the median is a match itself.
+const SPREAD_SAMPLE: usize = 3;
+
+/// The lowest similarity that still matches by meaning: [`SEMANTIC_SPREAD`]
+/// of the way from the best similarity down to the median one. Below
+/// [`SPREAD_SAMPLE`] candidates every one may match.
+fn similarity_floor(similarities: impl Iterator<Item = f32>) -> f32 {
+    let mut values: Vec<f32> = similarities.collect();
+    if values.len() < SPREAD_SAMPLE {
+        return f32::NEG_INFINITY;
+    }
+    values.sort_by(f32::total_cmp);
+    let best = values[values.len() - 1];
+    let median = values[values.len() / 2];
+    best - SEMANTIC_SPREAD * (best - median)
 }
 
 /// `found` as one page of a result: `memories`, and `next_cursor` when more remain.
