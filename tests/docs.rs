@@ -56,9 +56,9 @@ fn repo_file(name: &str) -> PathBuf {
 }
 
 /// The folders whose Markdown files are the docs: the user docs, the
-/// development docs, and the release notes the release text and changelog
-/// are made from.
-const PUBLISHED: [&str; 3] = ["docs", "docs/dev", "release-notes"];
+/// development docs, the release notes the release text and changelog are
+/// made from, and the user-memory skill's playbooks, which agents follow.
+const PUBLISHED: [&str; 4] = ["docs", "docs/dev", "release-notes", "skills/user-memory"];
 
 /// The docs at the repository's root.
 const ROOT_DOCS: [&str; 4] = ["README.md", "CONTRIBUTING.md", "SECURITY.md", "AGENTS.md"];
@@ -173,11 +173,30 @@ fn spans(line: &str, number: usize, quotes: &mut Quotes) {
 
 // ─── Commands ───────────────────────────────────────────────────────────────
 
+/// The compose service that runs user-memory, in the repository's
+/// `compose.yaml`, the installer's and the docs alike. Its image's entrypoint
+/// is the binary, so `docker compose run memory migrate` runs `user-memory
+/// migrate`; another service, such as `ollama`, runs another program.
+const SERVICE: &str = "memory";
+
+/// In a `docker compose … run|exec …` segment, the position of the
+/// [`SERVICE`] word when the words after it are user-memory's arguments: no
+/// `--entrypoint` replaces the binary.
+fn service(words: &[&str]) -> Option<usize> {
+    let verb = words.iter().position(|w| matches!(*w, "run" | "exec"))?;
+    if words.contains(&"--entrypoint") {
+        return None;
+    }
+    let at = words[verb + 1..].iter().position(|w| *w == SERVICE)?;
+    Some(verb + 1 + at)
+}
+
 /// The words of each `user-memory` command in a shell line, up to the first
 /// shell operator. A command is the first word of a segment (after `|`,
-/// `;`, `&&`, `(` or `!`), or the program a `docker compose … exec|run`
-/// segment runs; anywhere else, as in `rm ~/.local/bin/user-memory`, the
-/// name is a path, not a command.
+/// `;`, `&&`, `(` or `!`), the program a `docker compose … exec|run`
+/// segment runs, or the arguments it gives the [`SERVICE`] service; anywhere
+/// else, as in `rm ~/.local/bin/user-memory`, the name is a path, not a
+/// command.
 fn commands(line: &str) -> Vec<Vec<String>> {
     let spaced = line
         .replace("&&", " ; ")
@@ -194,7 +213,10 @@ fn commands(line: &str) -> Vec<Vec<String>> {
         let start = if words.first().is_some_and(|w| program(w)) {
             Some(0)
         } else if words.first() == Some(&"docker") {
-            words.iter().position(|w| program(w))
+            words
+                .iter()
+                .position(|w| program(w))
+                .or_else(|| service(words))
         } else {
             None
         };
@@ -1320,6 +1342,29 @@ fn a_flag_the_binary_lacks_is_caught() {
         None
     );
     assert!(commands("rm ~/.local/bin/user-memory").is_empty());
+}
+
+#[test]
+fn a_command_the_memory_service_runs_is_checked() {
+    // The image's entrypoint is the binary, so these run user-memory.
+    assert_eq!(
+        commands("docker compose run --rm memory migrate --check && docker compose stop memory"),
+        [["migrate", "--check"]]
+    );
+    assert_eq!(
+        commands("docker compose -f x.yaml run --rm -T memory migrate --titles - < titles.json"),
+        [["migrate", "--titles", "-"]]
+    );
+    // Another service, another entrypoint, or no run or exec: not user-memory.
+    for line in [
+        "docker compose run --rm ollama pull qwen3-embedding:4b",
+        "docker compose run --rm --entrypoint rm memory -f /data/memories.sqlite3-wal",
+        "docker compose up -d memory",
+        "docker compose logs memory",
+        "docker compose cp memory:/data/exports/b.json .",
+    ] {
+        assert!(commands(line).is_empty(), "{line}: {:?}", commands(line));
+    }
 }
 
 #[test]

@@ -95,7 +95,8 @@ to them rather than repeating them. Propose changes to it in an issue.
 
 - A change updates the docs, help texts, the user-memory skill and the code
   comments it affects, in the same change. `cargo test --test docs` checks
-  that documented commands, quoted messages and links match the code.
+  that the commands, quoted messages and links in the docs and the skill
+  match the code.
 - A change users notice gets a line in the next release's notes
   ([releasing](docs/dev/releasing.md)).
 - Write plainly: short sentences, no marketing language, no vague claims.

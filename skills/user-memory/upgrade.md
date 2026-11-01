@@ -2,15 +2,15 @@
 
 Use this when `user-memory setup`, `user-memory doctor`, the client or the session hook refuses the store because of its schema version. A refused store is always left unchanged. Pick the case by the message.
 
-## "run the installer again (or ./setup, or `user-memory migrate`) to upgrade it"
+## ``run the installer again (or ./setup, or `user-memory migrate`) to upgrade it``
 
 The store is from an older version that this one can upgrade.
 
-1. Tell the user to run the installer again (`curl -fsSL https://github.com/l7aromeo/user-memory/releases/latest/download/install.sh | sh`), or `./setup` from the new version's checkout, or `user-memory setup`. It backs the store up first, then upgrades it in one transaction. If it stops with "needs a title for every memory", follow "Titles for the upgrade" below first.
-2. Ask the user for the line `Backed up … to …` that setup prints, and tell them where the backup is: `<store>.v<old version>-<UTC time>.bak` beside the store, mode 0600. Setup never replaces an existing backup.
+1. Tell the user to run the installer again (`curl -fsSL https://github.com/l7aromeo/user-memory/releases/latest/download/install.sh | sh`), or `./setup` from the new version's checkout, or `user-memory setup`. It backs the store up first, then upgrades it in one transaction. If it stops with ``needs a title for every memory``, follow "Titles for the upgrade" below first.
+2. Ask the user for the line ``Backed up … to …`` that setup prints, and tell them where the backup is: `<store>.v<old version>-<UTC time>.bak` beside the store, mode 0600. Setup never replaces an existing backup.
 3. The user restarts their clients, then runs `user-memory doctor`.
 
-If the migration fails, it rolls back: the store is unchanged and the message names the backup. If it refuses because the store "is damaged", nothing was changed or backed up: the user runs `user-memory repair` (Docker: `docker compose run --rm memory repair`), which backs it up and rebuilds its indexes, then upgrades again.
+If the migration fails, it rolls back: the store is unchanged and the message names the backup. If it refuses because the store ``is damaged``, nothing was changed or backed up: the user runs `user-memory repair` (Docker: `docker compose run --rm memory repair`), which backs it up and rebuilds its indexes, then upgrades again.
 
 Docker server: `migrate` upgrades `/data/memories.sqlite3`, and the backup lands beside it in the user-memory-data volume.
 
@@ -34,11 +34,11 @@ Schema version 3 gives every memory a title: one line of at most 120 characters 
 5. Run the upgrade with it: the installer again with `--titles titles.json` (`… | sh -s -- --titles titles.json`), or `./setup --titles titles.json`, or `user-memory migrate --titles titles.json`. Docker server from a checkout: `docker compose run --rm -T memory migrate --titles - < titles.json`. Each title is stored as written, with its whitespace tidied.
 6. If it refuses again, it names the ids still missing, unknown or invalid; fix those entries and repeat.
 
-## "this user-memory is older than the store"
+## ``this user-memory is older than the store``
 
 The store was upgraded by a newer version. Nothing needs migrating: the user updates user-memory (run the installer again, or pull the newer checkout and run `./setup`, or update the Docker image) and restarts the client. Never move the store aside for this.
 
-## "needs schema version … Move it aside"
+## ``needs schema version … Move it aside``
 
 The store is too old, unversioned or not a user-memory store, and cannot be upgraded in place. The user runs these steps; explain them and wait for each result:
 
@@ -59,10 +59,10 @@ The store is too old, unversioned or not a user-memory store, and cannot be upgr
    user-memory import memories-before-upgrade.json --apply
    ```
 
-5. Run `user-memory reindex`, then `user-memory doctor`.
+5. Run `user-memory doctor`. `user-memory reindex` is optional: it embeds the imported memories at once, where search would embed them as it goes.
 6. Once the user has checked their memories, they may delete the `.bak` store and the export file.
 
-For a Docker server, run export and import through `docker compose exec -T memory user-memory …` as in [backup.md](backup.md).
+For a Docker server, run the export and the import through Docker, as the Docker block in [backup.md](backup.md) shows.
 
 ## Roll back an upgrade
 
