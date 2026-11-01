@@ -16,7 +16,7 @@ use super::{
     Memory,
     ids::resolve,
     index::{
-        self, Entry, embed,
+        self, Candidates, embed,
         stems::{Field, Stems},
     },
     page::{Paging, page},
@@ -30,7 +30,10 @@ use rusqlite::Connection;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::path::Path;
+use std::{
+    path::Path,
+    sync::{Mutex, PoisonError},
+};
 use uuid::Uuid;
 
 /// Smoothing constant of reciprocal rank fusion. The customary 60 suits lists
@@ -150,46 +153,39 @@ fn field_weights(stems: &mut Stems, query: &[String], m: &Memory) -> Vec<f64> {
     best
 }
 
-/// Each memory's keyword relevance from `weights`, the weight of the
-/// strongest field holding each query term (0 where none does), among
-/// `candidates` memories: every term counts its field's weight times its
-/// rarity among the candidates, BM25's inverse document frequency, so a
-/// word most memories share adds little and one that few hold adds much.
-/// Memories holding no term may be left out of `weights`; they add nothing.
-fn keyword_scores(weights: &[Vec<f64>], terms: usize, candidates: usize) -> Vec<f64> {
+/// Each memory's keyword relevance, written into `scores`, from `weights`:
+/// for each of `rows` memories, one row of `terms` weights, that of the
+/// strongest field holding each query term (0 where none does). Among
+/// `candidates` memories every term counts its field's weight times its
+/// rarity, BM25's inverse document frequency, so a word most memories share
+/// adds little and one that few hold adds much. Memories holding no term
+/// may be left out of `weights`; they add nothing.
+fn keyword_scores(
+    weights: &[f64],
+    terms: usize,
+    rows: usize,
+    candidates: usize,
+    rarity: &mut Vec<f64>,
+    scores: &mut Vec<f64>,
+) {
     let all = candidates as f64;
-    let rarity: Vec<f64> = (0..terms)
-        .map(|t| {
-            let holding = weights.iter().filter(|w| w[t] > 0.0).count() as f64;
-            ((all - holding + 0.5) / (holding + 0.5)).ln_1p()
-        })
-        .collect();
-    weights
-        .iter()
-        .map(|w| {
-            w.iter()
-                .zip(&rarity)
-                .map(|(weight, idf)| weight * idf)
-                .sum()
-        })
-        .collect()
+    rarity.clear();
+    rarity.extend((0..terms).map(|t| {
+        let holding = (0..rows).filter(|&r| weights[r * terms + t] > 0.0).count() as f64;
+        ((all - holding + 0.5) / (holding + 0.5)).ln_1p()
+    }));
+    scores.clear();
+    scores.extend((0..rows).map(|r| {
+        weights[r * terms..(r + 1) * terms]
+            .iter()
+            .zip(rarity.iter())
+            .map(|(weight, idf)| weight * idf)
+            .sum::<f64>()
+    }));
 }
 
 fn recency(m: &Memory) -> (&str, i64) {
     (&m.updated_at, m.sequence)
-}
-
-fn latest(e: &Entry) -> (&str, i64) {
-    (&e.updated_at, e.order)
-}
-
-fn entry(m: &Memory) -> Entry {
-    Entry {
-        id: m.id,
-        local: m.scope == "project",
-        updated_at: m.updated_at.clone(),
-        order: m.sequence,
-    }
 }
 
 fn add_ranking(order: &[usize], fused: &mut [f64]) {
@@ -216,6 +212,17 @@ pub(super) fn rank(
     topic: &str,
     limit: usize,
 ) -> Result<Ranked> {
+    rank_with(conn, filter, topic, limit, BUFFERS.take().buffers())
+}
+
+/// [`rank`] in `buffers`, which it leaves holding this search's arrays.
+fn rank_with(
+    conn: &Connection,
+    filter: &Filter,
+    topic: &str,
+    limit: usize,
+    buffers: &mut Buffers,
+) -> Result<Ranked> {
     let mut stems = Stems::new();
     let query: Vec<String> = stems.all(topic).into_iter().collect();
     let semantic = if query.is_empty() {
@@ -224,90 +231,80 @@ pub(super) fn rank(
         embed::Config::from_env()
     };
     let indexed = index::ready(conn)?;
-    // Without a current keyword index, search stems every candidate's words
-    // itself, so it reads every candidate in full.
-    let items = if indexed {
-        None
-    } else {
-        Some(candidates(conn, filter)?)
-    };
-    let strength = |fields: &[Option<Field>]| -> Vec<f64> {
-        fields
-            .iter()
-            .map(|field| field.map_or(0.0, weight))
-            .collect()
-    };
-    let (entries, weights, covered): (Vec<Entry>, Vec<Vec<f64>>, usize) = match &items {
-        Some(items) => (
-            items.iter().map(entry).collect(),
-            items
-                .iter()
-                .map(|m| field_weights(&mut stems, &query, m))
-                .collect(),
-            items.len(),
-        ),
-        None => {
-            let covered = index::entries(conn, filter)?;
-            let held = if query.is_empty() {
-                vec![None; covered.len()]
-            } else {
-                index::hits(conn, &covered, &query)?
-            };
-            let count = covered.len();
-            // Meaning ranks every candidate; keywords alone, only those
-            // holding a query term.
-            let keep_all = semantic.is_some() || query.is_empty();
-            let (entries, weights) = covered
-                .into_iter()
-                .zip(held)
-                .filter_map(|(entry, fields)| match fields {
-                    Some(fields) => Some((entry, strength(&fields))),
-                    None if keep_all => Some((entry, vec![0.0; query.len()])),
-                    None => None,
-                })
-                .unzip();
-            (entries, weights, count)
+    let Buffers {
+        candidates: covered,
+        weights,
+        rarity,
+        scores,
+        matched,
+        fused,
+        by_keyword,
+        by_meaning,
+        order,
+        similar,
+        values,
+    } = buffers;
+    let terms = query.len();
+    if indexed {
+        index::covered(conn, filter, covered)?;
+        weights.clear();
+        weights.resize(covered.len() * terms, 0.0);
+        if terms > 0 {
+            index::hits(conn, covered, &query, |i, t, field| {
+                weights[i * terms + t] = weight(field);
+            })?;
         }
-    };
-    let scores = keyword_scores(&weights, query.len(), covered);
-    let mut matched: Vec<bool> = scores
-        .iter()
-        .map(|&s| query.is_empty() || s > 0.0)
-        .collect();
-    let mut fused = vec![0.0; entries.len()];
+    } else {
+        // Without a current keyword index, search stems every candidate's
+        // words itself, so it reads every candidate in full.
+        covered.clear();
+        weights.clear();
+        for m in candidates(conn, filter)? {
+            covered.push(m.id, m.scope == "project", &m.updated_at, m.sequence);
+            weights.extend(field_weights(&mut stems, &query, &m));
+        }
+    }
+    let count = covered.len();
+    keyword_scores(weights, terms, count, count, rarity, scores);
+    matched.clear();
+    matched.extend(scores.iter().map(|&s| query.is_empty() || s > 0.0));
+    fused.clear();
+    fused.resize(count, 0.0);
     let mut semantic_ranked = false;
-    let mut by_keyword: Vec<usize> = (0..entries.len()).filter(|&i| scores[i] > 0.0).collect();
-    by_keyword.sort_by(|&a, &b| {
+    // Every order compared ends with a memory's key or rowid, which no two
+    // share, so an unstable sort gives the one order a stable sort would.
+    by_keyword.clear();
+    by_keyword.extend((0..count).filter(|&i| scores[i] > 0.0));
+    by_keyword.sort_unstable_by(|&a, &b| {
         scores[b]
             .total_cmp(&scores[a])
-            .then_with(|| latest(&entries[b]).cmp(&latest(&entries[a])))
+            .then_with(|| covered.recency(b).cmp(&covered.recency(a)))
     });
-    add_ranking(&by_keyword, &mut fused);
+    add_ranking(by_keyword, fused);
     if let Some(config) = &semantic {
-        match index::similarities(conn, config, topic, &entries) {
-            Ok(similar) => {
-                let mut by_meaning: Vec<usize> = (0..entries.len())
-                    .filter(|&i| similar[i].is_some())
-                    .collect();
+        match index::similarities(conn, config, topic, covered, similar) {
+            Ok(()) => {
+                by_meaning.clear();
+                by_meaning.extend((0..count).filter(|&i| similar[i].is_some()));
                 let value = |i: usize| similar[i].unwrap_or(f32::NEG_INFINITY);
-                by_meaning.sort_by(|&a, &b| {
+                by_meaning.sort_unstable_by(|&a, &b| {
                     value(b)
                         .total_cmp(&value(a))
-                        .then_with(|| latest(&entries[b]).cmp(&latest(&entries[a])))
+                        .then_with(|| covered.recency(b).cmp(&covered.recency(a)))
                 });
-                let floor = similarity_floor(similar.iter().flatten().copied());
+                let floor = similarity_floor(similar, values);
                 for &i in by_meaning.iter().take(limit) {
                     if value(i) >= floor {
                         matched[i] = true;
                     }
                 }
-                add_ranking(&by_meaning, &mut fused);
+                add_ranking(by_meaning, fused);
                 semantic_ranked = true;
             }
             Err(err) => embed::warn(format!("{err:#}")),
         }
     }
-    let local = |i: usize| entries[i].local;
+    let local = |i: usize| covered.local[i];
     let score = |i: usize| {
         if local(i) {
             fused[i] * (1.0 + PROJECT_BONUS)
@@ -315,18 +312,80 @@ pub(super) fn rank(
             fused[i]
         }
     };
-    let mut order: Vec<usize> = (0..entries.len()).filter(|&i| matched[i]).collect();
+    order.clear();
+    order.extend((0..count).filter(|&i| matched[i]));
     // Without a topic every score is 0, so project memories come first.
-    order.sort_by(|&a, &b| {
+    order.sort_unstable_by(|&a, &b| {
         score(b)
             .total_cmp(&score(a))
             .then_with(|| local(b).cmp(&local(a)))
-            .then_with(|| latest(&entries[b]).cmp(&latest(&entries[a])))
+            .then_with(|| covered.recency(b).cmp(&covered.recency(a)))
     });
     Ok(Ranked {
-        ids: order.into_iter().map(|i| entries[i].id).collect(),
+        ids: order.iter().map(|&i| covered.ids[i]).collect(),
         semantic: semantic_ranked,
     })
+}
+
+/// The arrays one search ranks with, kept for the next: see
+/// [`Candidates`] for why a search does not allocate its own.
+#[derive(Default)]
+struct Buffers {
+    candidates: Candidates,
+    /// For each candidate, a row of the weight of the strongest field
+    /// holding each query term.
+    weights: Vec<f64>,
+    rarity: Vec<f64>,
+    scores: Vec<f64>,
+    matched: Vec<bool>,
+    fused: Vec<f64>,
+    by_keyword: Vec<usize>,
+    by_meaning: Vec<usize>,
+    order: Vec<usize>,
+    similar: Vec<Option<f32>>,
+    values: Vec<f32>,
+}
+
+/// Buffers no search is using: a server that runs searches at once takes
+/// one set each, so there are as many as searches ever ran together.
+struct Pool(Mutex<Vec<Buffers>>);
+
+static BUFFERS: Pool = Pool(Mutex::new(Vec::new()));
+
+impl Pool {
+    fn take(&self) -> Borrowed<'_> {
+        let mut free = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        Borrowed {
+            pool: self,
+            buffers: Some(free.pop().unwrap_or_default()),
+        }
+    }
+}
+
+/// A search's set of [`Buffers`], handed back to its pool when it drops.
+struct Borrowed<'p> {
+    pool: &'p Pool,
+    buffers: Option<Buffers>,
+}
+
+impl Borrowed<'_> {
+    fn buffers(&mut self) -> &mut Buffers {
+        self.buffers
+            .as_mut()
+            .expect("a search holds its buffers until it drops them")
+    }
+}
+
+impl Drop for Borrowed<'_> {
+    fn drop(&mut self) {
+        if let Some(buffers) = self.buffers.take() {
+            self.pool
+                .0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(buffers);
+        }
+    }
 }
 
 /// `memories` as read and search return them: each without its empty
@@ -355,14 +414,20 @@ const SPREAD_SAMPLE: usize = 3;
 /// The lowest similarity that still matches by meaning: [`SEMANTIC_SPREAD`]
 /// of the way from the best similarity down to the median one. Below
 /// [`SPREAD_SAMPLE`] candidates every one may match.
-fn similarity_floor(similarities: impl Iterator<Item = f32>) -> f32 {
-    let mut values: Vec<f32> = similarities.collect();
+fn similarity_floor(similar: &[Option<f32>], values: &mut Vec<f32>) -> f32 {
+    values.clear();
+    values.extend(similar.iter().flatten());
     if values.len() < SPREAD_SAMPLE {
         return f32::NEG_INFINITY;
     }
-    values.sort_by(f32::total_cmp);
-    let best = values[values.len() - 1];
-    let median = values[values.len() / 2];
+    // The element a full sort would put in the middle, without sorting.
+    let middle = values.len() / 2;
+    let (_, &mut median, _) = values.select_nth_unstable_by(middle, f32::total_cmp);
+    let best = values
+        .iter()
+        .copied()
+        .max_by(f32::total_cmp)
+        .expect("at least SPREAD_SAMPLE values");
     best - SEMANTIC_SPREAD * (best - median)
 }
 
@@ -494,4 +559,139 @@ pub(super) fn standing_rule(m: &Memory) -> bool {
     m.source == "explicit"
         && m.status == "confirmed"
         && RULE_TYPES.contains(&m.memory_type.as_str())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A seeded xorshift generator.
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+    }
+
+    #[test]
+    fn a_search_reuses_the_buffers_of_the_one_before() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = connect(&dir.path().join("memories.sqlite3")).unwrap();
+        for n in 0..300 {
+            conn.execute(
+                "INSERT INTO memories (id,memory_type,category,title,content) VALUES (?1,'fact','tools',?2,?3)",
+                rusqlite::params![
+                    Uuid::new_v4().to_string(),
+                    format!("Release note {n}"),
+                    format!("Write release notes for build {n}")
+                ],
+            )
+            .unwrap();
+        }
+        let filter = Selection::default().filter().unwrap();
+        let mut buffers = Buffers::default();
+        let first = rank_with(&conn, &filter, "release notes", 20, &mut buffers).unwrap();
+        assert_eq!(first.ids.len(), 300);
+        // Room to spare in every buffer: a search that allocated one again
+        // would leave it only the room it needs.
+        let spare = 100_000;
+        buffers.candidates.ids.reserve(spare);
+        buffers.weights.reserve(spare);
+        buffers.scores.reserve(spare);
+        buffers.matched.reserve(spare);
+        buffers.fused.reserve(spare);
+        buffers.by_keyword.reserve(spare);
+        buffers.order.reserve(spare);
+        let room = |b: &Buffers| {
+            [
+                b.candidates.ids.capacity(),
+                b.weights.capacity(),
+                b.scores.capacity(),
+                b.matched.capacity(),
+                b.fused.capacity(),
+                b.by_keyword.capacity(),
+                b.order.capacity(),
+            ]
+        };
+        let before = room(&buffers);
+        let second = rank_with(&conn, &filter, "release notes", 20, &mut buffers).unwrap();
+        assert_eq!(second.ids, first.ids);
+        assert_eq!(room(&buffers), before, "a buffer was allocated again");
+    }
+
+    #[test]
+    fn buffers_go_back_to_their_pool_for_the_next_search() {
+        let pool = Pool(Mutex::new(Vec::new()));
+        let place = {
+            let mut first = pool.take();
+            first.buffers().scores.reserve(1000);
+            first.buffers().scores.as_ptr()
+        };
+        let mut second = pool.take();
+        assert_eq!(second.buffers().scores.as_ptr(), place);
+        // Searches at once each take a set of their own.
+        let mut third = pool.take();
+        assert_ne!(third.buffers().scores.as_ptr(), place);
+    }
+
+    #[test]
+    fn the_spread_floor_is_the_one_a_full_sort_gives() {
+        let mut rng = Rng(0x00f1_00a5);
+        let mut values = Vec::new();
+        for length in [0, 2, 3, 4, 7, 100, 1001] {
+            let similar: Vec<Option<f32>> = (0..length)
+                .map(|i| match rng.next() % 6 {
+                    0 => None,
+                    1 => Some(0.5),
+                    2 if i % 2 == 0 => Some(-0.0),
+                    _ => Some((rng.next() % 2000) as f32 / 1000.0 - 1.0),
+                })
+                .collect();
+            let mut sorted: Vec<f32> = similar.iter().flatten().copied().collect();
+            let expected = if sorted.len() < SPREAD_SAMPLE {
+                f32::NEG_INFINITY
+            } else {
+                sorted.sort_by(f32::total_cmp);
+                let best = sorted[sorted.len() - 1];
+                let median = sorted[sorted.len() / 2];
+                best - SEMANTIC_SPREAD * (best - median)
+            };
+            assert_eq!(
+                similarity_floor(&similar, &mut values).to_bits(),
+                expected.to_bits(),
+                "{length}"
+            );
+        }
+    }
+
+    #[test]
+    fn recency_orders_as_the_updated_at_text_does() {
+        let stamps = [
+            "2026-11-01 10:00:00",
+            "2026-11-01 09:59:59",
+            "2026-11-01 10:00:00.5",
+            "2026-11-01T10:00:00Z",
+            "2026-11-01 10:00",
+            "",
+            "édité",
+        ];
+        let mut candidates = Candidates::default();
+        for (n, stamp) in stamps.iter().enumerate() {
+            candidates.push(Uuid::new_v4(), false, stamp, (n % 3) as i64);
+        }
+        for a in 0..stamps.len() {
+            for b in 0..stamps.len() {
+                assert_eq!(
+                    candidates.recency(a).cmp(&candidates.recency(b)),
+                    (stamps[a], (a % 3) as i64).cmp(&(stamps[b], (b % 3) as i64)),
+                    "{} and {}",
+                    stamps[a],
+                    stamps[b]
+                );
+            }
+        }
+    }
 }

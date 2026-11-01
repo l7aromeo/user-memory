@@ -79,11 +79,12 @@ impl Matrix {
     }
 
     /// The cosine similarity of `query` with the vector in every slot, each
-    /// bit for bit what `cosine(query, vector)` returns.
-    pub(in crate::memory) fn cosines(&self, query: &[f32]) -> Vec<f32> {
+    /// bit for bit what `cosine(query, vector)` returns, written into
+    /// `found`.
+    pub(in crate::memory) fn cosines(&self, query: &[f32], found: &mut Vec<f32>) {
         debug_assert_eq!(query.len(), self.length);
         let query_norm = norm(query);
-        let mut found = Vec::with_capacity(self.slots);
+        found.clear();
         for (block, values) in self.values.chunks_exact(self.length * LANES).enumerate() {
             // `Sum` for f32 starts from -0.0 and adds in order.
             let mut dots = [-0.0f32; LANES];
@@ -98,7 +99,6 @@ impl Matrix {
                 found.push(if scale > 0.0 { dot / scale } else { 0.0 });
             }
         }
-        found
     }
 }
 
@@ -116,6 +116,9 @@ pub(in crate::memory) struct Held {
     /// model at its default length may answer at more than one.
     odd: HashMap<Uuid, usize>,
     free: Vec<usize>,
+    /// Each slot's cosine with the latest query, reused from one search to
+    /// the next.
+    all: Vec<f32>,
 }
 
 /// The vectors this process holds, for the store and model it last
@@ -136,6 +139,7 @@ impl Held {
             slots: HashMap::new(),
             odd: HashMap::new(),
             free: Vec::new(),
+            all: Vec::new(),
         }
     }
 
@@ -282,15 +286,24 @@ impl Held {
     }
 
     /// For each memory in `ids`, in order, the cosine similarity of `query`,
-    /// of the matrix's length, with its current vector there, if it has one.
-    pub(in crate::memory) fn cosines(&self, query: &[f32], ids: &[Uuid]) -> Vec<Option<f32>> {
+    /// of the matrix's length, with its current vector there, if it has one,
+    /// written into `similar`.
+    pub(in crate::memory) fn cosines(
+        &mut self,
+        query: &[f32],
+        ids: &[Uuid],
+        similar: &mut Vec<Option<f32>>,
+    ) {
+        similar.clear();
         let Some(matrix) = &self.matrix else {
-            return vec![None; ids.len()];
+            similar.resize(ids.len(), None);
+            return;
         };
-        let all = matrix.cosines(query);
-        ids.iter()
-            .map(|id| self.slots.get(id).map(|&slot| all[slot]))
-            .collect()
+        matrix.cosines(query, &mut self.all);
+        similar.extend(
+            ids.iter()
+                .map(|id| self.slots.get(id).map(|&slot| self.all[slot])),
+        );
     }
 }
 
@@ -338,7 +351,11 @@ mod tests {
                 assert_eq!(cosine(&signed, &against).to_bits(), (-0.0f32).to_bits());
             }
             assert_eq!(
-                matrix_signed.cosines(&signed)[0].to_bits(),
+                {
+                    let mut found = Vec::new();
+                    matrix_signed.cosines(&signed, &mut found);
+                    found[0].to_bits()
+                },
                 cosine(&signed, &against).to_bits()
             );
             for query in [
@@ -346,7 +363,8 @@ mod tests {
                 vec![0.0; length],
                 vectors[5].clone(),
             ] {
-                let found = matrix.cosines(&query);
+                let mut found = Vec::new();
+                matrix.cosines(&query, &mut found);
                 assert_eq!(found.len(), vectors.len());
                 for (vector, cosine_found) in vectors.iter().zip(&found) {
                     assert_eq!(
@@ -358,7 +376,11 @@ mod tests {
             }
             matrix.set(4, &vectors[7]);
             assert_eq!(
-                matrix.cosines(&vectors[9])[4].to_bits(),
+                {
+                    let mut found = Vec::new();
+                    matrix.cosines(&vectors[9], &mut found);
+                    found[4].to_bits()
+                },
                 cosine(&vectors[9], &vectors[7]).to_bits()
             );
         }
