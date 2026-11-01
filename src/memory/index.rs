@@ -1,12 +1,13 @@
 //! Search indexes derived from stored memories: a keyword index of each
 //! memory's stemmed words, kept in step with the memories in the transaction
-//! that changes them, and embedding vectors filled lazily at recall time.
+//! that changes them, and embedding vectors filled lazily at recall time and
+//! held by the process between searches.
 
 use super::{
     Memory,
     schema::{SELECT, connect, row, write},
     selection::{Filter, condition},
-    similar::{Draft, DraftVector, cosine, document, from_blob, save_vector},
+    similar::{Draft, DraftVector, document, save_vector},
 };
 use anyhow::{Result, bail};
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
@@ -16,6 +17,7 @@ use uuid::Uuid;
 
 pub(super) mod embed;
 pub(super) mod stems;
+pub(super) mod vectors;
 
 use stems::{Field, Stems, Text, fields, stamp, token};
 
@@ -306,30 +308,21 @@ fn entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<Entry> {
     })
 }
 
-/// The keyword index's answer for a query: how many memories the filter
-/// covers, and each covered memory holding a query term with the strongest
-/// field holding each term, in query order.
-pub(in crate::memory) struct Hits {
-    pub(in crate::memory) candidates: usize,
-    pub(in crate::memory) found: Vec<(Entry, Vec<Option<Field>>)>,
-}
-
-/// Reads the memories `filter` covers that hold any of the stemmed `query`
-/// terms, from a [`ready`] index. The covered memories are read once, by
-/// the filter alone; the index then gives only the keys holding each term,
-/// so a word that most memories hold costs one lookup per memory.
+/// For each of `covered`, the memories a filter covers, the strongest field
+/// holding each of the stemmed `query` terms, in query order, or `None`
+/// when it holds none; read from a [`ready`] index. The index gives only
+/// the keys holding each term, so a word most memories hold costs one
+/// lookup per memory.
 pub(in crate::memory) fn hits(
     conn: &Connection,
-    filter: &Filter,
+    covered: &[Entry],
     query: &[String],
-) -> Result<Hits> {
-    let covered = entries(conn, filter)?;
-    let candidates = covered.len();
-    let mut slots: HashMap<i64, usize> = HashMap::with_capacity(candidates);
+) -> Result<Vec<Option<Vec<Option<Field>>>>> {
+    let mut slots: HashMap<i64, usize> = HashMap::with_capacity(covered.len());
     for (i, entry) in covered.iter().enumerate() {
         slots.insert(entry.order, i);
     }
-    let mut held: Vec<Option<Vec<Option<Field>>>> = vec![None; candidates];
+    let mut held: Vec<Option<Vec<Option<Field>>>> = vec![None; covered.len()];
     let mut matching =
         conn.prepare_cached("SELECT rowid FROM search_words WHERE search_words MATCH ?1")?;
     for (t, term) in query.iter().enumerate() {
@@ -344,14 +337,7 @@ pub(in crate::memory) fn hits(
             }
         }
     }
-    Ok(Hits {
-        candidates,
-        found: covered
-            .into_iter()
-            .zip(held)
-            .filter_map(|(entry, fields)| Some((entry, fields?)))
-            .collect(),
-    })
+    Ok(held)
 }
 
 /// Every memory `filter` covers, without its text, from a ready index.
@@ -450,95 +436,111 @@ pub(super) fn problems(conn: &Connection) -> Result<Vec<String>> {
     Ok(found)
 }
 
-/// Stored vector for `id`, only if `model` embedded it from `source` at `dimensions`.
-fn stored(
-    conn: &Connection,
-    id: Uuid,
-    (model, dimensions): (&str, i64),
-    source: &str,
-) -> Result<Option<Vec<f32>>> {
-    Ok(conn
-        .query_row(
-            "SELECT vector FROM memory_vectors WHERE id=?1 AND model=?2 AND dimensions=?3 AND source=?4",
-            params![id.to_string(), model, dimensions, source],
-            |r| r.get::<_, Vec<u8>>(0),
-        )
-        .optional()?
-        .map(|blob| from_blob(&blob)))
-}
-
 /// Memories one recall may embed. Embedding takes roughly 0.1 s per memory on
 /// a local model, so a store without vectors would otherwise stall its first
 /// semantic recall for minutes; the rest fill on later recalls or `reindex`.
 const RECALL_EMBED_BUDGET: usize = 32;
 
-/// Vectors for `items` in order, embedding and saving those that are missing
-/// or were made by another model, at another length or from older text, up to
-/// `budget` of them (newest first). Memories left unembedded get `None`.
-/// Returns how many were embedded.
-fn vectors(
+/// Embeds and saves `todo`, memories with their document text, newest
+/// first as given, and returns their vectors.
+fn embed_and_save(
     conn: &Connection,
     config: &embed::Config,
-    items: &[Memory],
-    budget: usize,
-) -> Result<(Vec<Option<Vec<f32>>>, usize)> {
+    todo: &[(Uuid, String)],
+) -> Result<Vec<Vec<f32>>> {
     let identity = config.identity();
-    let sources: Vec<String> = items.iter().map(|m| document(&Draft::from(m))).collect();
-    let mut found = Vec::with_capacity(items.len());
-    let mut missing = Vec::new();
-    for (i, m) in items.iter().enumerate() {
-        let vector = stored(conn, m.id, identity, &sources[i])?;
-        if vector.is_none() {
-            missing.push(i);
-        }
-        found.push(vector);
+    let texts: Vec<String> = todo.iter().map(|(_, text)| text.clone()).collect();
+    let fresh = config.embed(&texts)?;
+    let tx = write(conn)?;
+    for ((id, source), vector) in todo.iter().zip(&fresh) {
+        let vector = DraftVector {
+            vector: vector.clone(),
+            identity: (identity.0.to_owned(), identity.1),
+            source: source.clone(),
+        };
+        save_vector(&tx, *id, &vector)?;
     }
-    missing.sort_by_key(|&i| std::cmp::Reverse(items[i].sequence));
-    missing.truncate(budget);
-    if !missing.is_empty() {
-        let texts: Vec<String> = missing.iter().map(|&i| sources[i].clone()).collect();
-        let fresh = config.embed(&texts)?;
-        let tx = write(conn)?;
-        for (&i, vector) in missing.iter().zip(fresh) {
-            let vector = DraftVector {
-                vector,
-                identity: (identity.0.to_owned(), identity.1),
-                source: sources[i].clone(),
-            };
-            save_vector(&tx, items[i].id, &vector)?;
-            found[i] = Some(vector.vector);
-        }
-        tx.commit()?;
-    }
-    Ok((found, missing.len()))
+    tx.commit()?;
+    Ok(fresh)
 }
 
-/// Cosine similarity between `query` and each memory that has a vector.
+/// Embeds every memory of `items` that lacks a current vector: one made by
+/// this model, at this length, from the memory's present text. Returns how
+/// many were embedded.
+fn embed_missing(conn: &Connection, config: &embed::Config, items: &[Memory]) -> Result<usize> {
+    let guard = vectors::Held::current(conn, config.identity())?;
+    let held = guard.as_ref().expect("Held::current always holds vectors");
+    let mut missing: Vec<&Memory> = items
+        .iter()
+        .filter(|m| held.length(m.id).is_none())
+        .collect();
+    drop(guard);
+    missing.sort_by_key(|m| std::cmp::Reverse(m.sequence));
+    let todo: Vec<(Uuid, String)> = missing
+        .iter()
+        .map(|m| (m.id, document(&Draft::from(*m))))
+        .collect();
+    if !todo.is_empty() {
+        embed_and_save(conn, config, &todo)?;
+    }
+    Ok(todo.len())
+}
+
+/// For each candidate, in order, the cosine similarity between `query` and
+/// its current vector, if it has one, after embedding up to
+/// [`RECALL_EMBED_BUDGET`] candidates that lack one, newest first.
 pub(super) fn similarities(
     conn: &Connection,
     config: &embed::Config,
     query: &str,
-    items: &[Memory],
-) -> Result<HashMap<Uuid, f32>> {
+    candidates: &[Entry],
+) -> Result<Vec<Option<f32>>> {
     let query = config.embed(&[config.query(query)])?.remove(0);
-    let (vectors, _) = vectors(conn, config, items, RECALL_EMBED_BUDGET)?;
-    let mut scores = HashMap::with_capacity(items.len());
-    let pending = vectors.iter().filter(|v| v.is_none()).count();
+    let mut guard = vectors::Held::current(conn, config.identity())?;
+    let held = guard.as_mut().expect("Held::current always holds vectors");
+    let mut missing: Vec<&Entry> = candidates
+        .iter()
+        .filter(|e| held.length(e.id).is_none())
+        .collect();
+    missing.sort_by_key(|e| std::cmp::Reverse(e.order));
+    missing.truncate(RECALL_EMBED_BUDGET);
+    if !missing.is_empty() {
+        let ids: Vec<String> = missing.iter().map(|e| e.id.to_string()).collect();
+        let mut texts: HashMap<Uuid, String> = conn
+            .prepare(&format!(
+                "{SELECT} WHERE id IN (SELECT value FROM json_each(?1))"
+            ))?
+            .query_map([serde_json::to_string(&ids)?], row)?
+            .map(|m| m.map(|m| (m.id, document(&Draft::from(&m)))))
+            .collect::<rusqlite::Result<_>>()?;
+        // A memory forgotten since the search began has no text to embed.
+        let todo: Vec<(Uuid, String)> = missing
+            .iter()
+            .filter_map(|e| texts.remove(&e.id).map(|text| (e.id, text)))
+            .collect();
+        for ((id, _), vector) in todo.iter().zip(embed_and_save(conn, config, &todo)?) {
+            held.insert(*id, &vector);
+        }
+    }
+    let pending = candidates
+        .iter()
+        .filter(|e| held.length(e.id).is_none())
+        .count();
     if pending > 0 {
         embed::pending(pending);
     }
-    for (m, vector) in items.iter().zip(vectors) {
-        let Some(vector) = vector else { continue };
-        if vector.len() != query.len() {
-            bail!(
-                "Embedding endpoint returned {} dimensions for a memory but {} for the query; run user-memory reindex",
-                vector.len(),
-                query.len()
-            );
-        }
-        scores.insert(m.id, cosine(&query, &vector));
+    if let Some(length) = candidates
+        .iter()
+        .filter_map(|e| held.length(e.id))
+        .find(|&length| length != query.len())
+    {
+        bail!(
+            "Embedding endpoint returned {length} dimensions for a memory but {} for the query; run user-memory reindex",
+            query.len()
+        );
     }
-    Ok(scores)
+    let ids: Vec<Uuid> = candidates.iter().map(|e| e.id).collect();
+    Ok(held.cosines(&query, &ids))
 }
 
 /// Rebuilds the keyword index from the stored memories and, when semantic
@@ -562,7 +564,7 @@ pub(in crate::memory) fn reindex_with(db: &Path, config: Option<&embed::Config>)
         .query_map([], row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let embedded = match config {
-        Some(config) => json!(vectors(&conn, config, &items, usize::MAX)?.1),
+        Some(config) => json!(embed_missing(&conn, config, &items)?),
         None => Value::Null,
     };
     Ok(json!({"reindexed":items.len(),"embedded":embedded}))
@@ -628,5 +630,266 @@ mod tests {
         let kept = changes(&conn);
         assert_eq!(kept.len() as i64, CHANGES_KEPT);
         assert_eq!(kept[0], format!("id-{}", extra + 1));
+    }
+}
+
+#[cfg(test)]
+mod held_tests {
+    use super::{vectors::Held, *};
+    use crate::memory::similar::{cosine, to_blob};
+
+    /// A seeded xorshift generator.
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+        fn vector(&mut self, length: usize) -> Vec<f32> {
+            (0..length)
+                .map(|_| (self.next() >> 40) as f32 / (1u64 << 24) as f32 - 0.5)
+                .collect()
+        }
+    }
+
+    const MODEL: (&str, i64) = ("test-model", 0);
+    const OTHER: (&str, i64) = ("another-model", 0);
+    const LENGTH: usize = 24;
+
+    /// What search compared before the held vectors: each memory's stored
+    /// vector, looked up by id, model, length and present text, by `cosine`.
+    fn oracle(conn: &Connection, model: (&str, i64), query: &[f32]) -> HashMap<Uuid, u32> {
+        let memories = conn
+            .prepare(&format!("{SELECT} ORDER BY rowid"))
+            .unwrap()
+            .query_map([], row)
+            .unwrap()
+            .map(Result::unwrap)
+            .collect::<Vec<_>>();
+        memories
+            .iter()
+            .filter_map(|m| {
+                conn.query_row(
+                    "SELECT vector FROM memory_vectors WHERE id=?1 AND model=?2 AND dimensions=?3 AND source=?4",
+                    params![m.id.to_string(), model.0, model.1, document(&Draft::from(m))],
+                    |r| r.get::<_, Vec<u8>>(0),
+                )
+                .optional()
+                .unwrap()
+                .map(|blob| {
+                    let vector = crate::memory::similar::from_blob(&blob);
+                    (m.id, vector)
+                })
+            })
+            .filter(|(_, vector)| vector.len() == query.len())
+            .map(|(id, vector)| (id, cosine(query, &vector).to_bits()))
+            .collect()
+    }
+
+    fn held(conn: &Connection, model: (&str, i64), query: &[f32]) -> HashMap<Uuid, u32> {
+        let ids: Vec<Uuid> = conn
+            .prepare("SELECT id FROM memories")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|id| Uuid::parse_str(&id.unwrap()).unwrap())
+            .collect();
+        let guard = Held::current(conn, model).unwrap();
+        guard
+            .as_ref()
+            .unwrap()
+            .cosines(query, &ids)
+            .into_iter()
+            .zip(&ids)
+            .filter_map(|(cosine, id)| cosine.map(|cosine| (*id, cosine.to_bits())))
+            .collect()
+    }
+
+    fn insert(conn: &Connection, rng: &mut Rng, n: usize) -> Uuid {
+        let mut bytes = [0u8; 16];
+        bytes[..8].copy_from_slice(&rng.next().to_le_bytes());
+        bytes[8..].copy_from_slice(&rng.next().to_le_bytes());
+        let id = uuid::Builder::from_random_bytes(bytes).into_uuid();
+        conn.execute(
+            "INSERT INTO memories (id,memory_type,category,title,content,context) VALUES (?1,'fact','tools',?2,?3,?4)",
+            params![id.to_string(), format!("Memory {n}"), format!("Content {n}"), if n.is_multiple_of(3) { "When testing" } else { "" }],
+        )
+        .unwrap();
+        id
+    }
+
+    fn save(conn: &Connection, id: Uuid, model: (&str, i64), source: &str, vector: &[f32]) {
+        conn.execute(
+            "INSERT OR REPLACE INTO memory_vectors (id,model,dimensions,source,vector) VALUES (?1,?2,?3,?4,?5)",
+            params![id.to_string(), model.0, model.1, source, to_blob(vector)],
+        )
+        .unwrap();
+    }
+
+    fn current_source(conn: &Connection, id: Uuid) -> String {
+        let m = conn
+            .query_row(&format!("{SELECT} WHERE id=?1"), [id.to_string()], row)
+            .unwrap();
+        document(&Draft::from(&m))
+    }
+
+    #[test]
+    fn held_vectors_answer_as_the_store_after_every_kind_of_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("memories.sqlite3");
+        let conn = connect(&db).unwrap();
+        // Another process's writes reach the log the same way.
+        let other = connect(&db).unwrap();
+        let mut rng = Rng(0x00c4_c4e5);
+        let mut ids = Vec::new();
+        for n in 0..40 {
+            let id = insert(&conn, &mut rng, n);
+            match n % 5 {
+                0 => {}
+                1 => save(&conn, id, MODEL, "an older text", &rng.vector(LENGTH)),
+                2 => save(
+                    &conn,
+                    id,
+                    OTHER,
+                    &current_source(&conn, id),
+                    &rng.vector(LENGTH),
+                ),
+                _ => save(
+                    &conn,
+                    id,
+                    MODEL,
+                    &current_source(&conn, id),
+                    &rng.vector(LENGTH),
+                ),
+            }
+            ids.push(id);
+        }
+        for round in 0..40 {
+            let query = rng.vector(LENGTH);
+            assert_eq!(
+                held(&conn, MODEL, &query),
+                oracle(&conn, MODEL, &query),
+                "round {round}"
+            );
+            let writer = if round % 2 == 0 { &conn } else { &other };
+            let id = ids[rng.below(ids.len())];
+            match rng.below(7) {
+                // The memory's text changes, so its vector is no longer current.
+                0 => {
+                    writer
+                        .execute(
+                            "UPDATE memories SET content=content||' more' WHERE id=?1",
+                            [id.to_string()],
+                        )
+                        .unwrap();
+                }
+                // A current vector is saved or replaced.
+                1 | 2 => {
+                    let source = current_source(writer, id);
+                    save(writer, id, MODEL, &source, &rng.vector(LENGTH));
+                }
+                // The memory is forgotten, with its vector.
+                3 => {
+                    writer
+                        .execute("DELETE FROM memories WHERE id=?1", [id.to_string()])
+                        .unwrap();
+                    ids.retain(|kept| *kept != id);
+                }
+                // A new memory arrives, with its vector.
+                4 => {
+                    let new = insert(writer, &mut rng, 100 + round);
+                    let source = current_source(writer, new);
+                    save(writer, new, MODEL, &source, &rng.vector(LENGTH));
+                    ids.push(new);
+                }
+                // Another model's vector changes; ours stay.
+                5 => {
+                    let source = current_source(writer, id);
+                    save(writer, id, OTHER, &source, &rng.vector(LENGTH));
+                }
+                // A title change keeps the vector current.
+                _ => {
+                    writer
+                        .execute(
+                            "UPDATE memories SET title=title||'!' WHERE id=?1",
+                            [id.to_string()],
+                        )
+                        .unwrap();
+                }
+            }
+            if round == 25 {
+                // A change, then more than the log keeps: the change is
+                // pruned, and the held vectors must reload to see it.
+                let source = current_source(writer, ids[0]);
+                save(writer, ids[0], MODEL, &source, &rng.vector(LENGTH));
+                writer
+                    .execute(
+                        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < ?1) INSERT INTO search_changes(id) SELECT 'noise' FROM n",
+                        [CHANGES_KEPT + 1],
+                    )
+                    .unwrap();
+                write(writer).unwrap().commit().unwrap();
+            }
+            if round == 32 {
+                // A store whose log starts again, as one restored from a
+                // backup under a running server: the held vectors reload.
+                writer
+                    .execute_batch(
+                        "DELETE FROM search_changes; DELETE FROM sqlite_sequence WHERE name='search_changes';",
+                    )
+                    .unwrap();
+                let source = current_source(writer, ids[1]);
+                save(writer, ids[1], MODEL, &source, &rng.vector(LENGTH));
+            }
+        }
+        // Another model's vectors are held in their place.
+        let query = rng.vector(LENGTH);
+        assert_eq!(held(&conn, OTHER, &query), oracle(&conn, OTHER, &query));
+        // And another store's.
+        let elsewhere = tempfile::tempdir().unwrap();
+        let second = connect(&elsewhere.path().join("memories.sqlite3")).unwrap();
+        let id = insert(&second, &mut rng, 1);
+        save(
+            &second,
+            id,
+            MODEL,
+            &current_source(&second, id),
+            &rng.vector(LENGTH),
+        );
+        assert_eq!(held(&second, MODEL, &query), oracle(&second, MODEL, &query));
+        assert_eq!(held(&conn, MODEL, &query), oracle(&conn, MODEL, &query));
+    }
+
+    #[test]
+    fn a_vector_of_another_length_is_held_and_reported_not_compared() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = connect(&dir.path().join("memories.sqlite3")).unwrap();
+        let mut rng = Rng(0x0dd);
+        let (a, b) = (insert(&conn, &mut rng, 1), insert(&conn, &mut rng, 2));
+        save(
+            &conn,
+            a,
+            MODEL,
+            &current_source(&conn, a),
+            &rng.vector(LENGTH),
+        );
+        save(
+            &conn,
+            b,
+            MODEL,
+            &current_source(&conn, b),
+            &rng.vector(LENGTH + 1),
+        );
+        let guard = Held::current(&conn, MODEL).unwrap();
+        let held = guard.as_ref().unwrap();
+        assert_eq!(held.length(a), Some(LENGTH));
+        assert_eq!(held.length(b), Some(LENGTH + 1));
+        let found = held.cosines(&rng.vector(LENGTH), &[a, b]);
+        assert!(found[0].is_some() && found[1].is_none());
     }
 }

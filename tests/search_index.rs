@@ -843,3 +843,107 @@ fn a_server_keeps_the_store_open_between_calls() {
     );
     drop(server);
 }
+
+// A server keeps the vectors it read and reloads only the memories the
+// store's change log names; a fresh process reads them all.
+#[test]
+fn a_long_running_server_answers_as_a_fresh_one_after_other_processes_write() {
+    let mut rng = Rng(0x10_96e5);
+    let embedder = Embedder::start();
+    let store = Store::new();
+    let mut ids: Vec<String> = (0..20).map(|_| store.record(&mut rng)).collect();
+    let fused = |db: &Path| {
+        let mut command = store.command(db);
+        command
+            .env("USER_MEMORY_EMBED_URL", &embedder.url)
+            .env("USER_MEMORY_EMBED_MODEL", "test-model")
+            .env("USER_MEMORY_EMBED_ALLOW_HTTP", "1");
+        command
+    };
+    let mut lasting = Server::start(fused(&store.db()));
+    let mut semantic = 0;
+    for round in 0..12 {
+        match round % 4 {
+            0 => ids.push(store.record(&mut rng)),
+            1 => {
+                let words = rng.words(4, 12);
+                store.run(&[
+                    "update",
+                    &ids[rng.below(ids.len())],
+                    "--content",
+                    &words,
+                    "--reason",
+                    "",
+                ]);
+            }
+            2 => {
+                let id = ids.remove(rng.below(ids.len()));
+                store.run(&["forget", &id]);
+            }
+            _ => {
+                let words = rng.words(2, 5);
+                store.run(&["update", &ids[rng.below(ids.len())], "--title", &words]);
+            }
+        }
+        let memory_words: Vec<String> = store
+            .ids("SELECT title || ' ' || content FROM memories")
+            .iter()
+            .flat_map(|text| {
+                text.split_whitespace()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for _ in 0..5 {
+            let arguments = arguments(&mut rng, &memory_words);
+            let answer = lasting.search(&arguments);
+            assert_eq!(
+                answer,
+                Server::start(fused(&store.db())).search(&arguments),
+                "round {round}: {arguments}"
+            );
+            embedder.check();
+            semantic +=
+                usize::from(serde_json::from_str::<Value>(&answer).unwrap()["semantic"] == true);
+        }
+    }
+    // Only a topic of stop words has nothing to embed.
+    assert!(
+        semantic >= 40,
+        "only {semantic} of 60 searches used meaning"
+    );
+}
+
+// Memories as close to the topic as each other list newest first.
+#[test]
+fn equally_close_memories_by_meaning_list_newest_first() {
+    let embedder = Embedder::start();
+    let store = Store::new();
+    store.run(&["search"]);
+    let conn = store.sql();
+    for (n, title) in ["Older", "Newer"].iter().enumerate() {
+        conn.execute(
+            "INSERT INTO memories(id,memory_type,category,title,content) VALUES (?1,'fact','tools',?2,'Keep the build reproducible')",
+            [format!("00000000-0000-4000-8000-00000000000{n}"), (*title).to_owned()],
+        )
+        .unwrap();
+    }
+    drop(conn);
+    let mut command = store.command(&store.db());
+    command
+        .env("USER_MEMORY_EMBED_URL", &embedder.url)
+        .env("USER_MEMORY_EMBED_MODEL", "test-model")
+        .env("USER_MEMORY_EMBED_ALLOW_HTTP", "1");
+    let mut server = Server::start(command);
+    // No keyword of the topic is in either memory; both are equally near.
+    let answer: Value =
+        serde_json::from_str(&server.search(&json!({"topic": "zebra quokka"}))).unwrap();
+    embedder.check();
+    let titles: Vec<&str> = answer["memories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(titles, ["Newer", "Older"], "{answer}");
+}
