@@ -59,6 +59,17 @@ newest 3 batch folders there, itself included, and removes the older ones;
 4. `--dry-run` and `--rehearse`, then one scenario as a smoke test, then the
    batch.
 
+Trials run keyword-only unless `USER_MEMORY_EVAL_EMBED_URL` names an
+embeddings endpoint. Then `USER_MEMORY_EVAL_EMBED_MODEL`, `_DIMENSIONS` and
+`_QUERY_INSTRUCTION` go with it, and each trial's setup saves them as its
+`USER_MEMORY_EMBED_*` settings, so the agents search semantically. Plain http
+is allowed only for an endpoint on this machine. `--dry-run` shows which
+mode a batch would use:
+
+    USER_MEMORY_EVAL_EMBED_URL=http://127.0.0.1:11434/v1/embeddings \
+    USER_MEMORY_EVAL_EMBED_MODEL=qwen3-embedding:4b USER_MEMORY_EVAL_EMBED_DIMENSIONS=1024 \
+    evals/run.py --dry-run
+
 `--budget` caps the running total in `run-count`, not one batch: a batch
 starts only if the sessions already counted plus those it plans stay within
 it. After a 4-session smoke test, a 31-session batch needs `--budget 35`.

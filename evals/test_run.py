@@ -418,5 +418,31 @@ class TrialPruning(unittest.TestCase):
                 run.kept_batches({"USER_MEMORY_EVAL_KEEP_TRIALS": bad})
 
 
+
+class Embedding(unittest.TestCase):
+    def test_trials_get_semantic_search_only_when_an_endpoint_is_given(self):
+        self.assertEqual(run.embed_settings({}), {})
+        settings = run.embed_settings({
+            "USER_MEMORY_EVAL_EMBED_URL": "http://127.0.0.1:11434/v1/embeddings",
+            "USER_MEMORY_EVAL_EMBED_MODEL": "qwen3-embedding:4b",
+            "USER_MEMORY_EVAL_EMBED_DIMENSIONS": "1024",
+            "USER_MEMORY_EVAL_EMBED_QUERY_INSTRUCTION": "Instruct: find\\nQuery:",
+        })
+        self.assertEqual(settings, {
+            "USER_MEMORY_EMBED_URL": "http://127.0.0.1:11434/v1/embeddings",
+            "USER_MEMORY_EMBED_MODEL": "qwen3-embedding:4b",
+            "USER_MEMORY_EMBED_DIMENSIONS": "1024",
+            "USER_MEMORY_EMBED_QUERY_INSTRUCTION": "Instruct: find\\nQuery:",
+            # Plain http reaches only this machine's endpoint.
+            "USER_MEMORY_EMBED_ALLOW_HTTP": "1",
+        })
+        https = run.embed_settings({"USER_MEMORY_EVAL_EMBED_URL": "https://api.example.com/v1",
+                                    "USER_MEMORY_EVAL_EMBED_MODEL": "small"})
+        self.assertNotIn("USER_MEMORY_EMBED_ALLOW_HTTP", https)
+        # A model with no endpoint is a mistake, not keyword-only search.
+        with self.assertRaises(SystemExit):
+            run.embed_settings({"USER_MEMORY_EVAL_EMBED_MODEL": "small"})
+
+
 if __name__ == "__main__":
     unittest.main()

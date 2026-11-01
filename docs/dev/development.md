@@ -293,6 +293,24 @@ that plan or API usage; the runner enforces a session budget and aborts if
 your real memory, client configuration, instruction files or logins change.
 See [evals/README.md](../../evals/README.md).
 
+## Retrieval benchmark
+
+`just retrieval-bench` measures how well `search` finds a known memory. It
+builds a throwaway store from the synthetic memories in
+`evals/retrieval/memories.json`, then runs the graded queries in
+`evals/retrieval/queries.json` in the session's project. There are three
+styles of query: sharing words with the memory, phrased as a task, and
+paraphrased. It reports top-1, top-3, mean reciprocal rank (MRR) and misses
+per style, plus the ranks of global targets among global memories alone.
+It runs keyword-only, and with `--embed-url` also fused with an embeddings
+endpoint; the qwen3-embedding defaults match the installer's:
+
+    just retrieval-bench --embed-url http://127.0.0.1:11434/v1/embeddings
+
+Run it before and after a change to ranking, and report both. It needs no
+CI and runs no agent. `--out FILE` writes every query's ranks as JSON, and
+`--keep DIR` keeps the built store with its vectors.
+
 ## Repository rules
 
 - Keep implementation plans, designs and progress logs outside the repository
