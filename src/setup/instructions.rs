@@ -1117,6 +1117,25 @@ mod tests {
             .unwrap();
     }
 
+    /// The time `path` last changed, as the filesystem recorded it.
+    fn changed(path: &Path) -> SystemTime {
+        fs::metadata(path).unwrap().modified().unwrap()
+    }
+
+    /// Asserts that a write which returned just now waited for a file last
+    /// changed at `changed` to go [`QUIET`]. Timed from the change, not the
+    /// call, since the wait is QUIET less the file's age, and on this
+    /// process's clock, which the code compares the file's time with.
+    fn assert_waited(changed: SystemTime, case: &str) {
+        let after = SystemTime::now()
+            .duration_since(changed)
+            .unwrap_or_default();
+        assert!(
+            after >= QUIET,
+            "{case}: returned {after:?} after the file changed"
+        );
+    }
+
     #[test]
     fn a_file_saved_since_a_write_of_ours_waits_for_quiet() {
         let dir = tempfile::tempdir().unwrap();
@@ -1155,13 +1174,9 @@ mod tests {
             } else {
                 &path
             };
-            let started = Instant::now();
+            let before = changed(target);
             write_codex(target, &rules("b")).unwrap();
-            assert!(
-                started.elapsed() >= QUIET / 2,
-                "{case}: {:?}",
-                started.elapsed()
-            );
+            assert_waited(before, case);
         }
     }
 
@@ -1215,13 +1230,9 @@ mod tests {
                 }
                 _ => fs::write(&record, "{").unwrap(),
             }
-            let started = Instant::now();
+            let before = changed(&path);
             assert_eq!(write_codex(&path, &rules("b")).unwrap(), Change::Written);
-            assert!(
-                started.elapsed() >= QUIET / 2,
-                "{case}: {:?}",
-                started.elapsed()
-            );
+            assert_waited(before, case);
             if record.is_dir() {
                 fs::remove_dir(&record).unwrap();
             }
@@ -1275,6 +1286,7 @@ mod tests {
                 format!("{}# Mine, again\n", fs::read_to_string(&path).unwrap()),
             )
             .unwrap();
+            let before = changed(&path);
             let started = Instant::now();
             let change = if remove {
                 remove_codex(&path).map(|_| Change::Written)
@@ -1283,7 +1295,8 @@ mod tests {
             };
             let waited = started.elapsed();
             assert_eq!(change.unwrap(), Change::Written);
-            assert!(waited >= QUIET / 2 && waited < WAIT_LIMIT, "{waited:?}");
+            assert_waited(before, if remove { "remove" } else { "write" });
+            assert!(waited < WAIT_LIMIT, "{waited:?}");
             let text = fs::read_to_string(&path).unwrap();
             assert!(text.ends_with("# Mine, again\n"), "{text:?}");
             assert_eq!(text.contains(&rules("b")), !remove, "{text:?}");
@@ -1316,6 +1329,7 @@ mod tests {
             fs::write(&path, "# Mine\n").unwrap();
             settle(&path);
             let reads = std::cell::Cell::new(0);
+            let saved_at = std::cell::Cell::new(None);
             // The second read is the check just before the rename.
             let saving = |path: &Path| {
                 reads.set(reads.get() + 1);
@@ -1324,10 +1338,10 @@ mod tests {
                     if quiet {
                         settle(path);
                     }
+                    saved_at.set(Some(changed(path)));
                 }
                 read(path)
             };
-            let started = Instant::now();
             let change = update_reading(&path, saving, |existing| {
                 Ok(Next::Text(with_block(
                     &path,
@@ -1342,7 +1356,7 @@ mod tests {
             );
             assert!(reads.get() > 2);
             if !quiet {
-                assert!(started.elapsed() >= QUIET / 2, "{:?}", started.elapsed());
+                assert_waited(saved_at.get().unwrap(), "saved again");
             }
         }
     }
