@@ -970,7 +970,9 @@ copies it into the store after passing its turn on, so that copy never holds
 up other writers; SQLite's own copy inside the commit is off. A copy that
 fails is reported on stderr and retried by the next commit; the write it
 followed has succeeded. Readers take
-no lock. The lock file holds nothing: restoring a backup leaves it as it
+no lock. A server does its store work apart from the threads that read
+requests and send replies, so while its writes wait it goes on answering
+other calls, reads at once. The lock file holds nothing: restoring a backup leaves it as it
 is, and uninstall with `--purge` deletes it with the store.
 
 The store records its schema version (`PRAGMA user_version`). When a new
