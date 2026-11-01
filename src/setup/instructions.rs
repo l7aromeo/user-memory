@@ -1060,7 +1060,10 @@ mod tests {
         let started = Instant::now();
         assert_eq!(write_codex(&path, &rules("b")).unwrap(), Change::Written);
         assert!(remove_codex(&path).unwrap());
-        assert!(started.elapsed() < QUIET / 2, "{:?}", started.elapsed());
+        // A missed record makes the write and the remove each wait out
+        // QUIET; anything less is the time the writes take, which a loaded
+        // machine stretches.
+        assert!(started.elapsed() < QUIET, "{:?}", started.elapsed());
         assert_eq!(fs::read_to_string(&path).unwrap(), "# Mine\n");
         // Removing the file leaves no record of it behind.
         write_codex(&path, &rules("c")).unwrap();
@@ -1069,6 +1072,30 @@ mod tests {
         assert!(remove_codex(&path).unwrap());
         assert!(!path.exists());
         assert_eq!(records(), 0);
+    }
+
+    #[test]
+    fn the_record_matches_the_file_after_each_write() {
+        let dir = tempfile::tempdir().unwrap();
+        keep_records_in(&dir.path().join("state"));
+        let codex = dir.path().join("AGENTS.md");
+        let claude = dir.path().join("rules/user-memory.md");
+        let writes: [(&Path, &dyn Fn() -> Change); 4] = [
+            (&codex, &|| write_codex(&codex, &rules("a")).unwrap()),
+            (&codex, &|| write_codex(&codex, &rules("b")).unwrap()),
+            (&claude, &|| write_claude(&claude, &rules("a")).unwrap()),
+            (&claude, &|| write_claude(&claude, &rules("b")).unwrap()),
+        ];
+        for (path, write) in writes {
+            assert_eq!(write(), Change::Written);
+            let meta = fs::metadata(path).unwrap();
+            let text = fs::read_to_string(path).unwrap();
+            assert!(as_written(path, &meta, &text), "{}", path.display());
+            // Just written, so only the record makes it quiet.
+            let fresh = quiet_after(meta.modified().unwrap(), SystemTime::now());
+            assert!(!fresh.is_zero(), "{fresh:?}");
+            assert_eq!(until_quiet(path, Some(&text)).unwrap(), Duration::ZERO);
+        }
     }
 
     /// Writes the rules `line` into `path` as user-memory, returning the
