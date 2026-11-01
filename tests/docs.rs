@@ -191,6 +191,25 @@ fn service(words: &[&str]) -> Option<usize> {
     Some(verb + 1 + at)
 }
 
+/// Stands in for a `|` with a word on each side and no space, which lists
+/// alternatives (`keep-store|use-file`, `--no-hooks|--hooks`); with a space
+/// on either side it is a pipe.
+const ALTERNATIVES: char = '\u{1}';
+
+/// `line` with each `|` that lists alternatives written as [`ALTERNATIVES`].
+fn mark_alternatives(line: &str) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    let word = |c: Option<&char>| c.is_some_and(|c| !c.is_whitespace() && *c != '|');
+    chars
+        .iter()
+        .enumerate()
+        .map(|(i, &c)| {
+            let between = i > 0 && word(chars.get(i - 1)) && word(chars.get(i + 1));
+            if c == '|' && between { ALTERNATIVES } else { c }
+        })
+        .collect()
+}
+
 /// The words of each `user-memory` command in a shell line, up to the first
 /// shell operator. A command is the first word of a segment (after `|`,
 /// `;`, `&&`, `(` or `!`), the program a `docker compose … exec|run`
@@ -198,7 +217,7 @@ fn service(words: &[&str]) -> Option<usize> {
 /// else, as in `rm ~/.local/bin/user-memory`, the name is a path, not a
 /// command.
 fn commands(line: &str) -> Vec<Vec<String>> {
-    let spaced = line
+    let spaced = mark_alternatives(line)
         .replace("&&", " ; ")
         .replace("||", " ; ")
         .replace(['|', ';', '(', ')'], " ; ");
@@ -226,7 +245,7 @@ fn commands(line: &str) -> Vec<Vec<String>> {
         let args: Vec<String> = words[start + 1..]
             .iter()
             .take_while(|w| !matches!(**w, ">" | "<" | "2>&1" | "#") && !w.starts_with('>'))
-            .map(|w| (*w).to_owned())
+            .map(|w| w.replace(ALTERNATIVES, "|"))
             .collect();
         found.push(args);
     }
@@ -304,16 +323,27 @@ fn check_command(help: &mut Help, args: &[String]) -> Option<String> {
         return Some(format!("user-memory {} --help failed", path.join(" ")));
     }
     let flags = Help::flags(&text);
+    let words: HashSet<&str> = text
+        .split(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_'))
+        .collect();
     for word in rest {
-        if word == "-" || word == "--" || !word.starts_with('-') {
-            continue;
-        }
-        let flag = word.split('=').next().unwrap();
-        if !flags.iter().any(|known| known == flag) {
-            return Some(format!(
-                "user-memory {} does not accept {flag}",
-                path.join(" ")
-            ));
+        // Optional parts are in brackets, and a repeatable one ends in `…`.
+        let word = word.trim_start_matches('[').trim_end_matches([']', '…']);
+        for part in word.split('|') {
+            if part.starts_with('-') && part != "-" && part != "--" {
+                let flag = part.split('=').next().unwrap();
+                if !flags.iter().any(|known| known == flag) {
+                    return Some(format!(
+                        "user-memory {} does not accept {flag}",
+                        path.join(" ")
+                    ));
+                }
+            } else if word.contains('|') && !words.contains(part) {
+                return Some(format!(
+                    "user-memory {} takes no value {part}",
+                    path.join(" ")
+                ));
+            }
         }
     }
     None
@@ -1342,6 +1372,33 @@ fn a_flag_the_binary_lacks_is_caught() {
         None
     );
     assert!(commands("rm ~/.local/bin/user-memory").is_empty());
+}
+
+#[test]
+fn a_value_or_optional_flag_the_binary_lacks_is_caught() {
+    let mut help = Help {
+        cache: HashMap::new(),
+    };
+    let mut check = |line: &str| {
+        let found = commands(line);
+        assert_eq!(found.len(), 1, "{line}: {found:?}");
+        check_command(&mut help, &found[0])
+    };
+    // `a|b` inside a word lists the values a flag takes; optional parts
+    // are in brackets.
+    assert_eq!(
+        check("user-memory import f.json --apply [--on-conflict abort|keep-store|use-file]"),
+        None
+    );
+    assert_eq!(
+        check("user-memory review [--project P]… [--max-groups N]"),
+        None
+    );
+    assert!(check("user-memory import f.json --apply --on-conflict keep-stor|use-file").is_some());
+    assert!(check("user-memory review [--project P]… [--max-group N]").is_some());
+    assert!(check("user-memory setup --no-hooks|--hook").is_some());
+    // With spaces, `|` is a pipe.
+    assert_eq!(commands("user-memory export - | gzip"), [["export", "-"]]);
 }
 
 #[test]
