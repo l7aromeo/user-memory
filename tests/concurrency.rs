@@ -39,60 +39,27 @@ fn binary(db: &Path, home: &Path) -> Command {
 }
 
 /// Sends `RECORDS` record calls to one server without waiting, then reads
-/// every reply; a reply that never comes fails the test instead of hanging it.
+/// every reply; a reply that never comes fails the test instead of hanging
+/// it, with the server's stderr.
 fn serve_records(db: &Path, home: &Path, server: usize) -> Vec<Value> {
-    let mut child = binary(db, home)
-        .arg("serve")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let mut input = child.stdin.take().unwrap();
-    let stdout = child.stdout.take().unwrap();
-    let (lines, replies) = mpsc::channel();
-    std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines() {
-            let Ok(line) = line else { break };
-            if lines.send(line).is_err() {
-                break;
-            }
-        }
-    });
-    writeln!(input, "{}", json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}})).unwrap();
-    writeln!(
-        input,
-        "{}",
-        json!({"jsonrpc":"2.0","method":"notifications/initialized"})
-    )
-    .unwrap();
+    let mut child = Server::start(db, home, &format!("server {server}"), &[]);
     for i in 1..=RECORDS {
         // Every word unique, so no record is held back as similar.
         let title = format!("Alpha{server}x{i} bravo{server}y{i} charlie{server}z{i}");
-        let arguments = json!({"type":"preference","category":"workflow","title":title,"content":title,"scope":"global","user_confirmed":true});
-        writeln!(
-            input,
-            "{}",
-            json!({"jsonrpc":"2.0","id":i,"method":"tools/call","params":{"name":"record","arguments":arguments}})
-        )
-        .unwrap();
+        child.call(
+            i as u64,
+            "record",
+            json!({"type":"preference","category":"workflow","title":title,"content":title,"scope":"global","user_confirmed":true}),
+        );
     }
-    input.flush().unwrap();
     let mut answers = Vec::new();
     while answers.len() < RECORDS {
-        let line = replies.recv_timeout(time::STUCK).unwrap_or_else(|_| {
-            panic!(
-                "server {server}: no reply after {} of {RECORDS}",
-                answers.len()
-            )
-        });
-        let message: Value = serde_json::from_str(&line).unwrap();
-        if message["id"].as_u64().is_some_and(|id| id >= 1) {
-            answers.push(message);
-        }
+        answers.push(child.reply(
+            time::STUCK,
+            &format!("after {} of {RECORDS}", answers.len()),
+        ));
     }
-    drop(input);
-    child.wait().unwrap();
+    child.stop();
     answers
 }
 
