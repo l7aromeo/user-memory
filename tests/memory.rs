@@ -476,6 +476,8 @@ fn corrections_replace_content_and_confirmation_without_leaving_old_preferences_
             &id,
             "--content",
             "Prefer Python for prototypes",
+            "--title",
+            "Prefer Python for prototypes",
             "--reason",
             "Faster iteration"
         ])["updated"],
@@ -1220,6 +1222,7 @@ fn memories_differing_in_any_recorded_field_are_not_duplicates() {
 #[test]
 fn search_ranks_category_then_type_then_text_matches_above_recency() {
     let s = Store::new();
+    // Titles that hold no topic word, so the text match is the content alone.
     let record = |memory_type: &str, category: &str, content: &str| {
         s.value(&[
             "record",
@@ -1229,6 +1232,8 @@ fn search_ranks_category_then_type_then_text_matches_above_recency() {
             category,
             "--content",
             content,
+            "--title",
+            &format!("Memory {}", content.len()),
         ]);
     };
     record("preference", "testing", "Category match");

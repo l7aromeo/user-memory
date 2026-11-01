@@ -801,9 +801,13 @@ Search ranks the memories the [filters](#scope-and-filters) select, active
 global ones plus the listed projects' by default. The MCP tool takes the
 topic as `topic`, or `query`.
 
-- **Keyword:** an SQLite FTS5 index kept current by triggers. Relevance weighs
-  category, then type, then text, then recency; common function words are
-  ignored. Category synonyms match at query time:
+- **Keyword:** every candidate memory is scored. Words are compared by
+  their stems, so "releases" finds "release" and "paths" finds "path";
+  common function words are ignored. Each word of the question counts once
+  per memory, by the strongest field holding it (category, then title, then
+  type, then the text), and by how rare it is among the candidates, so a
+  word most memories share adds little. Ties go to the newest. Category
+  synonyms match at query time:
   programming/coding/software development/development,
   communication/comms/writing style, and workflow/process.
 - **Semantic (optional):** an OpenAI-compatible embeddings endpoint finds

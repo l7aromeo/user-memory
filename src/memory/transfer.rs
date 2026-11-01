@@ -310,7 +310,7 @@ pub fn export_document(db: &Path, subset: &Subset) -> Result<(String, Value)> {
         })?;
     let mut outside = None;
     if let Some(filter) = &filter {
-        let chosen: HashSet<Uuid> = candidates(&conn, filter, None)?
+        let chosen: HashSet<Uuid> = candidates(&conn, filter)?
             .into_iter()
             .map(|m| m.id)
             .collect();
@@ -784,7 +784,7 @@ fn covered(rows: &[Entry], filter: &Filter) -> Result<HashSet<Uuid>> {
         insert(&conn, entry)?;
         merge_origins(&conn, entry)?;
     }
-    Ok(candidates(&conn, filter, None)?
+    Ok(candidates(&conn, filter)?
         .into_iter()
         .map(|m| m.id)
         .collect())

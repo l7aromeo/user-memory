@@ -1,9 +1,11 @@
 //! Retrieval: ranked search and reading whole memories.
 //!
 //! Search considers every memory the selection covers (by default the active
-//! global memories and the requested projects'). Keyword relevance weighs
-//! category over type over text; with an embedding endpoint configured it is
-//! fused with semantic similarity by reciprocal rank. A project memory's
+//! global memories and the requested projects'). Keyword relevance stems
+//! the topic's words, weighs each by how rare it is among the candidates and
+//! by the field that holds it (category, title, type, then the text); with
+//! an embedding endpoint configured it is fused with semantic similarity by
+//! reciprocal rank. A project memory's
 //! fused score counts [`PROJECT_BONUS`] more, so it wins an equal match but
 //! not a clearly stronger one; without a topic, project memories come first.
 
@@ -20,10 +22,14 @@ use super::{
 use anyhow::{Result, bail};
 use clap::Args;
 use rusqlite::Connection;
+use rust_stemmers::{Algorithm, Stemmer};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{collections::BTreeSet, path::Path};
+use std::{
+    collections::{BTreeSet, HashMap},
+    path::Path,
+};
 use uuid::Uuid;
 
 /// Smoothing constant of reciprocal rank fusion. The customary 60 suits lists
@@ -92,18 +98,104 @@ pub struct Read {
 /// Most ids one read accepts; more is a listing, which category or index gives.
 const READ_IDS: usize = 20;
 
-fn keyword_score(query: &BTreeSet<String>, m: &Memory) -> usize {
-    let overlap = |words: &BTreeSet<String>| query.intersection(words).count();
-    let category: BTreeSet<String> = category_group(&m.category)
+/// How much a topic word counts, by the strongest field of a memory that
+/// holds it; each word counts once per memory. A category names what the
+/// memory is about, and a title states the memory in a line, so either
+/// beats a word somewhere in the text, and a type such as "preference"
+/// beats the text. On the retrieval benchmark (evals/retrieval) the order
+/// matters more than the values: these weights score keyword MRR 0.72, and
+/// in the simulation the design was chosen with, category 2 or 1 with title
+/// 1.5 to 2 came within 0.02 of category 3 with title 2.
+const CATEGORY_WEIGHT: f64 = 3.0;
+/// See [`CATEGORY_WEIGHT`].
+const TITLE_WEIGHT: f64 = 2.0;
+/// See [`CATEGORY_WEIGHT`]. Above the text's 1 so the documented order holds,
+/// category, then type, then text: the design was measured with type and
+/// text both at 1, and on the benchmark 1.5 moves nothing, as topics rarely
+/// name a memory's type.
+const TYPE_WEIGHT: f64 = 1.5;
+/// See [`CATEGORY_WEIGHT`]: content, context, reason and evidence.
+const TEXT_WEIGHT: f64 = 1.0;
+
+/// Word stems for one search, each distinct word stemmed once: a store's
+/// memories share most of their vocabulary.
+struct Stems {
+    stemmer: Stemmer,
+    seen: HashMap<String, String>,
+}
+
+impl Stems {
+    fn new() -> Self {
+        Self {
+            stemmer: Stemmer::create(Algorithm::English),
+            seen: HashMap::new(),
+        }
+    }
+    /// The stem of the lowercase `word`, so "release" and "releases" or
+    /// "path" and "paths" are one term.
+    fn of(&mut self, word: String) -> &str {
+        let stemmer = &self.stemmer;
+        self.seen
+            .entry(word)
+            .or_insert_with_key(|word| stemmer.stem(word).into_owned())
+    }
+    /// The stems of `text`'s words, without common function words.
+    fn all(&mut self, text: &str) -> BTreeSet<String> {
+        tokenize(text)
+            .into_iter()
+            .map(|word| self.of(word).to_owned())
+            .collect()
+    }
+}
+
+/// The weight of the strongest field of `m` holding each of `query`'s terms,
+/// in order; 0 where none does.
+fn field_weights(stems: &mut Stems, query: &[String], m: &Memory) -> Vec<f64> {
+    let mut best = vec![0.0; query.len()];
+    let text = format!("{} {} {} {}", m.content, m.context, m.reason, m.evidence);
+    let labels = category_group(&m.category).join(" ");
+    for (field, weight) in [
+        (labels.as_str(), CATEGORY_WEIGHT),
+        (m.title.as_str(), TITLE_WEIGHT),
+        (m.memory_type.as_str(), TYPE_WEIGHT),
+        (text.as_str(), TEXT_WEIGHT),
+    ] {
+        for word in tokenize(field) {
+            let stem = stems.of(word);
+            if let Some(i) = query.iter().position(|term| term == stem) {
+                best[i] = f64::max(best[i], weight);
+            }
+        }
+    }
+    best
+}
+
+/// Each of `items`' keyword relevance to the stemmed `query`: every query
+/// term counts its field's weight times its rarity among `items`, BM25's
+/// inverse document frequency, so a word most memories share adds little
+/// and one that few hold adds much.
+fn keyword_scores(stems: &mut Stems, query: &BTreeSet<String>, items: &[Memory]) -> Vec<f64> {
+    let query: Vec<String> = query.iter().cloned().collect();
+    let weights: Vec<Vec<f64>> = items
         .iter()
-        .flat_map(|label| tokenize(label))
+        .map(|m| field_weights(stems, &query, m))
         .collect();
-    4 * overlap(&category)
-        + 2 * overlap(&tokenize(&m.memory_type))
-        + overlap(&tokenize(&format!(
-            "{} {} {} {}",
-            m.content, m.context, m.reason, m.evidence
-        )))
+    let all = items.len() as f64;
+    let rarity: Vec<f64> = (0..query.len())
+        .map(|t| {
+            let holding = weights.iter().filter(|w| w[t] > 0.0).count() as f64;
+            ((all - holding + 0.5) / (holding + 0.5)).ln_1p()
+        })
+        .collect();
+    weights
+        .iter()
+        .map(|w| {
+            w.iter()
+                .zip(&rarity)
+                .map(|(weight, idf)| weight * idf)
+                .sum()
+        })
+        .collect()
 }
 
 fn recency(m: &Memory) -> (&str, i64) {
@@ -134,22 +226,27 @@ pub(super) fn rank(
     topic: &str,
     limit: usize,
 ) -> Result<Ranked> {
-    let query = tokenize(topic);
+    let mut stems = Stems::new();
+    let query = stems.all(topic);
     let semantic = if query.is_empty() {
         None
     } else {
         embed::Config::from_env()
     };
-    let keyword_only = semantic.is_none() && !query.is_empty();
-    let items = candidates(conn, filter, keyword_only.then_some(&query))?;
-    let scores: Vec<usize> = items.iter().map(|m| keyword_score(&query, m)).collect();
-    let mut matched: Vec<bool> = scores.iter().map(|&s| query.is_empty() || s > 0).collect();
+    // Every candidate is scored, with keywords as with meaning: the keyword
+    // index's exact words would miss what stemming finds.
+    let items = candidates(conn, filter)?;
+    let scores = keyword_scores(&mut stems, &query, &items);
+    let mut matched: Vec<bool> = scores
+        .iter()
+        .map(|&s| query.is_empty() || s > 0.0)
+        .collect();
     let mut fused = vec![0.0; items.len()];
     let mut semantic_ranked = false;
-    let mut by_keyword: Vec<usize> = (0..items.len()).filter(|&i| scores[i] > 0).collect();
+    let mut by_keyword: Vec<usize> = (0..items.len()).filter(|&i| scores[i] > 0.0).collect();
     by_keyword.sort_by(|&a, &b| {
         scores[b]
-            .cmp(&scores[a])
+            .total_cmp(&scores[a])
             .then_with(|| recency(&items[b]).cmp(&recency(&items[a])))
     });
     add_ranking(&by_keyword, &mut fused);
@@ -291,7 +388,7 @@ pub fn read(db: &Path, input: &Read) -> Result<Value> {
     match (input.ids.is_empty(), category) {
         (false, None) => {}
         (true, Some(_)) => {
-            let mut found = candidates(&conn, &selection.filter()?, None)?;
+            let mut found = candidates(&conn, &selection.filter()?)?;
             found.sort_by(group_order);
             return paged(found, &input.paging);
         }

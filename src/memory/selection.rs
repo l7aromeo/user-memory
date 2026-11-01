@@ -4,16 +4,15 @@
 //! the filtered result.
 
 use super::{
-    Memory, Source, clean, index, project_key,
+    Memory, Source, clean, project_key,
     schema::{SELECT, row},
-    similar::{aliased_categories, category_group},
+    similar::category_group,
 };
 use anyhow::{Result, bail};
 use clap::{Args, ValueEnum};
 use rusqlite::{Connection, params_from_iter, types::Value as Sql};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
 
 /// Which scopes a request covers beyond the default (global memories plus the
 /// requested projects').
@@ -257,23 +256,18 @@ fn clean_label(label: &str) -> String {
     clean(label, usize::MAX).to_lowercase()
 }
 
-/// Memories the filter covers. With `words`, only those whose text contains
-/// one of them or whose category one aliases.
-pub(super) fn candidates(
-    conn: &Connection,
-    filter: &Filter,
-    words: Option<&BTreeSet<String>>,
-) -> Result<Vec<Memory>> {
+/// Memories the filter covers.
+pub(super) fn candidates(conn: &Connection, filter: &Filter) -> Result<Vec<Memory>> {
     let scope = match filter.scope {
         None => "",
         Some(ScopeFilter::Global) => "global",
         Some(ScopeFilter::Project) => "project",
         Some(ScopeFilter::All) => "all",
     };
-    let mut sql = format!(
+    let sql = format!(
         "{SELECT} WHERE (CASE ?1 WHEN 'all' THEN 1 WHEN 'global' THEN scope='global' WHEN 'project' THEN scope='project' AND project IN (SELECT value FROM json_each(?2)) ELSE scope='global' OR (scope='project' AND project IN (SELECT value FROM json_each(?2))) END) AND (?3='' OR memory_type=?3) AND (?4='[]' OR category IN (SELECT value FROM json_each(?4))) AND (?5='' OR source=?5) AND status IN (SELECT value FROM json_each(?6)) AND (?7='' OR EXISTS (SELECT 1 FROM memory_origins WHERE memory_id=memories.id AND origin=?7))"
     );
-    let mut values = vec![
+    let values = vec![
         Sql::Text(scope.into()),
         Sql::Text(serde_json::to_string(&filter.projects)?),
         Sql::Text(filter.memory_type.clone()),
@@ -282,14 +276,6 @@ pub(super) fn candidates(
         Sql::Text(serde_json::to_string(filter.status.statuses())?),
         Sql::Text(filter.origin.clone()),
     ];
-    if let Some(words) = words {
-        sql.push_str(" AND (id IN (SELECT id FROM memory_search WHERE memory_search MATCH ?8) OR category IN (SELECT value FROM json_each(?9)))");
-        let tokens: Vec<&str> = words.iter().map(String::as_str).collect();
-        values.push(Sql::Text(index::any_token(&tokens)));
-        values.push(Sql::Text(serde_json::to_string(&aliased_categories(
-            words,
-        ))?));
-    }
     Ok(conn
         .prepare(&sql)?
         .query_map(params_from_iter(values), row)?
