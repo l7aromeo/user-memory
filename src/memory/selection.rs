@@ -256,28 +256,67 @@ fn clean_label(label: &str) -> String {
     clean(label, usize::MAX).to_lowercase()
 }
 
+/// The filter as a condition on the columns of `memories`, with its values
+/// as parameters in order. Only the clauses the filter sets are written, as
+/// plain comparisons and `IN` lists: a store scan evaluates them for every
+/// memory, where general clauses cost several times as much.
+pub(super) fn condition(filter: &Filter) -> Result<(String, Vec<Sql>)> {
+    let mut values = Vec::new();
+    let mut list = |items: &[String]| -> String {
+        values.extend(items.iter().map(|item| Sql::Text(item.clone())));
+        vec!["?"; items.len()].join(",")
+    };
+    let mut clauses = Vec::new();
+    match filter.scope {
+        Some(ScopeFilter::All) => {}
+        Some(ScopeFilter::Global) => clauses.push("scope='global'".to_owned()),
+        Some(ScopeFilter::Project) => clauses.push(format!(
+            "scope='project' AND project IN ({})",
+            list(&filter.projects)
+        )),
+        None => clauses.push(format!(
+            "scope='global' OR (scope='project' AND project IN ({}))",
+            list(&filter.projects)
+        )),
+    }
+    if !filter.memory_type.is_empty() {
+        clauses.push(format!(
+            "memory_type IN ({})",
+            list(std::slice::from_ref(&filter.memory_type))
+        ));
+    }
+    if !filter.categories.is_empty() {
+        clauses.push(format!("category IN ({})", list(&filter.categories)));
+    }
+    if let Some(source) = filter.source {
+        clauses.push(format!("source IN ({})", list(&[source.name().to_owned()])));
+    }
+    let statuses: Vec<String> = filter
+        .status
+        .statuses()
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+    clauses.push(format!("status IN ({})", list(&statuses)));
+    if !filter.origin.is_empty() {
+        clauses.push(format!(
+            "EXISTS (SELECT 1 FROM memory_origins WHERE memory_id=memories.id AND origin IN ({}))",
+            list(std::slice::from_ref(&filter.origin))
+        ));
+    }
+    let condition = clauses
+        .iter()
+        .map(|clause| format!("({clause})"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    Ok((condition, values))
+}
+
 /// Memories the filter covers.
 pub(super) fn candidates(conn: &Connection, filter: &Filter) -> Result<Vec<Memory>> {
-    let scope = match filter.scope {
-        None => "",
-        Some(ScopeFilter::Global) => "global",
-        Some(ScopeFilter::Project) => "project",
-        Some(ScopeFilter::All) => "all",
-    };
-    let sql = format!(
-        "{SELECT} WHERE (CASE ?1 WHEN 'all' THEN 1 WHEN 'global' THEN scope='global' WHEN 'project' THEN scope='project' AND project IN (SELECT value FROM json_each(?2)) ELSE scope='global' OR (scope='project' AND project IN (SELECT value FROM json_each(?2))) END) AND (?3='' OR memory_type=?3) AND (?4='[]' OR category IN (SELECT value FROM json_each(?4))) AND (?5='' OR source=?5) AND status IN (SELECT value FROM json_each(?6)) AND (?7='' OR EXISTS (SELECT 1 FROM memory_origins WHERE memory_id=memories.id AND origin=?7))"
-    );
-    let values = vec![
-        Sql::Text(scope.into()),
-        Sql::Text(serde_json::to_string(&filter.projects)?),
-        Sql::Text(filter.memory_type.clone()),
-        Sql::Text(serde_json::to_string(&filter.categories)?),
-        Sql::Text(filter.source.map_or("", Source::name).into()),
-        Sql::Text(serde_json::to_string(filter.status.statuses())?),
-        Sql::Text(filter.origin.clone()),
-    ];
+    let (condition, values) = condition(filter)?;
     Ok(conn
-        .prepare(&sql)?
+        .prepare(&format!("{SELECT} WHERE {condition}"))?
         .query_map(params_from_iter(values), row)?
         .collect::<rusqlite::Result<Vec<_>>>()?)
 }
