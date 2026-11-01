@@ -13,8 +13,8 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use std::{
     fs,
-    io::ErrorKind,
-    net::{Ipv4Addr, SocketAddr, TcpStream},
+    io::{self, ErrorKind},
+    net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::Duration,
@@ -114,8 +114,13 @@ const FAILED: i32 = 2;
 
 /// The address every installed server listens on inside its container.
 const CONTAINER_PORT: u16 = 8765;
-/// How long the port probe waits; a free port refuses at once.
-const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long the port probe's connect waits for an answer. A listener on
+/// loopback accepts in well under a millisecond, as the kernel completes the
+/// handshake; a closed port refuses at once on macOS and Linux, but on
+/// Windows only after about two seconds of SYN retries, so the wait bounds
+/// that, and a port whose bind did not find it held counts as free when it
+/// runs out.
+const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 /// The publish address this machine's own clients always use.
 const LOOPBACK: &str = "127.0.0.1";
 
@@ -202,14 +207,29 @@ fn docker_state() -> Docker {
     }
 }
 
-/// Whether anything accepts a connection on 127.0.0.1:`port`; only a
-/// refused connection counts as free, as a timeout may be a busy server.
+/// Whether a port is taken, from binding 127.0.0.1 there (`bind`) and then
+/// connecting to it (`connect`): taken when the bind finds the port held
+/// (AddrInUse) or the connect succeeds. Any other bind failure, such as a
+/// port below 1024 for a user on Linux, says nothing of a listener, so the
+/// connect decides; Docker reports a port it cannot publish itself. A
+/// refusal or a timeout there is free: Windows refuses a closed port slower
+/// than the probe waits.
+fn taken(bind: io::Result<()>, connect: impl FnOnce() -> io::Result<()>) -> bool {
+    matches!(&bind, Err(err) if err.kind() == ErrorKind::AddrInUse) || connect().is_ok()
+}
+
+/// Whether something holds 127.0.0.1:`port`. Binding it alone misses a
+/// server listening on every address (0.0.0.0) where the system lets a
+/// narrower bind share the port, as macOS does for SO_REUSEADDR sockets and
+/// Windows does without SO_EXCLUSIVEADDRUSE; connecting alone takes a
+/// Windows port that refuses slowly for a listener. So both are tried.
 fn port_in_use(port: u16) -> bool {
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-    !matches!(
-        TcpStream::connect_timeout(&address, PROBE_TIMEOUT),
-        Err(err) if err.kind() == ErrorKind::ConnectionRefused
-    )
+    // The listener closes at once, so the connect never reaches the probe's own.
+    let bind = TcpListener::bind(address).map(drop);
+    taken(bind, || {
+        TcpStream::connect_timeout(&address, PROBE_TIMEOUT).map(drop)
+    })
 }
 
 /// The Linux build for the Docker daemon's architecture.
@@ -771,5 +791,44 @@ mod tests {
     fn a_listening_port_is_in_use() {
         let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         assert!(port_in_use(listener.local_addr().unwrap().port()));
+    }
+
+    /// A server listening on every address takes 127.0.0.1's port too, though
+    /// binding 127.0.0.1 there succeeds on macOS (SO_REUSEADDR): the connect
+    /// is what finds it.
+    #[test]
+    fn a_port_every_address_listens_on_is_in_use() {
+        let listener = std::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+        assert!(port_in_use(listener.local_addr().unwrap().port()));
+    }
+
+    /// The decision over what binding 127.0.0.1:port and connecting to it
+    /// found. Windows refuses a connect to a closed loopback port only after
+    /// about two seconds of SYN retries, so a timeout is a free port, as a
+    /// refusal is, unless the bind found the port held.
+    #[test]
+    fn a_port_is_taken_only_when_its_bind_finds_it_held_or_a_connect_succeeds() {
+        let failed = |kind: ErrorKind| -> std::io::Result<()> { Err(kind.into()) };
+        let bound = || Ok(());
+        // Free: bound, and nothing answered.
+        assert!(!taken(bound(), || failed(ErrorKind::TimedOut)));
+        assert!(!taken(bound(), || failed(ErrorKind::ConnectionRefused)));
+        // Taken: something answered, or the bind found the port held.
+        assert!(taken(bound(), || Ok(())));
+        assert!(taken(failed(ErrorKind::AddrInUse), || {
+            failed(ErrorKind::ConnectionRefused)
+        }));
+        assert!(taken(failed(ErrorKind::AddrInUse), || {
+            failed(ErrorKind::TimedOut)
+        }));
+        // A bind refused for another reason (a low port on Linux, a range
+        // Windows reserves) says nothing of a listener: the connect decides.
+        assert!(!taken(failed(ErrorKind::PermissionDenied), || {
+            failed(ErrorKind::ConnectionRefused)
+        }));
+        assert!(!taken(failed(ErrorKind::PermissionDenied), || {
+            failed(ErrorKind::TimedOut)
+        }));
+        assert!(taken(failed(ErrorKind::PermissionDenied), || Ok(())));
     }
 }
