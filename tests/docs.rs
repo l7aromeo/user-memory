@@ -1409,9 +1409,11 @@ fn the_longest_no_project_line_matches_in_time() {
 const OWN_PAGES: &str = "https://github.com/l7aromeo/user-memory/blob/main/";
 
 /// The anchors GitHub gives a Markdown file's headings: lower case, with
-/// spaces as hyphens and other punctuation dropped.
+/// spaces as hyphens and other punctuation dropped, and `-1`, `-2` and so on
+/// after the second and later headings of one name.
 fn anchors(doc: &str) -> HashSet<String> {
     let mut found = HashSet::new();
+    let mut seen: HashMap<String, usize> = HashMap::new();
     let mut fenced = false;
     for line in doc.lines() {
         if line.trim_start().starts_with("```") {
@@ -1432,7 +1434,13 @@ fn anchors(doc: &str) -> HashSet<String> {
             .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || *c == ' ')
             .map(|c| if c == ' ' { '-' } else { c })
             .collect();
-        found.insert(slug);
+        let earlier = seen.entry(slug.clone()).or_insert(0);
+        found.insert(if *earlier == 0 {
+            slug
+        } else {
+            format!("{slug}-{earlier}")
+        });
+        *earlier += 1;
     }
     found
 }
@@ -1527,4 +1535,15 @@ fn a_broken_link_is_caught() {
             "docs/x.md:3: https://github.com/l7aromeo/user-memory/blob/main/docs/missing.md: no file docs/missing.md",
         ]
     );
+}
+
+#[test]
+fn a_repeated_heading_gets_githubs_number() {
+    let doc = "# Upgrade\n## Notes\n### Notes\n```\n## Notes\n```\n## Notes\n";
+    let found = anchors(doc);
+    for anchor in ["upgrade", "notes", "notes-1", "notes-2"] {
+        assert!(found.contains(anchor), "#{anchor} missing from {found:?}");
+    }
+    // A heading inside a code block is no heading.
+    assert!(!found.contains("notes-3"), "{found:?}");
 }
