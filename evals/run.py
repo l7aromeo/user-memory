@@ -122,6 +122,27 @@ REAL_SESSIONS = HOME / ".local/state/user-memory/sessions"
 REAL_CLAUDE_PROJECTS = HOME / ".claude/projects"
 
 
+# The trials' optional semantic search: USER_MEMORY_EVAL_EMBED_<NAME> becomes
+# USER_MEMORY_EMBED_<NAME> in each trial, where setup saves it. Unset, the
+# trials run keyword-only.
+EMBED_NAMES = ("URL", "MODEL", "DIMENSIONS", "QUERY_INSTRUCTION")
+
+
+def embed_settings(environ):
+    """The embedding settings a trial's setup receives, from `environ`."""
+    settings = {f"USER_MEMORY_EMBED_{name}": environ[f"USER_MEMORY_EVAL_EMBED_{name}"]
+                for name in EMBED_NAMES if environ.get(f"USER_MEMORY_EVAL_EMBED_{name}")}
+    if not settings:
+        return {}
+    url = settings.get("USER_MEMORY_EMBED_URL")
+    if not url:
+        sys.exit("USER_MEMORY_EVAL_EMBED_URL is needed for the other USER_MEMORY_EVAL_EMBED_ settings")
+    if url.startswith("http://"):
+        # user-memory allows plain http only when told, and only to this machine.
+        settings["USER_MEMORY_EMBED_ALLOW_HTTP"] = "1"
+    return settings
+
+
 def kept_batches(environ):
     """How many trial batches to keep: USER_MEMORY_EVAL_KEEP_TRIALS, or KEPT_BATCHES."""
     value = environ.get("USER_MEMORY_EVAL_KEEP_TRIALS")
@@ -330,6 +351,7 @@ class Sandbox:
             "CLAUDE_CONFIG_DIR": str(self.claude_dir),
             "CODEX_HOME": str(self.codex_home),
             "USER_MEMORY_DB": str(self.db),
+            **embed_settings(os.environ),
         }
         self.ids = {}
 
@@ -1381,6 +1403,10 @@ def main():
     problems = [p for p in (claude_token_problem() if "claude" in clients else None,
                             codex_login_problem() if "codex" in clients else None) if p]
     print("eval logins: " + ("; ".join(problems) if problems else "present"))
+    embed = embed_settings(os.environ)
+    print("semantic search: " + (f"{embed['USER_MEMORY_EMBED_URL']} "
+                                 f"{embed.get('USER_MEMORY_EMBED_MODEL', '(default model)')}"
+                                 if embed else "off (keyword only)"))
     binary = Path(args.binary).resolve()
     if not os.access(binary, os.X_OK):
         sys.exit(f"build the binary first: {binary}")

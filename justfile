@@ -39,6 +39,11 @@ mutants *args:
 sql-mutants *args:
     scripts/sql-mutants {{ args }}
 
+# Search quality on synthetic memories, keyword-only unless given an endpoint: `just retrieval-bench --embed-url http://127.0.0.1:11434/v1/embeddings`.
+retrieval-bench *args:
+    cargo build --locked
+    python3 -I evals/retrieval/run.py {{ args }}
+
 # ─── This machine ────────────────────────────────────────────────────────────
 
 # Builds from this checkout and connects the local clients: `just setup --url … --token-file …`.
