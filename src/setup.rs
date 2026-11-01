@@ -19,6 +19,7 @@ mod embedding;
 pub mod git_ignore;
 mod hooks;
 mod instructions;
+pub(crate) use instructions::sha256;
 mod path_env;
 pub(crate) mod removal;
 mod skill;

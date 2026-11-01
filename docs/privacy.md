@@ -36,7 +36,7 @@ On each machine running the client:
 |---|---|
 | `~/.config/user-memory/client-token` | The access token, readable only by you. |
 | `~/.local/bin/.user-memory.json` | Setup's choices: the server address or store path, clients, hooks, skill. |
-| `~/.local/state/user-memory/sessions/` | For each recent session, the id, last change, status and title of each memory it saw, so the change notice can compare. Files unused for 30 days are removed. |
+| `~/.local/state/user-memory/sessions/` | For each recent session, the id, last change, status and title of each memory it saw, so the change notice can compare. A file's name holds a key made from the store's path or the server's address (a hash, not the path or address itself). Files unused for 30 days are removed. |
 | `~/.local/state/user-memory/instructions/` | For each instruction file user-memory last wrote: its path, time, size and a SHA-256 of its text, never the text itself, so the next write can tell nobody has saved it since. |
 | `~/.claude/rules/user-memory.md`, the block in `~/.codex/AGENTS.md` | The titles of your global rules. |
 

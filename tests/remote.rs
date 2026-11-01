@@ -1166,6 +1166,84 @@ fn a_host_never_takes_its_own_folders_project_for_the_clients() {
     assert_eq!(linked["added"], json!([key]), "{linked}");
 }
 
+// A machine that switches between a server and a local store under one
+// session id keeps a snapshot of each: neither one's prompts hear of the
+// other's memories as changes.
+#[test]
+fn a_server_and_a_local_store_keep_their_own_session_snapshots() {
+    let root = tempdir().unwrap();
+    fs::write(root.path().join("token"), TOKEN).unwrap();
+    let host = Host::start(root);
+    let home = tempdir().unwrap();
+    let run = |remote: bool, args: &[&str], stdin: &[u8]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_user-memory"));
+        command
+            .args(args)
+            .current_dir(home.path())
+            .sandboxed(home.path())
+            .env(time::HOOK_ROOM.0, time::HOOK_ROOM.1)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if remote {
+            command
+                .env("USER_MEMORY_URL", format!("http://{}/mcp", host.address))
+                .env("USER_MEMORY_TOKEN_FILE", host.root.path().join("token"))
+                .env_remove("USER_MEMORY_DB");
+        } else {
+            // The machine's own store, where it lives by default: the one a
+            // native install uses before it moves to the server.
+            command
+                .env_remove("USER_MEMORY_DB")
+                .env_remove("USER_MEMORY_URL")
+                .env_remove("USER_MEMORY_TOKEN_FILE");
+        }
+        let mut child = command.spawn().unwrap();
+        child.stdin.take().unwrap().write_all(stdin).unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    for (remote, title) in [(false, "Prefer tabs here"), (true, "Prefer spaces there")] {
+        let stored = run(
+            remote,
+            &[
+                "record",
+                "--type",
+                "preference",
+                "--category",
+                "workflow",
+                "--title",
+                title,
+                "--content",
+                title,
+                "--scope",
+                "global",
+            ],
+            b"",
+        );
+        assert!(stored.contains("\"stored\":true"), "{stored}");
+    }
+    let payload = |event: &str| {
+        json!({"session_id":"s","cwd":home.path(),"hook_event_name":event}).to_string()
+    };
+    for remote in [false, true] {
+        run(
+            remote,
+            &["session-start", "--client", "claude"],
+            payload("SessionStart").as_bytes(),
+        );
+    }
+    for remote in [false, true] {
+        let notice = run(
+            remote,
+            &["prompt-submit", "--client", "claude"],
+            payload("UserPromptSubmit").as_bytes(),
+        );
+        assert_eq!(notice, "", "remote {remote}: nothing changed in its store");
+    }
+}
+
 /// Runs the CLI as a client of `host`, with `home` as its home folder and
 /// `stdin` as its input.
 fn client(

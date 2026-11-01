@@ -109,42 +109,37 @@ pub(super) struct Snapshot {
     pub stamps: Stamps,
 }
 
-/// A snapshot file as this or an earlier version wrote it.
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum Saved {
-    Current(Snapshot),
-    StampsOnly(Stamps),
-}
+/// Hex characters of the store key in a snapshot's file name: 64 bits of
+/// the SHA-256 of the store's identity, so two stores on one machine never
+/// share a key, without a path or address in the name.
+const STORE_KEY_CHARS: usize = 16;
 
-/// The snapshot's file name for `client`'s session `session_id`, or `None`
-/// when the id could not safely name a file.
-fn file_name(client: &str, session_id: &str) -> Option<String> {
+/// The snapshot's file name for `client`'s session `session_id` of the
+/// store named `store`, or `None` when the id could not safely name a file.
+fn file_name(client: &str, session_id: &str, store: &str) -> Option<String> {
     let safe = !session_id.is_empty()
         && session_id.len() <= SESSION_ID_CHARS
         && !session_id.starts_with('.')
         && session_id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
-    safe.then(|| format!("{client}-{session_id}.json"))
+    let key = &crate::setup::sha256(store.as_bytes())[..STORE_KEY_CHARS];
+    safe.then(|| format!("{client}-{session_id}-{key}.json"))
 }
 
-/// The snapshot file of `client`'s session `session_id`.
-pub(super) fn snapshot_path(client: &str, session_id: &str) -> Option<PathBuf> {
+/// The snapshot file of `client`'s session `session_id` of the store named
+/// `store`. A session's snapshot of another store, such as a build run
+/// against a store of its own, is another file, never compared with it.
+pub(super) fn snapshot_path(client: &str, session_id: &str, store: &str) -> Option<PathBuf> {
     let dir = paths::state_dir()?.join("sessions");
-    Some(dir.join(file_name(client, session_id)?))
+    Some(dir.join(file_name(client, session_id, store)?))
 }
 
-/// The snapshot saved at `path`, if one is there and readable; one saved
-/// before snapshots held projects loads with them unknown.
+/// The snapshot saved at `path`, if one is there and readable. Snapshots
+/// from before their file name held the store's key are never read: which
+/// store they saw is unknown.
 pub(super) fn load(path: &Path) -> Option<Snapshot> {
-    match serde_json::from_slice(&fs::read(path).ok()?).ok()? {
-        Saved::Current(snapshot) => Some(snapshot),
-        Saved::StampsOnly(stamps) => Some(Snapshot {
-            projects: None,
-            stamps,
-        }),
-    }
+    serde_json::from_slice(&fs::read(path).ok()?).ok()
 }
 
 /// Saves `snapshot` at `path` (folders and file private, replaced whole),
@@ -383,10 +378,24 @@ mod tests {
     // Where the state folder is: paths' tests.
     #[test]
     fn snapshots_have_a_safe_name() {
+        let store = "store /home/u/.local/share/user-memory/memories.sqlite3";
+        let key = &crate::setup::sha256(store.as_bytes())[..STORE_KEY_CHARS];
         assert_eq!(
-            file_name("claude", "0b9c-41aa_x.1").as_deref(),
-            Some("claude-0b9c-41aa_x.1.json")
+            file_name("claude", "0b9c-41aa_x.1", store),
+            Some(format!("claude-0b9c-41aa_x.1-{key}.json"))
         );
+        assert_eq!(key.len(), 16);
+        assert!(key.chars().all(|c| c.is_ascii_hexdigit()), "{key}");
+        // Each store, or server, names a file of its own.
+        let names: std::collections::BTreeSet<_> = [
+            store,
+            "store /tmp/dev/memories.sqlite3",
+            "server https://memory.example.com/mcp",
+        ]
+        .into_iter()
+        .map(|store| file_name("claude", "s", store))
+        .collect();
+        assert_eq!(names.len(), 3, "{names:?}");
         let long = "x".repeat(SESSION_ID_CHARS + 1);
         for unsafe_id in [
             "",
@@ -396,9 +405,9 @@ mod tests {
             "with space",
             long.as_str(),
         ] {
-            assert_eq!(file_name("codex", unsafe_id), None, "{unsafe_id:?}");
+            assert_eq!(file_name("codex", unsafe_id, store), None, "{unsafe_id:?}");
         }
-        assert!(file_name("codex", &"x".repeat(SESSION_ID_CHARS)).is_some());
+        assert!(file_name("codex", &"x".repeat(SESSION_ID_CHARS), store).is_some());
     }
 
     #[test]
@@ -456,21 +465,6 @@ mod tests {
             fs::read_dir(&sessions).unwrap().count(),
             3,
             "no temporary file left"
-        );
-    }
-
-    #[test]
-    fn a_snapshot_from_before_projects_loads_with_them_unknown() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("claude-old.json");
-        let saved = stamps(&[("11111111-aaaa", stamp("t", "confirmed", "Prefer Rust"))]);
-        fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
-        assert_eq!(
-            load(&path),
-            Some(Snapshot {
-                projects: None,
-                stamps: saved
-            })
         );
     }
 

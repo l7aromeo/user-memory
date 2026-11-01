@@ -321,7 +321,7 @@ fn records_dir() -> Option<PathBuf> {
 }
 
 /// The SHA-256 of `bytes`, in hex.
-fn sha256(bytes: &[u8]) -> String {
+pub(crate) fn sha256(bytes: &[u8]) -> String {
     aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, bytes)
         .as_ref()
         .iter()

@@ -228,8 +228,9 @@ existing category for a new memory (`workflow`, not a new `process`). With
   transcript holds the index as it was, so it gets the current one.
 - It saves what the session sees of memory (each memory's id, last change,
   status and title, for the global memories and its projects') in
-  `${XDG_STATE_HOME:-~/.local/state}/user-memory/sessions/<client>-<session id>.json`
-  (mode 0600, directory 0700; on Windows
+  `${XDG_STATE_HOME:-~/.local/state}/user-memory/sessions/<client>-<session id>-<store key>.json`,
+  one per store or server the session used, the key a hash of the store's
+  path or the server's address (mode 0600, directory 0700; on Windows
   `%LOCALAPPDATA%\user-memory\state\sessions\`, with an access list allowing
   only the user). Snapshots untouched for 30 days are removed
   when any is written.

@@ -52,7 +52,11 @@ impl Home {
         command
     }
     fn cli(&self, args: &[&str]) -> Value {
-        let out = self.command(args, &[]).output().unwrap();
+        self.cli_with(args, &[])
+    }
+    /// The command line's output with `env` added, such as another store.
+    fn cli_with(&self, args: &[&str], env: &[(&str, &str)]) -> Value {
+        let out = self.command(args, env).output().unwrap();
         assert!(out.status.success(), "{out:?}");
         serde_json::from_slice(&out.stdout).unwrap()
     }
@@ -108,6 +112,18 @@ impl Home {
     fn notice(&self, session: &str) -> String {
         self.notice_in(session, self.path())
     }
+    /// The prompt hook's notice with `env` added, such as another store.
+    fn notice_with(&self, session: &str, env: &[(&str, &str)]) -> String {
+        let out = self.hook_in("UserPromptSubmit", session, self.path(), env);
+        if out.stdout.is_empty() {
+            return String::new();
+        }
+        let reply: Value = serde_json::from_slice(&out.stdout).unwrap();
+        reply["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
     /// The prompt hook's notice for a session now working in `cwd`.
     fn notice_in(&self, session: &str, cwd: &Path) -> String {
         let out = self.hook_in("UserPromptSubmit", session, cwd, &[]);
@@ -124,12 +140,29 @@ impl Home {
             .unwrap()
             .to_owned()
     }
-    /// Where the session's snapshot is kept: the sessions folder in the
-    /// state folder, as user-memory resolves it in this home.
+    /// The sessions folder in the state folder, as user-memory resolves it
+    /// in this home.
+    fn sessions(&self) -> PathBuf {
+        sandbox::folder(self.path(), "state").join("sessions")
+    }
+    /// The session's one snapshot, of this home's store: its file name
+    /// starts with the client and session id, and ends with the store's key.
     fn snapshot(&self, session: &str) -> PathBuf {
-        sandbox::folder(self.path(), "state")
-            .join("sessions")
-            .join(format!("claude-{session}.json"))
+        let prefix = format!("claude-{session}-");
+        let found: Vec<PathBuf> = std::fs::read_dir(self.sessions())
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|path| {
+                        let name = path.file_name().unwrap().to_string_lossy();
+                        name.starts_with(&prefix) && name.ends_with(".json")
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(found.len(), 1, "snapshots of {session}: {found:?}");
+        found[0].clone()
     }
 }
 
@@ -354,4 +387,73 @@ fn a_session_keeps_the_projects_it_has_seen_when_its_folder_changes() {
     // a, which the session also saw from its own folder, stays.
     std::fs::write(work.join(".user-memory"), "@b\n").unwrap();
     assert_eq!(home.notice_in("s", &work), "");
+}
+
+// A session's snapshot belongs to the store it was taken from. A build or a
+// setup using another store, under the same client and session id, keeps a
+// snapshot of its own: neither store's prompts hear of the other's memories.
+#[test]
+fn a_snapshot_belongs_to_the_store_it_was_taken_from() {
+    let home = Home::new();
+    let other_db = home.path().join("other.sqlite3");
+    let other = [("USER_MEMORY_DB", other_db.to_str().unwrap())];
+    let record_in = |env: &[(&str, &str)], title: &str| {
+        let out = home.cli_with(
+            &[
+                "record",
+                "--type",
+                "preference",
+                "--category",
+                "workflow",
+                "--title",
+                title,
+                "--content",
+                title,
+                "--scope",
+                "global",
+            ],
+            env,
+        );
+        assert_eq!(out["stored"], true, "{out}");
+        out["id"].as_str().unwrap().to_owned()
+    };
+    record_in(&[], "Prefer tabs for indentation");
+    home.hook("SessionStart", "s", &[]);
+    record_in(&other, "Prefer spaces for indentation");
+    home.hook("SessionStart", "s", &other);
+    assert_eq!(
+        home.notice("s"),
+        "",
+        "the other store's start changed nothing here"
+    );
+    assert_eq!(home.notice_with("s", &other), "", "nor this store's there");
+    let added = record_in(&other, "Wrap lines at 100");
+    assert_eq!(home.notice("s"), "");
+    assert_eq!(
+        home.notice_with("s", &other).lines().nth(1),
+        Some(format!("+ {} Wrap lines at 100", id8(&added)).as_str())
+    );
+}
+
+// A snapshot saved before snapshots named their store cannot tell which
+// store it saw, so it is never compared: the first prompt after the upgrade
+// is quiet, as a session's first prompt without a snapshot is, and changes
+// after it are told as before.
+#[test]
+fn a_snapshot_from_before_the_upgrade_gives_no_notice() {
+    let home = Home::new();
+    home.record("Prefer Rust for tools");
+    std::fs::create_dir_all(home.sessions()).unwrap();
+    // As 0.9.0 wrote it: one memory this store never held.
+    std::fs::write(
+        home.sessions().join("claude-old.json"),
+        json!({"projects":[],"stamps":{"0b9d3a11-0000-4000-8000-000000000000":{"updated_at":"2026-10-01 10:00:00","status":"confirmed","title":"Use tabs"}}}).to_string(),
+    )
+    .unwrap();
+    assert_eq!(home.notice("old"), "");
+    let added = home.record("Ask before pushing");
+    assert_eq!(
+        home.notice("old").lines().nth(1),
+        Some(format!("+ {} Ask before pushing", id8(&added)).as_str())
+    );
 }
