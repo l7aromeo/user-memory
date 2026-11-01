@@ -1,5 +1,6 @@
 //! Search indexes derived from stored memories: an FTS5 keyword index kept in
-//! step by triggers, and embedding vectors filled lazily at recall time.
+//! step by triggers, which search no longer reads (it scores the candidates'
+//! stemmed words itself), and embedding vectors filled lazily at recall time.
 
 use super::{
     Memory,
@@ -58,15 +59,6 @@ pub(super) fn install(conn: &Connection) -> Result<()> {
     }
     tx.commit()?;
     Ok(())
-}
-
-/// FTS5 query matching any of `tokens`, each quoted so it is never read as syntax.
-pub(super) fn any_token(tokens: &[&str]) -> String {
-    tokens
-        .iter()
-        .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
-        .collect::<Vec<_>>()
-        .join(" OR ")
 }
 
 /// Stored vector for `id`, only if `model` embedded it from `source` at `dimensions`.

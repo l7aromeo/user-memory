@@ -28,7 +28,7 @@ pub type Stamps = BTreeMap<String, Stamp>;
 /// The snapshot of the memories `filter` selects: [`STAMPS`], then one line
 /// per memory, its fields separated by tabs, which a title never holds.
 pub(super) fn stamps(conn: &Connection, filter: &Filter) -> Result<String> {
-    let mut memories: Vec<Memory> = candidates(conn, filter, None)?;
+    let mut memories: Vec<Memory> = candidates(conn, filter)?;
     memories.sort_by_key(|m| m.id);
     let mut lines = vec![STAMPS.to_owned()];
     lines.extend(

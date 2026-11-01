@@ -57,7 +57,7 @@ pub fn instructions(db: &Path, max_bytes: usize) -> Result<String> {
         scope: Some(ScopeFilter::Global),
         ..Selection::default()
     };
-    let mut rules: Vec<Memory> = candidates(&conn, &global.filter()?, None)?
+    let mut rules: Vec<Memory> = candidates(&conn, &global.filter()?)?
         .into_iter()
         .filter(standing_rule)
         .collect();

@@ -177,15 +177,6 @@ pub(super) fn category_group(label: &str) -> Vec<String> {
     }
 }
 
-/// Labels of every alias group that a query word belongs to.
-pub(super) fn aliased_categories(query: &BTreeSet<String>) -> Vec<String> {
-    CATEGORY_ALIASES
-        .iter()
-        .filter(|group| group.iter().any(|l| !tokenize(l).is_disjoint(query)))
-        .flat_map(|group| group.iter().map(|l| (*l).to_owned()))
-        .collect()
-}
-
 /// The normalized fields of a memory, as stored or about to be recorded.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Draft<'a> {

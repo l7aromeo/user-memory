@@ -133,7 +133,7 @@ pub fn index(db: &Path, input: &Index) -> Result<String> {
             .position(|id| *id == m.id)
             .unwrap_or(matched.len())
     };
-    let mut all: Vec<Memory> = candidates(&conn, &filter, None)?;
+    let mut all: Vec<Memory> = candidates(&conn, &filter)?;
     if all.is_empty() {
         let stored: i64 =
             conn.query_row("SELECT EXISTS (SELECT 1 FROM memories)", [], |r| r.get(0))?;

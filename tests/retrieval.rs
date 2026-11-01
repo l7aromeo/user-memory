@@ -375,7 +375,7 @@ fn search_index_tables_are_created_once_and_follow_store_level_changes() {
     )
     .unwrap();
     conn.execute(
-        "UPDATE memories SET content='Prefer Zig for systems work' WHERE id=?1",
+        "UPDATE memories SET content='Prefer Zig for systems work',title='Prefer Zig for systems work' WHERE id=?1",
         [&rust],
     )
     .unwrap();
@@ -440,7 +440,12 @@ fn reindex_rebuilds_a_damaged_keyword_index() {
     let s = Store::new();
     preferences(&s);
     s.sql().execute("DELETE FROM memory_search", []).unwrap();
-    assert!(s.contents(&[], &["editor"]).is_empty());
+    assert_eq!(s.search_rows(), 0);
+    // Search reads the memories themselves, not the keyword index.
+    assert_eq!(
+        s.contents(&[], &["editor"]),
+        ["Use Helix as the text editor"]
+    );
     let report = s.value(&[], &["reindex"]);
     assert_eq!(report, json!({"reindexed":3,"embedded":null}));
     assert_eq!(
@@ -845,13 +850,16 @@ fn semantic_search_embeds_lazily_and_reuses_current_vectors() {
     assert_eq!(
         s.contents(
             &env,
-            &["which language for a fast tool", "--page-size", "1"]
+            // No memory shares a word with it; "tool" would match the
+            // category tools now that words are stemmed.
+            &["which language for a fast binary", "--page-size", "1"]
         ),
         ["Generally prefer Rust over Python"]
     );
     assert_eq!(fake.inputs().len(), 5, "query plus four memories");
     assert_eq!(
-        s.contents(&env, &["something for typing code", "--page-size", "1"]),
+        // "code" would match the category programming's alias coding.
+        s.contents(&env, &["something for typing quickly", "--page-size", "1"]),
         ["Use Helix as the text editor"]
     );
     assert_eq!(fake.inputs().len(), 6, "only the query is embedded again");
@@ -1118,7 +1126,13 @@ fn shared_function_words_do_not_outrank_a_semantic_match() {
     assert_eq!(
         s.contents(
             &env,
-            &["which language to write a fast tool in", "--page-size", "1"]
+            // Neither "tool" nor "write" here: by their stems they would
+            // match the categories tools and communication (writing style).
+            &[
+                "which language to pick for a fast binary in",
+                "--page-size",
+                "1"
+            ]
         ),
         ["Generally prefer Rust over Python"]
     );
@@ -1595,4 +1609,102 @@ fn equally_similar_memories_all_match() {
         s.contents(&env, &["compiler", "--page-size", "20"]).len(),
         3
     );
+}
+
+/// Keyword search matches inflected forms: a topic of "releases" finds a
+/// memory about a release, and "paths" one about a path.
+#[test]
+fn keyword_search_matches_inflected_words() {
+    let s = Store::new();
+    s.stored(&[
+        "--category",
+        "workflow",
+        "--content",
+        "Cut each release from a tag",
+    ]);
+    s.stored(&[
+        "--category",
+        "tooling",
+        "--content",
+        "Quote every path in scripts",
+    ]);
+    s.stored(&["--category", "food", "--content", "Vegetarian recipes only"]);
+    assert_eq!(
+        s.contents(&[], &["releases"]),
+        ["Cut each release from a tag"]
+    );
+    assert_eq!(s.contents(&[], &["paths"]), ["Quote every path in scripts"]);
+}
+
+/// A word few memories share says more than one most of them share: the
+/// memory with the rare word ranks first, though the others are newer.
+#[test]
+fn a_rare_word_outweighs_a_common_one() {
+    let s = Store::new();
+    s.stored(&[
+        "--category",
+        "notes",
+        "--content",
+        "No releases on Friday afternoons",
+    ]);
+    for content in [
+        "Deploy only from main",
+        "Deploy with the release script",
+        "Deploy after the review",
+    ] {
+        s.stored(&["--category", "notes", "--content", content]);
+    }
+    assert_eq!(
+        s.contents(&[], &["deploy friday"])[0],
+        "No releases on Friday afternoons"
+    );
+}
+
+/// A word that only the title holds is matched as well.
+#[test]
+fn keyword_search_reads_the_title() {
+    let s = Store::new();
+    s.stored(&[
+        "--category",
+        "notes",
+        "--title",
+        "Benchmarks run on the dedicated runner",
+        "--content",
+        "Numbers from laptops are not comparable",
+    ]);
+    s.stored(&[
+        "--category",
+        "notes",
+        "--content",
+        "Vegetarian recipes only",
+    ]);
+    assert_eq!(
+        s.contents(&[], &["benchmarks"]),
+        ["Numbers from laptops are not comparable"]
+    );
+}
+
+/// A topic word counts once per memory, at the strongest field holding it:
+/// repeating it in the title and the text does not outrank a memory filed
+/// under it as a category, though that one is older.
+#[test]
+fn a_word_counts_once_at_its_strongest_field() {
+    let s = Store::new();
+    s.stored(&[
+        "--category",
+        "deploy",
+        "--title",
+        "Only on weekdays",
+        "--content",
+        "Ship on weekdays only",
+    ]);
+    s.stored(&[
+        "--category",
+        "notes",
+        "--title",
+        "Deploy from main",
+        "--content",
+        "Deploy only after review",
+    ]);
+    assert_eq!(s.contents(&[], &["deploy"])[0], "Ship on weekdays only");
 }
