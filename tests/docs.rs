@@ -1,7 +1,7 @@
 //! The docs and release notes (README.md, CONTRIBUTING.md, SECURITY.md,
-//! docs/ and release-notes/) against the code, so docs that disagree with
-//! the binary cannot be released: scripts/client-release runs this test
-//! before it builds.
+//! AGENTS.md, docs/ and release-notes/) against the code, so docs that
+//! disagree with the binary cannot be released: scripts/client-release runs
+//! this test before it builds.
 //!
 //! - Every `user-memory …` command in a code block or inline code span must
 //!   name subcommands the built binary has, with flags its `--help` lists.
@@ -61,7 +61,7 @@ fn repo_file(name: &str) -> PathBuf {
 const PUBLISHED: [&str; 3] = ["docs", "docs/dev", "release-notes"];
 
 /// The docs at the repository's root.
-const ROOT_DOCS: [&str; 3] = ["README.md", "CONTRIBUTING.md", "SECURITY.md"];
+const ROOT_DOCS: [&str; 4] = ["README.md", "CONTRIBUTING.md", "SECURITY.md", "AGENTS.md"];
 
 fn docs() -> Vec<(String, String)> {
     let mut docs: Vec<(String, String)> = ROOT_DOCS

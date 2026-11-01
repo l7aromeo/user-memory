@@ -1,0 +1,141 @@
+name: Bug report
+description: user-memory behaves differently than its docs say
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Do not use this form for a security vulnerability:
+        report it privately, as [SECURITY.md](https://github.com/l7aromeo/user-memory/blob/main/SECURITY.md) describes.
+        Never paste an access token, an API key, a memory you would not publish, or a host or path you keep private.
+
+  - type: checkboxes
+    id: prerequisites
+    attributes:
+      label: Before you file
+      options:
+        - label: I searched the existing issues and found nothing matching
+          required: true
+        - label: I can reproduce this on the latest release
+          required: true
+        - label: This is not a security vulnerability
+          required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you saw, including any message word for word.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: >
+        The commands you ran, or what you asked the agent to do, in order. A
+        fresh throwaway store that shows the problem is ideal.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+
+  - type: input
+    id: version
+    attributes:
+      label: user-memory version
+      description: What `user-memory --version` prints.
+      placeholder: user-memory 0.8.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Operating system and architecture
+      options:
+        - macOS, Apple Silicon
+        - macOS, Intel
+        - Linux, x64
+        - Linux, ARM64
+        - Windows, x64
+        - Windows, ARM64
+        - WSL
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: Install kind
+      description: How this machine uses user-memory.
+      options:
+        - Native store on this machine
+        - Docker server on this machine
+        - Client of a shared server
+        - Server-only host
+        - Built from a checkout
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: clients
+    attributes:
+      label: Agent clients
+      options:
+        - label: Claude Code
+        - label: Codex
+        - label: Another MCP client
+
+  - type: input
+    id: client-versions
+    attributes:
+      label: Client versions
+      description: Such as what `claude --version` and `codex --version` print.
+
+  - type: dropdown
+    id: semantic-search
+    attributes:
+      label: Semantic search
+      options:
+        - Ollama on this machine
+        - Another OpenAI-compatible endpoint
+        - Off (keywords only)
+        - Not sure
+
+  - type: input
+    id: model
+    attributes:
+      label: Embedding model
+      description: >
+        The model name only. `user-memory embedding show` prints it where the
+        store lives (on the installer's Docker server, `docker compose exec
+        memory user-memory embedding show`); on a client, give the name from
+        the server's settings. No keys or private addresses.
+      placeholder: qwen3-embedding:4b
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: user-memory doctor
+      description: >
+        What `user-memory doctor` prints on the machine with the problem (for
+        the Docker server, also inside it). Remove the access token, any API
+        key, and any host name or path you keep private.
+      render: text
+
+  - type: input
+    id: regression
+    attributes:
+      label: Last version where this worked
+      description: If it worked before, the last release where it did.
+
+  - type: textarea
+    id: more
+    attributes:
+      label: Anything else
+      description: Logs or other context, with the same things removed.

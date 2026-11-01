@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/l7aromeo/user-memory/security/advisories/new
+    about: Report it privately, never in a public issue.
+  - name: Documentation
+    url: https://github.com/l7aromeo/user-memory/tree/main/docs
+    about: Install, use, server and troubleshooting guides.

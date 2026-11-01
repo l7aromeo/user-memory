@@ -1,9 +1,16 @@
 # Contributing
 
 Thank you for helping with user-memory. This page has what every change
-needs; [development](docs/dev/development.md) has the detail: the test
-layout, the fake programs the tests use, mutation testing and the agent
-evaluations.
+needs; [AGENTS.md](AGENTS.md) has the full rules a change is held to, and
+[development](docs/dev/development.md) the detail: the test layout, the fake
+programs the tests use, mutation testing and the agent evaluations.
+
+## Start with an issue
+
+Open an issue first, describing the problem or the need; the templates ask
+for what a fix needs. Then open a pull request that closes it, with
+`Fixes #N` in its description, so the issue and the change stay linked.
+Security issues are the exception: report those privately, as below.
 
 ## Set up
 
