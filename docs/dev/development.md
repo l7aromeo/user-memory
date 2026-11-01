@@ -33,6 +33,12 @@ libraries.
 The tests drive the real binary with throwaway stores and fake clients; none
 touch your real `~/.claude`, `~/.codex`, skills folders or memory store.
 
+After moving or renaming a checkout or a worktree, run `cargo clean -p
+user-memory` before the tests. Each test binary holds the path of the
+`user-memory` it runs (`CARGO_BIN_EXE_user-memory`), and cargo does not
+rebuild them for a move alone, so they keep running the binary at the old
+path, or fail with "No such file or directory" when it is gone.
+
 The programs user-memory and its scripts call (`claude`, `codex`, `docker`,
 `brew`, `ollama`, `uname`, and for the release script `gh`, `cargo`,
 `rustc` and `rustup`) are one fake: the `user-memory-fake` binary,
@@ -258,12 +264,13 @@ scripts/sql-mutants           # SQL literals; needs a clean tree
 
 `just mutants` runs cargo-mutants with `CARGO_TARGET_DIR` unset (exported,
 cargo-mutants builds its mutants into that folder, over your own build) and
-three jobs. It builds each mutant with the `mutants` profile in `Cargo.toml`,
-the test profile without debug information. Measured on
-`src/memory/titles.rs` (45 mutants): 362 s at two jobs, 336 s with the
-profile, 317 s with three jobs, and no faster at four. It tests with `cargo
-test`, not nextest: nextest lets the slow integration tests still running
-finish after a mutant is caught, which made the same run 1,149 s.
+three jobs; when you run `cargo mutants` yourself, unset it the same way. It
+builds each mutant with the `mutants` profile in `Cargo.toml`, the test
+profile without debug information. Measured on `src/memory/titles.rs` (45
+mutants): 362 s at two jobs, 336 s with the profile, 317 s with three jobs,
+and no faster at four. It tests with `cargo test`, not nextest: nextest lets
+the slow integration tests still running finish after a mutant is caught,
+which made the same run 1,149 s.
 
 cargo-mutants does not mutate string literals, so `scripts/sql-mutants` applies
 the exact search/replace pairs in `scripts/sql-mutations/*.txt` (one catalog per
@@ -297,7 +304,8 @@ See [evals/README.md](../../evals/README.md).
 
 - Commit maintained setup, operation, configuration and reference
   documentation.
-- `AGENTS.md` holds the agent-agnostic repository guidance.
+- [AGENTS.md](../../AGENTS.md) holds the rules every change is held to, for
+  people and tools alike.
 
 ## References
 
