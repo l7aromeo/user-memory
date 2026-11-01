@@ -822,3 +822,24 @@ fn a_memory_too_long_to_index_leaves_search_reading_every_memory() {
     assert_eq!(found["memories"].as_array().unwrap().len(), 2);
     assert_eq!(store.count("search_pending"), 1);
 }
+
+// SQLite removes a WAL store's log and shared memory when its last
+// connection closes; a server that held none paid for that on every call.
+#[test]
+fn a_server_keeps_the_store_open_between_calls() {
+    let store = Store::new();
+    store.run(&["search"]);
+    let shared = |db: PathBuf| {
+        let mut name = db.into_os_string();
+        name.push("-shm");
+        PathBuf::from(name)
+    };
+    assert!(!shared(store.db()).exists(), "no connection is open");
+    let mut server = Server::start(store.command(&store.db()));
+    server.search(&json!({"topic": "release"}));
+    assert!(
+        shared(store.db()).exists(),
+        "the server keeps the store open"
+    );
+    drop(server);
+}

@@ -734,6 +734,7 @@ async fn main() -> Result<()> {
             if let Some(connection) = connection {
                 return remote::connect(connection).await;
             }
+            let _held = memory::hold(&db);
             let service = UserMemoryServer {
                 db,
                 in_client_folder: true,

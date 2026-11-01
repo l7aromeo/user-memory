@@ -268,6 +268,7 @@ async fn authenticate(State(token): State<String>, request: Request, next: Next)
 
 pub async fn host(options: HostOptions) -> Result<()> {
     let db = options.db.unwrap_or_else(crate::db_path);
+    let _held = crate::memory::hold(&db);
     if !db.is_absolute() {
         bail!("Server database must use an absolute path");
     }

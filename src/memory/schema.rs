@@ -220,6 +220,17 @@ pub fn connect(db: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
+/// A connection that keeps the store at `db` open while a server runs, or
+/// none when there is no store yet or it cannot be opened, which each call
+/// then reports. SQLite removes a WAL store's log and shared-memory files
+/// when its last connection closes and makes them again at the next open;
+/// a server opens a connection per call, so without this every call paid
+/// that, about 10 ms and at times far more, a third of a search on a large
+/// store.
+pub fn hold(db: &Path) -> Option<Connection> {
+    db.is_file().then(|| connect(db).ok()).flatten()
+}
+
 /// One write transaction at a time, for the writers that share it.
 pub(super) struct Gate {
     /// The thread holding the turn, or none while it is free; a write opened
