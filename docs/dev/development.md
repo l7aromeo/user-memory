@@ -461,6 +461,18 @@ Run it before and after a change to ranking, and report both. It needs no
 CI and runs no agent. `--out FILE` writes every query's ranks as JSON, and
 `--keep DIR` keeps the built store with its vectors.
 
+## Search budget
+
+`just search-budget` checks that search stays fast as the store grows. It
+builds a throwaway store of 100,000 synthetic memories (`--memories N` for
+another size), builds its keyword index with `reindex`, then times keyword
+searches whose words few, some and many memories hold, as a whole
+command-line process and inside one long-running `serve`. It prints each
+median and fails when one is over its budget: 150 ms for the command line
+and 100 ms for the server (`evals/scale/run.py`). Run it after a change to
+search or the keyword index, and report what it printed. It takes a few
+minutes and needs no CI.
+
 ## Repository rules
 
 - Keep implementation plans, designs and progress logs outside the repository
