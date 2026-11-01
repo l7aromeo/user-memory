@@ -183,7 +183,13 @@ user-memory keeps two kinds of file in its state folder,
 on Windows), each private to you:
 
 - `sessions/`: what each recent session saw of memory, which the change
-  notice compares against ([session hooks](clients.md#session-hooks)).
+  notice compares against ([session hooks](clients.md#session-hooks)). Each
+  file is one session's view of one store or server: its name ends with a
+  key made from the store's path or the server's address, so a build or
+  setup using another store, or a machine moving from its store to a
+  server, keeps a snapshot of its own. A snapshot from before 0.9.0 names
+  no store and is never read; that session's next prompt starts a new one
+  quietly, and the old file goes with the 30-day clean-up.
 - `instructions/`: one record per instruction file user-memory wrote, with
   its path, time, size and the SHA-256 of its text, so the next write knows
   nobody has saved the file since

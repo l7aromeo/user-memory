@@ -90,6 +90,34 @@ pub fn same(a: &Path, b: &Path) -> bool {
     equal(OS, &resolved(a), &resolved(b))
 }
 
+/// One spelling of `path`, the same before and after it is created: its
+/// longest existing ancestor as the file system resolves it (links
+/// followed, long names on Windows), with the rest appended as given.
+pub fn resolved(path: &Path) -> PathBuf {
+    let mut rest = Vec::new();
+    let mut existing = path;
+    loop {
+        if let Ok(found) = dunce::canonicalize(existing) {
+            return rest
+                .iter()
+                .rev()
+                .fold(found, |found, part| found.join(part));
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name);
+                // A bare name's folder is the current one.
+                existing = if parent.as_os_str().is_empty() {
+                    Path::new(".")
+                } else {
+                    parent
+                };
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
+}
+
 fn variable(name: &str) -> Option<OsString> {
     env::var_os(name)
 }
@@ -195,8 +223,43 @@ fn equal(os: Os, a: &Path, b: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use std::collections::HashMap;
+
+    // A path is spelled the same before its file exists as after: on macOS
+    // a temporary folder is reached through a link, /var to /private/var.
+    #[test]
+    fn a_path_is_resolved_the_same_before_and_after_it_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("store").join("memories.sqlite3");
+        let before = resolved(&store);
+        std::fs::create_dir(dir.path().join("store")).unwrap();
+        std::fs::write(&store, "").unwrap();
+        assert_eq!(resolved(&store), before);
+        assert_eq!(before, dunce::canonicalize(&store).unwrap());
+        // A bare name, as USER_MEMORY_DB may give, is in the current folder.
+        let bare = resolved(Path::new("not-yet-a-store.sqlite3"));
+        assert_eq!(
+            bare,
+            dunce::canonicalize(".")
+                .unwrap()
+                .join("not-yet-a-store.sqlite3")
+        );
+    }
+
+    // One store reached through a linked folder has one spelling.
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_folder_resolves_to_its_target() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("store")).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("store"), dir.path().join("link")).unwrap();
+        assert_eq!(
+            resolved(&dir.path().join("link/memories.sqlite3")),
+            resolved(&dir.path().join("store/memories.sqlite3"))
+        );
+    }
 
     /// An environment holding exactly `vars`.
     fn with(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<OsString> + use<> {
