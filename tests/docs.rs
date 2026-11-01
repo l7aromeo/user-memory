@@ -1445,11 +1445,22 @@ fn anchors(doc: &str) -> HashSet<String> {
     found
 }
 
-/// Each link in `doc` (named `name`, relative to the repository) whose
-/// file or heading is missing: relative links, and links to this
-/// repository's own pages on GitHub.
-fn link_errors(name: &str, doc: &str) -> Vec<String> {
-    let mut errors = Vec::new();
+/// A link from one doc into this repository.
+struct Link<'a> {
+    /// The line it is on, from 1.
+    line: usize,
+    /// As written.
+    target: &'a str,
+    /// The file it names, from the repository's root.
+    file: String,
+    /// The heading it names, or empty.
+    anchor: &'a str,
+}
+
+/// The links in `doc` (named `name`, relative to the repository) to files
+/// of this repository: relative links, and links to its own pages on GitHub.
+fn links<'a>(name: &str, doc: &'a str) -> Vec<Link<'a>> {
+    let mut found = Vec::new();
     let dir = name.rsplit_once('/').map_or("", |(dir, _)| dir);
     let mut fenced = false;
     for (index, line) in doc.lines().enumerate() {
@@ -1479,19 +1490,55 @@ fn link_errors(name: &str, doc: &str) -> Vec<String> {
                 };
                 (file, anchor)
             };
-            let number = index + 1;
-            let Ok(text) = fs::read_to_string(repo_file(&file)) else {
-                if !repo_file(&file).exists() {
-                    errors.push(format!("{name}:{number}: {target}: no file {file}"));
-                }
-                continue;
-            };
-            if !anchor.is_empty() && file.ends_with(".md") && !anchors(&text).contains(anchor) {
-                errors.push(format!("{name}:{number}: {target}: no heading #{anchor}"));
+            found.push(Link {
+                line: index + 1,
+                target,
+                file,
+                anchor,
+            });
+        }
+    }
+    found
+}
+
+/// Each link in `doc` (named `name`) whose file or heading is missing.
+fn link_errors(name: &str, doc: &str) -> Vec<String> {
+    let mut errors = Vec::new();
+    for Link {
+        line,
+        target,
+        file,
+        anchor,
+    } in links(name, doc)
+    {
+        let Ok(text) = fs::read_to_string(repo_file(&file)) else {
+            if !repo_file(&file).exists() {
+                errors.push(format!("{name}:{line}: {target}: no file {file}"));
             }
+            continue;
+        };
+        if !anchor.is_empty() && file.ends_with(".md") && !anchors(&text).contains(anchor) {
+            errors.push(format!("{name}:{line}: {target}: no heading #{anchor}"));
         }
     }
     errors
+}
+
+/// The index of the user docs, which links every page under docs/.
+const INDEX: &str = "docs/README.md";
+
+/// The pages among `pages` that `index` does not link, besides the index
+/// itself.
+fn unindexed(index: &str, pages: &[String]) -> Vec<String> {
+    let linked: HashSet<String> = links(INDEX, index)
+        .into_iter()
+        .map(|link| link.file)
+        .collect();
+    pages
+        .iter()
+        .filter(|page| page.as_str() != INDEX && !linked.contains(page.as_str()))
+        .cloned()
+        .collect()
 }
 
 /// `path`, a repository path with `/` between its parts as links and the
@@ -1546,4 +1593,29 @@ fn a_repeated_heading_gets_githubs_number() {
     }
     // A heading inside a code block is no heading.
     assert!(!found.contains("notes-3"), "{found:?}");
+}
+
+// The index is how a reader finds a page, so a page it leaves out is one
+// nobody finds.
+#[test]
+fn the_docs_index_links_every_page() {
+    let pages: Vec<String> = docs()
+        .into_iter()
+        .map(|(name, _)| name)
+        .filter(|name| name.starts_with("docs/"))
+        .collect();
+    let index = fs::read_to_string(repo_file(INDEX)).unwrap();
+    let missing = unindexed(&index, &pages);
+    assert!(
+        missing.is_empty(),
+        "{INDEX} does not link {}",
+        missing.join(", ")
+    );
+}
+
+#[test]
+fn a_page_missing_from_the_index_is_caught() {
+    let pages = ["docs/README.md", "docs/a.md", "docs/b.md", "docs/dev/c.md"].map(String::from);
+    let index = "[A](a.md#part), [C](dev/c.md) and [up](../README.md)\n```\n[B](b.md)\n```\n";
+    assert_eq!(unindexed(index, &pages), ["docs/b.md"]);
 }
