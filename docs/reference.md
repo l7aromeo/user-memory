@@ -401,10 +401,11 @@ workflow
   launch. The text comes from `index` with `instructions` (CLI
   `user-memory index --instructions`), so a remote server renders it.
 - Writes go through a temporary file and a rename, keep the file's
-  permissions and are skipped when nothing changed. Just before the rename
-  the file is read again; if you saved it meanwhile, the write starts over
-  from your version, and after about a tenth of a second of changes it
-  leaves the file for the next sync. A failed write never
+  permissions and are skipped when nothing changed. A file changed in the
+  last second, as during a save of yours, is written only once it has gone
+  a second unchanged, so the write starts from your saved version; a file
+  still changing after two seconds is left for the next sync. Just before
+  the rename the file is read and checked again. A failed write never
   fails a tool call or a session start; `doctor` reports each file as
   current, outdated or missing.
 - A `rules/user-memory.md` you wrote yourself, a Codex file whose markers

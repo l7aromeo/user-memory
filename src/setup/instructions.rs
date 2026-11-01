@@ -12,6 +12,7 @@ use std::{
     io::{self, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
+    time::{Duration, Instant, SystemTime},
 };
 
 /// Numbers this process's writes, naming each one's temporary file.
@@ -242,15 +243,31 @@ enum Next {
     Keep,
 }
 
-/// Tries to replace a file before giving up on it: about a tenth of a
-/// second in all, longer than an editor takes to save, short enough not to
-/// hold up a tool call.
-const ATTEMPTS: u32 = 20;
-/// Waits between tries, for a save under way to finish.
-const PAUSE: std::time::Duration = std::time::Duration::from_millis(5);
+/// How long a file must go unchanged before user-memory replaces it. An
+/// editor saving in place truncates the file, then writes it, and every
+/// read in between sees part of the user's text: a write then would replace
+/// it, and the rest of the save would land in the replaced file. Each step of
+/// a save moves the file's modification time to now, so a file that has kept
+/// it for this long has no save under way. Saves measured on a desktop took
+/// under 10 ms, and up to 200 ms with twice as many busy processes as cores;
+/// a loaded CI runner stalled one past the 100 ms the check used to allow.
+const QUIET: Duration = Duration::from_secs(1);
+/// Longest a write waits for its file to go [`QUIET`] before leaving it as
+/// it is for the next sync: one save just before the call is waited out,
+/// and both clients' files stay within [`super::SYNC_LIMIT`].
+const WAIT_LIMIT: Duration = QUIET.saturating_mul(2);
+const _: () = assert!(
+    2 * WAIT_LIMIT.as_millis() <= super::SYNC_LIMIT.as_millis(),
+    "a sync of both files must fit its limit"
+);
+/// The step of a filesystem that keeps whole seconds (HFS+, ext3): a time
+/// there may read up to this much earlier than the change it records.
+const WHOLE_SECOND: Duration = Duration::from_secs(1);
+/// Waits before trying again after the file changed during a write.
+const PAUSE: Duration = Duration::from_millis(5);
 /// Age past which a temporary file of ours is left over from a write that
 /// was cut off (a session hook exits on time): a write takes milliseconds.
-const STALE: std::time::Duration = std::time::Duration::from_secs(60);
+const STALE: Duration = Duration::from_secs(60);
 
 /// The start of the names of `path`'s temporary files.
 fn temporary_prefix(path: &Path) -> Option<String> {
@@ -281,40 +298,77 @@ fn clear_stale(path: &Path) {
     }
 }
 
+/// How much longer the file at `path` must go unchanged to be [`QUIET`]:
+/// zero when it is missing or already has.
+fn until_quiet(path: &Path) -> Result<Duration> {
+    match fs::metadata(path).and_then(|meta| meta.modified()) {
+        Ok(modified) => Ok(quiet_after(modified, SystemTime::now())),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Duration::ZERO),
+        Err(err) => Err(err).with_context(|| format!("Cannot read {}", path.display())),
+    }
+}
+
+/// How long after `now` a file last changed at `modified` turns [`QUIET`].
+/// A time ahead of `now` counts as quiet: a save on this machine stamps the
+/// file with this clock, so it is another machine's clock or this one set
+/// back, and waiting for it would hold every write up.
+fn quiet_after(modified: SystemTime, now: SystemTime) -> Duration {
+    let Ok(mut age) = now.duration_since(modified) else {
+        return Duration::ZERO;
+    };
+    // No fraction of a second: perhaps rounded down to it, so the change
+    // may be up to a second younger.
+    if modified
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .is_ok_and(|since| since.subsec_nanos() == 0)
+    {
+        age = age.saturating_sub(WHOLE_SECOND);
+    }
+    QUIET.saturating_sub(age)
+}
+
 /// Replaces `path` with what `next` makes of its current text, through a
 /// temporary file in the same directory that keeps the file's permissions.
-/// The user may be saving the file in place at the same time: the text is
-/// read again just before the rename, and when it changed, or reads empty as
-/// in the middle of such a save, the write starts over from a fresh read.
-/// After [`ATTEMPTS`] the file is left as it is; an empty file is written
-/// only when every try found it empty.
+/// A file that already holds that text is left at once. The user may be
+/// saving the file in place, so any other file is changed only once it has
+/// gone [`QUIET`] since the read, and is checked again just before the
+/// rename; one still changing after [`WAIT_LIMIT`] is left as it is. A
+/// save that starts between that last check and the rename can still be
+/// lost: no lock-free write closes that window, and editors take no locks.
 fn update(path: &Path, next: impl Fn(Option<&str>) -> Result<Next>) -> Result<Change> {
     update_reading(path, read, next)
 }
 
-/// [`update`] with the file read by `read`, so a test can play a save in
-/// progress exactly.
+/// [`update`] with the file read by `read`, so a test can change the file
+/// at an exact point of a write.
 fn update_reading(
     path: &Path,
     read: impl Fn(&Path) -> Result<Option<String>>,
     next: impl Fn(Option<&str>) -> Result<Next>,
 ) -> Result<Change> {
     clear_stale(path);
-    // Whether any try found text: an empty read after that is a save in the
-    // middle of truncating, never the file's real content.
-    let mut had_text = false;
-    for attempt in 1..=ATTEMPTS {
+    let deadline = Instant::now() + WAIT_LIMIT;
+    // Whether the file still holds `existing`, and has gone quiet since.
+    let settled = |existing: &Option<String>| -> Result<bool> {
+        Ok(read(path)? == *existing && until_quiet(path)?.is_zero())
+    };
+    while Instant::now() < deadline {
         let existing = read(path)?;
-        let empty = existing.as_deref() == Some("");
-        had_text |= existing.as_deref().is_some_and(|text| !text.is_empty());
-        if empty && (had_text || attempt < ATTEMPTS) {
-            std::thread::sleep(PAUSE);
-            continue;
-        }
-        let next = next(existing.as_deref())?;
-        if matches!(&next, Next::Text(text) if existing.as_deref() == Some(text.as_str())) {
+        let next = next(existing.as_deref());
+        if let Ok(Next::Text(text)) = &next
+            && existing.as_deref() == Some(text.as_str())
+        {
             return Ok(Change::Unchanged);
         }
+        // Read before this check, the text is the file's own only when
+        // nothing has changed it since: until then it may be part of a save,
+        // and so may a refusal of it.
+        let wait = until_quiet(path)?;
+        if !wait.is_zero() {
+            std::thread::sleep(wait.min(deadline.saturating_duration_since(Instant::now())));
+            continue;
+        }
+        let next = next?;
         if !matches!(next, Next::Keep) && is_link(path) {
             return Err(linked(path));
         }
@@ -322,7 +376,7 @@ fn update_reading(
             Next::Keep => return Ok(Change::Unchanged),
             Next::Text(text) => text,
             Next::Remove => {
-                if read(path)? != existing {
+                if !settled(&existing)? {
                     std::thread::sleep(PAUSE);
                     continue;
                 }
@@ -352,7 +406,7 @@ fn update_reading(
                 fs::set_permissions(&temporary, fs::metadata(path)?.permissions())?;
             }
             file.sync_all()?;
-            if read(path)? != existing {
+            if !settled(&existing)? {
                 return Ok(false);
             }
             fs::rename(&temporary, path)?;
@@ -540,6 +594,7 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         }
+        settle(&path);
         assert_eq!(write_claude(&path, &rules("b")).unwrap(), Change::Written);
         #[cfg(unix)]
         {
@@ -552,6 +607,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), rules("b"));
         // No temporary file is left beside it.
         assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+        settle(&path);
         assert!(remove_claude(&path).unwrap());
         assert!(!path.exists());
         assert!(!remove_claude(&path).unwrap());
@@ -562,6 +618,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("user-memory.md");
         fs::write(&path, "# My own rules\n").unwrap();
+        settle(&path);
         for err in [
             write_claude(&path, &rules("a")).unwrap_err(),
             claude_state(&path, &rules("a")).unwrap_err(),
@@ -589,6 +646,7 @@ mod tests {
                 let _ = fs::remove_file(&path);
             } else {
                 fs::write(&path, original).unwrap();
+                settle(&path);
             }
             assert_eq!(write_codex(&path, &rules("a")).unwrap(), Change::Written);
             let text = fs::read_to_string(&path).unwrap();
@@ -607,12 +665,14 @@ mod tests {
             // Text added after the block by the user stays where it is.
             let edited = format!("{text}after\n");
             fs::write(&path, &edited).unwrap();
+            settle(&path);
             write_codex(&path, &rules("b")).unwrap();
             assert_eq!(
                 fs::read_to_string(&path).unwrap(),
                 edited.replace(&marked(&rules("a")), &marked(&rules("b")))
             );
             fs::write(&path, &text).unwrap();
+            settle(&path);
             assert!(remove_codex(&path).unwrap());
             if original.is_empty() {
                 assert!(!path.exists());
@@ -642,6 +702,7 @@ mod tests {
             (format!("abc {block}"), "abc "),
         ] {
             fs::write(&path, &around).unwrap();
+            settle(&path);
             assert!(remove_codex(&path).unwrap());
             assert_eq!(fs::read_to_string(&path).unwrap(), expected, "{around:?}");
         }
@@ -655,6 +716,7 @@ mod tests {
         assert_eq!(codex_room(&path), RULES_MAX_BYTES - markers);
         let own = "x".repeat(20 * 1024);
         fs::write(&path, &own).unwrap();
+        settle(&path);
         assert_eq!(codex_room(&path), RULES_MAX_BYTES - own.len() - markers);
         // The block already there is not the user's text.
         write_codex(&path, &rules("a")).unwrap();
@@ -725,48 +787,299 @@ mod tests {
         assert_eq!(text.matches(END).count(), 1);
     }
 
+    /// How long a simulated editor stalls in the middle of a save, as one
+    /// on a loaded machine does: longer than a write used to retry for, and
+    /// shorter than [`QUIET`].
+    const STALL: Duration = Duration::from_millis(300);
+
+    /// Truncates `path` as an editor saving in place does, then, after
+    /// [`STALL`] in another thread, writes `first` and `rest` into the same
+    /// file, which it keeps open throughout.
+    fn stalled_save(path: &Path, first: &str, rest: &str) -> std::thread::JoinHandle<()> {
+        let mut editor = fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(path)
+            .unwrap();
+        editor.write_all(first.as_bytes()).unwrap();
+        let rest = rest.to_owned();
+        std::thread::spawn(move || {
+            std::thread::sleep(STALL);
+            editor.write_all(rest.as_bytes()).unwrap();
+        })
+    }
+
     #[test]
-    fn an_empty_file_is_written_only_once_every_try_found_it_empty() {
+    fn a_save_stalled_after_its_truncate_keeps_the_users_text() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("AGENTS.md");
-        // Truly empty: every try reads it so, and the last one writes.
-        fs::write(&path, "").unwrap();
-        let started = std::time::Instant::now();
-        assert_eq!(write_codex(&path, &rules("a")).unwrap(), Change::Written);
-        assert!(
-            started.elapsed() >= PAUSE * (ATTEMPTS - 1),
-            "{:?}",
-            started.elapsed()
+        let original: String = (0..50).map(|i| format!("Original line {i}\n")).collect();
+        fs::write(&path, &original).unwrap();
+        let saved = format!("Edit 0\n{original}");
+        // Every read finds the file empty until the editor writes.
+        let editor = stalled_save(&path, "", &saved);
+        let change = write_codex(&path, &rules("a"));
+        editor.join().unwrap();
+        assert_eq!(change.unwrap(), Change::Written);
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            with_block(&path, &saved, &rules("a")).unwrap()
         );
+    }
+
+    #[test]
+    fn a_save_stalled_partway_through_a_large_file_keeps_every_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("AGENTS.md");
+        let original: String = (0..500).map(|i| format!("Original line {i}\n")).collect();
+        fs::write(&path, &original).unwrap();
+        // Past a page, so the first part reads the same on every try.
+        let (first, rest) = original.split_at(4096);
+        let editor = stalled_save(&path, first, rest);
+        let change = write_codex(&path, &rules("a"));
+        editor.join().unwrap();
+        assert_eq!(change.unwrap(), Change::Written);
+        let text = fs::read_to_string(&path).unwrap();
+        let kept = (0..500)
+            .filter(|i| text.contains(&format!("Original line {i}\n")))
+            .count();
+        assert!(
+            text == with_block(&path, &original, &rules("a")).unwrap(),
+            "{kept} of 500 lines kept"
+        );
+    }
+
+    #[test]
+    fn a_file_that_keeps_changing_is_left_as_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("AGENTS.md");
+        fs::write(&path, "# Mine\n").unwrap();
+        #[cfg(unix)]
+        let inode = {
+            use std::os::unix::fs::MetadataExt;
+            fs::metadata(&path).unwrap().ino()
+        };
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // Saves in place every tenth of a second until stopped.
+        let editor = {
+            let (path, stop) = (path.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let mut saves = 0;
+                while !stop.load(Ordering::Relaxed) {
+                    saves += 1;
+                    fs::OpenOptions::new()
+                        .write(true)
+                        .truncate(true)
+                        .open(&path)
+                        .unwrap()
+                        .write_all(format!("# Mine, save {saves}\n").as_bytes())
+                        .unwrap();
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                saves
+            })
+        };
+        let started = Instant::now();
+        let change = write_codex(&path, &rules("a"));
+        let waited = started.elapsed();
+        stop.store(true, Ordering::Relaxed);
+        let saves = editor.join().unwrap();
+        let err = change.unwrap_err();
+        assert!(err.to_string().contains("kept changing"), "{err}");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            format!("# Mine, save {saves}\n")
+        );
+        // Never replaced, even for a moment.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(fs::metadata(&path).unwrap().ino(), inode);
+        }
+        // Only once the bound has passed.
+        assert!(
+            waited >= WAIT_LIMIT && waited < WAIT_LIMIT + QUIET / 2,
+            "{waited:?}"
+        );
+    }
+
+    /// Dates the file at `path` past [`QUIET`], as one the user saved a
+    /// while ago, so a write needs no wait.
+    fn settle(path: &Path) {
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(SystemTime::now() - QUIET - WHOLE_SECOND)
+            .unwrap();
+    }
+
+    #[test]
+    fn a_quiet_empty_file_is_written_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("AGENTS.md");
+        fs::write(&path, "").unwrap();
+        settle(&path);
+        let started = Instant::now();
+        assert_eq!(write_codex(&path, &rules("a")).unwrap(), Change::Written);
+        assert!(started.elapsed() < QUIET / 2, "{:?}", started.elapsed());
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
             format!("{}\n", marked(&rules("a")))
         );
-        // Text first, then empty on every later try, as a save that keeps
-        // truncating the file: never written, the text stays.
+    }
+
+    #[test]
+    fn a_sync_right_after_a_write_of_ours_returns_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("AGENTS.md");
         fs::write(&path, "# Mine\n").unwrap();
-        let reads = std::cell::Cell::new(0);
-        let saving = |path: &Path| {
-            reads.set(reads.get() + 1);
-            if reads.get() == 1 {
-                read(path)
-            } else {
-                Ok(Some(String::new()))
-            }
-        };
-        let err = update_reading(&path, saving, |existing| {
-            Ok(Next::Text(with_block(
+        settle(&path);
+        // Stamped by the filesystem's clock, as the write is: NTFS stamps
+        // from a tick about 15.6 ms coarse, which lags SystemTime::now().
+        let probe = dir.path().join("probe");
+        fs::write(&probe, "").unwrap();
+        let before = fs::metadata(&probe).unwrap().modified().unwrap();
+        assert_eq!(write_codex(&path, &rules("a")).unwrap(), Change::Written);
+        // The file says truly when it changed, for the user's editor and tools.
+        assert!(fs::metadata(&path).unwrap().modified().unwrap() >= before);
+        let started = Instant::now();
+        assert_eq!(write_codex(&path, &rules("a")).unwrap(), Change::Unchanged);
+        assert!(started.elapsed() < QUIET / 2, "{:?}", started.elapsed());
+    }
+
+    #[test]
+    fn a_file_saved_just_before_is_written_once_it_has_gone_quiet() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("AGENTS.md");
+        for remove in [false, true] {
+            fs::write(&path, "# Mine\n").unwrap();
+            settle(&path);
+            write_codex(&path, &rules("a")).unwrap();
+            fs::write(
                 &path,
-                existing.unwrap_or_default(),
-                &rules("a"),
-            )?))
-        })
-        .unwrap_err();
-        assert!(err.to_string().contains("kept changing"), "{err}");
-        // Each try reads once, and the first, finding text, reads again
-        // before its rename.
-        assert_eq!(reads.get(), ATTEMPTS as usize + 1);
-        assert_eq!(fs::read_to_string(&path).unwrap(), "# Mine\n");
+                format!("{}# Mine, again\n", fs::read_to_string(&path).unwrap()),
+            )
+            .unwrap();
+            let started = Instant::now();
+            let change = if remove {
+                remove_codex(&path).map(|_| Change::Written)
+            } else {
+                write_codex(&path, &rules("b"))
+            };
+            let waited = started.elapsed();
+            assert_eq!(change.unwrap(), Change::Written);
+            assert!(waited >= QUIET / 2 && waited < WAIT_LIMIT, "{waited:?}");
+            let text = fs::read_to_string(&path).unwrap();
+            assert!(text.ends_with("# Mine, again\n"), "{text:?}");
+            assert_eq!(text.contains(&rules("b")), !remove, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_file_dated_ahead_of_this_clock_counts_as_quiet() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("AGENTS.md");
+        fs::write(&path, "# Mine\n").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(SystemTime::now() + Duration::from_secs(3600))
+            .unwrap();
+        let started = Instant::now();
+        assert_eq!(write_codex(&path, &rules("a")).unwrap(), Change::Written);
+        assert!(started.elapsed() < QUIET / 2, "{:?}", started.elapsed());
+    }
+
+    #[test]
+    fn a_file_changed_after_the_read_is_read_again_before_the_rename() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("AGENTS.md");
+        // Changed with its old time put back, as `rsync -t` does, and saved
+        // with the same text: either way the write starts over.
+        for (saved, quiet) in [("# Mine, synced\n", true), ("# Mine\n", false)] {
+            fs::write(&path, "# Mine\n").unwrap();
+            settle(&path);
+            let reads = std::cell::Cell::new(0);
+            // The second read is the check just before the rename.
+            let saving = |path: &Path| {
+                reads.set(reads.get() + 1);
+                if reads.get() == 2 {
+                    fs::write(path, saved).unwrap();
+                    if quiet {
+                        settle(path);
+                    }
+                }
+                read(path)
+            };
+            let started = Instant::now();
+            let change = update_reading(&path, saving, |existing| {
+                Ok(Next::Text(with_block(
+                    &path,
+                    existing.unwrap_or_default(),
+                    &rules("a"),
+                )?))
+            });
+            assert_eq!(change.unwrap(), Change::Written);
+            assert_eq!(
+                fs::read_to_string(&path).unwrap(),
+                with_block(&path, saved, &rules("a")).unwrap()
+            );
+            assert!(reads.get() > 2);
+            if !quiet {
+                assert!(started.elapsed() >= QUIET / 2, "{:?}", started.elapsed());
+            }
+        }
+    }
+
+    #[test]
+    fn a_time_that_cannot_be_read_is_an_error_not_quiet() {
+        let dir = tempfile::tempdir().unwrap();
+        // A name no filesystem takes: not missing, it cannot be looked at.
+        let err = until_quiet(Path::new("AGENTS\0.md")).unwrap_err();
+        assert!(err.to_string().contains("Cannot read"), "{err}");
+        let file = dir.path().join("file");
+        fs::write(&file, "").unwrap();
+        let below = until_quiet(&file.join("AGENTS.md"));
+        // Below a file: Unix says it is not a folder.
+        #[cfg(unix)]
+        assert!(below.unwrap_err().to_string().contains("Cannot read"));
+        // Windows says the path is not found, so it counts as missing; the
+        // write that follows fails on the path.
+        #[cfg(windows)]
+        assert_eq!(below.unwrap(), Duration::ZERO);
+        assert_eq!(
+            until_quiet(&dir.path().join("missing")).unwrap(),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn a_file_goes_quiet_once_unchanged_for_quiet() {
+        let ms = Duration::from_millis;
+        // A time with a fraction of a second, as most filesystems keep.
+        let changed = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000) + ms(250);
+        for (age, left) in [
+            (ms(0), QUIET),
+            (ms(1), QUIET - ms(1)),
+            (QUIET - ms(1), ms(1)),
+            (QUIET, ms(0)),
+            (QUIET + ms(1), ms(0)),
+        ] {
+            assert_eq!(quiet_after(changed, changed + age), left, "{age:?}");
+        }
+        // Ahead of this clock.
+        assert_eq!(quiet_after(changed + ms(1), changed), ms(0));
+        // Whole seconds, as HFS+ and ext3 keep: the change may have come up
+        // to a second later than the time says.
+        let whole = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        assert_eq!(quiet_after(whole, whole + ms(500)), QUIET);
+        assert_eq!(
+            quiet_after(whole, whole + WHOLE_SECOND + ms(400)),
+            QUIET - ms(400)
+        );
+        assert_eq!(quiet_after(whole, whole + WHOLE_SECOND + QUIET), ms(0));
     }
 
     #[test]
@@ -806,6 +1119,7 @@ mod tests {
             format!("{START}\n{START}\n{END}\n"),
         ] {
             fs::write(&path, &broken).unwrap();
+            settle(&path);
             for err in [
                 write_codex(&path, &rules("a")).unwrap_err(),
                 remove_codex(&path).unwrap_err(),
@@ -838,12 +1152,14 @@ mod tests {
         let target = dir.path().join("dotfiles/AGENTS.md");
         fs::create_dir_all(target.parent().unwrap()).unwrap();
         fs::write(&target, "# Kept in a dotfiles repository\n").unwrap();
+        settle(&target);
         let link = dir.path().join("AGENTS.md");
         std::os::unix::fs::symlink(&target, &link).unwrap();
         assert!(is_link(&link));
         // Writes through a link are refused, even into a file that is ours.
         let ours = dir.path().join("dotfiles/user-memory.md");
         fs::write(&ours, rules("a")).unwrap();
+        settle(&ours);
         let claude = dir.path().join("user-memory.md");
         std::os::unix::fs::symlink(&ours, &claude).unwrap();
         for err in [
@@ -866,6 +1182,7 @@ mod tests {
             marked(&rules("a"))
         );
         fs::write(&target, &with).unwrap();
+        settle(&target);
         assert_eq!(codex_state(&link, &rules("a")).unwrap(), State::Current);
         assert_eq!(write_codex(&link, &rules("a")).unwrap(), Change::Unchanged);
         let err = remove_codex(&link).unwrap_err();
