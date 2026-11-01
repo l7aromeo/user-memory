@@ -4,6 +4,7 @@ user-memory keeps what your agents learn about you: your preferences,
 decisions, goals and context. Every agent you connect, on every machine that
 uses the same server, sees the same memories.
 
+- [The pieces](#the-pieces)
 - [Memories](#memories)
 - [Where memories come from](#where-memories-come-from)
 - [Scope: global or one project](#scope-global-or-one-project)
@@ -12,8 +13,38 @@ uses the same server, sees the same memories.
 - [Your rules in instruction files](#your-rules-in-instruction-files)
 - [The index at session start](#the-index-at-session-start)
 - [Change notices during a session](#change-notices-during-a-session)
+- [How search finds a memory](#how-search-finds-a-memory)
 - [Workflows you ask for](#workflows-you-ask-for)
 - [Look without the agent](#look-without-the-agent)
+
+## The pieces
+
+```mermaid
+flowchart LR
+  subgraph machine["Each of your machines"]
+    agent["Claude Code / Codex"]
+    client["user-memory client<br/>MCP connector · session hooks · skill"]
+    agent <-->|MCP| client
+  end
+  subgraph server["Your server: this machine, or one host behind HTTPS"]
+    host["user-memory host<br/>(Docker)"]
+    store[("SQLite store<br/>+ access token")]
+    ollama["Ollama<br/>(embeddings)"]
+    host --> store
+    host --> ollama
+  end
+  client -->|"HTTP(S) + access token"| host
+```
+
+- **The server** (`user-memory host`) owns the memories. It enforces the
+  rules (provenance, duplicate checks, approval for changes) and serves the
+  MCP tools. It runs in Docker on this machine, natively, or on one host
+  shared behind HTTPS ([running the server](server.md)).
+- **The client** is the same binary on each machine. Setup registers it with
+  your agents, adds the session hooks, writes your rules into the clients'
+  instruction files and installs a skill with playbooks for the rare
+  workflows: review, backup, forgetting a chat, upgrading
+  ([Claude Code and Codex](clients.md)).
 
 ## Memories
 
@@ -25,7 +56,7 @@ the conversation it came from. Each memory has:
 | Title | `Push, publish or tag only with my explicit go-ahead` |
 | Content | The rule in full, with its conditions and exceptions. |
 | Reason | Why you want it, when you said why. A reason you did not give stays blank. |
-| Type | `preference`, `constraint`, `decision`, `goal`, `fact`, `pattern` or another label. |
+| Type | `preference`, `constraint`, `value`, `decision`, `goal`, `fact`, `behavior`, `pattern` or another label. |
 | Category | A topic, such as `workflow`, `programming` or `communication`. |
 | Scope | Global, or one project. |
 | Source | Explicit, observed or inferred (see below). |
@@ -121,10 +152,13 @@ Only your explicit, confirmed, global rules go there. Observations, patterns,
 facts and project memories never do.
 
 The files update themselves after every change made on this machine, and at
-every session start, which picks up changes from your other machines. If you
-edit one of these files while it updates, user-memory starts again from your
-version. It never writes through a symbolic link, and never replaces a
-`rules/user-memory.md` that you wrote yourself. To remove the rules:
+every session start, which picks up changes from your other machines. A
+file you changed in the last second, as while you save it, is written only
+once it has gone a second unchanged, so the write starts from your saved
+text; if it
+keeps changing for two seconds, the next sync tries again. It never writes
+through a symbolic link, and never replaces a `rules/user-memory.md` that you
+wrote yourself. To remove the rules:
 
 ```bash
 user-memory setup --no-instructions
@@ -200,6 +234,24 @@ Projects changed: + github.com/you/api (linked)
 The notice never delays a prompt: if the store is slow or cannot be reached,
 it is skipped.
 
+## How search finds a memory
+
+Search looks at the words of your question and, with semantic search on, at
+its meaning:
+
+- **Words:** a memory matches when it shares words with the question,
+  compared by their stems ("releases" finds "release"). A word few memories
+  use counts more than one most of them share, and a word in the title or
+  category counts more than one in the text.
+- **Meaning:** with an embeddings model, it also finds memories phrased
+  differently, then merges both rankings.
+- **Your project first, when as good:** a memory of the session's project
+  wins over a global one that matches as well, not over one that clearly
+  matches better.
+
+[Search](tools.md#search) has the details. Semantic search is optional
+([semantic search](server.md#semantic-search)).
+
 ## Workflows you ask for
 
 The user-memory skill handles rare tasks. Ask in plain words:
@@ -207,7 +259,7 @@ The user-memory skill handles rare tasks. Ask in plain words:
 | Say | What happens |
 |---|---|
 | "review my memories" | The agent lists duplicates, project copies of global memories, one rule stated in several projects (which could become one global rule, with your yes), overlaps and stale patterns, and changes only what you approve. |
-| "back up my memories" | An export of every memory, or the part you name, to one JSON file. With a server, the agent's export lands on the server; for a copy on your own machine, run `user-memory export FILE` there. The store also backs itself up every day ([automatic backups](cli.md#automatic-backups)). |
+| "back up my memories" | An export of every memory, or the part you name, to one JSON file. With a server, the agent's export lands on the server; for a copy on your own machine, run `user-memory export FILE` there. The store also backs itself up every day ([automatic backups](backup.md#automatic-backups)). |
 | "restore my memories from this backup" | A preview of what would change, then the import once you approve. |
 | "restore yesterday's backup" | The steps to restore an automatic backup, for you to run with your agents closed. |
 | "forget what we discussed in that chat" | Removes every memory that one conversation recorded. Memories that other conversations also stated are kept. |

@@ -283,7 +283,7 @@ curl -fsSL https://github.com/l7aromeo/user-memory/releases/latest/download/inst
   setting moves into `embedding.env` beside its `compose.yaml`.
 - Codex's hooks are unchanged, so Codex needs no new approval.
 - To go back to 0.5.0, use the backup the upgrade made (`.v4-<time>.bak`) as
-  [roll back an upgrade](https://github.com/l7aromeo/user-memory/blob/main/docs/install.md#roll-back-an-upgrade)
+  [roll back an upgrade](https://github.com/l7aromeo/user-memory/blob/main/docs/upgrade.md#roll-back-an-upgrade)
   describes. The daily backups are copies of the upgraded store, which 0.5.0
   refuses.
 
@@ -363,10 +363,10 @@ curl -fsSL https://github.com/l7aromeo/user-memory/releases/latest/download/inst
 - On the command line, `user-memory record` now needs `--scope global` or
   `--scope project`.
 - Still on 0.3? Upgrade through 0.4's titles step first:
-  [upgrade from 0.3](https://github.com/l7aromeo/user-memory/blob/main/docs/install.md#upgrade-from-03-titles).
+  [upgrade from 0.3](https://github.com/l7aromeo/user-memory/blob/main/docs/upgrade.md#upgrade-from-03-titles).
 - Codex's hooks are unchanged, so Codex needs no new approval.
 - To go back to 0.4.0, see
-  [roll back an upgrade](https://github.com/l7aromeo/user-memory/blob/main/docs/install.md#roll-back-an-upgrade).
+  [roll back an upgrade](https://github.com/l7aromeo/user-memory/blob/main/docs/upgrade.md#roll-back-an-upgrade).
 
 ### New
 

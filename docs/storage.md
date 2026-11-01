@@ -1,0 +1,194 @@
+# Storage
+
+The store on disk: its tables, the write-ahead log, how writers take turns,
+schema versions, automatic backups, repair, and the files user-memory keeps
+beside it and in its state folder.
+
+- [Tables](#tables)
+- [Write-ahead log](#write-ahead-log)
+- [Writers take turns](#writers-take-turns)
+- [Schema versions](#schema-versions)
+- [Automatic backups](#automatic-backups)
+- [Checking and repairing the store](#checking-and-repairing-the-store)
+- [Titles for older memories](#titles-for-older-memories)
+- [The state folder](#the-state-folder)
+
+## Tables
+
+The store is one SQLite database: the `memories` table, `memory_origins`,
+`memory_distinct`, `conversation_projects` (each conversation's
+[links](tools.md#conversation-links)), `embedding_cutoffs` (cutoffs computed for an
+embedding model and vector length without built-in ones, since schema
+version 5), and derived search tables (`memory_search` for FTS5,
+`memory_vectors` for embeddings) that `reindex` can always rebuild. Memory IDs
+are UUID strings; insertion order tracks recency.
+
+## Write-ahead log
+
+The store runs in SQLite's write-ahead log (WAL) mode, so readers, such as
+each session start's instruction sync, never make a writer wait. Recent writes
+sit in `<store>-wal` beside the store until SQLite copies them into it, and
+`<store>-shm` coordinates the processes using it; both take the store's mode
+and are removed when the last process closes the store. The mode is kept in
+the file: the first open by this version converts a store, and a store busy
+at that moment keeps the rollback journal until a later open. WAL needs a
+local disk; on a network filesystem (NFS, SMB) processes on different machines
+cannot share the log. `doctor` reports the mode. Backups that `migrate`,
+`repair` and `project move` make are copied through SQLite's online backup,
+so they include writes still in the log, and are one whole file each, in the
+rollback journal mode.
+
+## Writers take turns
+
+Writers take turns. Within a process they queue for the store; across
+processes, such as one server per agent session plus the command line, each
+writer first takes an exclusive `flock` lock on `<store>.lock` beside the
+store (mode 0600, created with it and kept), and releases it when its
+transaction ends. The queue is fair, so a writer waits out only those ahead
+of it, for at most 30 seconds, which is also SQLite's busy timeout. Each
+commit waits until the disk has its data, which keeps every write durable
+and on a slow, busy disk can take seconds. Past the 30 seconds a write fails
+with "database is locked: another process kept its write turn on the store
+for 30 s", or, when it is still queued behind another write of its own
+process, "database is locked: another write in this process kept its write
+turn on the store for 30 s". Once the log passes about 4 MB, the commit that finds it so
+copies it into the store after passing its turn on, so that copy never holds
+up other writers; SQLite's own copy inside the commit is off. A copy that
+fails is reported on stderr and retried by the next commit; the write it
+followed has succeeded. Readers take
+no lock. A server does its store work apart from the threads that read
+requests and send replies, so while its writes wait it goes on answering
+other calls, reads at once. The lock file holds nothing: restoring a backup leaves it as it
+is, and uninstall with `--purge` deletes it with the store.
+
+## Schema versions
+
+The store records its schema version (`PRAGMA user_version`). When a new
+version changes the schema, the installer, `user-memory migrate` or a
+checkout's `./setup` ([run from a checkout](dev/development.md#run-from-a-checkout)):
+
+1. copies the store to `<store>.v<OLD>-<UTC time>.bak` beside it (mode 0600,
+   never replacing a file) and prints the path;
+2. applies every pending migration step in one transaction; if any step fails,
+   nothing changes and the backup stays.
+
+A step that needs something only the user can give refuses before step 1,
+so a refusal leaves no backup and no change. So does a damaged store, one
+that fails SQLite's integrity check: migrating copies its rows, and a
+damaged index can hide some, so it asks for `user-memory repair` first.
+
+## Automatic backups
+
+A local store, or a server's, keeps daily copies of itself in a `backups`
+folder beside it (mode 0700): `<store dir>/backups/<stem>-<UTC date>.<ext>`,
+such as `memories-2026-10-18.sqlite3`, mode 0600. There is no scheduler. The
+first write once the newest backup is at least 24 hours old makes one, after
+its commit has passed the write turn on, so other writers never wait for it;
+only that write's own reply waits for the copy. Every write counts: record,
+update, forget, import, links, re-indexing and `project move`. Setup makes
+one too when the store has memories, so an upgraded store has one at once.
+A store without memories gets none.
+
+Each copy is taken like migrate's: SQLite's online backup from a read-only
+connection, so it includes writes still in the log, into
+`.<name>.partial-<process id>` in the folder, converted to the rollback
+journal (one whole file), then renamed into place, so a copy cut short never
+looks like a backup. Copies cut short more than a day ago are deleted.
+`backup now` makes one at once and replaces that day's.
+
+The newest 7 are kept (`KEEP` in `src/memory/backups.rs`); after a new one is
+written, older ones are deleted. Migrate, repair and project move backups
+(`.bak` beside the store) are a separate kind and never rotated.
+
+A backup that fails never fails the write. The write prints
+``user-memory: the automatic backup of <store> failed: …`` to stderr, writes
+the reason to `backups/last-failure`, and that process does not try again for
+an hour; the next backup that succeeds removes the note. `doctor` prints the
+newest backup and its age, and an Action needed step when a store with
+memories has none, when the newest is over 48 hours old though the store or
+its log changed since, or when `last-failure` is there. Uninstall's `--purge`
+deletes the backups, the note and copies cut short with the store, then the
+folder if nothing else is in it; without `--purge` they stay.
+
+To restore one, stop every client and server using the store, delete
+`<store>-wal` and `<store>-shm`, and copy the backup over the store: `backup
+list` prints both commands, for PowerShell on Windows. As when [undoing an upgrade](upgrade.md#roll-back-an-upgrade), a leftover
+log would be applied to the restored store.
+
+## Checking and repairing the store
+
+`doctor` runs SQLite's full integrity check (`PRAGMA integrity_check`), which
+also compares every index with its table and checks the keyword index. Two
+processes writing the store at once without SQLite's locks leave exactly that
+damage: an index whose entries no longer match the memories.
+
+`user-memory repair` (`--db PATH` for another store; on a server,
+`docker compose exec memory user-memory repair`) checks the store the same way
+and, when it finds problems:
+
+1. copies the store page by page, damage included, to
+   `<store>.repair-<UTC time>.bak` beside it (mode 0600, never replacing a
+   file), and checks that the copy holds every memory;
+2. under the same write lock, rebuilds every index from the memories
+   (`REINDEX`) and the keyword index from its stored text (FTS5 `rebuild`);
+3. if the store still fails the check, rewrites the whole file (`VACUUM`),
+   which mends damage beyond the indexes, such as a miscounted free-page list;
+4. counts the memories again, without any index, and prints what it found.
+
+Memories themselves are never changed. A healthy store is reported clean and
+left alone, with no backup. If a memory went missing or the store is still
+damaged, repair fails and says so, with the backup beside it; restore a backup
+(as when [undoing an upgrade](upgrade.md#roll-back-an-upgrade)) or an export you trust. Repair works on a store from an earlier schema version
+too, so a damaged store can be repaired before it is migrated.
+
+## Titles for older memories
+
+Schema version 3 gives every memory a title. A title decides how agents
+understand the memory, so nothing derives one: the upgrade from version 2
+(`./setup --titles FILE`, `user-memory migrate --titles FILE`, `-` for stdin)
+takes each title from a JSON object mapping every memory id to the title the
+user approved:
+
+```json
+{"68da18b4-5d40-4746-930f-22a7c859e8f7": "Push, publish or tag only with the user's explicit go-ahead"}
+```
+
+Without the map, with an id missing or unknown, or with a title that is
+empty or over 120 characters, the upgrade changes nothing
+and lists the untitled memories with their content, so an agent can propose
+titles for the user to approve (the user-memory skill's upgrade playbook walks
+through it). Each title is stored as written, its whitespace tidied (trimmed,
+with runs and line breaks made one space), as any title is. A map given when the
+store needs none is reported as not needed. Until the store is upgraded, the
+server and hooks refuse it, so memory is unavailable on that store.
+
+Nothing else migrates. The MCP server, the CLI, the session hook and `host`
+refuse an older store with "run the installer again (or ./setup, or
+`user-memory migrate`) to upgrade it", and a newer one with "update user-memory and restart your client" (what
+sessions opened before an upgrade show). Refused stores are left untouched. To
+undo an upgrade, stop your clients and every other process using the store,
+delete `<store>-wal` and `<store>-shm` if they are there, copy the `.bak` back
+and install the previous version; memories recorded since are lost unless
+exported first. A `-wal` left beside the store is applied to whatever store
+sits there, so skipping the delete brings writes made after the backup into
+the restored store. The previous version reads a WAL store as it is. Stores
+from before schema version 2, and files that are not user-memory stores, are
+refused: move the file aside and run setup to start fresh, then import an
+export made with the version that created it.
+
+## The state folder
+
+user-memory keeps two kinds of file in its state folder,
+`${XDG_STATE_HOME:-~/.local/state}/user-memory/` (`%LOCALAPPDATA%\user-memory\state\`
+on Windows), each private to you:
+
+- `sessions/`: what each recent session saw of memory, which the change
+  notice compares against ([session hooks](clients.md#session-hooks)).
+- `instructions/`: one record per instruction file user-memory wrote, with
+  its path, time, size and the SHA-256 of its text, so the next write knows
+  nobody has saved the file since
+  ([instruction files](clients.md#instruction-files)).
+
+Both are only working state. Deleting the folder loses no memory; the next
+session start takes a new snapshot, and the next write waits for the file
+to go quiet. Uninstall removes the folder.

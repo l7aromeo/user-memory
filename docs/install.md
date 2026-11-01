@@ -163,7 +163,7 @@ curl -fsSL https://github.com/l7aromeo/user-memory/releases/latest/download/inst
 | `--install-dir DIR` | Install the binary to DIR (default `~/.local/bin`). |
 | `--client NAME` | `auto` (every client found, the default), `codex`, `claude` or `both`. |
 | `--server-only` | Run the Docker server on a host with no agent app, and connect none. Reruns keep it; `--client` or `--url` makes the host a client too. Not with `--url`, `--local native` or `--client`. |
-| `--titles FILE` | Titles for an upgrade from 0.3 (see [upgrade](#upgrade-from-03-titles)). |
+| `--titles FILE` | Titles for an upgrade from 0.3 (see [upgrade](upgrade.md#upgrade-from-03-titles)). |
 | `--embed-model NAME` | Semantic search through Ollama on this machine with that model (default `qwen3-embedding:4b`). |
 | `--install-ollama` | Install Ollama if it is missing (Homebrew on macOS, Ollama's install script with sudo on Linux). |
 | `--pull-model` | Download the model into Ollama if it is missing. |
@@ -276,9 +276,9 @@ Windows carry an access list that allows only you; doctor checks the store
 
 Setup prints every file it changes. It refuses a settings file that is not
 valid JSON, and changes nothing on a second run. It never edits Codex's
-`config.toml` or your `~/.claude/CLAUDE.md`. The
-[reference](reference.md#session-hooks) has the hooks in detail, and
-[the skill](reference.md#the-user-memory-skill).
+`config.toml` or your `~/.claude/CLAUDE.md`. [Claude Code and
+Codex](clients.md) describes the [hooks](clients.md#session-hooks) and
+[the skill](clients.md#the-user-memory-skill) in detail.
 
 ## More machines
 
@@ -293,196 +293,10 @@ user-memory setup --url https://memory.example.com --token-file ~/.config/user-m
 
 ## Upgrade
 
-Run the installer again:
-
-```bash
-curl -fsSL https://github.com/l7aromeo/user-memory/releases/latest/download/install.sh | sh
-```
-
-On a machine that is already set up, it asks nothing:
-
-- With an existing server, it keeps that server and token. Upgrade the server
-  too ([server upgrade](server.md#upgrade)). A client refuses a server that is
-  too old for it and says to update the server.
-- With the installer's Docker server, it builds the new image, checks the
-  store, stops the server, upgrades the store and starts the server again. It
-  keeps the port, the embedding choice and the token.
-- With a native store, setup upgrades the store in place.
-
-Before any change to the store's format, the upgrade copies the store to a
-backup file beside it, then upgrades it in one step. A native store prints:
-
-```output
-Backed up <store> to <store>.v4-<time>.bak
-Migrated <store> from schema version 4 to 5.
-```
-
-The installer's Docker server does the same inside its volume, with the
-backup at `/data/memories.sqlite3.v4-<time>.bak`. Your memories come
-through unchanged. If the upgrade fails, the store is left as it was. Keep
-the backup's name: [rolling back](#roll-back-an-upgrade) needs it.
-
-Setup also makes the store's first [automatic backup](cli.md#automatic-backups)
-when it has none from the last day, so an upgraded store is backed up daily
-from the start.
-
-After an upgrade, restart your agents and start new sessions. Old sessions
-keep the tools they started with.
-
-### Upgrade from 0.5 to 0.6
-
-The store gains a table for the duplicate cutoffs of embedding models. The
-upgrade backs it up first, as above, and needs nothing from you. What
-changes for you:
-
-- The store backs itself up every day, keeping a week of copies beside it
-  ([automatic backups](cli.md#automatic-backups)). Setup makes the first one.
-- [Semantic search](#semantic-search) takes any embedding model. With a
-  model other than `qwen3-embedding:4b`, doctor asks you once to run the
-  `user-memory embedding set …` command it prints, which calibrates duplicate
-  detection for that model. The upgrade keeps your choice; the Docker
-  server's setting moves into `embedding.env` beside its `compose.yaml`.
-- `--server-only` sets up the Docker server on a host with no agent app
-  ([choices](#choices-the-installer-offers)).
-- `.user-memory` lines can name any folder: `..`, absolute and `~/` paths
-  ([projects](projects.md#a-folder-of-repositories-user-memory)).
-- Text that starts with `-`, such as a list item, works as a value on the
-  command line: `user-memory update <id> --content "- item"`.
-
-### Upgrade from 0.4 to 0.5
-
-The store gains a table for conversation links. The upgrade backs it up
-first, as above, and needs nothing from you. What changes for you:
-
-- Agents ask before they record a memory as global
-  ([why](how-it-works.md#scope-global-or-one-project)). On the command line,
-  `record` now needs `--scope global` or `--scope project`.
-- A folder without git, or a folder of repositories, can have projects, and
-  an agent can link another repository to a conversation
-  ([projects](projects.md)).
-- Setup adds `.user-memory` and `.user-memory-key` to your global git
-  ignore, so those files are never committed, and says so:
-
-  ```output
-  Git ignore: .user-memory and .user-memory-key added to <git ignore file>
-  ```
-
-  The file is the one `git config --global core.excludesFile` names, else
-  `~/.config/git/ignore`. It gains three lines:
-
-  ```
-  # user-memory
-  .user-memory
-  .user-memory-key
-  ```
-
-### Upgrade from 0.3: titles
-
-Since 0.4 every memory has a title: one line that states the memory, which
-the index shows. Nothing writes titles for you, so the upgrade from 0.3 stops,
-changes nothing, and lists your memories that need one. With the installer's
-Docker server, the old server keeps running.
-
-1. Ask your agent: "upgrade my memory store". The user-memory skill proposes
-   a title for each memory.
-2. Read the list and change what you want. Approve it when every title is
-   right.
-3. The agent writes the approved titles to a file such as `titles.json`.
-4. Run the installer again with that file:
-
-   ```bash
-   curl -fsSL https://github.com/l7aromeo/user-memory/releases/latest/download/install.sh | sh -s -- --titles titles.json
-   ```
-
-If it still refuses, it names the memories that are missing a title, or that
-have one that is empty or longer than 120 characters. Fix those and run it
-again. For a server you run from a checkout, see
-[server upgrade](server.md#upgrade).
-
-### Roll back an upgrade
-
-To go back to the previous version, put the backup back and install that
-version with its installer and its tag. Memories recorded or changed since
-the upgrade are lost; to keep them, [export](cli.md#backup-and-restore)
-first and keep the file.
-
-This works for any release from 0.7.0 on. Releases before 0.7.0 can no
-longer be downloaded, so they cannot be reinstalled: before upgrading from
-one of them, keep an export (`user-memory export FILE`), which any later
-version imports.
-
-The steps below go back to 0.7.0; for another release, use its tag. Use
-the backup the upgrade made, `<store>.v<N>-<time>.bak`, where N is the
-store's version before the upgrade: the automatic backups in the `backups`
-folder are copies of the upgraded store, which the previous version
-refuses, as it refuses the upgraded store until the backup is back:
-``this user-memory is older than the store``.
-
-**Native store:**
-
-1. Quit your agents, so nothing holds the store open.
-2. Delete the store's write-ahead log files, if they are there. SQLite
-   applies a leftover log to whatever store sits beside it, which would bring
-   writes made after the backup into the restored store:
-
-   ```bash
-   rm -f ~/.local/share/user-memory/memories.sqlite3-wal ~/.local/share/user-memory/memories.sqlite3-shm
-   ```
-
-3. Copy the backup over the store, with the name the upgrade printed:
-
-   ```bash
-   cp ~/.local/share/user-memory/memories.sqlite3.v<N>-<time>.bak ~/.local/share/user-memory/memories.sqlite3
-   ```
-
-   On Windows, steps 2 and 3 in PowerShell:
-
-   ```powershell
-   Get-Item -Force -LiteralPath "$env:LOCALAPPDATA\user-memory\memories.sqlite3-wal", "$env:LOCALAPPDATA\user-memory\memories.sqlite3-shm" -ErrorAction Ignore | Remove-Item -Force
-   Copy-Item -Force -LiteralPath "$env:LOCALAPPDATA\user-memory\memories.sqlite3.v<N>-<time>.bak" -Destination "$env:LOCALAPPDATA\user-memory\memories.sqlite3"
-   ```
-
-4. Run the previous version's installer with its tag:
-
-   ```bash
-   curl -fsSL https://github.com/l7aromeo/user-memory/releases/download/v0.7.0/install.sh | sh -s -- --version v0.7.0
-   ```
-
-   On Windows, with `install.ps1` and `-Version`:
-
-   ```powershell
-   & ([scriptblock]::Create((irm https://github.com/l7aromeo/user-memory/releases/download/v0.7.0/install.ps1))) -Version v0.7.0
-   ```
-
-5. Restart your agents.
-
-**The installer's Docker server:** stop it, delete the log files and copy the
-backup over the store inside the volume, then run the previous version's
-installer. The upgrade
-rebuilt the server image under the same name, so the old image is gone; the
-previous installer builds it again and starts it on the restored store. On
-Windows, in PowerShell, give `docker compose` the file
-`-f "$env:LOCALAPPDATA\user-memory\docker\compose.yaml"` instead.
-
-```bash
-docker compose -f ~/.local/share/user-memory/docker/compose.yaml stop memory
-```
-
-```bash
-docker compose -f ~/.local/share/user-memory/docker/compose.yaml run --rm --entrypoint rm memory -f /data/memories.sqlite3-wal /data/memories.sqlite3-shm
-```
-
-```bash
-docker compose -f ~/.local/share/user-memory/docker/compose.yaml run --rm --entrypoint cp memory /data/memories.sqlite3.v<N>-<time>.bak /data/memories.sqlite3
-```
-
-```bash
-curl -fsSL https://github.com/l7aromeo/user-memory/releases/download/v0.7.0/install.sh | sh -s -- --version v0.7.0
-```
-
-Then run the same installer on every machine that uses this server, so the
-clients match it. Your agent can also walk you through these steps: ask it
-to "roll back my memory store upgrade".
+Run the installer again. On a machine that is already set up it asks
+nothing, and it backs the store up before any change to its format.
+[Upgrade](upgrade.md) covers servers, the notes for each version and rolling
+back.
 
 ## Turn parts off
 
@@ -538,7 +352,7 @@ Options go after `sh -s --`:
 | Option | Meaning |
 |---|---|
 | `--dry-run` | List what would be removed or kept, and change nothing. |
-| `--purge` | Delete your memories too: the local store, its upgrade and repair backups and its [automatic backups](cli.md#automatic-backups), or the Docker server's volume. On a terminal it asks first. |
+| `--purge` | Delete your memories too: the local store, its upgrade and repair backups and its [automatic backups](backup.md#automatic-backups), or the Docker server's volume. On a terminal it asks first. |
 | `--yes` | With `--purge`, delete without asking: for a run without a terminal. |
 | `--no-export` | With `--purge`, skip the export it takes before deleting. |
 | `--client NAME` | `auto` (every client found, the default), `codex`, `claude` or `both`. |

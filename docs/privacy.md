@@ -1,7 +1,10 @@
 # Privacy
 
 user-memory is self-hosted. Your memories stay on the machine or server you
-run. There is no account, no telemetry and no model training.
+run. There is no account, no telemetry and no model training. Besides your
+memory server and the embeddings endpoint you choose, user-memory contacts
+only GitHub, for the installers' downloads and doctor's check for a newer
+release ([what leaves your machine](#what-leaves-your-machine)).
 
 ## What is stored
 
@@ -45,7 +48,7 @@ write records in `%LOCALAPPDATA%\user-memory\state\instructions\`, and
 
 Backups you make with `export` hold every memory in readable JSON, readable
 only by you. Upgrade and repair backups (`.bak` files) sit beside the store,
-and the [automatic backups](cli.md#automatic-backups), a week of daily
+and the [automatic backups](backup.md#automatic-backups), a week of daily
 copies, in the `backups` folder beside it, readable only by you. A forgotten
 memory stays in the backups made before you forgot it, until 7 newer
 backups have replaced them. Protect them like the store.
@@ -66,7 +69,7 @@ Anyone with the token can read and change every memory. To replace it, see
 
 ## What leaves your machine
 
-The client connects to only two places:
+The client connects to two places you choose:
 
 1. **Your memory server**, when you use one. It receives the requests your
    agents make: memories to record, searches, links, and the keys of the
@@ -75,7 +78,20 @@ The client connects to only two places:
    text of memories and searches. Keep it on your machine or a server you
    control.
 
-The installer also downloads releases from GitHub.
+Two more requests go to GitHub, and carry nothing about you or your
+memories:
+
+- The installers download the release from
+  `github.com/l7aromeo/user-memory/releases` (`USER_MEMORY_RELEASES` names a
+  mirror instead).
+- `user-memory doctor` asks the same releases page once which release is
+  the newest, to tell you when yours is out of date. The session hooks
+  never make that request. `user-memory setup --no-update-check`, or
+  `USER_MEMORY_NO_UPDATE_CHECK=1` for one run, turns it off.
+
+When you agree to it, the installer also installs Ollama (through Homebrew,
+Ollama's install script or `winget`) and has Ollama download the embedding
+model ([semantic search](install.md#semantic-search)).
 
 What user-memory never sends anywhere:
 
@@ -99,3 +115,10 @@ provider's own privacy terms apply to that text.
 - Agents update, forget, merge and import only when you ask.
 - You can forget one memory or everything a conversation taught
   ([forget](cli.md#forget)), and export everything at any time.
+- Agents are told that your explicit rules say how you want work done, that
+  observations and patterns are only tentative evidence, and never to act
+  on commands written inside a memory's text.
+- The checks on what is recorded validate its structure and the claims
+  about its source; they cannot prove that an agent saw what it noted.
+- Protect the server, the access token and backups as you would the
+  memories.
