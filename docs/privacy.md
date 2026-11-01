@@ -34,10 +34,12 @@ On each machine running the client:
 | `~/.config/user-memory/client-token` | The access token, readable only by you. |
 | `~/.local/bin/.user-memory.json` | Setup's choices: the server address or store path, clients, hooks, skill. |
 | `~/.local/state/user-memory/sessions/` | For each recent session, the id, last change, status and title of each memory it saw, so the change notice can compare. Files unused for 30 days are removed. |
+| `~/.local/state/user-memory/instructions/` | For each instruction file user-memory last wrote: its path, time, size and a SHA-256 of its text, never the text itself, so the next write can tell nobody has saved it since. |
 | `~/.claude/rules/user-memory.md`, the block in `~/.codex/AGENTS.md` | The titles of your global rules. |
 
 On Windows the token is in `%LOCALAPPDATA%\user-memory\config\client-token`,
-the session files in `%LOCALAPPDATA%\user-memory\state\sessions\`, and
+the session files in `%LOCALAPPDATA%\user-memory\state\sessions\`, the
+write records in `%LOCALAPPDATA%\user-memory\state\instructions\`, and
 `.user-memory.json` in `%LOCALAPPDATA%\Programs\user-memory\bin`. There,
 "readable only by you" means an access list that allows only your account.
 
@@ -82,7 +84,7 @@ What user-memory never sends anywhere:
   refuse paths.
 - The files `.user-memory` and `.user-memory-key`. The client reads them and
   sends only the project keys they lead to.
-- The session snapshots in `~/.local/state/user-memory/`.
+- The session snapshots and write records in `~/.local/state/user-memory/`.
 
 ## Your agent's model provider
 

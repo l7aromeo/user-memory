@@ -265,7 +265,7 @@ profile (`.claude`, `.codex`, `.agents`) are the same on all of them:
 |---|---|---|
 | Binary and `.user-memory.json` | `~/.local/bin` | `%LOCALAPPDATA%\Programs\user-memory\bin` |
 | Local store | `~/.local/share/user-memory` | `%LOCALAPPDATA%\user-memory` |
-| Session snapshots | `$XDG_STATE_HOME` or `~/.local/state`, then `user-memory` | `%LOCALAPPDATA%\user-memory\state` |
+| Session snapshots and write records | `$XDG_STATE_HOME` or `~/.local/state`, then `user-memory` | `%LOCALAPPDATA%\user-memory\state` |
 | Access token | `$XDG_CONFIG_HOME` or `~/.config`, then `user-memory/client-token` | `%LOCALAPPDATA%\user-memory\config\client-token` |
 | Claude Code hooks | A shell command. | The binary and its arguments, run without a shell. |
 | Codex hooks | A shell command. | A `cmd.exe` command. |
@@ -516,7 +516,8 @@ Uninstalling user memory…
 ```
 
 With Codex it removes the same for Codex, and it also removes the session
-snapshots and the saved access token when there are any. With the installer's Docker server it
+snapshots, the instruction files' write records and the saved access token
+when there are any. With the installer's Docker server it
 removes the server (container, image and network) and its folder, and keeps
 its volume. It ends with where your memories are and how to delete them
 later, for example

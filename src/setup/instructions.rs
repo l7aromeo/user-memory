@@ -6,7 +6,9 @@
 
 use super::hooks::config_dir;
 use crate::memory::{GENERATED, RULES_MAX_BYTES};
+use crate::private;
 use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 use std::{
     fs,
     io::{self, Write},
@@ -298,14 +300,122 @@ fn clear_stale(path: &Path) {
     }
 }
 
-/// How much longer the file at `path` must go unchanged to be [`QUIET`]:
-/// zero when it is missing or already has.
-fn until_quiet(path: &Path) -> Result<Duration> {
-    match fs::metadata(path).and_then(|meta| meta.modified()) {
-        Ok(modified) => Ok(quiet_after(modified, SystemTime::now())),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Duration::ZERO),
-        Err(err) => Err(err).with_context(|| format!("Cannot read {}", path.display())),
+/// What user-memory last wrote to an instruction file. While the file
+/// still has this time, size and text, nobody has saved it since, so no
+/// save can be under way and a write need not wait for it to go quiet.
+#[derive(Serialize, Deserialize)]
+struct Record {
+    path: PathBuf,
+    modified: SystemTime,
+    size: u64,
+    sha256: String,
+}
+
+/// The folder of the records, in user-memory's state folder.
+fn records_dir() -> Option<PathBuf> {
+    #[cfg(test)]
+    let state = tests::STATE.with(|state| state.borrow().clone());
+    #[cfg(not(test))]
+    let state = crate::paths::state_dir();
+    state.map(|state| state.join("instructions"))
+}
+
+/// The SHA-256 of `bytes`, in hex.
+fn sha256(bytes: &[u8]) -> String {
+    aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, bytes)
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// The record file of the instruction file at `path`.
+fn record_path(path: &Path) -> Option<PathBuf> {
+    Some(records_dir()?.join(format!(
+        "{}.json",
+        sha256(path.as_os_str().as_encoded_bytes())
+    )))
+}
+
+/// Notes that user-memory wrote `text` to `path`, its time and size as
+/// `meta` says. A note that cannot be written only makes the next write
+/// wait for the file to go quiet.
+fn note_write(path: &Path, meta: &fs::Metadata, text: &str) {
+    let note = || -> io::Result<()> {
+        let record = Record {
+            path: path.to_owned(),
+            modified: meta.modified()?,
+            size: meta.len(),
+            sha256: sha256(text.as_bytes()),
+        };
+        let at = record_path(path).ok_or(io::ErrorKind::NotFound)?;
+        let dir = at.parent().ok_or(io::ErrorKind::InvalidInput)?;
+        private::create_dir(dir)?;
+        let temporary = dir.join(format!(
+            ".{}.{}-{}",
+            at.file_name()
+                .ok_or(io::ErrorKind::InvalidInput)?
+                .to_string_lossy(),
+            std::process::id(),
+            WRITES.fetch_add(1, Ordering::Relaxed)
+        ));
+        let written = (|| {
+            let file = private::create_file(
+                fs::OpenOptions::new().write(true).create_new(true),
+                &temporary,
+            )?;
+            serde_json::to_writer(file, &record)?;
+            fs::rename(&temporary, &at)
+        })();
+        if written.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        written
+    };
+    let _ = note();
+}
+
+/// Forgets the record of `path`, which user-memory removed.
+fn forget_write(path: &Path) {
+    if let Some(at) = record_path(path) {
+        let _ = fs::remove_file(at);
     }
+}
+
+/// Whether the file at `path`, read as `text`, is as user-memory last wrote
+/// it, with the time and size `meta` gives. A missing, unreadable or
+/// corrupt record matches nothing.
+fn as_written(path: &Path, meta: &fs::Metadata, text: &str) -> bool {
+    let Some(record) = record_path(path)
+        .and_then(|at| fs::read(at).ok())
+        .and_then(|bytes| serde_json::from_slice::<Record>(&bytes).ok())
+    else {
+        return false;
+    };
+    record.path == path
+        && meta
+            .modified()
+            .is_ok_and(|modified| modified == record.modified)
+        && meta.len() == record.size
+        && sha256(text.as_bytes()) == record.sha256
+}
+
+/// How much longer the file at `path`, read as `existing`, must go
+/// unchanged to be [`QUIET`]: zero when it is missing, already has, or is
+/// as user-memory last wrote it.
+fn until_quiet(path: &Path, existing: Option<&str>) -> Result<Duration> {
+    let meta = match fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Duration::ZERO),
+        Err(err) => return Err(err).with_context(|| format!("Cannot read {}", path.display())),
+    };
+    if existing.is_some_and(|text| as_written(path, &meta, text)) {
+        return Ok(Duration::ZERO);
+    }
+    let modified = meta
+        .modified()
+        .with_context(|| format!("Cannot read {}", path.display()))?;
+    Ok(quiet_after(modified, SystemTime::now()))
 }
 
 /// How long after `now` a file last changed at `modified` turns [`QUIET`].
@@ -350,7 +460,7 @@ fn update_reading(
     let deadline = Instant::now() + WAIT_LIMIT;
     // Whether the file still holds `existing`, and has gone quiet since.
     let settled = |existing: &Option<String>| -> Result<bool> {
-        Ok(read(path)? == *existing && until_quiet(path)?.is_zero())
+        Ok(read(path)? == *existing && until_quiet(path, existing.as_deref())?.is_zero())
     };
     while Instant::now() < deadline {
         let existing = read(path)?;
@@ -363,7 +473,7 @@ fn update_reading(
         // Read before this check, the text is the file's own only when
         // nothing has changed it since: until then it may be part of a save,
         // and so may a refusal of it.
-        let wait = until_quiet(path)?;
+        let wait = until_quiet(path, existing.as_deref())?;
         if !wait.is_zero() {
             std::thread::sleep(wait.min(deadline.saturating_duration_since(Instant::now())));
             continue;
@@ -382,6 +492,7 @@ fn update_reading(
                 }
                 fs::remove_file(path)
                     .with_context(|| format!("Cannot remove {}", path.display()))?;
+                forget_write(path);
                 return Ok(Change::Written);
             }
         };
@@ -396,7 +507,8 @@ fn update_reading(
             std::process::id(),
             WRITES.fetch_add(1, Ordering::Relaxed)
         ));
-        let written = (|| -> Result<bool> {
+        // The temporary file's time and size, which the rename keeps.
+        let written = (|| -> Result<Option<fs::Metadata>> {
             let mut file = fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -406,15 +518,19 @@ fn update_reading(
                 fs::set_permissions(&temporary, fs::metadata(path)?.permissions())?;
             }
             file.sync_all()?;
+            let meta = file.metadata()?;
             if !settled(&existing)? {
-                return Ok(false);
+                return Ok(None);
             }
             fs::rename(&temporary, path)?;
-            Ok(true)
+            Ok(Some(meta))
         })();
         match written {
-            Ok(true) => return Ok(Change::Written),
-            Ok(false) => {
+            Ok(Some(meta)) => {
+                note_write(path, &meta, &text);
+                return Ok(Change::Written);
+            }
+            Ok(None) => {
                 let _ = fs::remove_file(&temporary);
                 std::thread::sleep(PAUSE);
             }
@@ -570,6 +686,18 @@ pub fn checked(text: String) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    std::thread_local! {
+        /// The state folder for this test's thread: none unless the test
+        /// sets one, so tests never touch the user's own.
+        pub(super) static STATE: std::cell::RefCell<Option<PathBuf>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// Gives this thread's writes the state folder `dir`.
+    fn keep_records_in(dir: &Path) {
+        STATE.with(|state| *state.borrow_mut() = Some(dir.to_owned()));
+    }
 
     fn rules(line: &str) -> String {
         format!("{GENERATED}\n# rules\n- {line}\n")
@@ -915,6 +1043,165 @@ mod tests {
     }
 
     #[test]
+    fn back_to_back_writes_of_ours_do_not_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        keep_records_in(&dir.path().join("state"));
+        let path = dir.path().join("AGENTS.md");
+        fs::write(&path, "# Mine\n").unwrap();
+        settle(&path);
+        write_codex(&path, &rules("a")).unwrap();
+        // One record, in the state folder's own place for them.
+        let records = || {
+            fs::read_dir(dir.path().join("state/instructions"))
+                .map(|entries| entries.count())
+                .unwrap_or(0)
+        };
+        assert_eq!(records(), 1);
+        let started = Instant::now();
+        assert_eq!(write_codex(&path, &rules("b")).unwrap(), Change::Written);
+        assert!(remove_codex(&path).unwrap());
+        assert!(started.elapsed() < QUIET / 2, "{:?}", started.elapsed());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "# Mine\n");
+        // Removing the file leaves no record of it behind.
+        write_codex(&path, &rules("c")).unwrap();
+        fs::write(&path, format!("{}\n", marked(&rules("c")))).unwrap();
+        settle(&path);
+        assert!(remove_codex(&path).unwrap());
+        assert!(!path.exists());
+        assert_eq!(records(), 0);
+    }
+
+    /// Writes the rules `line` into `path` as user-memory, returning the
+    /// time the file was left with.
+    fn ours(path: &Path, line: &str) -> SystemTime {
+        fs::write(path, "# Mine\n").unwrap();
+        settle(path);
+        write_codex(path, &rules(line)).unwrap();
+        fs::metadata(path).unwrap().modified().unwrap()
+    }
+
+    /// Puts the time `modified` back on `path`.
+    fn date(path: &Path, modified: SystemTime) {
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+    }
+
+    #[test]
+    fn a_file_saved_since_a_write_of_ours_waits_for_quiet() {
+        let dir = tempfile::tempdir().unwrap();
+        keep_records_in(&dir.path().join("state"));
+        let path = dir.path().join("AGENTS.md");
+        let other = dir.path().join("other/AGENTS.md");
+        fs::create_dir_all(other.parent().unwrap()).unwrap();
+        let cases: [(&str, &dyn Fn()); 3] = [
+            // Our exact bytes saved again: only the time differs.
+            ("same text, new time", &|| {
+                fs::write(&path, fs::read(&path).unwrap()).unwrap();
+            }),
+            // As long as ours, with our time put back: only the text differs.
+            ("same size and time, new text", &|| {
+                let modified = fs::metadata(&path).unwrap().modified().unwrap();
+                let text = fs::read_to_string(&path)
+                    .unwrap()
+                    .replace("# Mine", "# Mire");
+                fs::write(&path, text).unwrap();
+                date(&path, modified);
+            }),
+            // Another file with our bytes, time and record: only the path
+            // differs.
+            ("another file's record", &|| {
+                let modified = fs::metadata(&path).unwrap().modified().unwrap();
+                fs::copy(&path, &other).unwrap();
+                date(&other, modified);
+                fs::copy(record_path(&path).unwrap(), record_path(&other).unwrap()).unwrap();
+            }),
+        ];
+        for (case, save) in cases {
+            ours(&path, "a");
+            save();
+            let target = if case == "another file's record" {
+                &other
+            } else {
+                &path
+            };
+            let started = Instant::now();
+            write_codex(target, &rules("b")).unwrap();
+            assert!(
+                started.elapsed() >= QUIET / 2,
+                "{case}: {:?}",
+                started.elapsed()
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_grown_since_its_read_waits_for_quiet() {
+        let dir = tempfile::tempdir().unwrap();
+        keep_records_in(&dir.path().join("state"));
+        let path = dir.path().join("AGENTS.md");
+        let modified = ours(&path, "a");
+        let read_first = fs::read_to_string(&path).unwrap();
+        // Grown after the first read, with our time put back: only the
+        // size differs from the record.
+        fs::write(&path, format!("{read_first}# Added\n")).unwrap();
+        date(&path, modified);
+        let reads = std::cell::Cell::new(0);
+        let stale_first = |path: &Path| {
+            reads.set(reads.get() + 1);
+            if reads.get() == 1 {
+                Ok(Some(read_first.clone()))
+            } else {
+                read(path)
+            }
+        };
+        let change = update_reading(&path, stale_first, |existing| {
+            Ok(Next::Text(with_block(
+                &path,
+                existing.unwrap_or_default(),
+                &rules("b"),
+            )?))
+        });
+        assert_eq!(change.unwrap(), Change::Written);
+        assert!(fs::read_to_string(&path).unwrap().contains("# Added\n"));
+        // It waited at once: the stale read, then one read once quiet and
+        // one just before the rename, with no write tried in between.
+        assert_eq!(reads.get(), 3);
+    }
+
+    #[test]
+    fn a_missing_unreadable_or_corrupt_record_falls_back_to_quiet() {
+        let dir = tempfile::tempdir().unwrap();
+        keep_records_in(&dir.path().join("state"));
+        let path = dir.path().join("AGENTS.md");
+        for case in ["missing", "unreadable", "corrupt"] {
+            ours(&path, "a");
+            let record = record_path(&path).unwrap();
+            match case {
+                "missing" => fs::remove_file(&record).unwrap(),
+                "unreadable" => {
+                    fs::remove_file(&record).unwrap();
+                    fs::create_dir(&record).unwrap();
+                }
+                _ => fs::write(&record, "{").unwrap(),
+            }
+            let started = Instant::now();
+            assert_eq!(write_codex(&path, &rules("b")).unwrap(), Change::Written);
+            assert!(
+                started.elapsed() >= QUIET / 2,
+                "{case}: {:?}",
+                started.elapsed()
+            );
+            if record.is_dir() {
+                fs::remove_dir(&record).unwrap();
+            }
+        }
+    }
+
+    #[test]
     fn a_quiet_empty_file_is_written_at_once() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("AGENTS.md");
@@ -1037,11 +1324,11 @@ mod tests {
     fn a_time_that_cannot_be_read_is_an_error_not_quiet() {
         let dir = tempfile::tempdir().unwrap();
         // A name no filesystem takes: not missing, it cannot be looked at.
-        let err = until_quiet(Path::new("AGENTS\0.md")).unwrap_err();
+        let err = until_quiet(Path::new("AGENTS\0.md"), None).unwrap_err();
         assert!(err.to_string().contains("Cannot read"), "{err}");
         let file = dir.path().join("file");
         fs::write(&file, "").unwrap();
-        let below = until_quiet(&file.join("AGENTS.md"));
+        let below = until_quiet(&file.join("AGENTS.md"), None);
         // Below a file: Unix says it is not a folder.
         #[cfg(unix)]
         assert!(below.unwrap_err().to_string().contains("Cannot read"));
@@ -1050,7 +1337,7 @@ mod tests {
         #[cfg(windows)]
         assert_eq!(below.unwrap(), Duration::ZERO);
         assert_eq!(
-            until_quiet(&dir.path().join("missing")).unwrap(),
+            until_quiet(&dir.path().join("missing"), None).unwrap(),
             Duration::ZERO
         );
     }
