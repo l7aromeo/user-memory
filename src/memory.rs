@@ -45,7 +45,7 @@ pub use repair::{problems, repair};
 pub use review::{Review, review};
 pub use rules::{GENERATED, MAX_BYTES as RULES_MAX_BYTES, instructions};
 pub(crate) use schema::BUSY;
-pub use schema::connect;
+pub use schema::{connect, hold};
 pub use selection::{Subset, local_path};
 pub use stamps::{Stamp, Stamps, parse_stamps};
 pub use titles::{Titles, parse_titles};
