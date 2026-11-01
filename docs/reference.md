@@ -405,7 +405,13 @@ workflow
   last second, as during a save of yours, is written only once it has gone
   a second unchanged, so the write starts from your saved version; a file
   still changing after two seconds is left for the next sync. Just before
-  the rename the file is read and checked again. A failed write never
+  the rename the file is read and checked again. After each write,
+  user-memory records the file's path, time, size and the SHA-256 of its
+  text in
+  `${XDG_STATE_HOME:-~/.local/state}/user-memory/instructions/` (private,
+  as the session snapshots are), so a file still as it left it is written
+  again without the wait. A missing or damaged record only brings the wait
+  back. A failed write never
   fails a tool call or a session start; `doctor` reports each file as
   current, outdated or missing.
 - A `rules/user-memory.md` you wrote yourself, a Codex file whose markers

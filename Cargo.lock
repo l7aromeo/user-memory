@@ -2023,6 +2023,7 @@ name = "user-memory"
 version = "0.8.1"
 dependencies = [
  "anyhow",
+ "aws-lc-rs",
  "axum",
  "clap",
  "dunce",

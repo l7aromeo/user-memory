@@ -48,7 +48,8 @@ pub fn data_dir() -> Option<PathBuf> {
     data_in(OS, &variable, home().as_deref())
 }
 
-/// The state folder (session snapshots): `$XDG_STATE_HOME/user-memory`, else
+/// The state folder (session snapshots, instruction-file write records):
+/// `$XDG_STATE_HOME/user-memory`, else
 /// `~/.local/state/user-memory`; `%LOCALAPPDATA%\user-memory\state` on
 /// Windows.
 pub fn state_dir() -> Option<PathBuf> {

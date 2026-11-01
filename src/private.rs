@@ -1,5 +1,6 @@
 //! Files and folders only this user can read: the store, its backups and
-//! exports, session snapshots, tokens and receipts.
+//! exports, session snapshots, instruction-file write records, tokens and
+//! receipts.
 //!
 //! On Unix that is mode 0600 for a file and 0700 for a folder. On Windows it
 //! is a protected access list with one entry, for the current user
