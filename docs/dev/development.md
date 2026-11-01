@@ -142,7 +142,10 @@ the installer's native choice; each agent session runs its own
 `USER_MEMORY_EMBED_*` settings in the checkout's `.env` (start from
 `.env.example`), for example
 `USER_MEMORY_EMBED_URL=http://127.0.0.1:11434/v1/embeddings`, before running
-it ([configuration](../reference.md#configuration)). With `--url`, it
+it ([configuration](../configuration.md#environment)). The file holds
+`KEY=VALUE` lines, comments and optional quotes, with no `$VAR` expansion;
+an unknown `USER_MEMORY_EMBED_*` name is an error, and every other key is
+ignored. `./setup --env-file FILE` reads another file. With `--url`, it
 connects this machine's agents to that server instead.
 
 ### A server built from the checkout
@@ -228,7 +231,7 @@ docker compose up -d --wait memory
 
 When the upgrade needs a title for each memory, pass the approved map on
 stdin to both, as in `docker compose run --rm -T memory migrate --titles - <
-titles.json` ([titles](../reference.md#titles-for-older-memories)). Its
+titles.json` ([titles](../storage.md#titles-for-older-memories)). Its
 backups, export and import work as for the installer's server
 ([back up and restore](../server.md#back-up-and-restore)), with plain
 `docker compose` in the checkout.

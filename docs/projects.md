@@ -11,6 +11,7 @@ projects it loads, and never another project's.
 - [A folder of repositories: .user-memory](#a-folder-of-repositories-user-memory)
 - [Another repository for one conversation: links](#another-repository-for-one-conversation-links)
 - [When a project gets a git remote: project move](#when-a-project-gets-a-git-remote-project-move)
+- [Project identity](#project-identity)
 - [What needs your yes](#what-needs-your-yes)
 
 ## Project keys
@@ -283,6 +284,31 @@ Project: the .user-memory-key key local:tool differs from the git remote's key g
 `project move` refuses the same project twice, a local path, and an old key
 that no memory or link uses. When a key file holds the same key as the
 remote, it is only redundant, and you are asked to delete it.
+
+## Project identity
+
+The rules above in full, as `user-memory project-id` applies them:
+
+- A git remote becomes lowercase `host/path` without scheme, user, port or
+  `.git`. A remote that is a local path is ignored. Any other key, such as
+  one in `.user-memory-key`, is lowercased with its whitespace cleaned up.
+- A repository without a usable remote takes the first line of
+  `.user-memory-key` at its root, else `git-root:<root commit>`; with
+  several root commits, the smallest SHA.
+- Where no rule gives a key, `project-id` fails rather than use a path that
+  differs on each machine.
+- A repository whose `.user-memory-key` names another key than its remote
+  loads both: the remote's key for new memories, and the file's key until
+  [project move](#when-a-project-gets-a-git-remote-project-move) moves its
+  memories and the file is deleted. Session start asks the agent to raise
+  that with you once, and to raise a key file that only repeats the remote's
+  key, which can go.
+- In `.user-memory`, a trailing ` # comment` is ignored too. A key line
+  belongs in `.user-memory-key`, and the session header says so. A missing
+  folder, a path that is not a folder, a folder without a project and an
+  empty `@` are named in the session header, never a failure. Only each
+  listed folder's project key is read; its own `.user-memory` is not
+  followed. The file is per machine and never committed.
 
 ## What needs your yes
 

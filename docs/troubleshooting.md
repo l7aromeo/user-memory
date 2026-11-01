@@ -6,8 +6,8 @@ Start with:
 user-memory doctor
 ```
 
-It checks the binary, the store or server, each client, the hooks, the skill,
-the instruction files and the git ignore. It exits with code:
+It checks the store or server and everything setup installed
+([the full list](cli.md#install-and-health)). It exits with code:
 
 - 0 when all is well;
 - 3 when nothing is broken, but something needs a step from you. That line
@@ -35,7 +35,7 @@ the instruction files and the git ignore. It exits with code:
 | ``Action needed: Claude Code: a project-scope user-memory server overrides shared memory in …`` | A Claude Code setting in that folder replaces the shared server there; memory works in every other folder. Run the `claude mcp remove` command doctor prints, in that folder. The same holds for a local-scope one. |
 | ``Action needed: Git ignore: … does not ignore …`` | Your global git ignore lacks `.user-memory` or `.user-memory-key`. Run `user-memory setup` again, or add the names it lists, one per line. |
 | ``Action needed: Git ignore: core.excludesFile is set to an empty value, so git reads no ignore file …`` | Point `core.excludesFile` at a file, and add `.user-memory` and `.user-memory-key` to it, one per line. |
-| ``Action needed: Automatic backups: none yet; run `user-memory backup now` `` | The store holds memories but has no [automatic backup](cli.md#automatic-backups), for example because its `backups` folder was deleted. Run `user-memory backup now` where the store lives. |
+| ``Action needed: Automatic backups: none yet; run `user-memory backup now` `` | The store holds memories but has no [automatic backup](backup.md#automatic-backups), for example because its `backups` folder was deleted. Run `user-memory backup now` where the store lives. |
 | ``Action needed: Automatic backups: the newest is … old though memories changed since; run `user-memory backup now` `` | Memories changed, but no backup was made for over two days. Run `user-memory backup now`; if it fails, the error says why. |
 | ``Action needed: Automatic backups: the last one failed (…); fix the cause, then run `user-memory backup now` `` | The last automatic backup failed, for example because the disk is full or the `backups` folder beside the store is not writable. The message in brackets gives the cause. Your memories were stored; only the copy failed. |
 | ``Cannot connect to memory server; check endpoint and access token`` | Check the address (`user-memory endpoint`), the token file, and that the server answers: `curl -fsS https://memory.example.com/`. |
@@ -45,7 +45,7 @@ the instruction files and the git ignore. It exits with code:
 | ``Action needed: Git ignore: … is a symbolic link; user-memory leaves it and its target as they are …`` | Add `.user-memory` and `.user-memory-key` to the file it names yourself, one per line. Setup says the same when it runs: ``Git ignore: not written …``. |
 | ``Git ignore: this repository tracks …; an ignore rule does not untrack it`` | An ignore rule never untracks a committed file. `git rm --cached <file>` stops tracking it and keeps your copy. |
 | ``Project: the .user-memory-key key … differs from the git remote's key …`` | Run the `user-memory project move` command it prints, where the store lives, then delete `.user-memory-key`. |
-| ``user-memory … is available (this is …): run the installer again`` | A newer release is out. [Upgrade](install.md#upgrade) when it suits you; `user-memory setup --no-update-check` stops the notice. |
+| ``user-memory … is available (this is …): run the installer again`` | A newer release is out. [Upgrade](upgrade.md) when it suits you; `user-memory setup --no-update-check` stops the notice. |
 | ``Action needed: Store privacy: other accounts on this machine can read …`` | Another account on this computer can read your store, for example a store you placed in a shared folder. Run the command the line names: `chmod 600` on the file on macOS and Linux; on Windows, `icacls` shows who can read it, and the second command it names makes it yours only. |
 | ``Action needed: Claude Code … is older than …, which runs user-memory's Windows hooks; run `claude update` `` | Windows only. user-memory's Claude Code hooks need Claude Code 2.1.139 or later, which runs them without a shell. Run `claude update`, then start a new Claude Code session. Setup already wrote the hooks, so you don't need to run it again. |
 | ``Cannot read Claude Code's version from `claude --version` …`` | Windows only. Doctor could not tell which Claude Code is installed; the part in brackets, when there is one, shows what `claude --version` printed. Run `claude --version` yourself, and if it fails or shows a version older than 2.1.139, run `claude update`. |
@@ -68,7 +68,7 @@ the instruction files and the git ignore. It exits with code:
 
 | You see | Meaning and fix |
 |---|---|
-| The upgrade stops and lists memories without titles | An upgrade from 0.3. See [titles](install.md#upgrade-from-03-titles). |
+| The upgrade stops and lists memories without titles | An upgrade from 0.3. See [titles](upgrade.md#upgrade-from-03-titles). |
 | ``… is damaged`` | Nothing was changed. Run `user-memory repair`, then upgrade again. |
 | ``… needs schema version … Move it aside`` | The store is too old to upgrade in place. Ask your agent: "upgrade my memory store". The skill walks you through export, a fresh store and import. |
 
@@ -85,7 +85,7 @@ the instruction files and the git ignore. It exits with code:
 | The agent recorded something wrong | Ask it to update the memory, or run `user-memory update <id> --content …` with the id the index shows. |
 | The same thing is stored twice | Ask: "review my memories". |
 | A conversation taught the agent things you do not want kept | Ask: "forget what we discussed in that chat", or run `user-memory forget --origin <origin>`. |
-| Search finds only exact words | Semantic search is off. See [semantic search](server.md#semantic-search). |
+| Search finds only memories that share your words | Semantic search is off. See [semantic search](server.md#semantic-search). |
 | The agent asks before recording something as global | Since 0.5 it must. Say yes only if it holds in every project; otherwise ask it to record the memory for this project. |
 | A session in a parent folder does not see a repository's memories | List the repository with `user-memory project-id --include <folder>`, or ask the agent to link it ([projects](projects.md)). |
 | `record` on the command line says `--scope` is missing | Since 0.5, give `--scope global` or `--scope project --project KEY`. |

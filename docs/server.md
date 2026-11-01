@@ -275,26 +275,14 @@ it on your own machine or a server you control.
 
 ## Upgrade
 
-For the installer's Docker or native server, run the installer again. It
-backs the store up before it changes the store's format
-([upgrade](install.md#upgrade)). For the Docker server, the backup stays in
-the volume, at `/data/memories.sqlite3.v<old version>-<time>.bak`.
-
-The server never upgrades its store itself: until the installer has upgraded
-it, the server refuses it with
-``run the installer again (or ./setup, or `user-memory migrate`) to upgrade it``.
-An upgrade from 0.3 needs a title for each memory
-([titles](install.md#upgrade-from-03-titles)).
-
-To undo an upgrade, restore the backup and run the previous version's
-installer with its tag: [roll back an upgrade](install.md#roll-back-an-upgrade)
-gives the steps for the Docker server and a native store. Memories recorded
-since the upgrade are lost unless you exported them first.
+Run the installer again on the server's machine, then on every client.
+[Upgrade a shared server](upgrade.md#upgrade-a-shared-server) says what it
+does and how to undo it.
 
 ## Back up and restore
 
 The server backs its store up once a day, as a native store does
-([automatic backups](cli.md#automatic-backups)): the first change once the
+([automatic backups](backup.md#automatic-backups)): the first change once the
 newest backup is a day old copies the store into `/data/backups/` in the
 volume, and the newest 7 are kept. Doctor on the server reports the newest.
 
@@ -335,7 +323,8 @@ Docker directly. Export through stdout to a file outside the container:
 ```
 
 Restore through stdin. The first command only shows what would change; the
-second writes it; the third rebuilds the search index:
+second writes it. A third, optional, embeds the new memories at once; search
+embeds them as it goes otherwise:
 
 ```bash
 docker compose -f ~/.local/share/user-memory/docker/compose.yaml exec -T memory user-memory import - < memories.json
@@ -349,15 +338,8 @@ docker compose -f ~/.local/share/user-memory/docker/compose.yaml exec -T memory 
 docker compose -f ~/.local/share/user-memory/docker/compose.yaml exec memory user-memory reindex
 ```
 
-With a native store, run `user-memory export memories.json` and
-`user-memory import memories.json` directly.
-
-To move memories from a native store to a server: export on the old machine,
-import on the server, then run the installer on the old machine with the
-server's address.
-
-Restoring an older backup brings back memories forgotten since. Backups do
-not include conversation links.
+[Back up and restore](backup.md) covers exports, a native store and moving
+one to a server.
 
 ## Check and repair
 
@@ -382,4 +364,4 @@ semantic search settings and automatic backups.
 | `401` for every client | The clients' token no longer matches the server's. Copy the token again and run the installer on each machine. |
 | The server refuses to start: ``run the installer again (or ./setup, or `user-memory migrate`) to upgrade it`` | The store needs an [upgrade](#upgrade). |
 | ``Database health check failed`` | The store is damaged. Run `user-memory repair` where the store lives (Docker: `docker compose … exec memory user-memory repair`). It backs the store up and rebuilds its indexes. |
-| Search finds only exact words | Semantic search is off or its endpoint is down. Run `user-memory embedding show` and `doctor`, and check that Ollama runs and has the model. |
+| Search finds only memories that share your words | Semantic search is off or its endpoint is down. Run `user-memory embedding show` and `doctor`, and check that Ollama runs and has the model. |
