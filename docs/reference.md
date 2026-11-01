@@ -807,9 +807,15 @@ topic as `topic`, or `query`.
   programming/coding/software development/development,
   communication/comms/writing style, and workflow/process.
 - **Semantic (optional):** an OpenAI-compatible embeddings endpoint finds
-  memories phrased differently from the question: the 20 closest join every
-  keyword match, and both rankings are fused.
-- Memories of the listed projects come before global ones.
+  memories phrased differently from the question. Of the 20 closest, those
+  near the best match join every keyword match. "Near" means within three
+  quarters of the gap between the best and the median similarity of this
+  question's candidates, so a far memory is never listed just to fill the
+  count. Both rankings are fused by reciprocal rank.
+- A memory of the listed projects counts 30% more in the fused score: it
+  wins over a global memory that matches as well, but not over one that
+  clearly matches better. Without a topic, project memories come first, then
+  the newest.
 - Search embeds the question and up to 32 memories that lack a current vector
   (newest first); `reindex` embeds the rest, and `embedding set` or
   `embedding sync` re-embeds every memory. Vectors from another model or
