@@ -72,6 +72,10 @@ const STEPS: &[Step] = &[
         check: always,
         apply: to_v5,
     },
+    Step {
+        check: always,
+        apply: to_v6,
+    },
 ];
 
 /// Version 5 adds the table of computed embedding cutoffs, empty until a
@@ -91,6 +95,73 @@ fn to_v5(conn: &Connection, _: Option<&Titles>) -> Result<()> {
 );",
     )?;
     Ok(())
+}
+
+/// Version 6 replaces the FTS5 copy of every memory's text, which search
+/// stopped reading when it began stemming words, with a keyword index of
+/// each memory's stems, and builds it; no memory or vector changes. The SQL
+/// is written out as it was at version 6.
+fn to_v6(conn: &Connection, _: Option<&Titles>) -> Result<()> {
+    conn.execute_batch(
+        "DROP TRIGGER memory_search_inserted;
+DROP TRIGGER memory_search_changed;
+DROP TRIGGER memory_search_deleted;
+DROP TABLE memory_search;
+CREATE TABLE search_keys (
+    key INTEGER PRIMARY KEY,
+    id TEXT NOT NULL UNIQUE,
+    memory_type TEXT NOT NULL,
+    category TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    project TEXT NOT NULL,
+    source TEXT NOT NULL,
+    status TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE VIRTUAL TABLE search_words USING fts5(category,title,type,body,content='',contentless_delete=1,detail=column,tokenize='ascii');
+CREATE TABLE search_pending (key INTEGER PRIMARY KEY NOT NULL);
+CREATE TABLE search_state (
+    id INTEGER PRIMARY KEY CHECK(id=1),
+    stemmed_by TEXT NOT NULL
+);
+CREATE TABLE search_changes (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT NOT NULL
+);
+CREATE TRIGGER search_inserted AFTER INSERT ON memories BEGIN
+    DELETE FROM search_words WHERE rowid IN (SELECT key FROM search_keys WHERE id=NEW.id);
+    DELETE FROM search_pending WHERE key IN (SELECT key FROM search_keys WHERE id=NEW.id);
+    DELETE FROM search_keys WHERE id=NEW.id;
+    INSERT INTO search_keys(id,memory_type,category,scope,project,source,status,updated_at) VALUES (NEW.id,NEW.memory_type,NEW.category,NEW.scope,NEW.project,NEW.source,NEW.status,NEW.updated_at);
+    INSERT INTO search_pending(key) SELECT key FROM search_keys WHERE id=NEW.id;
+    INSERT INTO search_changes(id) VALUES (NEW.id);
+END;
+CREATE TRIGGER search_changed AFTER UPDATE ON memories BEGIN
+    UPDATE search_keys SET id=NEW.id,memory_type=NEW.memory_type,category=NEW.category,scope=NEW.scope,project=NEW.project,source=NEW.source,status=NEW.status,updated_at=NEW.updated_at WHERE id=OLD.id;
+    INSERT OR IGNORE INTO search_pending(key) SELECT key FROM search_keys WHERE id=NEW.id AND (NEW.memory_type IS NOT OLD.memory_type OR NEW.category IS NOT OLD.category OR NEW.title IS NOT OLD.title OR NEW.content IS NOT OLD.content OR NEW.context IS NOT OLD.context OR NEW.reason IS NOT OLD.reason OR NEW.evidence IS NOT OLD.evidence);
+    INSERT INTO search_changes(id) VALUES (NEW.id);
+END;
+CREATE TRIGGER search_deleted AFTER DELETE ON memories BEGIN
+    DELETE FROM search_words WHERE rowid IN (SELECT key FROM search_keys WHERE id=OLD.id);
+    DELETE FROM search_pending WHERE key IN (SELECT key FROM search_keys WHERE id=OLD.id);
+    DELETE FROM search_keys WHERE id=OLD.id;
+    DELETE FROM memory_vectors WHERE id=OLD.id;
+    INSERT INTO search_changes(id) VALUES (OLD.id);
+END;
+CREATE TRIGGER search_vector_inserted AFTER INSERT ON memory_vectors BEGIN
+    INSERT INTO search_changes(id) VALUES (NEW.id);
+END;
+CREATE TRIGGER search_vector_changed AFTER UPDATE ON memory_vectors BEGIN
+    INSERT INTO search_changes(id) VALUES (NEW.id);
+END;
+CREATE TRIGGER search_vector_deleted AFTER DELETE ON memory_vectors BEGIN
+    INSERT INTO search_changes(id) VALUES (OLD.id);
+END;
+INSERT INTO search_keys(id,memory_type,category,scope,project,source,status,updated_at) SELECT id,memory_type,category,scope,project,source,status,updated_at FROM memories ORDER BY rowid;
+INSERT INTO search_pending(key) SELECT key FROM search_keys;",
+    )?;
+    super::index::stamp_new(conn)?;
+    super::index::drain(conn)
 }
 
 /// A step that needs nothing from the user.
@@ -352,7 +423,14 @@ fn run(
     let kind = schema::inspect(&tx, from, baseline, current)?;
     match kind {
         Found::Empty => return Ok(Migration::Empty),
-        Found::Current => return Ok(Migration::Current(from)),
+        Found::Current => {
+            // A binary that stems words differently rebuilds the keyword
+            // index here, where setup and the installers upgrade the store.
+            if mode == Mode::Apply && super::index::refresh(&tx)? {
+                tx.commit()?;
+            }
+            return Ok(Migration::Current(from));
+        }
         Found::Older => {}
         Found::Newer | Found::Foreign => {
             bail!(schema::refusal(&tx, db, from, &kind, current)?.unwrap_or_default())
@@ -794,7 +872,7 @@ mod tests {
         let conn = Connection::open(&db).unwrap();
         conn.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_DEFENSIVE, false)
             .unwrap();
-        conn.execute_batch("DELETE FROM memory_search_data WHERE id > 1")
+        conn.execute_batch("DELETE FROM search_words_data WHERE id > 1")
             .unwrap();
         drop(conn);
         let before = fs::read(&db).unwrap();
@@ -804,7 +882,7 @@ mod tests {
             assert!(
                 err.contains("is damaged, so it was not migrated and nothing changed")
                     && err.contains("run `user-memory repair` first")
-                    && err.contains("memory_search"),
+                    && err.contains("search_words"),
                 "{err}"
             );
             assert_eq!(fs::read(&db).unwrap(), before);

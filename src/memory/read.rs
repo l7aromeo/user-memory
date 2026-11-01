@@ -3,17 +3,22 @@
 //! Search considers every memory the selection covers (by default the active
 //! global memories and the requested projects'). Keyword relevance stems
 //! the topic's words, weighs each by how rare it is among the candidates and
-//! by the field that holds it (category, title, type, then the text); with
-//! an embedding endpoint configured it is fused with semantic similarity by
-//! reciprocal rank. A project memory's
-//! fused score counts [`PROJECT_BONUS`] more, so it wins an equal match but
-//! not a clearly stronger one; without a topic, project memories come first.
+//! by the field that holds it (category, title, type, then the text), read
+//! from the keyword index when it is current and from every candidate's own
+//! text otherwise, with the same result; with an embedding endpoint
+//! configured it is fused with semantic similarity by reciprocal rank. A
+//! project memory's fused score counts [`PROJECT_BONUS`] more, so it wins an
+//! equal match but not a clearly stronger one; without a topic, project
+//! memories come first.
 
 pub(super) use super::ids::SHORT_ID;
 use super::{
     Memory,
     ids::resolve,
-    index::{self, embed},
+    index::{
+        self, Entry, embed,
+        stems::{Field, Stems},
+    },
     page::{Paging, page},
     schema::{connect, get},
     selection::{Filter, Selection, candidates},
@@ -22,14 +27,10 @@ use super::{
 use anyhow::{Result, bail};
 use clap::Args;
 use rusqlite::Connection;
-use rust_stemmers::{Algorithm, Stemmer};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{
-    collections::{BTreeSet, HashMap},
-    path::Path,
-};
+use std::{collections::HashMap, path::Path};
 use uuid::Uuid;
 
 /// Smoothing constant of reciprocal rank fusion. The customary 60 suits lists
@@ -117,34 +118,13 @@ const TYPE_WEIGHT: f64 = 1.5;
 /// See [`CATEGORY_WEIGHT`]: content, context, reason and evidence.
 const TEXT_WEIGHT: f64 = 1.0;
 
-/// Word stems for one search, each distinct word stemmed once: a store's
-/// memories share most of their vocabulary.
-struct Stems {
-    stemmer: Stemmer,
-    seen: HashMap<String, String>,
-}
-
-impl Stems {
-    fn new() -> Self {
-        Self {
-            stemmer: Stemmer::create(Algorithm::English),
-            seen: HashMap::new(),
-        }
-    }
-    /// The stem of the lowercase `word`, so "release" and "releases" or
-    /// "path" and "paths" are one term.
-    fn of(&mut self, word: String) -> &str {
-        let stemmer = &self.stemmer;
-        self.seen
-            .entry(word)
-            .or_insert_with_key(|word| stemmer.stem(word).into_owned())
-    }
-    /// The stems of `text`'s words, without common function words.
-    fn all(&mut self, text: &str) -> BTreeSet<String> {
-        tokenize(text)
-            .into_iter()
-            .map(|word| self.of(word).to_owned())
-            .collect()
+/// How much a word counts in `field`.
+fn weight(field: Field) -> f64 {
+    match field {
+        Field::Category => CATEGORY_WEIGHT,
+        Field::Title => TITLE_WEIGHT,
+        Field::Type => TYPE_WEIGHT,
+        Field::Body => TEXT_WEIGHT,
     }
 }
 
@@ -170,18 +150,15 @@ fn field_weights(stems: &mut Stems, query: &[String], m: &Memory) -> Vec<f64> {
     best
 }
 
-/// Each of `items`' keyword relevance to the stemmed `query`: every query
-/// term counts its field's weight times its rarity among `items`, BM25's
-/// inverse document frequency, so a word most memories share adds little
-/// and one that few hold adds much.
-fn keyword_scores(stems: &mut Stems, query: &BTreeSet<String>, items: &[Memory]) -> Vec<f64> {
-    let query: Vec<String> = query.iter().cloned().collect();
-    let weights: Vec<Vec<f64>> = items
-        .iter()
-        .map(|m| field_weights(stems, &query, m))
-        .collect();
-    let all = items.len() as f64;
-    let rarity: Vec<f64> = (0..query.len())
+/// Each memory's keyword relevance from `weights`, the weight of the
+/// strongest field holding each query term (0 where none does), among
+/// `candidates` memories: every term counts its field's weight times its
+/// rarity among the candidates, BM25's inverse document frequency, so a
+/// word most memories share adds little and one that few hold adds much.
+/// Memories holding no term may be left out of `weights`; they add nothing.
+fn keyword_scores(weights: &[Vec<f64>], terms: usize, candidates: usize) -> Vec<f64> {
+    let all = candidates as f64;
+    let rarity: Vec<f64> = (0..terms)
         .map(|t| {
             let holding = weights.iter().filter(|w| w[t] > 0.0).count() as f64;
             ((all - holding + 0.5) / (holding + 0.5)).ln_1p()
@@ -202,6 +179,19 @@ fn recency(m: &Memory) -> (&str, i64) {
     (&m.updated_at, m.sequence)
 }
 
+fn latest(e: &Entry) -> (&str, i64) {
+    (&e.updated_at, e.order)
+}
+
+fn entry(m: &Memory) -> Entry {
+    Entry {
+        id: m.id,
+        local: m.scope == "project",
+        updated_at: m.updated_at.clone(),
+        order: m.sequence,
+    }
+}
+
 fn add_ranking(order: &[usize], fused: &mut [f64]) {
     for (rank, &i) in order.iter().enumerate() {
         fused[i] += 1.0 / (FUSION + rank as f64 + 1.0);
@@ -211,7 +201,7 @@ fn add_ranking(order: &[usize], fused: &mut [f64]) {
 /// What a topic matched, best first, and whether meaning ranked it beside
 /// the keywords.
 pub(super) struct Ranked {
-    pub(super) memories: Vec<Memory>,
+    pub(super) ids: Vec<Uuid>,
     /// An embeddings endpoint is configured and answered for this topic;
     /// false without a topic, without an endpoint, or when it failed.
     pub(super) semantic: bool,
@@ -227,43 +217,94 @@ pub(super) fn rank(
     limit: usize,
 ) -> Result<Ranked> {
     let mut stems = Stems::new();
-    let query = stems.all(topic);
+    let query: Vec<String> = stems.all(topic).into_iter().collect();
     let semantic = if query.is_empty() {
         None
     } else {
         embed::Config::from_env()
     };
-    // Every candidate is scored, with keywords as with meaning: the keyword
-    // index's exact words would miss what stemming finds.
-    let items = candidates(conn, filter)?;
-    let scores = keyword_scores(&mut stems, &query, &items);
+    let indexed = index::ready(conn)?;
+    // Meaning compares every candidate's vector, made from its text, so it
+    // reads every candidate; so does search without a current keyword
+    // index, which stems every candidate's words itself.
+    let items = if semantic.is_some() || !indexed {
+        Some(candidates(conn, filter)?)
+    } else {
+        None
+    };
+    let strength = |fields: &[Option<Field>]| -> Vec<f64> {
+        fields
+            .iter()
+            .map(|field| field.map_or(0.0, weight))
+            .collect()
+    };
+    let (entries, weights, covered): (Vec<Entry>, Vec<Vec<f64>>, usize) = match &items {
+        Some(items) => {
+            let weights = if indexed && !query.is_empty() {
+                let mut found: HashMap<Uuid, Vec<f64>> = index::hits(conn, filter, &query)?
+                    .found
+                    .into_iter()
+                    .map(|(entry, fields)| (entry.id, strength(&fields)))
+                    .collect();
+                items
+                    .iter()
+                    .map(|m| {
+                        found
+                            .remove(&m.id)
+                            .unwrap_or_else(|| vec![0.0; query.len()])
+                    })
+                    .collect()
+            } else {
+                items
+                    .iter()
+                    .map(|m| field_weights(&mut stems, &query, m))
+                    .collect()
+            };
+            (items.iter().map(entry).collect(), weights, items.len())
+        }
+        None if query.is_empty() => {
+            let entries = index::entries(conn, filter)?;
+            let covered = entries.len();
+            (entries, vec![Vec::new(); covered], covered)
+        }
+        None => {
+            let hits = index::hits(conn, filter, &query)?;
+            let (entries, weights) = hits
+                .found
+                .into_iter()
+                .map(|(entry, fields)| (entry, strength(&fields)))
+                .unzip();
+            (entries, weights, hits.candidates)
+        }
+    };
+    let scores = keyword_scores(&weights, query.len(), covered);
     let mut matched: Vec<bool> = scores
         .iter()
         .map(|&s| query.is_empty() || s > 0.0)
         .collect();
-    let mut fused = vec![0.0; items.len()];
+    let mut fused = vec![0.0; entries.len()];
     let mut semantic_ranked = false;
-    let mut by_keyword: Vec<usize> = (0..items.len()).filter(|&i| scores[i] > 0.0).collect();
+    let mut by_keyword: Vec<usize> = (0..entries.len()).filter(|&i| scores[i] > 0.0).collect();
     by_keyword.sort_by(|&a, &b| {
         scores[b]
             .total_cmp(&scores[a])
-            .then_with(|| recency(&items[b]).cmp(&recency(&items[a])))
+            .then_with(|| latest(&entries[b]).cmp(&latest(&entries[a])))
     });
     add_ranking(&by_keyword, &mut fused);
-    if let Some(config) = &semantic {
-        match index::similarities(conn, config, topic, &items) {
+    if let (Some(config), Some(items)) = (&semantic, &items) {
+        match index::similarities(conn, config, topic, items) {
             Ok(similar) => {
-                let mut by_meaning: Vec<usize> = (0..items.len())
-                    .filter(|&i| similar.contains_key(&items[i].id))
+                let mut by_meaning: Vec<usize> = (0..entries.len())
+                    .filter(|&i| similar.contains_key(&entries[i].id))
                     .collect();
                 by_meaning.sort_by(|&a, &b| {
-                    similar[&items[b].id]
-                        .total_cmp(&similar[&items[a].id])
-                        .then_with(|| recency(&items[b]).cmp(&recency(&items[a])))
+                    similar[&entries[b].id]
+                        .total_cmp(&similar[&entries[a].id])
+                        .then_with(|| latest(&entries[b]).cmp(&latest(&entries[a])))
                 });
                 let floor = similarity_floor(similar.values().copied());
                 for &i in by_meaning.iter().take(limit) {
-                    if similar[&items[i].id] >= floor {
+                    if similar[&entries[i].id] >= floor {
                         matched[i] = true;
                     }
                 }
@@ -273,7 +314,7 @@ pub(super) fn rank(
             Err(err) => embed::warn(format!("{err:#}")),
         }
     }
-    let local = |i: usize| items[i].scope == "project";
+    let local = |i: usize| entries[i].local;
     let score = |i: usize| {
         if local(i) {
             fused[i] * (1.0 + PROJECT_BONUS)
@@ -281,17 +322,16 @@ pub(super) fn rank(
             fused[i]
         }
     };
-    let mut order: Vec<usize> = (0..items.len()).filter(|&i| matched[i]).collect();
+    let mut order: Vec<usize> = (0..entries.len()).filter(|&i| matched[i]).collect();
     // Without a topic every score is 0, so project memories come first.
     order.sort_by(|&a, &b| {
         score(b)
             .total_cmp(&score(a))
             .then_with(|| local(b).cmp(&local(a)))
-            .then_with(|| recency(&items[b]).cmp(&recency(&items[a])))
+            .then_with(|| latest(&entries[b]).cmp(&latest(&entries[a])))
     });
-    let mut items: Vec<Option<Memory>> = items.into_iter().map(Some).collect();
     Ok(Ranked {
-        memories: order.into_iter().filter_map(|i| items[i].take()).collect(),
+        ids: order.into_iter().map(|i| entries[i].id).collect(),
         semantic: semantic_ranked,
     })
 }
@@ -358,7 +398,17 @@ pub fn search(db: &Path, input: &Search) -> Result<Value> {
         page_size: Some(input.paging.page_size.unwrap_or(SEARCH_PAGE)),
     };
     let ranked = rank(&conn, &filter, &input.topic, SEMANTIC_MATCHES)?;
-    let mut result = paged(ranked.memories, &paging)?;
+    let (shown, next) = page(ranked.ids.clone(), &ranked.ids, &paging)?;
+    // Only the page is read in full. A memory forgotten since it was ranked
+    // is left out of the page.
+    let mut memories = Vec::with_capacity(shown.len());
+    for id in shown {
+        memories.extend(get(&conn, id)?);
+    }
+    let mut result = json!({ "memories": compact(&memories)? });
+    if let Some(next) = next {
+        result["next_cursor"] = json!(next);
+    }
     // Lets an agent tell "nothing found" from "semantic search is off".
     result["semantic"] = json!(ranked.semantic);
     Ok(result)

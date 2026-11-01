@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 /// Category labels that mean the same at query time. Stored labels are kept
 /// as the user gave them; unlisted labels match only themselves.
-const CATEGORY_ALIASES: &[&[&str]] = &[
+pub(super) const CATEGORY_ALIASES: &[&[&str]] = &[
     &[
         "programming",
         "coding",
@@ -31,7 +31,7 @@ const CATEGORY_ALIASES: &[&[&str]] = &[
 
 /// Function words carry no topic; one shared "in" must not make two memories
 /// look alike or outrank a semantic match.
-const STOP: &[&str] = &[
+pub(super) const STOP: &[&str] = &[
     "a", "an", "and", "are", "as", "at", "be", "but", "by", "can", "could", "do", "does", "for",
     "from", "how", "i", "if", "in", "into", "is", "it", "its", "me", "my", "of", "on", "or", "our",
     "should", "so", "than", "that", "the", "their", "them", "then", "there", "these", "they",

@@ -11,14 +11,31 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 use std::path::{Path, PathBuf};
 
 /// Every problem SQLite's integrity check finds in the database behind
-/// `conn`, or none. The full check, not `quick_check`: only it compares each
-/// index with its table, and it checks the search index too.
+/// `conn`, or none, and in a store with the stem index (schema version 6
+/// on) every difference between it and the memories. The full check, not `quick_check`: only
+/// it compares each index with its table, and it checks the FTS5 table too.
 pub fn problems(conn: &Connection) -> Result<Vec<String>> {
-    let found = conn
+    let mut found = conn
         .prepare("PRAGMA integrity_check")?
         .query_map([], |r| r.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(if found == ["ok"] { Vec::new() } else { found })
+    if found == ["ok"] {
+        found.clear();
+        if stem_index(conn)? {
+            found.extend(super::index::problems(conn)?);
+        }
+    }
+    Ok(found)
+}
+
+/// Whether the store's keyword index is the stem index of schema version 6
+/// and later, rather than the FTS5 copy of the text before it.
+fn stem_index(conn: &Connection) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='search_state')",
+        [],
+        |r| r.get(0),
+    )?)
 }
 
 /// What `repair` did.
@@ -86,15 +103,23 @@ pub fn repair(db: &Path) -> Result<Repair> {
             backup.display()
         )
     };
-    // Every store user-memory creates or migrates has the keyword index.
-    tx.execute_batch("REINDEX;\nINSERT INTO memory_search(memory_search) VALUES('rebuild');")
-        .with_context(|| {
-            format!(
-                "Rebuilding the indexes of {} failed, so it is unchanged; {}",
-                db.display(),
-                kept()
-            )
-        })?;
+    // Every store user-memory creates or migrates has a keyword index: the
+    // stem index from version 6, an FTS5 copy of the text before.
+    (|| -> Result<()> {
+        tx.execute_batch("REINDEX;")?;
+        if stem_index(&tx)? {
+            super::index::rebuild(&tx)
+        } else {
+            Ok(tx.execute_batch("INSERT INTO memory_search(memory_search) VALUES('rebuild');")?)
+        }
+    })()
+    .with_context(|| {
+        format!(
+            "Rebuilding the indexes of {} failed, so it is unchanged; {}",
+            db.display(),
+            kept()
+        )
+    })?;
     tx.commit()?;
     if !problems(&conn)?.is_empty() {
         // Damage beyond the indexes, such as a miscounted free-page list:

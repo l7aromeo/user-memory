@@ -32,7 +32,7 @@ mod transfer;
 mod write;
 
 pub use ids::MemoryRef;
-pub use index::reindex;
+pub use index::{outdated as search_index_outdated, reindex};
 pub use links::{Link, link};
 pub use migrate::{Migration, check_migration, migrate};
 pub use overview::{

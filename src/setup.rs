@@ -1625,6 +1625,7 @@ pub async fn doctor(options: &Options) -> Result<Health> {
         }
     }
     if paths.remote.is_none() {
+        check_search_index(&paths.db, &mut actions, &mut failures);
         check_backups(&paths.db, &mut actions, &mut failures);
         check_privacy(&paths.db, &mut actions, &mut failures);
     }
@@ -1877,8 +1878,21 @@ fn store_doctor(paths: &Paths) -> Result<Health> {
         Ok(None) => {}
         Err(err) => failures.push(format!("Embedding: {err:#}")),
     }
+    check_search_index(&paths.db, &mut actions, &mut failures);
     check_backups(&paths.db, &mut actions, &mut failures);
     conclude(&actions, &failures)
+}
+
+/// A step when the store's keyword index was built by another version of
+/// user-memory, which search does not read.
+fn check_search_index(db: &Path, actions: &mut Vec<String>, failures: &mut Vec<String>) {
+    match crate::memory::search_index_outdated(db) {
+        Ok(false) => {}
+        Ok(true) => actions.push(
+            "Search index: built by another version of user-memory, so search reads every memory, which is slower on a large store; run `user-memory reindex` to rebuild it".into(),
+        ),
+        Err(err) => failures.push(format!("Search index: {err:#}")),
+    }
 }
 
 /// The store's automatic backups: their line, and a step when they need
