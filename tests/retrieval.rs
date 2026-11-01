@@ -319,7 +319,12 @@ impl Store {
     }
     fn search_rows(&self) -> i64 {
         self.sql()
-            .query_row("SELECT COUNT(*) FROM memory_search", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM search_keys", [], |r| r.get(0))
+            .unwrap()
+    }
+    fn pending(&self) -> i64 {
+        self.sql()
+            .query_row("SELECT COUNT(*) FROM search_pending", [], |r| r.get(0))
             .unwrap()
     }
 }
@@ -349,7 +354,7 @@ fn search_index_tables_are_created_once_and_follow_store_level_changes() {
     let conn = s.sql();
     let tables: Vec<String> = conn
         .prepare(
-            "SELECT name FROM sqlite_master WHERE type='table' AND (name LIKE 'memory_search%' OR name='memory_vectors') ORDER BY name",
+            "SELECT name FROM sqlite_master WHERE type='table' AND (name LIKE 'search%' OR name='memory_vectors') ORDER BY name",
         )
         .unwrap()
         .query_map([], |r| r.get(0))
@@ -359,16 +364,22 @@ fn search_index_tables_are_created_once_and_follow_store_level_changes() {
     assert_eq!(
         tables,
         [
-            "memory_search",
-            "memory_search_config",
-            "memory_search_content",
-            "memory_search_data",
-            "memory_search_docsize",
-            "memory_search_idx",
-            "memory_vectors"
+            "memory_vectors",
+            "search_changes",
+            "search_keys",
+            "search_pending",
+            "search_state",
+            "search_words",
+            "search_words_config",
+            "search_words_data",
+            "search_words_docsize",
+            "search_words_idx"
         ]
     );
     assert_eq!(s.search_rows(), 3);
+    assert_eq!(s.pending(), 0);
+    // Another program's writes are queued by the triggers and indexed
+    // before search reads the index.
     conn.execute(
         "INSERT INTO memories(id,memory_type,category,content,title) VALUES ('00000000-0000-4000-8000-000000000001','fact','tools','Keyboard layout is Colemak','Keyboard layout is Colemak')",
         [],
@@ -380,10 +391,12 @@ fn search_index_tables_are_created_once_and_follow_store_level_changes() {
     )
     .unwrap();
     drop(conn);
+    assert_eq!(s.pending(), 2);
     assert_eq!(
         s.contents(&[], &["colemak"]),
         ["Keyboard layout is Colemak"]
     );
+    assert_eq!(s.pending(), 0);
     assert_eq!(s.contents(&[], &["zig"]), ["Prefer Zig for systems work"]);
     assert!(s.contents(&[], &["rust"]).is_empty());
     s.value(&[], &["forget", &rust]);
@@ -392,12 +405,12 @@ fn search_index_tables_are_created_once_and_follow_store_level_changes() {
 }
 
 #[test]
-fn memories_stored_before_the_index_existed_are_indexed_on_first_use() {
+fn a_store_without_its_keyword_index_is_searched_in_full_until_reindexed() {
     let s = Store::new();
     preferences(&s);
     let conn = s.sql();
     conn.execute_batch(
-        "DROP TRIGGER memory_search_inserted; DROP TRIGGER memory_search_changed; DROP TRIGGER memory_search_deleted; DROP TABLE memory_search; DROP TABLE memory_vectors;",
+        "DROP TRIGGER search_inserted; DROP TRIGGER search_changed; DROP TRIGGER search_deleted; DROP TABLE search_keys; DROP TABLE search_words; DROP TABLE search_pending; DROP TABLE search_state;",
     )
     .unwrap();
     conn.execute(
@@ -406,13 +419,19 @@ fn memories_stored_before_the_index_existed_are_indexed_on_first_use() {
     )
     .unwrap();
     drop(conn);
+    // Opening the store creates the index again, empty and unstamped, so
+    // search reads every memory.
     assert_eq!(
         s.contents(&[], &["colemak"]),
         ["Keyboard layout is Colemak"]
     );
+    assert_eq!(s.search_rows(), 0);
+    s.value(&[], &["reindex"]);
     assert_eq!(s.search_rows(), 4);
-    s.value(&[], &["search", "editor"]);
-    assert_eq!(s.search_rows(), 4);
+    assert_eq!(
+        s.contents(&[], &["colemak"]),
+        ["Keyboard layout is Colemak"]
+    );
 }
 
 #[test]
@@ -432,20 +451,35 @@ fn concurrent_first_use_indexes_each_memory_once() {
         }
     });
     assert_eq!(s.search_rows(), 8);
+    assert_eq!(s.pending(), 0);
     assert_eq!(s.contents(&[], &["parallel", "--page-size", "20"]).len(), 8);
 }
 
 #[test]
-fn reindex_rebuilds_a_damaged_keyword_index() {
+fn repair_and_reindex_rebuild_a_damaged_keyword_index() {
     let s = Store::new();
     preferences(&s);
-    s.sql().execute("DELETE FROM memory_search", []).unwrap();
-    assert_eq!(s.search_rows(), 0);
-    // Search reads the memories themselves, not the keyword index.
+    let damage = || {
+        s.sql()
+            .execute(
+                "INSERT INTO search_words(search_words) VALUES('delete-all')",
+                [],
+            )
+            .unwrap();
+    };
+    damage();
+    let out = s.output(&[], &["repair"]);
+    assert!(
+        String::from_utf8_lossy(&out.stdout)
+            .contains("search index: the stored words of 3 memories differ from their text"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
     assert_eq!(
         s.contents(&[], &["editor"]),
         ["Use Helix as the text editor"]
     );
+    damage();
     let report = s.value(&[], &["reindex"]);
     assert_eq!(report, json!({"reindexed":3,"embedded":null}));
     assert_eq!(

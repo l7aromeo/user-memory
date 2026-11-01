@@ -71,9 +71,24 @@ Each release's notes say what changed; [the changelog](../CHANGELOG.md)
 collects them. The versions below needed something more than running the
 installer again.
 
-### From 0.6 on
+### Upgrade to 0.9: the keyword index
 
-The store's format has not changed since 0.6, so upgrading from 0.6 or later
+0.9 replaces the store's unused copy of every memory's text (schema version
+5) with a [keyword index](storage.md#the-keyword-index) of each memory's
+stems (schema version 6), so search stays fast as the store grows. Run the
+installer again on each machine and on the server: it backs the store up
+beside itself (`<store>.v5-<UTC time>.bak`), then migrates it and builds the
+index in one transaction. No memory, conversation or vector changes. A
+store of 20,000 memories took under a second when measured, and one of
+100,000 from 5 to 16 seconds, depending on how long the memories are.
+
+A 0.8 binary refuses a version 6 store, as with every schema change, so
+upgrade every machine that opens the store; to go back, follow [roll back an
+upgrade](#roll-back-an-upgrade).
+
+### From 0.6 to 0.8
+
+The store's format did not change from 0.6 to 0.8, so upgrading within them
 changes no file and makes no store backup. Run the installer again on each
 machine and on the server.
 

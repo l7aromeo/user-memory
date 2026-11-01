@@ -229,11 +229,47 @@ fn data(db: &Path) -> Vec<Vec<String>> {
         "SELECT memory_id,origin,first_seen FROM memory_origins ORDER BY 1,2",
         "SELECT a,b FROM memory_distinct ORDER BY 1,2",
         "SELECT id,model,dimensions,source,hex(vector) FROM memory_vectors ORDER BY id",
-        "SELECT id FROM memory_search WHERE memory_search MATCH 'rust OR answers' ORDER BY id",
     ]
     .iter()
     .map(|sql| rows(&conn, sql))
     .collect()
+}
+
+/// The keyword index of the store at `db`: every key with its memory's
+/// columns, and every stored stem with its memory and column. FTS5's own
+/// check runs first.
+fn keyword_index(db: &Path) -> Vec<Vec<String>> {
+    let conn = Connection::open(db).unwrap();
+    conn.execute(
+        "INSERT INTO search_words(search_words) VALUES('integrity-check')",
+        [],
+    )
+    .unwrap();
+    conn.execute_batch(
+        "CREATE VIRTUAL TABLE temp.stems USING fts5vocab(main,'search_words','instance')",
+    )
+    .unwrap();
+    [
+        "SELECT * FROM search_keys ORDER BY key",
+        "SELECT k.id,s.col,s.term FROM temp.stems s JOIN search_keys k ON k.key=s.doc ORDER BY 1,2,3",
+        "SELECT COUNT(*),stemmed_by FROM search_pending,search_state",
+    ]
+    .iter()
+    .map(|sql| rows(&conn, sql))
+    .collect()
+}
+
+/// [`keyword_index`] of a copy of the store at `db` after `reindex` built
+/// its index afresh.
+fn rebuilt_keyword_index(dir: &Path, db: &Path) -> Vec<Vec<String>> {
+    let copy = dir.join("rebuilt.sqlite3");
+    Connection::open(db)
+        .unwrap()
+        .backup(rusqlite::MAIN_DB, &copy, None)
+        .unwrap();
+    let out = user_memory(dir, &copy, &["reindex"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    keyword_index(&copy)
 }
 
 /// The first schema version whose memories carry titles.
@@ -377,13 +413,11 @@ fn every_snapshot_migrates_to_the_current_schema_and_keeps_its_data() {
         assert_eq!(version(&db), current);
         assert_eq!(normalized(&statements(&db)), target, "v{n}");
         assert_eq!(data(&db), before, "v{n} lost data");
-        Connection::open(&db)
-            .unwrap()
-            .execute(
-                "INSERT INTO memory_search(memory_search) VALUES('integrity-check')",
-                [],
-            )
-            .unwrap();
+        assert_eq!(
+            keyword_index(&db),
+            rebuilt_keyword_index(dir.path(), &db),
+            "v{n}"
+        );
         let recalled = user_memory(
             dir.path(),
             &db,
@@ -688,12 +722,21 @@ fn migrating_to_version_3_takes_every_title_from_the_map() {
         .map(Result::unwrap)
         .collect();
     assert_eq!(stored, titles);
-    // The search index finds memories by their title words too.
-    let found = rows(
-        &conn,
-        "SELECT id FROM memory_search WHERE memory_search MATCH 'title:once'",
+    // Search finds memories by their title words too.
+    let found = user_memory(
+        dir.path(),
+        &db,
+        &["search", "once", "--status", "all", "--scope", "all"],
     );
-    assert_eq!(found, [format!("'{}'", ids[1])]);
+    assert!(found.status.success(), "{}", stderr(&found));
+    let found: serde_json::Value = serde_json::from_slice(&found.stdout).unwrap();
+    let found: Vec<&str> = found["memories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(found, [ids[1].as_str()]);
     // A map given for a store that needs none is reported, never ignored.
     let again = migrate(Some(full.into()));
     assert!(again.status.success(), "{}", stderr(&again));

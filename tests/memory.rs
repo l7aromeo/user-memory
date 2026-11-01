@@ -90,10 +90,13 @@ fn database_contains_only_the_generic_memory_schema() {
         .unwrap()
         .collect::<rusqlite::Result<_>>()
         .unwrap();
-    // Search index tables belong to memory::index and are pinned by tests/retrieval.rs.
+    // Search index tables belong to memory::index and are pinned by
+    // tests/retrieval.rs; SQLite keeps `sqlite_sequence` for the change log.
     let stored: Vec<_> = tables
         .iter()
-        .filter(|name| !name.starts_with("memory_search") && *name != "memory_vectors")
+        .filter(|name| {
+            !name.starts_with("search_") && *name != "memory_vectors" && *name != "sqlite_sequence"
+        })
         .collect();
     assert_eq!(
         stored,
@@ -2055,9 +2058,9 @@ fn user_version(db: &std::path::Path) -> i64 {
 fn a_new_store_is_stamped_with_the_schema_version() {
     let s = Store::new();
     s.value(&["search"]);
-    assert_eq!(user_version(&s.db), 5);
+    assert_eq!(user_version(&s.db), 6);
     s.add("preference", "Prefer Rust");
-    assert_eq!(user_version(&s.db), 5);
+    assert_eq!(user_version(&s.db), 6);
 }
 
 #[test]
@@ -2082,7 +2085,7 @@ fn a_store_from_before_versioning_is_refused_and_left_untouched() {
         let error = String::from_utf8_lossy(&out.stderr);
         for part in [
             s.db.to_str().unwrap(),
-            "has an unversioned schema but this user-memory needs schema version 5",
+            "has an unversioned schema but this user-memory needs schema version 6",
             "it holds 1 memories and was left unchanged",
             "Move it aside",
             "existing memories are not copied automatically",
@@ -2130,7 +2133,7 @@ fn stores_from_another_version_or_program_are_refused() {
     let error = String::from_utf8_lossy(&s.run(&["search"]).stderr).into_owned();
     assert!(
         error.contains(
-            "has schema version 1 but this user-memory needs schema version 5; it holds 1 memories"
+            "has schema version 1 but this user-memory needs schema version 6; it holds 1 memories"
         ),
         "{error}"
     );
@@ -2141,7 +2144,7 @@ fn stores_from_another_version_or_program_are_refused() {
     drop(conn);
     let error = String::from_utf8_lossy(&other.run(&["search"]).stderr).into_owned();
     assert!(
-        error.contains("has an unversioned schema but this user-memory needs schema version 5; it has no user-memory table"),
+        error.contains("has an unversioned schema but this user-memory needs schema version 6; it has no user-memory table"),
         "{error}"
     );
 }

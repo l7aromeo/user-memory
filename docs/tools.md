@@ -84,8 +84,10 @@ topic as `topic`, or `query`.
   common function words are ignored. Each word of the question counts once
   per memory, by the strongest field holding it (category, then title, then
   type, then the text), and by how rare it is among the candidates, so a
-  word most memories share adds little. Ties go to the newest. Category
-  synonyms match at query time:
+  word most memories share adds little. Ties go to the newest. A
+  [keyword index](storage.md#the-keyword-index) of every memory's stems
+  finds the matching memories without reading the others, with the same
+  result. Category synonyms match at query time:
   programming/coding/software development/development,
   communication/comms/writing style, and workflow/process.
 - **Semantic (optional):** an OpenAI-compatible embeddings endpoint finds

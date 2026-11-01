@@ -121,11 +121,7 @@ pub fn index(db: &Path, input: &Index) -> Result<String> {
     let matched: Vec<_> = if tokenize(&input.topic).is_empty() {
         Vec::new()
     } else {
-        rank(&conn, &filter, &input.topic, TOPIC_MATCHES)?
-            .memories
-            .into_iter()
-            .map(|m| m.id)
-            .collect()
+        rank(&conn, &filter, &input.topic, TOPIC_MATCHES)?.ids
     };
     let relevance = |m: &Memory| {
         matched

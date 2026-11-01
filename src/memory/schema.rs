@@ -12,7 +12,7 @@ use uuid::Uuid;
 /// previous version in `migrate.rs`: `IF NOT EXISTS` keeps an older table or
 /// trigger as it was, so connecting refuses a store from another version
 /// instead of half upgrading it.
-pub(super) const SCHEMA_VERSION: i64 = 5;
+pub(super) const SCHEMA_VERSION: i64 = 6;
 
 /// The tables and the triggers that stale inferred patterns when their
 /// support weakens: a supporting memory deleted; one changed in what it
@@ -185,6 +185,8 @@ pub fn connect(db: &Path) -> Result<Connection> {
             tx.execute_batch(SCHEMA)?;
             tx.execute_batch(LINKS)?;
             tx.execute_batch(CUTOFFS)?;
+            super::index::create(&tx)?;
+            super::index::stamp_new(&tx)?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         tx.commit()?;
@@ -214,7 +216,7 @@ pub fn connect(db: &Path) -> Result<Connection> {
     conn.execute_batch(SCHEMA)?;
     conn.execute_batch(LINKS)?;
     conn.execute_batch(CUTOFFS)?;
-    super::index::install(&conn)?;
+    super::index::create(&conn)?;
     Ok(conn)
 }
 
@@ -420,8 +422,9 @@ fn checkpoint(conn: &Connection) -> rusqlite::Result<()> {
 }
 
 impl Write<'_> {
-    /// Commits, passes the turns on, then copies a long log into the store
-    /// and makes the day's backup when one is due. The copy is SQLite's
+    /// Indexes the memories this write changed, commits, passes the turns
+    /// on, then copies a long log into the store and makes the day's backup
+    /// when one is due. The copy is SQLite's
     /// passive checkpoint: it waits for no one, and a copy left unfinished,
     /// or one that fails, is taken up by the next commit. Only the commit
     /// decides whether the write succeeded; a failed copy is reported on
@@ -434,6 +437,7 @@ impl Write<'_> {
             turn,
             conn,
         } = self;
+        super::index::settle(&tx)?;
         tx.commit()?;
         drop(file);
         let outermost = turn.is_some();

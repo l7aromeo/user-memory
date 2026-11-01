@@ -102,15 +102,25 @@ pub fn cross_two_id_index_entries(db: &Path) {
     assert_eq!(check(db, "quick_check"), ["ok"], "quick_check misses it");
 }
 
-/// The keyword index loses the size record of one memory's text, which
-/// FTS5 reports as a malformed inverted index.
+/// The keyword index loses part of its inverted index (from schema version
+/// 6) or the size record of one memory's text (before), which FTS5 reports
+/// as corruption.
 pub fn break_the_keyword_index(db: &Path) {
-    Connection::open(db)
-        .unwrap()
-        .execute_batch(
-            "DELETE FROM memory_search_docsize WHERE id = (SELECT max(id) FROM memory_search_docsize)",
+    let conn = Connection::open(db).unwrap();
+    let stems: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='search_words_data')",
+            [],
+            |r| r.get(0),
         )
         .unwrap();
+    conn.execute_batch(if stems {
+        "DELETE FROM search_words_data WHERE id > 10"
+    } else {
+        "DELETE FROM memory_search_docsize WHERE id = (SELECT max(id) FROM memory_search_docsize)"
+    })
+    .unwrap();
+    drop(conn);
     assert_ne!(check(db, "integrity_check"), ["ok"], "the store is damaged");
 }
 

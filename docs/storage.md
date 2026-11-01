@@ -7,6 +7,7 @@ beside it and in its state folder.
 - [Tables](#tables)
 - [Write-ahead log](#write-ahead-log)
 - [Writers take turns](#writers-take-turns)
+- [The keyword index](#the-keyword-index)
 - [Schema versions](#schema-versions)
 - [Automatic backups](#automatic-backups)
 - [Checking and repairing the store](#checking-and-repairing-the-store)
@@ -19,9 +20,12 @@ The store is one SQLite database: the `memories` table, `memory_origins`,
 `memory_distinct`, `conversation_projects` (each conversation's
 [links](tools.md#conversation-links)), `embedding_cutoffs` (cutoffs computed for an
 embedding model and vector length without built-in ones, since schema
-version 5), and derived search tables (`memory_search` for FTS5,
-`memory_vectors` for embeddings) that `reindex` can always rebuild. Memory IDs
-are UUID strings; insertion order tracks recency.
+version 5), and derived search tables that `reindex` can always rebuild: the
+[keyword index](#the-keyword-index) (`search_keys`, `search_words`,
+`search_pending`, `search_state` and `search_changes`, since schema version
+6) and
+`memory_vectors` for embeddings. Memory IDs are UUID strings; insertion order
+tracks recency.
 
 ## Write-ahead log
 
@@ -60,6 +64,35 @@ no lock. A server does its store work apart from the threads that read
 requests and send replies, so while its writes wait it goes on answering
 other calls, reads at once. The lock file holds nothing: restoring a backup leaves it as it
 is, and uninstall with `--purge` deletes it with the store.
+
+## The keyword index
+
+Search finds the memories holding a word of the question through an index of
+each memory's words, stemmed as search compares them, so it does not read
+every memory to answer. Its answer is the one reading every memory would
+give.
+
+- `search_keys` gives each memory a number, in the order memories were
+  stored, and copies the columns search filters on.
+- `search_words` (SQLite FTS5, without a copy of the text) holds each
+  memory's stems under its number, each at the strongest field holding it:
+  category, title, type, or the text.
+- Triggers on `memories` keep the numbers and filter columns in step with
+  every write, from user-memory or any other program, and queue a changed
+  memory in `search_pending`. Every write by user-memory stems what it
+  queued before it commits; a search first stems what another program left
+  queued.
+- `search_state` records which stemming made the stored stems. A user-memory
+  that stems differently, after an upgrade, does not read an index made by
+  another: search reads and stems every memory itself, which is slower on a
+  large store, until `migrate` (run by the installer and setup) or
+  `reindex` rebuilds the index. `doctor` reports it.
+- `search_changes` logs which memories and vectors changed, in order, so a
+  long-running server that keeps vectors in memory reloads only those.
+  Writes keep the newest 10,000 changes.
+
+A memory with a word too long for the index (over 16,384 bytes, which
+recording refuses) is left unindexed, and search then reads every memory.
 
 ## Schema versions
 
@@ -118,9 +151,11 @@ log would be applied to the restored store.
 ## Checking and repairing the store
 
 `doctor` runs SQLite's full integrity check (`PRAGMA integrity_check`), which
-also compares every index with its table and checks the keyword index. Two
-processes writing the store at once without SQLite's locks leave exactly that
-damage: an index whose entries no longer match the memories.
+also compares every index with its table and checks the keyword index's
+FTS5 structure, then stems every memory again and compares the result with
+the keyword index. Two processes writing the store at once without SQLite's
+locks leave exactly that damage: an index whose entries no longer match the
+memories.
 
 `user-memory repair` (`--db PATH` for another store; on a server,
 `docker compose exec memory user-memory repair`) checks the store the same way
@@ -130,7 +165,8 @@ and, when it finds problems:
    `<store>.repair-<UTC time>.bak` beside it (mode 0600, never replacing a
    file), and checks that the copy holds every memory;
 2. under the same write lock, rebuilds every index from the memories
-   (`REINDEX`) and the keyword index from its stored text (FTS5 `rebuild`);
+   (`REINDEX`) and the keyword index from the memories' text (before schema
+   version 6, FTS5 `rebuild`);
 3. if the store still fails the check, rewrites the whole file (`VACUUM`),
    which mends damage beyond the indexes, such as a miscounted free-page list;
 4. counts the memories again, without any index, and prints what it found.
