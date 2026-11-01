@@ -220,17 +220,18 @@ pub fn connect(db: &Path) -> Result<Connection> {
 
 /// One write transaction at a time, for the writers that share it.
 pub(super) struct Gate {
-    turn: std::sync::Mutex<()>,
-    /// The thread holding the turn, so a write opened inside another on the
-    /// same thread never waits for itself.
+    /// The thread holding the turn, or none while it is free; a write opened
+    /// inside another on the same thread never waits for itself.
     holder: std::sync::Mutex<Option<std::thread::ThreadId>>,
+    /// Signalled each time the turn is freed.
+    freed: std::sync::Condvar,
 }
 
 impl Gate {
     const fn new() -> Self {
         Self {
-            turn: std::sync::Mutex::new(()),
             holder: std::sync::Mutex::new(None),
+            freed: std::sync::Condvar::new(),
         }
     }
 
@@ -240,21 +241,28 @@ impl Gate {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// This thread's turn, or none when it already holds one.
-    fn enter(&'static self) -> Option<Turn> {
+    /// This thread's turn, waiting at most `wait` for it, or none when it
+    /// already holds one. Past `wait` it refuses as a writer kept waiting by
+    /// another process does: a queue behind a stalled write must not wait
+    /// without end.
+    fn enter(&'static self, wait: Duration) -> Result<Option<Turn>> {
         let me = std::thread::current().id();
-        if *self.holder() == Some(me) {
-            return None;
+        let holder = self.holder();
+        if *holder == Some(me) {
+            return Ok(None);
         }
-        let guard = self
-            .turn
-            .lock()
+        let (mut holder, _) = self
+            .freed
+            .wait_timeout_while(holder, wait, |holder| holder.is_some())
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *self.holder() = Some(me);
-        Some(Turn {
-            gate: self,
-            _guard: guard,
-        })
+        if holder.is_some() {
+            bail!(
+                "database is locked: another write in this process kept its write turn on the store for {} s",
+                wait.as_secs()
+            );
+        }
+        *holder = Some(me);
+        Ok(Some(Turn { gate: self }))
     }
 }
 
@@ -264,13 +272,12 @@ static WRITERS: Gate = Gate::new();
 /// A thread's turn at a [`Gate`]; the turn passes on when it drops.
 struct Turn {
     gate: &'static Gate,
-    _guard: std::sync::MutexGuard<'static, ()>,
 }
 
 impl Drop for Turn {
-    // Runs before the guard drops, so the next holder records itself after.
     fn drop(&mut self) {
         *self.gate.holder() = None;
+        self.gate.freed.notify_one();
     }
 }
 
@@ -314,10 +321,10 @@ pub fn lock_path(db: &Path) -> std::path::PathBuf {
 struct FileTurn(#[allow(dead_code, reason = "held for its drop")] fs::File);
 
 impl FileTurn {
-    /// Waits in the kernel's queue for the lock, at most [`BUSY`]. The wait
+    /// Waits in the kernel's queue for the lock, at most `wait`. The wait
     /// runs on a thread of its own: past the bound this gives up, and that
     /// thread drops the lock as soon as it gets it.
-    fn take(path: &Path) -> Result<Self> {
+    fn take(path: &Path, wait: Duration) -> Result<Self> {
         let file = private::create_file(
             fs::OpenOptions::new()
                 .read(true)
@@ -338,7 +345,6 @@ impl FileTurn {
         std::thread::spawn(move || {
             let _ = locked.send(file.lock().map(|()| file));
         });
-        let wait = turn_wait();
         match waiting.recv_timeout(wait) {
             Ok(Ok(file)) => Ok(Self(file)),
             Ok(Err(err)) => Err(err).with_context(|| format!("Cannot lock {}", path.display())),
@@ -367,14 +373,15 @@ pub(super) struct Write<'c> {
 }
 
 pub(super) fn write(conn: &Connection) -> Result<Write<'_>> {
-    write_at(&WRITERS, conn)
+    write_at(&WRITERS, conn, turn_wait())
 }
 
-fn write_at<'c>(gate: &'static Gate, conn: &'c Connection) -> Result<Write<'c>> {
-    let turn = gate.enter();
+/// [`write`] at `gate`, waiting at most `wait` for each turn.
+fn write_at<'c>(gate: &'static Gate, conn: &'c Connection, wait: Duration) -> Result<Write<'c>> {
+    let turn = gate.enter(wait)?;
     // A write inside another on this thread already has the file's turn.
     let file = match (&turn, conn.path().filter(|path| !path.is_empty())) {
-        (Some(_), Some(db)) => Some(FileTurn::take(&lock_path(Path::new(db)))?),
+        (Some(_), Some(db)) => Some(FileTurn::take(&lock_path(Path::new(db)), wait)?),
         _ => None,
     };
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
@@ -613,7 +620,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("m.sqlite3");
         let first = connect(&db).unwrap();
-        let held = write_at(&GATE, &first).unwrap();
+        let held = write_at(&GATE, &first, STUCK).unwrap();
         let (started, waiting) = mpsc::channel();
         let second = std::thread::spawn({
             let db = db.clone();
@@ -621,13 +628,60 @@ mod tests {
                 let conn = connect(&db).unwrap();
                 conn.busy_timeout(Duration::ZERO).unwrap();
                 started.send(()).unwrap();
-                write_at(&GATE, &conn).map(|tx| tx.commit())
+                write_at(&GATE, &conn, STUCK).map(|tx| tx.commit())
             }
         });
         waiting.recv().unwrap();
         std::thread::sleep(Duration::from_millis(200));
         held.commit().unwrap();
         assert!(matches!(second.join().unwrap(), Ok(Ok(()))));
+    }
+
+    // A writer queued behind another in this process waits at most its
+    // bound, then gets the store's "database is locked" refusal, as one
+    // waiting for another process's turn does; once the turn is free, the
+    // next writer gets it. A writer already holding it never waits.
+    #[test]
+    fn a_writer_waits_at_most_its_bound_behind_another_in_this_process() {
+        static GATE: Gate = Gate::new();
+        let held = GATE.enter(Duration::ZERO).unwrap();
+        assert!(held.is_some());
+        assert!(
+            GATE.enter(Duration::ZERO).unwrap().is_none(),
+            "a turn within a turn"
+        );
+        let queued = |wait: Duration| {
+            let (sent, got) = mpsc::channel();
+            std::thread::spawn(move || {
+                let turn = GATE.enter(wait).map(|turn| turn.is_some());
+                let _ = sent.send(turn.map_err(|err| err.to_string()));
+            });
+            got
+        };
+        let locked = "database is locked: another write in this process kept its write turn on the store for 1 s";
+        let refused = queued(Duration::from_secs(1))
+            .recv_timeout(STUCK)
+            .expect("the queue's wait has no bound");
+        assert_eq!(refused, Err(locked.to_owned()));
+        // A store write waits for the gate with the wait it is given.
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("m.sqlite3");
+        let (sent, got) = mpsc::channel();
+        std::thread::spawn(move || {
+            let conn = connect(&db).unwrap();
+            let refused = write_at(&GATE, &conn, Duration::from_secs(1)).err();
+            let _ = sent.send(refused.map(|err| err.to_string()));
+        });
+        let refused = got
+            .recv_timeout(STUCK)
+            .expect("the write's wait has no bound");
+        assert_eq!(refused.as_deref(), Some(locked));
+        // Woken by the freed turn, long before its own bound; the pause lets
+        // it start waiting first.
+        let next = queued(2 * STUCK);
+        std::thread::sleep(Duration::from_millis(200));
+        drop(held);
+        assert_eq!(next.recv_timeout(STUCK), Ok(Ok(true)));
     }
 
     // A commit that leaves the log past its limit copies it into the store
@@ -710,7 +764,7 @@ mod tests {
     fn the_file_turn_outlives_another_descriptor_of_the_file_closing() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("m.sqlite3.lock");
-        let turn = FileTurn::take(&path).unwrap();
+        let turn = FileTurn::take(&path, STUCK).unwrap();
         drop(fs::File::open(&path).unwrap());
         let other = fs::OpenOptions::new().write(true).open(&path).unwrap();
         assert!(matches!(
@@ -734,8 +788,8 @@ mod tests {
             let db = dir.path().join("m.sqlite3");
             let (outer, inner) = (connect(&db).unwrap(), connect(&db).unwrap());
             inner.busy_timeout(Duration::ZERO).unwrap();
-            let held = write_at(&GATE, &outer).unwrap();
-            let refused = write_at(&GATE, &inner).is_err();
+            let held = write_at(&GATE, &outer, STUCK).unwrap();
+            let refused = write_at(&GATE, &inner, STUCK).is_err();
             held.commit().unwrap();
             done.send(refused).unwrap();
         });
