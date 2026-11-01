@@ -101,7 +101,9 @@ topic as `topic`, or `query`.
   clearly matches better. Without a topic, project memories come first, then
   the newest.
 - Search embeds the question and up to 32 memories that lack a current vector
-  (newest first); `reindex` embeds the rest, and `embedding set` or
+  (newest first), then compares the question with every current vector in
+  one pass, which a server keeps in memory between searches; `reindex`
+  embeds the rest, and `embedding set` or
   `embedding sync` re-embeds every memory. Vectors from another model or
   length are never mixed. If the endpoint is unusable, search uses keywords
   only and prints one warning.

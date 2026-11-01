@@ -88,7 +88,8 @@ give.
   large store, until `migrate` (run by the installer and setup) or
   `reindex` rebuilds the index. `doctor` reports it.
 - `search_changes` logs which memories and vectors changed, in order, so a
-  long-running server that keeps vectors in memory reloads only those.
+  long-running server that keeps vectors in memory reloads only those
+  ([semantic search](server.md#semantic-search)).
   Writes keep the newest 10,000 changes.
 
 A memory with a word too long for the index (over 16,384 bytes, which

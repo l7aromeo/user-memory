@@ -270,6 +270,13 @@ When a model cannot tell the examples apart, `embedding set` says so; search
 still uses the model, but duplicates are caught by keywords only, and
 `doctor` notes it.
 
+A server keeps every memory's current vector in memory after its first
+semantic search, so later searches compare the question with all of them at
+once and read only the vectors that changed since. That takes the vectors'
+own size: about 4 KB per memory at 1,024 dimensions and 10 KB at
+`qwen3-embedding:4b`'s default 2,560, so 100 MB or 250 MB for 25,000
+memories. A command-line search reads them all each time instead.
+
 With semantic search on, memory text is sent to the embeddings endpoint. Keep
 it on your own machine or a server you control.
 

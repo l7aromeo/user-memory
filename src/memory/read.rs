@@ -30,7 +30,7 @@ use rusqlite::Connection;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{collections::HashMap, path::Path};
+use std::path::Path;
 use uuid::Uuid;
 
 /// Smoothing constant of reciprocal rank fusion. The customary 60 suits lists
@@ -224,13 +224,12 @@ pub(super) fn rank(
         embed::Config::from_env()
     };
     let indexed = index::ready(conn)?;
-    // Meaning compares every candidate's vector, made from its text, so it
-    // reads every candidate; so does search without a current keyword
-    // index, which stems every candidate's words itself.
-    let items = if semantic.is_some() || !indexed {
-        Some(candidates(conn, filter)?)
-    } else {
+    // Without a current keyword index, search stems every candidate's words
+    // itself, so it reads every candidate in full.
+    let items = if indexed {
         None
+    } else {
+        Some(candidates(conn, filter)?)
     };
     let strength = |fields: &[Option<Field>]| -> Vec<f64> {
         fields
@@ -239,42 +238,35 @@ pub(super) fn rank(
             .collect()
     };
     let (entries, weights, covered): (Vec<Entry>, Vec<Vec<f64>>, usize) = match &items {
-        Some(items) => {
-            let weights = if indexed && !query.is_empty() {
-                let mut found: HashMap<Uuid, Vec<f64>> = index::hits(conn, filter, &query)?
-                    .found
-                    .into_iter()
-                    .map(|(entry, fields)| (entry.id, strength(&fields)))
-                    .collect();
-                items
-                    .iter()
-                    .map(|m| {
-                        found
-                            .remove(&m.id)
-                            .unwrap_or_else(|| vec![0.0; query.len()])
-                    })
-                    .collect()
-            } else {
-                items
-                    .iter()
-                    .map(|m| field_weights(&mut stems, &query, m))
-                    .collect()
-            };
-            (items.iter().map(entry).collect(), weights, items.len())
-        }
-        None if query.is_empty() => {
-            let entries = index::entries(conn, filter)?;
-            let covered = entries.len();
-            (entries, vec![Vec::new(); covered], covered)
-        }
+        Some(items) => (
+            items.iter().map(entry).collect(),
+            items
+                .iter()
+                .map(|m| field_weights(&mut stems, &query, m))
+                .collect(),
+            items.len(),
+        ),
         None => {
-            let hits = index::hits(conn, filter, &query)?;
-            let (entries, weights) = hits
-                .found
+            let covered = index::entries(conn, filter)?;
+            let held = if query.is_empty() {
+                vec![None; covered.len()]
+            } else {
+                index::hits(conn, &covered, &query)?
+            };
+            let count = covered.len();
+            // Meaning ranks every candidate; keywords alone, only those
+            // holding a query term.
+            let keep_all = semantic.is_some() || query.is_empty();
+            let (entries, weights) = covered
                 .into_iter()
-                .map(|(entry, fields)| (entry, strength(&fields)))
+                .zip(held)
+                .filter_map(|(entry, fields)| match fields {
+                    Some(fields) => Some((entry, strength(&fields))),
+                    None if keep_all => Some((entry, vec![0.0; query.len()])),
+                    None => None,
+                })
                 .unzip();
-            (entries, weights, hits.candidates)
+            (entries, weights, count)
         }
     };
     let scores = keyword_scores(&weights, query.len(), covered);
@@ -291,20 +283,21 @@ pub(super) fn rank(
             .then_with(|| latest(&entries[b]).cmp(&latest(&entries[a])))
     });
     add_ranking(&by_keyword, &mut fused);
-    if let (Some(config), Some(items)) = (&semantic, &items) {
-        match index::similarities(conn, config, topic, items) {
+    if let Some(config) = &semantic {
+        match index::similarities(conn, config, topic, &entries) {
             Ok(similar) => {
                 let mut by_meaning: Vec<usize> = (0..entries.len())
-                    .filter(|&i| similar.contains_key(&entries[i].id))
+                    .filter(|&i| similar[i].is_some())
                     .collect();
+                let value = |i: usize| similar[i].unwrap_or(f32::NEG_INFINITY);
                 by_meaning.sort_by(|&a, &b| {
-                    similar[&entries[b].id]
-                        .total_cmp(&similar[&entries[a].id])
+                    value(b)
+                        .total_cmp(&value(a))
                         .then_with(|| latest(&entries[b]).cmp(&latest(&entries[a])))
                 });
-                let floor = similarity_floor(similar.values().copied());
+                let floor = similarity_floor(similar.iter().flatten().copied());
                 for &i in by_meaning.iter().take(limit) {
-                    if similar[&entries[i].id] >= floor {
+                    if value(i) >= floor {
                         matched[i] = true;
                     }
                 }
