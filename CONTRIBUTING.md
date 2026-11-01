@@ -43,8 +43,8 @@ skip without them locally.
 - **Tests.** New behaviour comes with a test, and a fix with a test that
   fails without it. One case per distinct way it can fail.
 - **Docs.** A change updates the docs and code comments it affects, in the
-  same change. `cargo test --test docs` checks that documented commands
-  and quoted messages match the code.
+  same change. `cargo test --test docs` checks that the commands, quoted
+  messages and links in the docs and the user-memory skill match the code.
 - **Release notes.** A change users notice gets a line in the next release's
   notes, `release-notes/v<version>.md`, when it is prepared
   ([releasing](docs/dev/releasing.md)).
