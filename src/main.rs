@@ -240,99 +240,128 @@ impl UserMemoryServer {
         description = "Record one memory: one fact, readable without the conversation, with absolute dates and a one-line title stating it. Inferred patterns cite at least two independent active explicit/observed memory IDs (one origin counts once). Skip project facts the project's own code, docs or instruction files state. If similar memories exist, nothing is stored: call again with confirms (said again), supersedes (changed their mind) or distinct_from (genuinely different, never just to pass the check); merge with supersedes only for duplicates the user approved merging."
     )]
     async fn record(&self, Parameters(input): Parameters<memory::Record>) -> Reply {
-        synced(guarded(Some("stored"), || {
-            output(memory::record(&self.db, input), "stored")
-        }))
+        let db = self.db.clone();
+        synced(
+            blocking(Some("stored"), move || {
+                output(memory::record(&db, input), "stored")
+            })
+            .await,
+        )
         .await
     }
     #[tool(
         description = "Find memories relevant to a task by topic, filtered like index; projects add those projects' memories to the global ones. Current instructions take precedence."
     )]
-    fn search(&self, Parameters(input): Parameters<memory::Search>) -> Reply {
-        guarded(None, || match memory::search(&self.db, &input) {
+    async fn search(&self, Parameters(input): Parameters<memory::Search>) -> Reply {
+        let db = self.db.clone();
+        blocking(None, move || match memory::search(&db, &input) {
             Ok(found) => Ok(found.to_string()),
             Err(err) => Err(json!({"error":err.to_string()}).to_string()),
         })
+        .await
     }
     #[tool(
         description = "Whole memories by up to 20 ids (full or the index's 8 characters), or a whole category when you need all of it. Read a rule before acting on it."
     )]
-    fn read(&self, Parameters(input): Parameters<memory::Read>) -> Reply {
-        guarded(None, || match memory::read(&self.db, &input) {
+    async fn read(&self, Parameters(input): Parameters<memory::Read>) -> Reply {
+        let db = self.db.clone();
+        blocking(None, move || match memory::read(&db, &input) {
             Ok(found) => Ok(found.to_string()),
             Err(err) => Err(json!({"error":err.to_string()}).to_string()),
         })
+        .await
     }
     #[tool(
         description = "Groups of duplicate, cross-scope, overlapping and stale memories to consolidate; keep marks one left as is. Only when the user asks; change nothing they have not approved."
     )]
-    fn review(&self, Parameters(input): Parameters<memory::Review>) -> Reply {
-        guarded(None, || match memory::review(&self.db, &input) {
+    async fn review(&self, Parameters(input): Parameters<memory::Review>) -> Reply {
+        let db = self.db.clone();
+        blocking(None, move || match memory::review(&db, &input) {
             Ok(groups) => Ok(groups.to_string()),
             Err(err) => Err(json!({"error":err.to_string()}).to_string()),
         })
+        .await
     }
     #[tool(
         description = "Write every memory, or those read's filters select, to a JSON file in the exports directory by name, never a path. Only when the user asks; returns a summary."
     )]
-    fn export(&self, Parameters(input): Parameters<memory::ExportMemories>) -> Reply {
-        guarded(None, || match memory::export_named(&self.db, &input) {
+    async fn export(&self, Parameters(input): Parameters<memory::ExportMemories>) -> Reply {
+        let db = self.db.clone();
+        blocking(None, move || match memory::export_named(&db, &input) {
             Ok(summary) => Ok(summary.to_string()),
             Err(err) => Err(json!({"error":err.to_string()}).to_string()),
         })
+        .await
     }
     #[tool(
         description = "Only when the user asks: preview an export from the exports directory by name (writes nothing), then import it with apply and user_confirmed once they approve."
     )]
     async fn import(&self, Parameters(input): Parameters<memory::ImportMemories>) -> Reply {
-        synced(guarded(Some("applied"), || {
-            match memory::import_named(&self.db, &input) {
-                Ok(summary) => Ok(summary.to_string()),
-                Err(err) => Err(json!({"error":err.to_string()}).to_string()),
-            }
-        }))
+        let db = self.db.clone();
+        synced(
+            blocking(Some("applied"), move || {
+                match memory::import_named(&db, &input) {
+                    Ok(summary) => Ok(summary.to_string()),
+                    Err(err) => Err(json!({"error":err.to_string()}).to_string()),
+                }
+            })
+            .await,
+        )
         .await
     }
     #[tool(
         description = "Every memory in scope, one line each with its id: rules (standing preferences, constraints and values) by category, then other memories by type."
     )]
-    fn index(&self, Parameters(input): Parameters<memory::Index>) -> Reply {
-        guarded(None, || {
-            memory::index(&self.db, &input).map_err(|err| memory::index_failure(&err))
+    async fn index(&self, Parameters(input): Parameters<memory::Index>) -> Reply {
+        let db = self.db.clone();
+        blocking(None, move || {
+            memory::index(&db, &input).map_err(|err| memory::index_failure(&err))
         })
+        .await
     }
     #[tool(
         description = "Load other repositories' memories in this conversation, past resume and compaction; returns their index lines. For ones a folder always needs, use .user-memory @ lines instead."
     )]
-    fn link(&self, Parameters(mut input): Parameters<memory::Link>) -> Reply {
-        guarded(Some("linked"), || {
+    async fn link(&self, Parameters(mut input): Parameters<memory::Link>) -> Reply {
+        let db = self.db.clone();
+        let in_client_folder = self.in_client_folder;
+        blocking(Some("linked"), move || {
             // What loads in the client's folder anyway is never a link.
-            if self.in_client_folder
+            if in_client_folder
                 && input.folder_projects.is_empty()
                 && input.included_projects.is_empty()
                 && let Ok(folder) = env::current_dir()
             {
                 (input.folder_projects, input.included_projects) = session::loaded_here(&folder);
             }
-            output(memory::link(&self.db, &input), "linked")
+            output(memory::link(&db, &input), "linked")
         })
+        .await
     }
     #[tool(
         description = "Correct or confirm a memory only on the user's explicit request; confirming makes it an explicit statement. It keeps its origins; origin adds this conversation, replace_origins makes it the only one. New content stales dependent inferences."
     )]
     async fn update(&self, Parameters(input): Parameters<memory::Update>) -> Reply {
-        synced(guarded(Some("updated"), || {
-            output(memory::update(&self.db, input), "updated")
-        }))
+        let db = self.db.clone();
+        synced(
+            blocking(Some("updated"), move || {
+                output(memory::update(&db, input), "updated")
+            })
+            .await,
+        )
         .await
     }
     #[tool(
         description = "Forget one memory, or every memory of one conversation origin, only on the user's explicit request; give exactly one of memory_id or origin. Memories another conversation also stated are kept."
     )]
     async fn forget(&self, Parameters(input): Parameters<memory::Forget>) -> Reply {
-        synced(guarded(Some("deleted"), || {
-            output(memory::forget(&self.db, input), "deleted")
-        }))
+        let db = self.db.clone();
+        synced(
+            blocking(Some("deleted"), move || {
+                output(memory::forget(&db, input), "deleted")
+            })
+            .await,
+        )
         .await
     }
 }
@@ -356,14 +385,34 @@ type Reply = Result<String, String>;
 /// committed before the panic stays, so the reply says only that the call
 /// did not complete.
 fn guarded(flag: Option<&str>, work: impl FnOnce() -> Reply) -> Reply {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).unwrap_or_else(|_| {
-        let error = "user-memory failed while handling this call, which did not complete; run user-memory doctor";
-        Err(match flag {
-            Some(flag) => json!({flag: false, "error": error}),
-            None => json!({"error": error}),
-        }
-        .to_string())
-    })
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
+        .unwrap_or_else(|_| incomplete(flag))
+}
+
+/// The error reply for a call that did not complete, with the tool's usual
+/// success field, `flag`, as false.
+fn incomplete(flag: Option<&str>) -> Reply {
+    let error = "user-memory failed while handling this call, which did not complete; run user-memory doctor";
+    Err(match flag {
+        Some(flag) => json!({flag: false, "error": error}),
+        None => json!({"error": error}),
+    }
+    .to_string())
+}
+
+/// [`guarded`] `work`, run on tokio's blocking threads. Store work waits for
+/// locks and the disk: for another writer's turn, SQLite's busy timeout and
+/// each commit's flush. On the async workers it would hold them all once
+/// the calls in flight outnumber them, and the server could neither read a
+/// request nor write a reply, even to a read that needs no turn, until the
+/// writes were done.
+async fn blocking(
+    flag: Option<&'static str>,
+    work: impl FnOnce() -> Reply + Send + 'static,
+) -> Reply {
+    tokio::task::spawn_blocking(move || guarded(flag, work))
+        .await
+        .unwrap_or_else(|_| incomplete(flag))
 }
 
 /// `result`, with the clients' instruction files brought in line with the
@@ -929,8 +978,11 @@ mod tests {
         );
     }
 
+    // Every tool's store work runs through blocking, which guards it and
+    // keeps it off the async workers: the store is used only inside it, on
+    // a copy of its path.
     #[test]
-    fn every_tool_replies_through_guarded() {
+    fn every_tool_does_its_store_work_through_blocking() {
         // Split so this test's own text holds no tool attribute.
         let attribute = concat!("#[", "tool(");
         let source = include_str!("main.rs");
@@ -944,11 +996,17 @@ mod tests {
             UserMemoryServer::tool_router().list_all().len()
         );
         for tool in tools {
-            let body = tool.split_once("-> Reply {").map(|(_, body)| body);
+            let body = tool
+                .split_once("-> Reply {")
+                .map(|(_, body)| body)
+                .unwrap_or_default();
             assert!(
-                body.is_some_and(|body| body.trim_start().starts_with("synced(guarded(")
-                    || body.trim_start().starts_with("guarded(")),
-                "a tool replies without guarded:{tool}"
+                body.contains("blocking(")
+                    && !body.contains("guarded(")
+                    && body.matches("self.db").count() == 1
+                    && body.contains("let db = self.db.clone()")
+                    && body.contains("move ||"),
+                "a tool works on the store outside blocking:{tool}"
             );
         }
     }

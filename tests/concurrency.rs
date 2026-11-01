@@ -96,6 +96,154 @@ fn serve_records(db: &Path, home: &Path, server: usize) -> Vec<Value> {
     answers
 }
 
+/// A `user-memory serve` child spoken to over MCP on its stdin and stdout,
+/// its stderr kept in a file so a failure shows the server's own errors.
+struct Server {
+    child: std::process::Child,
+    input: std::process::ChildStdin,
+    replies: mpsc::Receiver<String>,
+    stderr: std::path::PathBuf,
+    name: String,
+}
+
+impl Server {
+    /// Starts the server with `env` added, and opens the MCP session.
+    fn start(db: &Path, home: &Path, name: &str, env: &[(&str, &str)]) -> Self {
+        let stderr = home.join(format!("{name}.stderr"));
+        let mut child = binary(db, home)
+            .arg("serve")
+            .envs(env.iter().copied())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(std::fs::File::create(&stderr).unwrap())
+            .spawn()
+            .unwrap();
+        let input = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (lines, replies) = mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                if lines.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut server = Self {
+            child,
+            input,
+            replies,
+            stderr,
+            name: name.to_owned(),
+        };
+        server.send(&json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}));
+        server.send(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+        server
+    }
+    fn send(&mut self, message: &Value) {
+        writeln!(self.input, "{message}").unwrap();
+        self.input.flush().unwrap();
+    }
+    /// Sends a `name` tool call with `arguments` as request `id`.
+    fn call(&mut self, id: u64, name: &str, arguments: Value) {
+        self.send(&json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":arguments}}));
+    }
+    /// The next reply to a tool call, waiting at most `within`; `waiting`
+    /// says what for in the failure, with the server's stderr.
+    fn reply(&self, within: std::time::Duration, waiting: &str) -> Value {
+        loop {
+            let line = self.replies.recv_timeout(within).unwrap_or_else(|_| {
+                panic!(
+                    "{}: no reply {waiting} within {} s; its stderr:\n{}",
+                    self.name,
+                    within.as_secs(),
+                    std::fs::read_to_string(&self.stderr).unwrap_or_default()
+                )
+            });
+            let message: Value = serde_json::from_str(&line).unwrap();
+            if message["id"].as_u64().is_some_and(|id| id >= 1) {
+                return message;
+            }
+        }
+    }
+    /// Closes the server's input and waits for it to end.
+    fn stop(self) {
+        drop(self.input);
+        let mut child = self.child;
+        child.wait().unwrap();
+    }
+}
+
+/// How long a server may take to answer a read while its writes wait for
+/// another process's write turn. A read needs no turn, so only a loaded
+/// machine's scheduling delays it: far below the turn's 30-second wait,
+/// which a server answering only between writes would reach.
+const READ_WHILE_WRITES_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Reads sent while the writes wait.
+const READS: u64 = 3;
+/// Time between those reads: the writes start waiting within milliseconds,
+/// so the later reads surely come while they wait.
+const READ_SPACING: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Writes a server is sent while another process holds the turn: more than
+/// the async workers it is given, so none would be left to answer.
+const WAITING_WRITES: u64 = 4;
+
+// A server goes on answering while its writes wait for another process's
+// write turn, however few async workers it has: a read needs no turn and
+// is answered at once, and the writes go through once the turn is free.
+#[test]
+fn a_server_answers_a_read_while_its_writes_wait_for_the_turn() {
+    let home = tempdir().unwrap();
+    let db = home.path().join("store/memories.sqlite3");
+    assert!(
+        binary(&db, home.path())
+            .arg("index")
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    // This test process stands in for another writer holding its turn.
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(home.path().join("store/memories.sqlite3.lock"))
+        .unwrap();
+    held.lock().unwrap();
+    let mut server = Server::start(&db, home.path(), "server", &[("TOKIO_WORKER_THREADS", "2")]);
+    for i in 1..=WAITING_WRITES {
+        let title = format!("Delta{i} echo{i} foxtrot{i}");
+        server.call(
+            i,
+            "record",
+            json!({"type":"preference","category":"workflow","title":title,"content":title,"scope":"global","user_confirmed":true}),
+        );
+    }
+    // Reads sent while the writes wait, spaced so that later ones come once
+    // the writes are surely waiting: each is answered within the bound.
+    for read in 1..=READS {
+        std::thread::sleep(READ_SPACING);
+        server.call(100 + read, "search", json!({"topic":"anything"}));
+        let reply = server.reply(READ_WHILE_WRITES_WAIT, "to a read");
+        assert_eq!(
+            reply["id"],
+            100 + read,
+            "a write was answered during another's turn: {reply}"
+        );
+    }
+    held.unlock().unwrap();
+    for _ in 1..=WAITING_WRITES {
+        let write = server.reply(time::STUCK, "to a write");
+        let text = write["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(text.contains("\"stored\":true"), "{write}");
+    }
+    server.stop();
+}
+
 #[test]
 fn servers_writing_one_store_at_once_keep_it_intact() {
     let home = tempdir().unwrap();
