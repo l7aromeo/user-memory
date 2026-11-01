@@ -70,8 +70,9 @@ source out.
   schema must match its committed snapshot, and a store built from every
   earlier snapshot must migrate to exactly the current schema while keeping
   all of its rows.
-- `tests/skill.rs` — every tool, parameter and CLI flag the skill mentions
-  exists in the binary.
+- `tests/skill.rs` — every tool, parameter, value and result field the skill
+  mentions exists in the binary; `tests/docs.rs` checks its commands, quoted
+  messages and links with the docs'.
 - `tests/docker_context.rs` — every file the release binary embeds is inside
   the Docker build context.
 - `tests/windows_install.rs` — `install.ps1` and `uninstall.ps1` under

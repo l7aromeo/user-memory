@@ -1,5 +1,6 @@
-//! The user-memory skill names only tools, parameters, values, result fields
-//! and CLI flags that this binary really has.
+//! The user-memory skill names only tools, parameters, values and result
+//! fields that this binary really has. Its commands, quoted messages and
+//! links are checked with the docs', in tests/docs.rs.
 
 #![allow(
     clippy::unwrap_used,
@@ -83,13 +84,13 @@ fn the_skill_has_valid_frontmatter_and_links_only_to_its_own_files() {
 }
 
 /// What the binary offers: tools with their parameters, values that
-/// parameters take, fields of real tool results and review kinds, CLI
-/// subcommands with their help text.
+/// parameters take, fields of real tool results and review kinds, and the
+/// CLI's subcommands, which the skill names in passing.
 struct Surface {
     tools: BTreeMap<String, BTreeSet<String>>,
     values: BTreeSet<String>,
     results: BTreeSet<String>,
-    commands: BTreeMap<String, String>,
+    commands: BTreeSet<String>,
 }
 
 impl Surface {
@@ -101,7 +102,7 @@ impl Surface {
             || self.parameter(word)
             || self.values.contains(word)
             || self.results.contains(word)
-            || self.commands.contains_key(word)
+            || self.commands.contains(word)
     }
 }
 
@@ -382,7 +383,7 @@ fn surface(root: &TempDir) -> Surface {
         .take_while(|line| !line.trim().is_empty())
         .filter_map(|line| line.split_whitespace().next())
         .filter(|command| *command != "help")
-        .map(|command| (command.to_owned(), help(home, &db, &[command])))
+        .map(str::to_owned)
         .collect();
     Surface {
         tools: tool_params,
@@ -403,43 +404,8 @@ fn identifier(word: &str) -> bool {
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
 }
 
-/// Problems with one `user-memory …` command line.
-fn check_command(surface: &Surface, command: &str, problems: &mut Vec<String>) {
-    let Some((_, rest)) = command.split_once("user-memory ") else {
-        return;
-    };
-    let mut words = rest.split_whitespace();
-    // `…` stands for any command, as in "run it through docker compose".
-    let Some(sub) = words.next().filter(|sub| *sub != "…") else {
-        return;
-    };
-    let Some(help) = surface.commands.get(sub) else {
-        problems.push(format!("unknown subcommand `{sub}` in `{command}`"));
-        return;
-    };
-    for word in words.take_while(|w| *w != "#") {
-        // Optional parts are written in brackets: `[--limit N]`.
-        let word = word.trim_matches(|c| matches!(c, '[' | ']'));
-        if let Some(flag) = word.strip_prefix("--") {
-            let flag = flag.split('=').next().unwrap();
-            let listed = help
-                .split(|c: char| c.is_whitespace() || c == ',')
-                .any(|w| w == format!("--{flag}"));
-            if !listed {
-                problems.push(format!("`user-memory {sub}` has no --{flag}"));
-            }
-        } else if word.contains('|') {
-            for value in word.split('|') {
-                if !help.contains(value) {
-                    problems.push(format!("`user-memory {sub}` takes no value {value}"));
-                }
-            }
-        }
-    }
-}
-
 #[test]
-fn every_tool_parameter_value_and_command_the_skill_names_exists() {
+fn every_tool_parameter_value_and_field_the_skill_names_exists() {
     let root = tempdir().unwrap();
     let surface = surface(&root);
     let mut problems = Vec::new();
@@ -450,15 +416,14 @@ fn every_tool_parameter_value_and_command_the_skill_names_exists() {
                 fence = !fence;
                 continue;
             }
+            // Commands, in blocks and spans alike, are tests/docs.rs's.
             if fence {
-                check_command(&surface, line, &mut problems);
                 continue;
             }
             // Parameters belong to the tool named before them on the line.
             let mut tool: Option<&str> = None;
             for span in spans(line) {
                 if span.contains("user-memory ") {
-                    check_command(&surface, span, &mut problems);
                     continue;
                 }
                 let (word, value) = match span.split_once(": ") {
