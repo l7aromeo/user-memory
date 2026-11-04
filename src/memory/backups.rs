@@ -52,6 +52,16 @@ const STALE: Duration = Duration::from_secs(48 * 60 * 60);
 /// failed, so a folder it cannot write does not cost every write a try.
 const RETRY: Duration = Duration::from_secs(60 * 60);
 
+/// How long a backup waits for a reader to let go of the day's backup it
+/// replaces. Windows refuses to rename over a file another program has
+/// open, such as `backup list` counting each backup's memories, for the
+/// milliseconds a read takes; failing at once would hold the next checks
+/// off for [`RETRY`].
+const REPLACE_WAIT: Duration = Duration::from_secs(2);
+
+/// The pause between tries at replacing a backup a reader holds.
+const REPLACE_PAUSE: Duration = Duration::from_millis(50);
+
 /// The file in the folder saying why the last backup failed; the next
 /// backup that succeeds removes it.
 const FAILURE: &str = "last-failure";
@@ -418,7 +428,7 @@ fn make(db: &Path) -> Result<Made> {
     }
     create_private(&partial).with_context(|| format!("Cannot create {}", partial.display()))?;
     let copied = copy_into(db, &partial).and_then(|memories| {
-        fs::rename(&partial, &path).with_context(|| format!("Cannot write {}", path.display()))?;
+        replace(&partial, &path)?;
         Ok(memories)
     });
     let memories = match copied {
@@ -441,6 +451,24 @@ fn make(db: &Path) -> Result<Made> {
         memories,
         deleted,
     })
+}
+
+/// Renames the finished copy `partial` to `path`. While a backup of that
+/// name is there, a refusal is tried again for up to [`REPLACE_WAIT`]: on
+/// Windows a reader holding it refuses the rename until it lets go.
+fn replace(partial: &Path, path: &Path) -> Result<()> {
+    let deadline = Instant::now() + REPLACE_WAIT;
+    loop {
+        match fs::rename(partial, path) {
+            Ok(()) => return Ok(()),
+            Err(_) if path.is_file() && Instant::now() < deadline => {
+                std::thread::sleep(REPLACE_PAUSE);
+            }
+            Err(err) => {
+                return Err(err).with_context(|| format!("Cannot write {}", path.display()));
+            }
+        }
+    }
 }
 
 /// Creates the backups folder, owner-only like the store's own folder.
