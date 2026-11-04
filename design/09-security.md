@@ -35,9 +35,9 @@ flowchart LR
 
 - Everything inside the user's OS account trusts everything else there.
   A program running as the user can read the token files and the store
-  (#53's limit).
+  ([#53](https://github.com/l7aromeo/user-memory/issues/53)'s limit).
 - The network is untrusted, the proxy included: the server key proves
-  the server end to end (#58).
+  the server end to end ([#58](https://github.com/l7aromeo/user-memory/issues/58)).
 - The server trusts a request only by its client token, and a person only
   by a provider-verified numeric id.
 - A provider is trusted to say who a person is and whether they're a
@@ -76,75 +76,75 @@ flowchart LR
 
 | # | Threat | Mitigation | Issue |
 |---|---|---|---|
-| T1 | A mistyped or phished URL, a lapsed domain, or a TLS-intercepting proxy gets a client's token | the client checks the server's key before sending any token, and refuses a mismatch with nothing sent | #58 |
-| T2 | A relay at another address passes on a real server's proof | the URL used is inside the signed statement, and the server signs only for its own URLs | #58 |
-| T3 | A rollback or a forged "no key" answer skips the check | once a key has been seen, its absence is a mismatch | #58 |
-| T4 | A compromised server key | `host key rotate --no-chain` makes every client see a mismatch; the user re-pins only after checking the fingerprint with the operator | #58 |
-| T5 | One machine's token leaks or the machine is lost | per-machine tokens, revoked alone by name; revocation is live; 90 days unused expires a token | #48 |
-| T6 | A token lands in a tool's output, a log or an agent's context | `host token add` writes to `--out` or a terminal only; tokens never appear in errors, hook output or logs (a test greps for one); the skill says an agent never reads a token file | #48 |
-| T7 | A token sent to the wrong server during a switch | one token per remote, chosen by remote name; the key check for that remote's pin comes first | #60, #61 |
-| T8 | A switch mixes two servers inside a session, or leaves one server's rules under another | sessions keep the server they started on; the rules block is cleared, then filled from the target with a header naming the source | #61 |
-| T9 | The agent switches servers or accounts, or trusts a new key, on its own or because text told it to | no `--yes`; the terminal or a native dialog the user answers confirms, and without a display only the user's own next prompt, typed exactly; every switch is announced at the next session start with the command to undo it | #61, #62 |
-| T10 | A rollback brings back a retired shared token | `retire-shared` replaces the file's token with an unknown one | #48 |
-| T11 | A restored memory store brings back revoked tokens or removed users | tokens and users live in the registry, outside every store; restoring the registry revokes every token | #59, #63 |
-| T12 | Another user of the server reads or writes your memories | a token resolves to one user and that user's store; no code derives a holder from a path; a test checks two users never cross-read | #63 |
-| T13 | A former member keeps access | membership re-checked hourly on use, daily for inactive users, at once by webhook, with a 24-hour grace on provider outages; without the operator's credential, doctor and `host allow add` warn | #66 |
-| T14 | Account takeover by linking on email | identities link only by signing in to both; never by email | #67 |
-| T15 | Someone joins with a stolen invite | single-use, expiring invites, stored as a hash; the secret sits after `#`; the link carries the key, and the client still shows the host and fingerprint | #68 |
-| T16 | A device-code phishing page gets the user to approve someone else's sign-in | the approval page names the client, the provider and when it started; codes expire; each new sign-in is announced on the user's other machines | #64 |
-| T17 | OAuth redirect manipulation behind a proxy | redirect URIs come only from `--public-url`, never from `Host` or `X-Forwarded-*`; PKCE and `state` | #64 |
-| T18 | Flooding the unauthenticated sign-in endpoint | pending sign-ins per address bounded by a named constant, `slow_down` beyond it, kept in memory and expiring after 15 minutes | #64 |
-| T19 | A forged provider webhook removes or restores access | `X-Hub-Signature-256` for GitHub and `X-Gitlab-Token` for GitLab; unverified events are ignored | #66 |
-| T20 | An import of someone else's export adds their rules to your account | the export's `source` field is shown in the import preview when it differs | #69 |
-| T21 | A text the agent read becomes a rule | `serve`, or the CLI without a terminal, saves a rule only after the user's Save in a native dialog; without a display it stays pending until the user answers; new rules shown at session start (#42) | #53 |
-| T22 | An uninstalled machine leaves working tokens | uninstall revokes each reachable remote's token and lists what it left | #71 |
-| T23 | A provider token kept by the server is stolen | the user's provider token is discarded at sign-in; only the operator's own credentials are kept, owner-only in `<data>/oauth/` | #64, #66 |
-| T24 | A pending confirmation is applied by something other than the user | used only without a display; the whole trimmed prompt must equal the phrase; it expires after `CONFIRMATION_EXPIRY`; it's used once; prompts the client marks as not the user's are ignored | #62 |
-| T25 | An agent skips the dialog by calling the server directly with the machine's token | not prevented; read-only tokens (#48) close it for clients that don't write; #42's block shows every new rule | #48, #53 |
+| T1 | A mistyped or phished URL, a lapsed domain, or a TLS-intercepting proxy gets a client's token | the client checks the server's key before sending any token, and refuses a mismatch with nothing sent | [#58](https://github.com/l7aromeo/user-memory/issues/58) |
+| T2 | A relay at another address passes on a real server's proof | the URL used is inside the signed statement, and the server signs only for its own URLs | [#58](https://github.com/l7aromeo/user-memory/issues/58) |
+| T3 | A rollback or a forged "no key" answer skips the check | once a key has been seen, its absence is a mismatch | [#58](https://github.com/l7aromeo/user-memory/issues/58) |
+| T4 | A compromised server key | `host key rotate --no-chain` makes every client see a mismatch; the user re-pins only after checking the fingerprint with the operator | [#58](https://github.com/l7aromeo/user-memory/issues/58) |
+| T5 | One machine's token leaks or the machine is lost | per-machine tokens, revoked alone by name; revocation is live; 90 days unused expires a token | [#48](https://github.com/l7aromeo/user-memory/issues/48) |
+| T6 | A token lands in a tool's output, a log or an agent's context | `host token add` writes to `--out` or a terminal only; tokens never appear in errors, hook output or logs (a test greps for one); the skill says an agent never reads a token file | [#48](https://github.com/l7aromeo/user-memory/issues/48) |
+| T7 | A token sent to the wrong server during a switch | one token per remote, chosen by remote name; the key check for that remote's pin comes first | [#60](https://github.com/l7aromeo/user-memory/issues/60), [#61](https://github.com/l7aromeo/user-memory/issues/61) |
+| T8 | A switch mixes two servers inside a session, or leaves one server's rules under another | sessions keep the server they started on; the rules block is cleared, then filled from the target with a header naming the source | [#61](https://github.com/l7aromeo/user-memory/issues/61) |
+| T9 | The agent switches servers or accounts, or trusts a new key, on its own or because text told it to | no `--yes`; the terminal or a native dialog the user answers confirms, and without a display only the user's own next prompt, typed exactly; every switch is announced at the next session start with the command to undo it | [#61](https://github.com/l7aromeo/user-memory/issues/61), [#62](https://github.com/l7aromeo/user-memory/issues/62) |
+| T10 | A rollback brings back a retired shared token | `retire-shared` replaces the file's token with an unknown one | [#48](https://github.com/l7aromeo/user-memory/issues/48) |
+| T11 | A restored memory store brings back revoked tokens or removed users | tokens and users live in the registry, outside every store; restoring the registry revokes every token | [#59](https://github.com/l7aromeo/user-memory/issues/59), [#63](https://github.com/l7aromeo/user-memory/issues/63) |
+| T12 | Another user of the server reads or writes your memories | a token resolves to one user and that user's store; no code derives a holder from a path; a test checks two users never cross-read | [#63](https://github.com/l7aromeo/user-memory/issues/63) |
+| T13 | A former member keeps access | membership re-checked hourly on use, daily for inactive users, at once by webhook, with a 24-hour grace on provider outages; without the operator's credential, doctor and `host allow add` warn | [#66](https://github.com/l7aromeo/user-memory/issues/66) |
+| T14 | Account takeover by linking on email | identities link only by signing in to both; never by email | [#67](https://github.com/l7aromeo/user-memory/issues/67) |
+| T15 | Someone joins with a stolen invite | single-use, expiring invites, stored as a hash; the secret sits after `#`; the link carries the key, and the client still shows the host and fingerprint | [#68](https://github.com/l7aromeo/user-memory/issues/68) |
+| T16 | A device-code phishing page gets the user to approve someone else's sign-in | the approval page names the client, the provider and when it started; codes expire; each new sign-in is announced on the user's other machines | [#64](https://github.com/l7aromeo/user-memory/issues/64) |
+| T17 | OAuth redirect manipulation behind a proxy | redirect URIs come only from `--public-url`, never from `Host` or `X-Forwarded-*`; PKCE and `state` | [#64](https://github.com/l7aromeo/user-memory/issues/64) |
+| T18 | Flooding the unauthenticated sign-in endpoint | pending sign-ins per address bounded by a named constant, `slow_down` beyond it, kept in memory and expiring after 15 minutes | [#64](https://github.com/l7aromeo/user-memory/issues/64) |
+| T19 | A forged provider webhook removes or restores access | `X-Hub-Signature-256` for GitHub and `X-Gitlab-Token` for GitLab; unverified events are ignored | [#66](https://github.com/l7aromeo/user-memory/issues/66) |
+| T20 | An import of someone else's export adds their rules to your account | the export's `source` field is shown in the import preview when it differs | [#69](https://github.com/l7aromeo/user-memory/issues/69) |
+| T21 | A text the agent read becomes a rule | `serve`, or the CLI without a terminal, saves a rule only after the user's Save in a native dialog; without a display it stays pending until the user answers; new rules shown at session start ([#42](https://github.com/l7aromeo/user-memory/issues/42)) | [#53](https://github.com/l7aromeo/user-memory/issues/53) |
+| T22 | An uninstalled machine leaves working tokens | uninstall revokes each reachable remote's token and lists what it left | [#71](https://github.com/l7aromeo/user-memory/issues/71) |
+| T23 | A provider token kept by the server is stolen | the user's provider token is discarded at sign-in; only the operator's own credentials are kept, owner-only in `<data>/oauth/` | [#64](https://github.com/l7aromeo/user-memory/issues/64), [#66](https://github.com/l7aromeo/user-memory/issues/66) |
+| T24 | A pending confirmation is applied by something other than the user | used only without a display; the whole trimmed prompt must equal the phrase; it expires after `CONFIRMATION_EXPIRY`; it's used once; prompts the client marks as not the user's are ignored | [#62](https://github.com/l7aromeo/user-memory/issues/62) |
+| T25 | An agent skips the dialog by calling the server directly with the machine's token | not prevented; read-only tokens ([#48](https://github.com/l7aromeo/user-memory/issues/48)) close it for clients that don't write; [#42](https://github.com/l7aromeo/user-memory/issues/42)'s block shows every new rule | [#48](https://github.com/l7aromeo/user-memory/issues/48), [#53](https://github.com/l7aromeo/user-memory/issues/53) |
 
 ## What the design leaves out
 
 - **A program running as the user that sets out to act as the user.** It
   can read the token files, edit `remotes.json` or the store directly,
   call the server without `serve`, or drive a dialog through the desktop's
-  accessibility tools. The native dialog (#53, #62) stops accidents and
+  accessibility tools. The native dialog ([#53](https://github.com/l7aromeo/user-memory/issues/53), [#62](https://github.com/l7aromeo/user-memory/issues/62)) stops accidents and
   injected text, not a program set on it. The design makes such changes
-  visible (switch notices, `remote-log`, new-sign-in notices, #42's new
-  rules) but can't prevent them. #53's and #62's docs state this limit.
+  visible (switch notices, `remote-log`, new-sign-in notices, [#42](https://github.com/l7aromeo/user-memory/issues/42)'s new
+  rules) but can't prevent them. [#53](https://github.com/l7aromeo/user-memory/issues/53)'s and [#62](https://github.com/l7aromeo/user-memory/issues/62)'s docs state this limit.
 - **A compromised server.** A server can read every store it holds. Users
   of a server trust its operator with their memories; per-user stores
   separate users from each other, not from the operator.
 - **Encryption at rest.** The stores, the registry and the token files
-  rely on the operating system's permissions and disk encryption (#49);
+  rely on the operating system's permissions and disk encryption ([#49](https://github.com/l7aromeo/user-memory/issues/49));
   the design adds no encryption of its own.
 - **The provider itself.** A GitHub or GitLab account takeover is a
   takeover of the identities linked to it.
 - **Denial of service beyond sign-in flooding.** Rate limits on the MCP
   endpoints are the proxy's job.
 - **Prompts a client can't tell apart from the user's.** Where a client
-  doesn't mark queued or automated prompts, #62's phrase could come from
+  doesn't mark queued or automated prompts, [#62](https://github.com/l7aromeo/user-memory/issues/62)'s phrase could come from
   one; the docs say which clients can tell them apart.
 
 ## Checks the tests must keep
 
-- No error path, hook output or log contains a token (#48).
+- No error path, hook output or log contains a token ([#48](https://github.com/l7aromeo/user-memory/issues/48)).
 - A key mismatch sends no token, on every path that sends one: `serve`,
-  each hook, `login`, the `remote` commands, export and import (#58).
-- A relay at another URL fails the check (#58).
-- Two users routed to two stores never read each other's memories (#63).
+  each hook, `login`, the `remote` commands, export and import ([#58](https://github.com/l7aromeo/user-memory/issues/58)).
+- A relay at another URL fails the check ([#58](https://github.com/l7aromeo/user-memory/issues/58)).
+- Two users routed to two stores never read each other's memories ([#63](https://github.com/l7aromeo/user-memory/issues/63)).
 - A restored memory store leaves the registry alone; a restored registry
-  revokes every token (#59, #63).
+  revokes every token ([#59](https://github.com/l7aromeo/user-memory/issues/59), [#63](https://github.com/l7aromeo/user-memory/issues/63)).
 - A phrase inside a longer message, an expired request, a wrong phrase
-  and a reused phrase are all refused (#62).
-- `state` and PKCE are checked (#64).
+  and a reused phrase are all refused ([#62](https://github.com/l7aromeo/user-memory/issues/62)).
+- `state` and PKCE are checked ([#64](https://github.com/l7aromeo/user-memory/issues/64)).
 - Cancel, or no answer, in the native dialog stores nothing and changes
-  nothing (#53, #62).
+  nothing ([#53](https://github.com/l7aromeo/user-memory/issues/53), [#62](https://github.com/l7aromeo/user-memory/issues/62)).
 
 ## Open points
 
 Resolved by the user's decisions, and now in the issues:
 
 1. `pending-confirmation` is written through `src/private.rs` and deleted
-   once used (#62).
+   once used ([#62](https://github.com/l7aromeo/user-memory/issues/62)).
 2. A key changed mid-session is seen at the next session start; the
-   session keeps its server anyway (#58).
+   session keeps its server anyway ([#58](https://github.com/l7aromeo/user-memory/issues/58)).

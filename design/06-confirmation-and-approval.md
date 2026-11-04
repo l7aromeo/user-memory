@@ -2,9 +2,9 @@
 
 Two questions, one answer:
 
-- **#62:** how does the user confirm a command that changes where memory
+- **[#62](https://github.com/l7aromeo/user-memory/issues/62):** how does the user confirm a command that changes where memory
   goes, or whose it is, when an agent ran it in a shell with no terminal?
-- **#53:** how does the server know the user wanted a rule an agent
+- **[#53](https://github.com/l7aromeo/user-memory/issues/53):** how does the server know the user wanted a rule an agent
   records?
 
 The answer is one native confirmation (the user's decision 5, under the
@@ -38,7 +38,7 @@ kdialog. How each OS is detected is checked when building.
 
 No answer within `CONFIRM_DIALOG_WAIT`, two minutes, counts as Cancel.
 
-## 2. Sensitive commands (#62)
+## 2. Sensitive commands ([#62](https://github.com/l7aromeo/user-memory/issues/62))
 
 ### 2.1 Commands, buttons and phrases
 
@@ -59,7 +59,7 @@ None has a `--yes`. The phrases are user-facing text and fixed once.
 
 ### 2.2 At a terminal
 
-As #61 shows for `remote use`:
+As [#61](https://github.com/l7aromeo/user-memory/issues/61) shows for `remote use`:
 
 ```output
 Switch memory from "work" (memory.example.com, signed in as github:alice)
@@ -92,7 +92,7 @@ sequenceDiagram
 Error paths:
 
 - **The checks fail** (step 3): a key mismatch, a version gap or a refused
-  sign-in, with #58's and #61's messages. No dialog appears.
+  sign-in, with [#58](https://github.com/l7aromeo/user-memory/issues/58)'s and [#61](https://github.com/l7aromeo/user-memory/issues/61)'s messages. No dialog appears.
 - **Cancel, or no answer** (step 6): nothing changes, and the command
   prints
   ```output
@@ -103,7 +103,7 @@ Error paths:
 - **The dialog tool can't start** (step 4): the command falls back to the
   typed phrase.
 - **The local write fails** (step 8): the command reports it; nothing is
-  half-switched, since `active` is set in one rename (#61).
+  half-switched, since `active` is set in one rename ([#61](https://github.com/l7aromeo/user-memory/issues/61)).
 
 ### 2.4 Without a display: the typed phrase
 
@@ -131,7 +131,7 @@ sequenceDiagram
 ```
 
 Mermaid ends a message at a semicolon, so step 11 shows a comma. The text
-the agent gets is #62's:
+the agent gets is [#62](https://github.com/l7aromeo/user-memory/issues/62)'s:
 
 ```output
 Memory switched to "home" by the user's confirmation; this session keeps "work" until it restarts.
@@ -146,7 +146,7 @@ Error paths:
 - **The request expired:** the hook deletes it at its next run and marks
   the held token lapsed. The next `user-memory` command that reaches that
   server, or the next session start, revokes it, and the command's next run
-  says the request lapsed. The token's 90-day expiry (#48) bounds it
+  says the request lapsed. The token's 90-day expiry ([#48](https://github.com/l7aromeo/user-memory/issues/48)) bounds it
   anyway.
 - **The local write fails:** the hook keeps the request and tells the
   user; the phrase can be typed again until it expires.
@@ -176,14 +176,14 @@ which costs nothing: the phrase confirms a key the command already checked.
 
 `remote-log` records how each change was confirmed: `terminal`, `dialog` or
 `prompt`. The next session start says "confirmed in a terminal",
-"confirmed in a dialog" or "confirmed by your message", beside #61's
+"confirmed in a dialog" or "confirmed by your message", beside [#61](https://github.com/l7aromeo/user-memory/issues/61)'s
 notice:
 
 ```output
 This machine switched memory servers at 14:03 today: from work (memory.example.com) to home (memory.home.example). If you did not ask for this, switch back with `user-memory remote use work`.
 ```
 
-## 3. Rules (#53)
+## 3. Rules ([#53](https://github.com/l7aromeo/user-memory/issues/53))
 
 ### 3.1 Where and when it asks
 
@@ -198,7 +198,7 @@ It asks before storing a memory that would become a rule:
   `constraint`, `value`);
 - an `update` that would make a memory a rule, or change a rule's content,
   scope or project;
-- an applied import whose preview lists rules (#43): once, naming how many.
+- an applied import whose preview lists rules ([#43](https://github.com/l7aromeo/user-memory/issues/43)): once, naming how many.
 
 Observations, inferences and project notes that aren't rules never ask.
 The agent's `user_confirmed` doesn't replace the dialog for rules; for
@@ -270,7 +270,7 @@ stateDiagram-v2
   file can hold one too, and it is asked about the same way.
 - The next `serve` that starts on a machine with a display asks, one dialog
   per pending rule. Save confirms it; Cancel forgets it.
-- On a machine that never has a display, #42's block lists each pending
+- On a machine that never has a display, [#42](https://github.com/l7aromeo/user-memory/issues/42)'s block lists each pending
   rule at session start, with `user-memory update ID` to run at a terminal.
 - A pending rule doesn't lapse: it waits until the user answers.
 
@@ -278,25 +278,25 @@ stateDiagram-v2
 
 | Option | Outcome |
 |---|---|
-| Document what `user_confirmed` proves | Done in v0.9.2 (#40). |
-| Show new rules at session start | In v0.10.0 (#42). |
+| Document what `user_confirmed` proves | Done in v0.9.2 ([#40](https://github.com/l7aromeo/user-memory/issues/40)). |
+| Show new rules at session start | In v0.10.0 ([#42](https://github.com/l7aromeo/user-memory/issues/42)). |
 | Approval codes typed by the user | Dropped: a code is a step the user must get right for every batch. |
-| Propose-only tokens | Read-only tokens (#48) cover clients that don't write; a third scope can come later. |
+| Propose-only tokens | Read-only tokens ([#48](https://github.com/l7aromeo/user-memory/issues/48)) cover clients that don't write; a third scope can come later. |
 | Biometric approval | The dialog is the same native approval, without per-platform biometric code, and works on Linux desktops. |
 
 ## 4. The limit
 
-Stated plainly, as #53, #62 and #73 require:
+Stated plainly, as [#53](https://github.com/l7aromeo/user-memory/issues/53), [#62](https://github.com/l7aromeo/user-memory/issues/62) and [#73](https://github.com/l7aromeo/user-memory/issues/73) require:
 
 - An agent with a shell and the machine's token can call the server
-  directly, skipping `serve` and its dialog. Read-only tokens (#48) close
+  directly, skipping `serve` and its dialog. Read-only tokens ([#48](https://github.com/l7aromeo/user-memory/issues/48)) close
   that for clients that don't need to write.
 - A program running as the user can edit `remotes.json`, or drive a dialog
   through the desktop's accessibility tools.
 
 What the confirmation does stop: a change or a rule claimed without
 asking, and one taken from text an agent read. The next session start
-shows every switch, and #42's block every new rule, so the rest is visible
+shows every switch, and [#42](https://github.com/l7aromeo/user-memory/issues/42)'s block every new rule, so the rest is visible
 after the fact.
 
 ## Open points
@@ -307,5 +307,5 @@ Checks for building, not decisions:
    `WAYLAND_DISPLAY` with zenity or kdialog, an interactive Windows
    desktop).
 2. A fake dialog program a debug build takes from the environment, so the
-   tests drive Save and Cancel (#53, #62).
+   tests drive Save and Cancel ([#53](https://github.com/l7aromeo/user-memory/issues/53), [#62](https://github.com/l7aromeo/user-memory/issues/62)).
 3. Which prompts each client marks as not the user's (2.5).

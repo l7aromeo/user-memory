@@ -9,38 +9,38 @@ v0.10.0.
 
 | # | Scenario | Outcome | Issue | Detail |
 |---|---|---|---|---|
-| 1 | A server turns accounts on while it holds memories written with the shared token | `--owner` is required; the owner gets the existing store, which keeps its path. There is no unclaimed state. The shared token keeps working as the owner's until `host token retire-shared`. | #63, #48 | [04](04-accounts-mode.md) |
-| 1a | Clients still on the shared token, mid-session | Keep working, as the owner. | #63 | [07](07-state-machines.md) §6 |
-| 1b | The same clients at their next session start | Once: ``Memory server work now has accounts; this machine still uses its token from before accounts, which acts as github:alice. To use your own account, run `user-memory login`.`` | #63 | [07](07-state-machines.md) §6 |
-| 1c | The same clients after `retire-shared` | Refused, with #48's revoked message naming `user-memory login`. | #48 | [07](07-state-machines.md) §4 |
-| 2 | A server turns accounts off again with several users | `disable` lists each user's count and last activity, offers each an export, asks at a terminal, then serves the owner's store or the `--keep` user's. The others are dormant, never merged or deleted. | #63 | [04](04-accounts-mode.md) |
-| 2a | A dormant user's client | `Memory server work turned accounts off; its operator keeps your memories until accounts are on again. Ask them for an export.` | #63 | [07](07-state-machines.md) §5 |
-| 2b | Accounts turned on again | Dormant users are served again. | #63 | [07](07-state-machines.md) §5 |
-| 3 | A person signs in for the first time on a server with accounts | Allowed by a rule: a new user and store at `users/<store id>/`. Refused: `github:bob may not sign in to memory server work; ask its operator to allow you (on the server: user-memory host allow add user:github:bob)`. | #63, #64 | [03](03-identity-and-auth.md) |
-| 3a | They had a local store before | Kept apart until they copy it: `user-memory remote copy NAME` (name proposed) previews, asks, imports as an undoable import, and leaves the local store as it was. | #97, #69 | [11](11-skill-docs-evals.md) |
-| 4 | One machine switches accounts (GitHub to GitLab, or another person) | `login` as another account needs confirmation: the terminal, a native dialog, or without a display the phrase `sign memory in as github:bob`. Rules are cleared, then filled from the new account. Snapshots are keyed by server key and user id, so nothing leaks across. | #62, #61 | [06](06-confirmation-and-approval.md) |
-| 5 | One person with a GitHub and a GitLab identity | One user if linked (`account link`), two if not. Linking never goes by email. Two existing accounts join with `account merge`, recorded as an import that `forget --import ID` undoes. | #67, #43 | [03](03-identity-and-auth.md) |
-| 6 | Switching servers while sessions run | Running sessions keep their server, with a notice once; new sessions use the new one. | #61 | [07](07-state-machines.md) §2 |
-| 6a | The target is offline | Switches anyway (the key is pinned): `home is unreachable now; new sessions will say so until it answers`. | #61 | [05](05-remotes-and-switching.md) |
-| 6b | The target runs another version | `home runs user-memory 0.9.1; this client needs 0.11 or newer. Update the server, or keep using work.` | #61 | [05](05-remotes-and-switching.md) |
-| 6c | The target's key changed | Refused, nothing sent; #58's message with the `remote trust` command. | #58 | [03](03-identity-and-auth.md) |
-| 6d | The target needs a sign-in, the current one doesn't | `remote use` runs `login` inline and switches only if it succeeds. | #61 | [05](05-remotes-and-switching.md) |
-| 6e | The other way round | Switches; the new server needs no sign-in. | #61 | [05](05-remotes-and-switching.md) |
-| 6f | Switching back | The same command; the pin, sign-in and snapshots are reused. | #61 | [05](05-remotes-and-switching.md) |
-| 6g | What moves with a switch | The rules block is cleared and refilled with a header. `.user-memory`, `.user-memory-key`, the embedding setting and conversation links stay as they are. | #61 | [05](05-remotes-and-switching.md) |
-| 7 | One machine's token lost or revoked | `account clients revoke laptop` (or `host token revoke`); the other machines keep working. | #48, #67 | [07](07-state-machines.md) §4 |
-| 7a | An account removed by the operator | Tokens revoked, sign-in refused, store to `removed/`. `restore` brings it back; only `purge` deletes. | #63 | [07](07-state-machines.md) §5 |
-| 8 | Backups on a multi-user server | Per store, as today. The registry has its own daily backups. The operator restores; users export at any time. | #63, #70 | [04](04-accounts-mode.md) |
-| 8a | Importing someone else's export | Allowed, with a preview line: `This export came from github:bob on memory server work; importing adds its memories to github:alice.` | #69 | [04](04-accounts-mode.md) |
-| 9 | A client older than accounts, on a server with them | Works through the shared token while it lives; after that, today's message. | #48 | [07](07-state-machines.md) §4 |
-| 9a | A server older than the client | `remote use` refuses on the version gap; a 401 without `error_description` gives today's message. | #61, #48 | [05](05-remotes-and-switching.md) |
-| 9b | A native install that never enables accounts | No change: same files, schema, registrations, messages and doctor lines, apart from doctor's server line. A test checks no new file appears. | #56, #60 | [00](00-overview.md) |
-| 10 | The OAuth callback behind a proxy | Redirect URIs come only from `--public-url`, never from `Host` or `X-Forwarded-*`. doctor and `host accounts status` name a dropped path. | #64 | [03](03-identity-and-auth.md) |
-| 10a | A stolen client token | Revoked by name; `account clients` shows each token's last use. | #48, #67 | [09](09-security.md) |
-| 10b | An agent switching, signing in or saving a rule without the user | Needs a terminal, a native dialog the user answers, or without a display the user's own next prompt (#62); a rule needs the Save dialog (#53); the skill forbids acting alone (#72); evaluations check it (#74); the next session start shows any switch and new rule. | #53, #62, #72, #74 | [06](06-confirmation-and-approval.md) |
-| 10c | A malicious server during a switch or join | The key check fails and nothing is sent; a connect link carries the fingerprint. | #58, #68 | [03](03-identity-and-auth.md) |
+| 1 | A server turns accounts on while it holds memories written with the shared token | `--owner` is required; the owner gets the existing store, which keeps its path. There is no unclaimed state. The shared token keeps working as the owner's until `host token retire-shared`. | [#63](https://github.com/l7aromeo/user-memory/issues/63), [#48](https://github.com/l7aromeo/user-memory/issues/48) | [04](04-accounts-mode.md) |
+| 1a | Clients still on the shared token, mid-session | Keep working, as the owner. | [#63](https://github.com/l7aromeo/user-memory/issues/63) | [07](07-state-machines.md) §6 |
+| 1b | The same clients at their next session start | Once: ``Memory server work now has accounts; this machine still uses its token from before accounts, which acts as github:alice. To use your own account, run `user-memory login`.`` | [#63](https://github.com/l7aromeo/user-memory/issues/63) | [07](07-state-machines.md) §6 |
+| 1c | The same clients after `retire-shared` | Refused, with [#48](https://github.com/l7aromeo/user-memory/issues/48)'s revoked message naming `user-memory login`. | [#48](https://github.com/l7aromeo/user-memory/issues/48) | [07](07-state-machines.md) §4 |
+| 2 | A server turns accounts off again with several users | `disable` lists each user's count and last activity, offers each an export, asks at a terminal, then serves the owner's store or the `--keep` user's. The others are dormant, never merged or deleted. | [#63](https://github.com/l7aromeo/user-memory/issues/63) | [04](04-accounts-mode.md) |
+| 2a | A dormant user's client | `Memory server work turned accounts off; its operator keeps your memories until accounts are on again. Ask them for an export.` | [#63](https://github.com/l7aromeo/user-memory/issues/63) | [07](07-state-machines.md) §5 |
+| 2b | Accounts turned on again | Dormant users are served again. | [#63](https://github.com/l7aromeo/user-memory/issues/63) | [07](07-state-machines.md) §5 |
+| 3 | A person signs in for the first time on a server with accounts | Allowed by a rule: a new user and store at `users/<store id>/`. Refused: `github:bob may not sign in to memory server work; ask its operator to allow you (on the server: user-memory host allow add user:github:bob)`. | [#63](https://github.com/l7aromeo/user-memory/issues/63), [#64](https://github.com/l7aromeo/user-memory/issues/64) | [03](03-identity-and-auth.md) |
+| 3a | They had a local store before | Kept apart until they copy it: `user-memory remote copy NAME` (name proposed) previews, asks, imports as an undoable import, and leaves the local store as it was. | [#97](https://github.com/l7aromeo/user-memory/issues/97), [#69](https://github.com/l7aromeo/user-memory/issues/69) | [11](11-skill-docs-evals.md) |
+| 4 | One machine switches accounts (GitHub to GitLab, or another person) | `login` as another account needs confirmation: the terminal, a native dialog, or without a display the phrase `sign memory in as github:bob`. Rules are cleared, then filled from the new account. Snapshots are keyed by server key and user id, so nothing leaks across. | [#62](https://github.com/l7aromeo/user-memory/issues/62), [#61](https://github.com/l7aromeo/user-memory/issues/61) | [06](06-confirmation-and-approval.md) |
+| 5 | One person with a GitHub and a GitLab identity | One user if linked (`account link`), two if not. Linking never goes by email. Two existing accounts join with `account merge`, recorded as an import that `forget --import ID` undoes. | [#67](https://github.com/l7aromeo/user-memory/issues/67), [#43](https://github.com/l7aromeo/user-memory/issues/43) | [03](03-identity-and-auth.md) |
+| 6 | Switching servers while sessions run | Running sessions keep their server, with a notice once; new sessions use the new one. | [#61](https://github.com/l7aromeo/user-memory/issues/61) | [07](07-state-machines.md) §2 |
+| 6a | The target is offline | Switches anyway (the key is pinned): `home is unreachable now; new sessions will say so until it answers`. | [#61](https://github.com/l7aromeo/user-memory/issues/61) | [05](05-remotes-and-switching.md) |
+| 6b | The target runs another version | `home runs user-memory 0.9.1; this client needs 0.11 or newer. Update the server, or keep using work.` | [#61](https://github.com/l7aromeo/user-memory/issues/61) | [05](05-remotes-and-switching.md) |
+| 6c | The target's key changed | Refused, nothing sent; [#58](https://github.com/l7aromeo/user-memory/issues/58)'s message with the `remote trust` command. | [#58](https://github.com/l7aromeo/user-memory/issues/58) | [03](03-identity-and-auth.md) |
+| 6d | The target needs a sign-in, the current one doesn't | `remote use` runs `login` inline and switches only if it succeeds. | [#61](https://github.com/l7aromeo/user-memory/issues/61) | [05](05-remotes-and-switching.md) |
+| 6e | The other way round | Switches; the new server needs no sign-in. | [#61](https://github.com/l7aromeo/user-memory/issues/61) | [05](05-remotes-and-switching.md) |
+| 6f | Switching back | The same command; the pin, sign-in and snapshots are reused. | [#61](https://github.com/l7aromeo/user-memory/issues/61) | [05](05-remotes-and-switching.md) |
+| 6g | What moves with a switch | The rules block is cleared and refilled with a header. `.user-memory`, `.user-memory-key`, the embedding setting and conversation links stay as they are. | [#61](https://github.com/l7aromeo/user-memory/issues/61) | [05](05-remotes-and-switching.md) |
+| 7 | One machine's token lost or revoked | `account clients revoke laptop` (or `host token revoke`); the other machines keep working. | [#48](https://github.com/l7aromeo/user-memory/issues/48), [#67](https://github.com/l7aromeo/user-memory/issues/67) | [07](07-state-machines.md) §4 |
+| 7a | An account removed by the operator | Tokens revoked, sign-in refused, store to `removed/`. `restore` brings it back; only `purge` deletes. | [#63](https://github.com/l7aromeo/user-memory/issues/63) | [07](07-state-machines.md) §5 |
+| 8 | Backups on a multi-user server | Per store, as today. The registry has its own daily backups. The operator restores; users export at any time. | [#63](https://github.com/l7aromeo/user-memory/issues/63), [#70](https://github.com/l7aromeo/user-memory/issues/70) | [04](04-accounts-mode.md) |
+| 8a | Importing someone else's export | Allowed, with a preview line: `This export came from github:bob on memory server work; importing adds its memories to github:alice.` | [#69](https://github.com/l7aromeo/user-memory/issues/69) | [04](04-accounts-mode.md) |
+| 9 | A client older than accounts, on a server with them | Works through the shared token while it lives; after that, today's message. | [#48](https://github.com/l7aromeo/user-memory/issues/48) | [07](07-state-machines.md) §4 |
+| 9a | A server older than the client | `remote use` refuses on the version gap; a 401 without `error_description` gives today's message. | [#61](https://github.com/l7aromeo/user-memory/issues/61), [#48](https://github.com/l7aromeo/user-memory/issues/48) | [05](05-remotes-and-switching.md) |
+| 9b | A native install that never enables accounts | No change: same files, schema, registrations, messages and doctor lines, apart from doctor's server line. A test checks no new file appears. | [#56](https://github.com/l7aromeo/user-memory/issues/56), [#60](https://github.com/l7aromeo/user-memory/issues/60) | [00](00-overview.md) |
+| 10 | The OAuth callback behind a proxy | Redirect URIs come only from `--public-url`, never from `Host` or `X-Forwarded-*`. doctor and `host accounts status` name a dropped path. | [#64](https://github.com/l7aromeo/user-memory/issues/64) | [03](03-identity-and-auth.md) |
+| 10a | A stolen client token | Revoked by name; `account clients` shows each token's last use. | [#48](https://github.com/l7aromeo/user-memory/issues/48), [#67](https://github.com/l7aromeo/user-memory/issues/67) | [09](09-security.md) |
+| 10b | An agent switching, signing in or saving a rule without the user | Needs a terminal, a native dialog the user answers, or without a display the user's own next prompt ([#62](https://github.com/l7aromeo/user-memory/issues/62)); a rule needs the Save dialog ([#53](https://github.com/l7aromeo/user-memory/issues/53)); the skill forbids acting alone ([#72](https://github.com/l7aromeo/user-memory/issues/72)); evaluations check it ([#74](https://github.com/l7aromeo/user-memory/issues/74)); the next session start shows any switch and new rule. | [#53](https://github.com/l7aromeo/user-memory/issues/53), [#62](https://github.com/l7aromeo/user-memory/issues/62), [#72](https://github.com/l7aromeo/user-memory/issues/72), [#74](https://github.com/l7aromeo/user-memory/issues/74) | [06](06-confirmation-and-approval.md) |
+| 10c | A malicious server during a switch or join | The key check fails and nothing is sent; a connect link carries the fingerprint. | [#58](https://github.com/l7aromeo/user-memory/issues/58), [#68](https://github.com/l7aromeo/user-memory/issues/68) | [03](03-identity-and-auth.md) |
 
-## Server keys and pinning (#58)
+## Server keys and pinning ([#58](https://github.com/l7aromeo/user-memory/issues/58))
 
 | Case | Outcome |
 |---|---|
@@ -52,7 +52,7 @@ v0.10.0.
 | A compromised key (`host key rotate --no-chain`) | Every client sees a mismatch. |
 | The check is too slow for `PROMPT_LIMIT` | Cache the result per session id, never per process. |
 
-## Remotes and switching (#60, #61, #71)
+## Remotes and switching ([#60](https://github.com/l7aromeo/user-memory/issues/60), [#61](https://github.com/l7aromeo/user-memory/issues/61), [#71](https://github.com/l7aromeo/user-memory/issues/71))
 
 | Case | Outcome |
 |---|---|
@@ -70,7 +70,7 @@ v0.10.0.
 | Uninstall on a server without accounts | A client token is revoked the same way; the shared token file is left, as today. |
 | `uninstall --dry-run` | Lists what it would do and changes nothing. |
 
-## Confirmation and rules (#53, #62)
+## Confirmation and rules ([#53](https://github.com/l7aromeo/user-memory/issues/53), [#62](https://github.com/l7aromeo/user-memory/issues/62))
 
 | Case | Outcome |
 |---|---|
@@ -87,13 +87,13 @@ v0.10.0.
 | An agent records an explicit preference | `serve` asks ``Save as your rule: …?``; Cancel stores nothing and the agent gets ``The user chose not to save this rule.`` |
 | An agent records an observation or a project fact | Never asks. |
 | An agent turns a memory into a rule with `update` | Asks, as for a record. |
-| A rule recorded over SSH | Stored tentative; the next `serve` with a display asks; on a machine that never has one, #42's block lists it with `user-memory update ID`. It never lapses. |
+| A rule recorded over SSH | Stored tentative; the next `serve` with a display asks; on a machine that never has one, [#42](https://github.com/l7aromeo/user-memory/issues/42)'s block lists it with `user-memory update ID`. It never lapses. |
 | A rule typed by the user at a terminal | The user's own yes; no dialog. |
 | An agent's shell runs `user-memory record` for a rule | No terminal, so the dialog asks. |
-| An agent calls the server directly with the machine's token | Not prevented: it skips `serve`. Read-only tokens (#48) close it for clients that don't write. |
+| An agent calls the server directly with the machine's token | Not prevented: it skips `serve`. Read-only tokens ([#48](https://github.com/l7aromeo/user-memory/issues/48)) close it for clients that don't write. |
 | A program running as the user editing `remotes.json` or driving a dialog | Not prevented; visible at the next session start. |
 
-## Accounts and stores (#57, #63, #69, #70)
+## Accounts and stores ([#57](https://github.com/l7aromeo/user-memory/issues/57), [#63](https://github.com/l7aromeo/user-memory/issues/63), [#69](https://github.com/l7aromeo/user-memory/issues/69), [#70](https://github.com/l7aromeo/user-memory/issues/70))
 
 | Case | Outcome |
 |---|---|
@@ -102,7 +102,7 @@ v0.10.0.
 | The operator is also a user | Signs in like everyone else. |
 | A restored memory store | The registry is untouched; revoked tokens and removed users stay so. |
 | A restored registry | Every client token revoked; users, stores and allow rules come back as they were. |
-| One store, as today (#57) | Same behaviour and performance; measured with `just search-budget` and the concurrency tests. |
+| One store, as today ([#57](https://github.com/l7aromeo/user-memory/issues/57)) | Same behaviour and performance; measured with `just search-budget` and the concurrency tests. |
 | Two stores written at once | Neither waits for the other. |
 | More active stores than `HELD_STORES` | The least recently used is evicted and reloads on its next search; results unchanged. |
 | One damaged store | Only its user gets "Database health check failed", with the repair command for their store. |
@@ -113,7 +113,7 @@ v0.10.0.
 | A filtered export | Keeps its `selection` and adds `source`. |
 | The same user's export from another server | The preview shows the source. |
 
-## Sign-in and identities (#64, #65, #66, #67)
+## Sign-in and identities ([#64](https://github.com/l7aromeo/user-memory/issues/64), [#65](https://github.com/l7aromeo/user-memory/issues/65), [#66](https://github.com/l7aromeo/user-memory/issues/66), [#67](https://github.com/l7aromeo/user-memory/issues/67))
 
 | Case | Outcome |
 |---|---|
@@ -131,7 +131,7 @@ v0.10.0.
 | Unlinking the last identity | Refused. |
 | Unlinking after a merge | Doesn't split the store. |
 
-## Connect links (#68)
+## Connect links ([#68](https://github.com/l7aromeo/user-memory/issues/68))
 
 | Case | Outcome |
 |---|---|
@@ -140,7 +140,7 @@ v0.10.0.
 | The installer's own Docker server | Pins its key directly from the volume. |
 | The link's fragment | Never reaches the server or its logs. |
 
-## Agent behaviour (#72, #74)
+## Agent behaviour ([#72](https://github.com/l7aromeo/user-memory/issues/72), [#74](https://github.com/l7aromeo/user-memory/issues/74))
 
 | Case | Outcome |
 |---|---|
@@ -152,5 +152,5 @@ v0.10.0.
 
 ## Open points
 
-None left: scenario 3a's command is #97, and the `login` message for a
-server older than accounts went into #64.
+None left: scenario 3a's command is [#97](https://github.com/l7aromeo/user-memory/issues/97), and the `login` message for a
+server older than accounts went into [#64](https://github.com/l7aromeo/user-memory/issues/64).

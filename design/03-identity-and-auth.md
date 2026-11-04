@@ -1,8 +1,8 @@
 # 03 Identity and authentication
 
 How a client knows it reached the right server, how a server knows which
-client and person is calling, and how people sign in. Covers #58, #48,
-#64, #65, #66 and #67.
+client and person is calling, and how people sign in. Covers [#58](https://github.com/l7aromeo/user-memory/issues/58), [#48](https://github.com/l7aromeo/user-memory/issues/48),
+[#64](https://github.com/l7aromeo/user-memory/issues/64), [#65](https://github.com/l7aromeo/user-memory/issues/65), [#66](https://github.com/l7aromeo/user-memory/issues/66) and [#67](https://github.com/l7aromeo/user-memory/issues/67).
 
 Tables and files are in [02-data-model.md](02-data-model.md). Switching
 between servers is in [05-remotes-and-switching.md](05-remotes-and-switching.md).
@@ -14,15 +14,15 @@ threat model is in [09-security.md](09-security.md).
 
 | Credential | Held by | Proves | Never |
 |---|---|---|---|
-| Server key, Ed25519, `<data>/server-key` (#58) | the server | to a client, that it is the server the client pinned | leaves the server; a memory export never carries it |
-| Client token, `umt_` + 52 base32 characters (#48) | one machine, in its remote's token file | to the server, which machine and (with accounts) which user calls | printed, logged, sent to another server, or stored by the server other than as its SHA-256 |
-| Provider credential: the OAuth client secret, a GitHub App key, GitLab tokens (#64, #66) | the server, in `<data>/oauth/` | to GitHub or GitLab, that the server is the registered app | reaches a client; a user's own provider token is discarded at sign-in |
+| Server key, Ed25519, `<data>/server-key` ([#58](https://github.com/l7aromeo/user-memory/issues/58)) | the server | to a client, that it is the server the client pinned | leaves the server; a memory export never carries it |
+| Client token, `umt_` + 52 base32 characters ([#48](https://github.com/l7aromeo/user-memory/issues/48)) | one machine, in its remote's token file | to the server, which machine and (with accounts) which user calls | printed, logged, sent to another server, or stored by the server other than as its SHA-256 |
+| Provider credential: the OAuth client secret, a GitHub App key, GitLab tokens ([#64](https://github.com/l7aromeo/user-memory/issues/64), [#66](https://github.com/l7aromeo/user-memory/issues/66)) | the server, in `<data>/oauth/` | to GitHub or GitLab, that the server is the registered app | reaches a client; a user's own provider token is discarded at sign-in |
 
 The client checks the server before it sends a token; the server checks
 the token before it touches a store. A provider never sees a client token,
 and a client never sees a provider credential.
 
-## Server key and pinning (#58)
+## Server key and pinning ([#58](https://github.com/l7aromeo/user-memory/issues/58))
 
 ### Creating and showing the key
 
@@ -76,7 +76,7 @@ Error paths:
   ```output
   Memory is paused: the server "work" no longer proves the identity you trusted. The user needs to check it in a terminal (user-memory remote show work).
   ```
-- **A server with no key** (older than #58): recorded as having no key.
+- **A server with no key** (older than [#58](https://github.com/l7aromeo/user-memory/issues/58)): recorded as having no key.
   Once a key has been seen, its absence is a mismatch.
 - **A URL the server doesn't call its own:** it doesn't sign, which the
   client treats as a mismatch.
@@ -110,7 +110,7 @@ Error paths:
   key, which counts as a mismatch, never as "skip the check".
 - **A restored data folder** keeps the key; nothing changes for clients.
 
-## Client tokens (#48, in the registry of #59)
+## Client tokens ([#48](https://github.com/l7aromeo/user-memory/issues/48), in the registry of [#59](https://github.com/l7aromeo/user-memory/issues/59))
 
 ### Issuing a token without accounts
 
@@ -131,12 +131,12 @@ sequenceDiagram
 ```
 
 - On the installer's Docker server, the command runs in the container
-  through the Compose helper (#75). The container writes the token to a
+  through the Compose helper ([#75](https://github.com/l7aromeo/user-memory/issues/75)). The container writes the token to a
   temporary file in its volume, the host copies it to `--out`
   (owner-only) the way `copy_token` does (`src/server.rs:655`), and
   deletes the container's copy. A copy left by an interrupted `add` is
   deleted by the next `host token` command and at server start.
-- A connect link replaces the copied file (#68), see
+- A connect link replaces the copied file ([#68](https://github.com/l7aromeo/user-memory/issues/68)), see
   [05-remotes-and-switching.md](05-remotes-and-switching.md).
 
 Error paths:
@@ -186,13 +186,13 @@ stdio bridge, and export and import (`src/remote/transfer.rs:238`):
   ```output
   This machine's token for https://memory.example.com/mcp is read-only; this needs a token with write access from the server's operator.
   ```
-- **With accounts (#63):** `"sign in required"` is added, and each
-  message names `user-memory login` (#64) instead.
+- **With accounts ([#63](https://github.com/l7aromeo/user-memory/issues/63)):** `"sign in required"` is added, and each
+  message names `user-memory login` ([#64](https://github.com/l7aromeo/user-memory/issues/64)) instead.
 - **A new client and an older server:** no `error_description`, so
   today's "Cannot connect to memory server; check endpoint and access
   token".
 - **An unreadable registry:** every authenticated request is refused
-  (#59), see [01-architecture.md](01-architecture.md).
+  ([#59](https://github.com/l7aromeo/user-memory/issues/59)), see [01-architecture.md](01-architecture.md).
 
 ### The shared file
 
@@ -201,13 +201,13 @@ access and no expiry, listed as `owner (shared file)`.
 `user-memory host token retire-shared` gives this machine's client its own
 token, replaces the file's token with an unknown one, and sets
 `shared_file_retired`, so a rollback or a lost registry can't bring the
-old token back (#48).
+old token back ([#48](https://github.com/l7aromeo/user-memory/issues/48)).
 
 Error paths:
 - **On the installer's Docker server with the token healthcheck still in
   compose.yaml:** refused, asking to run the installer again first.
 
-## Signing in with GitHub (#64)
+## Signing in with GitHub ([#64](https://github.com/l7aromeo/user-memory/issues/64))
 
 The server brokers OAuth: RFC 8628 toward the client, OAuth toward the
 provider. The provider's token never reaches the client.
@@ -219,7 +219,7 @@ user-memory host provider add github [--id ID] [--base-url URL] --client-id ID -
 user-memory host provider list | remove ID
 ```
 
-The secret, and the app's private key for membership (#66), go
+The secret, and the app's private key for membership ([#66](https://github.com/l7aromeo/user-memory/issues/66)), go
 owner-only into `<data>/oauth/`. The command prints the callback to
 register, `https://<public-url>/auth/callback/<provider-id>`; "Enable
 Device Flow" must be ticked on the app.
@@ -291,12 +291,12 @@ Error paths:
 - **A proxy that drops `/auth/*`, `/login`, `/connect` or
   `/.well-known/user-memory`:** doctor and `host accounts status` name
   the dropped path.
-- **A key mismatch at the first step:** nothing is sent, #58's message.
-- **`login` without a terminal:** the native dialog (#62); without a
+- **A key mismatch at the first step:** nothing is sent, [#58](https://github.com/l7aromeo/user-memory/issues/58)'s message.
+- **`login` without a terminal:** the native dialog ([#62](https://github.com/l7aromeo/user-memory/issues/62)); without a
   display, a pending request with the phrase `sign memory in as github:bob`.
 - **A login rename on GitHub:** harmless; accounts use the numeric id.
 
-## Signing in with GitLab (#65)
+## Signing in with GitLab ([#65](https://github.com/l7aromeo/user-memory/issues/65))
 
 The same broker and client; only the provider differs.
 
@@ -304,7 +304,7 @@ The same broker and client; only the provider differs.
 host provider add gitlab [--id ID] [--base-url URL] --client-id ID --client-secret-file F
 ```
 
-| | GitHub (#64) | GitLab (#65) |
+| | GitHub ([#64](https://github.com/l7aromeo/user-memory/issues/64)) | GitLab ([#65](https://github.com/l7aromeo/user-memory/issues/65)) |
 |---|---|---|
 | App | GitHub App, github.com or GitHub Enterprise Server | OAuth application on the instance; `--base-url` must be HTTPS |
 | Identity | numeric user id | the instance and the numeric user id, such as `gitlab.example.com:42` |
@@ -315,7 +315,7 @@ host provider add gitlab [--id ID] [--base-url URL] --client-id ID --client-secr
 Two GitLab instances on one server are two provider ids and two separate
 identity spaces.
 
-## Re-checking membership (#66)
+## Re-checking membership ([#66](https://github.com/l7aromeo/user-memory/issues/66))
 
 Org and group rules (`org:github:acme`, `group:…`) stay true after
 sign-in by re-checking with the operator's credential. No user's provider
@@ -365,7 +365,7 @@ Error paths:
 - **GitLab's hosted service and group access tokens:** whether a paid
   plan is needed is unclear; confirm before the docs promise it.
 
-## Linking identities and merging accounts (#67)
+## Linking identities and merging accounts ([#67](https://github.com/l7aromeo/user-memory/issues/67))
 
 ```
 user-memory account show
@@ -426,6 +426,9 @@ sequenceDiagram
   S-->>M: done, forget --import ID undoes it
 ```
 
+The merge is recorded as an import ([#43](https://github.com/l7aromeo/user-memory/issues/43)),
+so `forget --import ID` undoes it.
+
 Error paths:
 - **The second sign-in fails or is declined:** nothing is merged.
 - **Declined at the preview:** nothing changes.
@@ -442,7 +445,7 @@ Your account github:alice on memory server work is disabled; its memories wait f
 ```
 
 `link`, `unlink` and `delete` need confirmation at a terminal or in the
-native dialog, and without a display by #62's phrase
+native dialog, and without a display by [#62](https://github.com/l7aromeo/user-memory/issues/62)'s phrase
 (`link gitlab:alice to my memory`, `unlink github:alice from my memory`,
 `delete my memory account`).
 
@@ -450,11 +453,11 @@ native dialog, and without a display by #62's phrase
 
 Resolved by the user's decisions, and now in the issues:
 
-1. `user-memory remote trust NAME FINGERPRINT` belongs to #60, confirmed
-   like the other sensitive commands (#62).
-2. #58's and #63's messages use the remote's name once #60 is in, and the
+1. `user-memory remote trust NAME FINGERPRINT` belongs to [#60](https://github.com/l7aromeo/user-memory/issues/60), confirmed
+   like the other sensitive commands ([#62](https://github.com/l7aromeo/user-memory/issues/62)).
+2. [#58](https://github.com/l7aromeo/user-memory/issues/58)'s and [#63](https://github.com/l7aromeo/user-memory/issues/63)'s messages use the remote's name once [#60](https://github.com/l7aromeo/user-memory/issues/60) is in, and the
    URL before.
-3. `user-memory remote set-token NAME FILE` (#60) replaces a remote's
-   token after a check of the pinned key; #48's revoked and expired
-   messages name it once #60 is in.
-4. #63's accounts-on notice covers any token from before accounts.
+3. `user-memory remote set-token NAME FILE` ([#60](https://github.com/l7aromeo/user-memory/issues/60)) replaces a remote's
+   token after a check of the pinned key; [#48](https://github.com/l7aromeo/user-memory/issues/48)'s revoked and expired
+   messages name it once [#60](https://github.com/l7aromeo/user-memory/issues/60) is in.
+4. [#63](https://github.com/l7aromeo/user-memory/issues/63)'s accounts-on notice covers any token from before accounts.

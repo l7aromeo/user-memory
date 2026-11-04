@@ -1,8 +1,8 @@
 # 05 Remotes and switching
 
 How a machine knows several memory servers, switches between them, joins
-one with a link, and signs out of all of them on uninstall. Covers #60,
-#61, #68 and #71.
+one with a link, and signs out of all of them on uninstall. Covers [#60](https://github.com/l7aromeo/user-memory/issues/60),
+[#61](https://github.com/l7aromeo/user-memory/issues/61), [#68](https://github.com/l7aromeo/user-memory/issues/68) and [#71](https://github.com/l7aromeo/user-memory/issues/71).
 
 Keys, tokens and sign-in are in [03-identity-and-auth.md](03-identity-and-auth.md).
 How each command is confirmed (the terminal, the native dialog, or the
@@ -20,7 +20,7 @@ The client files are in [02-data-model.md](02-data-model.md).
 | `team` | memory.team.example | on | not signed in yet |
 | `local` | this machine's store | — | none (reserved name) |
 
-## Remotes (#60)
+## Remotes ([#60](https://github.com/l7aromeo/user-memory/issues/60))
 
 ### Files
 
@@ -31,7 +31,7 @@ The client files are in [02-data-model.md](02-data-model.md).
   never inside the JSON.
 - `~/.local/state/user-memory/remote-log`: every add, use, trust,
   set-token, login and logout, with the time and how it was confirmed: at
-  a terminal, in the native dialog, or by the typed phrase (#62).
+  a terminal, in the native dialog, or by the typed phrase ([#62](https://github.com/l7aromeo/user-memory/issues/62)).
 
 ### Commands
 
@@ -67,7 +67,7 @@ Error paths:
 - **The same key as another remote:** a warning,
   `"home" is the same server as "work" (same key)`.
 - **The signature doesn't verify:** refused, nothing saved.
-- **Without a terminal:** the native dialog (#62); without a display, a
+- **Without a terminal:** the native dialog ([#62](https://github.com/l7aromeo/user-memory/issues/62)); without a display, a
   pending request with the phrase `trust memory server home 9a1b2c3d` (the
   last 8 characters of the fingerprint).
 - **Unreachable:** nothing to pin, so the remote isn't added (see open
@@ -118,14 +118,14 @@ Error paths:
 - **A local-only install:** nothing changes; no `remotes*` file is created
   until a `remote` command runs.
 - **The server is unreachable during setup:** see open point 3.
-- **A server without a key** (older than #58): recorded as having no
-  key, as #58 says.
+- **A server without a key** (older than [#58](https://github.com/l7aromeo/user-memory/issues/58)): recorded as having no
+  key, as [#58](https://github.com/l7aromeo/user-memory/issues/58) says.
 
 doctor's server line becomes
 `Memory server: work (memory.example.com), signed in as github:alice: OK`,
 and without accounts `Memory server: home (memory.home.example): OK`.
 
-## Switching (#61)
+## Switching ([#61](https://github.com/l7aromeo/user-memory/issues/61))
 
 ### `user-memory remote use NAME|local`
 
@@ -169,12 +169,12 @@ Error paths:
 - **Unreachable:** switches anyway, since the key is pinned, and says
   ``home is unreachable now; new sessions will say so until it answers``.
   The rules block is cleared and stays empty until home answers.
-- **Key mismatch:** refuses with #58's message; nothing is changed or sent.
+- **Key mismatch:** refuses with [#58](https://github.com/l7aromeo/user-memory/issues/58)'s message; nothing is changed or sent.
 - **Version gap:**
   ``home runs user-memory 0.9.1; this client needs 0.11 or newer. Update the server, or keep using work.``
-- **Without a terminal, before #62:**
+- **Without a terminal, before [#62](https://github.com/l7aromeo/user-memory/issues/62):**
   `Switching memory servers needs you at a terminal; run "user-memory remote use home" yourself.`
-- **Without a terminal, after #62:** the native dialog; without a display,
+- **Without a terminal, after [#62](https://github.com/l7aromeo/user-memory/issues/62):** the native dialog; without a display,
   a pending request and its phrase `switch memory to home`, which the hook
   applies (see below).
 - **The active remote is set by the environment** (`USER_MEMORY_URL`):
@@ -243,7 +243,7 @@ signed in yet). Each server only ever sees its own token.
   active remote, never "the current token".
 - **The key check comes first, bound to the URL:** the client sends a
   token only after the server at that URL proves the key pinned for that
-  remote (#58). A token can't reach a server whose key isn't that remote's
+  remote ([#58](https://github.com/l7aromeo/user-memory/issues/58)). A token can't reach a server whose key isn't that remote's
   pin, even if two remotes are mistyped to the same URL.
 - **Tokens are per server:** each server issued its own token and keeps
   only its hash; work's token is unknown to home and team.
@@ -279,8 +279,8 @@ Error paths:
 - **home has no token on this machine:** see open point 3.
 - **home's token was revoked:** the rules read gets a 401 with
   `error_description="revoked"`; the switch is done but the block stays
-  empty, and #48's revoked message names the fix.
-- **home is older than #58 and has no key:** recorded as having no key;
+  empty, and [#48](https://github.com/l7aromeo/user-memory/issues/48)'s revoked message names the fix.
+- **home is older than [#58](https://github.com/l7aromeo/user-memory/issues/58) and has no key:** recorded as having no key;
   once a key has been seen, its absence is a mismatch.
 
 ### home to team (accounts on, not signed in)
@@ -314,9 +314,9 @@ sequenceDiagram
 
 Error paths:
 - **The sign-in is declined, expires or is refused by team's allow
-  rules:** nothing is switched; the machine stays on home, and #64's
+  rules:** nothing is switched; the machine stays on home, and [#64](https://github.com/l7aromeo/user-memory/issues/64)'s
   message is shown.
-- **Without a terminal (#62):** the command runs the sign-in, then asks in
+- **Without a terminal ([#62](https://github.com/l7aromeo/user-memory/issues/62)):** the command runs the sign-in, then asks in
   the native dialog. Without a display, it holds the new token in
   `pending-confirmation` and prints `switch memory to team`; the hook
   writes the token and sets active on the exact phrase. Cancel, or an
@@ -328,7 +328,7 @@ Error paths:
 
 `user-memory remote use work`: the same checks. work's pin, token and
 snapshots are reused; no new sign-in unless the token was revoked or
-expired, in which case #48's message (with accounts, naming
+expired, in which case [#48](https://github.com/l7aromeo/user-memory/issues/48)'s message (with accounts, naming
 `user-memory login`) follows.
 
 ## A server turns accounts on or off while machines use it
@@ -352,7 +352,7 @@ sequenceDiagram
   M-->>M: notice once (#63)
 ```
 
-The notice, as #63 words it:
+The notice, as [#63](https://github.com/l7aromeo/user-memory/issues/63) words it:
 
 ```output
 Memory server work now has accounts; this machine still uses its token from before accounts, which acts as github:alice. To use your own account, run `user-memory login`.
@@ -363,7 +363,7 @@ Error paths:
   the owner's server): their token still reaches the owner's memories
   until the operator revokes it or they sign in as themselves.
   `user-memory login home` gives them their own, empty store; the shared
-  store goes whole to the owner (#63), who can give them a filtered export.
+  store goes whole to the owner ([#63](https://github.com/l7aromeo/user-memory/issues/63)), who can give them a filtered export.
 - **`login home` when the old token works:** a sign-in as a named account
   replaces the token file; it's `login` as another account, so without a
   terminal it asks in the native dialog, or without a display needs
@@ -400,7 +400,7 @@ Error paths:
   merged or deleted.
 - **The dormant user's rules block:** see open point 6.
 
-## Joining with a connect link (#68)
+## Joining with a connect link ([#68](https://github.com/l7aromeo/user-memory/issues/68))
 
 ```mermaid
 sequenceDiagram
@@ -441,7 +441,7 @@ Error paths:
 - **The user declines at the fingerprint:** nothing is saved, and the
   invite stays unredeemed.
 
-## Signing out of every remote on uninstall (#71)
+## Signing out of every remote on uninstall ([#71](https://github.com/l7aromeo/user-memory/issues/71))
 
 ```mermaid
 sequenceDiagram
@@ -481,20 +481,20 @@ Error paths:
 
 Resolved by the user's decisions, and now in the issues:
 
-1. `remote trust` belongs to #60.
-2. `remote set-token NAME FILE` replaces a remote's token (#60).
+1. `remote trust` belongs to [#60](https://github.com/l7aromeo/user-memory/issues/60).
+2. `remote set-token NAME FILE` replaces a remote's token ([#60](https://github.com/l7aromeo/user-memory/issues/60)).
 3. `remote use` to a server without accounts and without a token refuses
    with
    ``home has no token on this machine; ask its operator for a token file or a connect link, then run `user-memory remote set-token home FILE` ``
-   (#61); `add` needs the server reachable, and the migration pins at
-   first contact (#60).
-4. The window between `serve` and SessionStart is closed (#61).
+   ([#61](https://github.com/l7aromeo/user-memory/issues/61)); `add` needs the server reachable, and the migration pins at
+   first contact ([#60](https://github.com/l7aromeo/user-memory/issues/60)).
+4. The window between `serve` and SessionStart is closed ([#61](https://github.com/l7aromeo/user-memory/issues/61)).
 5. `remote use` says when `USER_MEMORY_URL` or `USER_MEMORY_DB` overrides
-   the switch, and doctor names the override (#61).
+   the switch, and doctor names the override ([#61](https://github.com/l7aromeo/user-memory/issues/61)).
 6. Session start clears the rules block on a 401 from the active remote,
-   as `logout` does (#61).
+   as `logout` does ([#61](https://github.com/l7aromeo/user-memory/issues/61)).
 7. Uninstall leaves a remote whose key doesn't match like an unreachable
-   one, with a `Left:` line naming the mismatch (#71).
+   one, with a `Left:` line naming the mismatch ([#71](https://github.com/l7aromeo/user-memory/issues/71)).
 8. The rules header without accounts is
    `<!-- Rules on memory server home (memory.home.example); rewritten by user-memory. -->`
-   (#61).
+   ([#61](https://github.com/l7aromeo/user-memory/issues/61)).

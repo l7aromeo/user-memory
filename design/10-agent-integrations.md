@@ -1,9 +1,9 @@
-# 10. Agent integrations: Hermes Agent and Pi (#54)
+# 10. Agent integrations: Hermes Agent and Pi ([#54](https://github.com/l7aromeo/user-memory/issues/54))
 
-user-memory sets itself up for Claude Code and Codex. #54 asks what
+user-memory sets itself up for Claude Code and Codex. [#54](https://github.com/l7aromeo/user-memory/issues/54) asks what
 supporting another MCP app takes, and what must be found out first for
 Hermes Agent and Pi. It commits to no design. This file answers most of
-#54's questions from each app's own docs and help output (Hermes Agent
+[#54](https://github.com/l7aromeo/user-memory/issues/54)'s questions from each app's own docs and help output (Hermes Agent
 v0.22.5, Pi 1.4.0, read 2026-11-05), and sketches the design the follow-up
 issue would hold. What still needs a trial is listed at the end.
 
@@ -60,7 +60,7 @@ flowchart LR
 | Standing rules | Context files are project-local (`.hermes.md`, `AGENTS.md`, `CLAUDE.md`, from the working folder). The only global file is `SOUL.md`, the agent's personality, loaded from `HERMES_HOME`. | No global rules file to own. The rules reach the model through the index at the first turn instead (below). |
 | Hooks | Shell hooks declared under `hooks:` in `~/.hermes/config.yaml`, run per event with a JSON payload on stdin (`session_id`, `cwd`, `profile`, and event fields in `extra`). `pre_llm_call` runs once per turn, and returning `{"context": …}` appends text to the user's message; its `extra` carries `user_message` and `is_first_turn`. `on_session_start` is an observer: its return is ignored. Default timeout 60 s, capped at 300. | Session start becomes `pre_llm_call` with `is_first_turn`; prompt submit becomes every other `pre_llm_call`. The index is appended to the first user message rather than placed before it. |
 | Hook consent | A first-use prompt per (event, command) pair, kept in `~/.hermes/shell-hooks-allowlist.json`; `hermes hooks list` shows consent status. | doctor reads `hermes hooks list`, as it reports Codex's trust. |
-| Adding hooks | `hermes config set` exists; whether it can add a list entry under `hooks:` is unconfirmed. | If not, setup would edit `config.yaml`, which #54's rule (the app's CLI, never its file) forbids. See open point 1. |
+| Adding hooks | `hermes config set` exists; whether it can add a list entry under `hooks:` is unconfirmed. | If not, setup would edit `config.yaml`, which [#54](https://github.com/l7aromeo/user-memory/issues/54)'s rule (the app's CLI, never its file) forbids. See open point 1. |
 | Skill | Its own skills folder, plus `skills.external_dirs` in `config.yaml`, which can list `~/.agents/skills`. | One config value, then the shared skill folder. |
 | Competing memory | Built-in `MEMORY.md` and `USER.md`, always active; external memory-provider plugins through `hermes memory setup`. | The index's header and the rules must steer it to user-memory, as the server instructions do for Claude Code's auto memory. |
 | Profiles | Several isolated Hermes homes; each hook payload names its `profile`. | Setup writes to the default profile; others are listed by doctor. |
@@ -86,7 +86,7 @@ flowchart LR
 - `--client` takes a list: `--client claude,codex,pi`. `auto` keeps
   meaning "every app found on `PATH`".
 - `both` keeps working as a deprecated alias for `claude,codex` for at
-  least one minor release, as #54 requires, and prints a deprecation note.
+  least one minor release, as [#54](https://github.com/l7aromeo/user-memory/issues/54) requires, and prints a deprecation note.
 - Saved settings store the list, so a third app needs no new value.
 - `session-start --client` and the hooks take `hermes` and `pi`.
 
@@ -99,8 +99,8 @@ flowchart LR
 | Standing rules | None; the first-turn index carries the rules section | Marked block in `~/.pi/agent/AGENTS.md` |
 | Index at session start | `pre_llm_call` hook when `is_first_turn` | The extension's `session_start`, added at the first `before_agent_start` |
 | Change notices | `pre_llm_call` on later turns | The extension's `before_agent_start` |
-| Confirmation (#53, #62) | The native dialog from `serve` or the CLI; without a display, the prompt is `extra.user_message` | The native dialog; without a display, the prompt when `messageType` is `"user"` |
-| Session's server (#61) | Keyed by `session_id` | Keyed by the session UUID |
+| Confirmation ([#53](https://github.com/l7aromeo/user-memory/issues/53), [#62](https://github.com/l7aromeo/user-memory/issues/62)) | The native dialog from `serve` or the CLI; without a display, the prompt is `extra.user_message` | The native dialog; without a display, the prompt when `messageType` is `"user"` |
+| Session's server ([#61](https://github.com/l7aromeo/user-memory/issues/61)) | Keyed by `session_id` | Keyed by the session UUID |
 | Skill | `skills.external_dirs` lists `~/.agents/skills` | Already read |
 | doctor | Registration, hook consent, the skill directory | Registration and exposure, the extension file, the rules block |
 | Uninstall | `hermes mcp remove`, the hook entries, the external dir | `pi mcp remove`, the extension file, the rules block |
@@ -146,11 +146,11 @@ Error paths:
 Nothing in [05](05-remotes-and-switching.md) or [06](06-confirmation-and-approval.md)
 is specific to Claude Code or Codex. Each new app needs:
 
-- its hooks to record the session's server at the first turn (#61);
+- its hooks to record the session's server at the first turn ([#61](https://github.com/l7aromeo/user-memory/issues/61));
 - nothing for the native dialog, which `serve` and the CLI show
-  themselves (#53, #62);
+  themselves ([#53](https://github.com/l7aromeo/user-memory/issues/53), [#62](https://github.com/l7aromeo/user-memory/issues/62));
 - its prompt passed to the typed-phrase check, for machines without a
-  display (#62), with a note in the docs where the app can't tell a user's
+  display ([#62](https://github.com/l7aromeo/user-memory/issues/62)), with a note in the docs where the app can't tell a user's
   prompt from an automated one;
 - its rules location in the list that `remote use` clears and refills.
 
@@ -168,13 +168,13 @@ issue is written.
 | Hermes | Does the index appended to the first user message steer the agent away from `MEMORY.md`? |
 | Pi | Does `--exposure direct` make the agent call `index` and `read` reliably? |
 | Pi | Can an extension add text to the first run from `session_start`, or only from `before_agent_start`? |
-| Pi | Can an extension's `pi.sendUserMessage()` be told apart from the user's prompt, for #62? |
+| Pi | Can an extension's `pi.sendUserMessage()` be told apart from the user's prompt, for [#62](https://github.com/l7aromeo/user-memory/issues/62)? |
 | Pi | How reliably does deepseek-flash follow the rules and the index: one evaluation scenario, "a rule recorded in one session reaches the next", before anything ships. |
 | Both | The time a hook may take before the app gives up. |
 
 ## Open points
 
-1. **Hermes hooks and the "app's CLI" rule.** #54 records the rule that
+1. **Hermes hooks and the "app's CLI" rule.** [#54](https://github.com/l7aromeo/user-memory/issues/54) records the rule that
    registration goes through the app's CLI, never its configuration file.
    Hermes declares shell hooks only in `config.yaml`, and its `hermes hooks`
    command lists, tests and revokes them but doesn't add them. If
@@ -185,10 +185,10 @@ issue is written.
    is a file user-memory owns, as the Claude Code rules file is. It runs
    inside Pi's process. The design issue should say how setup updates it
    and how doctor checks it is unchanged.
-3. **`both` as a deprecated alias.** #54 says `both` keeps working for at
+3. **`both` as a deprecated alias.** [#54](https://github.com/l7aromeo/user-memory/issues/54) says `both` keeps working for at
    least one minor release. The proposal is a comma-separated list; the
    name of the new form is a public name, so it needs the user's decision
    before it is built.
-4. **#54 is a research issue.** This file answers most of its questions
+4. **[#54](https://github.com/l7aromeo/user-memory/issues/54) is a research issue.** This file answers most of its questions
    from the apps' docs. The trial notes in section 4 remain, then a design
    issue per app.

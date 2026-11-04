@@ -2,9 +2,9 @@
 
 How an operator turns accounts on and off, how a request finds its user's
 store, who may sign in, and how per-user stores are run: restored,
-repaired, upgraded and measured. It covers #63 (accounts on and off,
-per-user stores, allow rules), #70 (operating per-user stores), #57
-(per-store gates and caches) and #69 (an export's source).
+repaired, upgraded and measured. It covers [#63](https://github.com/l7aromeo/user-memory/issues/63) (accounts on and off,
+per-user stores, allow rules), [#70](https://github.com/l7aromeo/user-memory/issues/70) (operating per-user stores), [#57](https://github.com/l7aromeo/user-memory/issues/57)
+(per-store gates and caches) and [#69](https://github.com/l7aromeo/user-memory/issues/69) (an export's source).
 
 Related: [02-data-model.md](02-data-model.md) for the registry and store
 tables, [03-identity-and-auth.md](03-identity-and-auth.md) for sign-in and
@@ -17,15 +17,15 @@ account and of a server's accounts mode, and
 | | Accounts off (today, and after `disable`) | Accounts on (after `enable`) |
 |---|---|---|
 | Stores served | one: the owner's `memories.sqlite3`, or a user's chosen with `disable --keep` | one per user, found through the registry's `stores` rows |
-| Who may connect | anyone holding the shared file or a client token (#48) | users the allow rules admit, signed in (#64, #65), or holding a token that acts as a user |
-| The shared token | the server's own | acts as the owner until `host token retire-shared` (#48) |
-| Registry | only if `host token add` or `host invite` made one (#59, #68) | always; `enable` creates it if missing |
+| Who may connect | anyone holding the shared file or a client token ([#48](https://github.com/l7aromeo/user-memory/issues/48)) | users the allow rules admit, signed in ([#64](https://github.com/l7aromeo/user-memory/issues/64), [#65](https://github.com/l7aromeo/user-memory/issues/65)), or holding a token that acts as a user |
+| The shared token | the server's own | acts as the owner until `host token retire-shared` ([#48](https://github.com/l7aromeo/user-memory/issues/48)) |
+| Registry | only if `host token add` or `host invite` made one ([#59](https://github.com/l7aromeo/user-memory/issues/59), [#68](https://github.com/l7aromeo/user-memory/issues/68)) | always; `enable` creates it if missing |
 | A user who isn't served | none exist | dormant while accounts are off: refused, never merged or deleted |
 
 A single-token server that never enables accounts is unchanged, with no
-new file (#56, #63).
+new file ([#56](https://github.com/l7aromeo/user-memory/issues/56), [#63](https://github.com/l7aromeo/user-memory/issues/63)).
 
-### Commands, on the server's machine (#63)
+### Commands, on the server's machine ([#63](https://github.com/l7aromeo/user-memory/issues/63))
 
 ```
 user-memory host --public-url URL                    (env USER_MEMORY_PUBLIC_URL)
@@ -35,7 +35,7 @@ user-memory host allow add RULE | remove RULE | list      (user:…, org:…, gr
 ```
 
 Identities are written as `github:alice` and resolved to the provider's
-numeric id at once (#63).
+numeric id at once ([#63](https://github.com/l7aromeo/user-memory/issues/63)).
 
 ## Turning accounts on
 
@@ -60,18 +60,18 @@ sequenceDiagram
 ```
 
 The existing store becomes the owner's store row and keeps its path, so no
-file moves. `enable` is live, with no restart (#63).
+file moves. `enable` is live, with no restart ([#63](https://github.com/l7aromeo/user-memory/issues/63)).
 
 Error paths:
 - **`--owner` missing while the store holds memories:** refused. On an
-  empty server `--owner` is optional (#63).
+  empty server `--owner` is optional ([#63](https://github.com/l7aromeo/user-memory/issues/63)).
 - **The identity can't be resolved** (no such login, or the provider is
   unreachable): nothing is written; see [Open points](#open-points) for
   the message.
-- **A wrong owner:** `host users link owner IDENTITY` fixes it (#63).
+- **A wrong owner:** `host users link owner IDENTITY` fixes it ([#63](https://github.com/l7aromeo/user-memory/issues/63)).
 - **A registry with a newer schema version, or a damaged one:** refused as
-  #59 says; accounts stay off.
-- **Mid-session clients** keep working, as the owner (#63).
+  [#59](https://github.com/l7aromeo/user-memory/issues/59) says; accounts stay off.
+- **Mid-session clients** keep working, as the owner ([#63](https://github.com/l7aromeo/user-memory/issues/63)).
 
 Clients still on the shared token see, once, at their next session start:
 
@@ -104,17 +104,17 @@ sequenceDiagram
     St-->>C: the tool's reply
 ```
 
-The tool code is unchanged: it gets one store, as today (#63). A store is
-opened only for its own user's request (#56).
+The tool code is unchanged: it gets one store, as today ([#63](https://github.com/l7aromeo/user-memory/issues/63)). A store is
+opened only for its own user's request ([#56](https://github.com/l7aromeo/user-memory/issues/56)).
 
 Error paths:
 - **Unknown or revoked token:** 401 with `error_description="revoked"`;
-  expired: `"expired"` (#48). The client's messages are in
+  expired: `"expired"` ([#48](https://github.com/l7aromeo/user-memory/issues/48)). The client's messages are in
   [03-identity-and-auth.md](03-identity-and-auth.md).
-- **A read-only token on a write:** refused as a tool error with #48's
+- **A read-only token on a write:** refused as a tool error with [#48](https://github.com/l7aromeo/user-memory/issues/48)'s
   message.
 - **The user is disabled or removed:** 401; their tokens were revoked by
-  `remove` (#63).
+  `remove` ([#63](https://github.com/l7aromeo/user-memory/issues/63)).
 - **Accounts are off and the user isn't the one served:** 401 with
   `error_description="accounts are off on this server"`, which the client
   shows as:
@@ -123,14 +123,14 @@ Error paths:
   ```
 - **The store fails its health check or is at an older version:** only
   this user is refused, with the repair or upgrade message for their store
-  (#70).
+  ([#70](https://github.com/l7aromeo/user-memory/issues/70)).
 - **The registry can't be read:** every authenticated request is refused
-  with #59's message.
+  with [#59](https://github.com/l7aromeo/user-memory/issues/59)'s message.
 
 ## Who may sign in: allow rules
 
 Deny by default: with no rules, only the owner may sign in, and `anyone`
-must be given explicitly (#63).
+must be given explicitly ([#63](https://github.com/l7aromeo/user-memory/issues/63)).
 
 ```mermaid
 flowchart TD
@@ -148,9 +148,9 @@ flowchart TD
     admit["Admitted: the user, and a new store for a new user"]
 ```
 
-Rules match any identity of the user (#67). Org and group rules are checked
-again later with the operator's credential (#66); without one, only at
-sign-in, with #66's warning.
+Rules match any identity of the user ([#67](https://github.com/l7aromeo/user-memory/issues/67)). Org and group rules are checked
+again later with the operator's credential ([#66](https://github.com/l7aromeo/user-memory/issues/66)); without one, only at
+sign-in, with [#66](https://github.com/l7aromeo/user-memory/issues/66)'s warning.
 
 A refused identity sees:
 
@@ -161,9 +161,9 @@ github:bob may not sign in to memory server work; ask its operator to allow you 
 Error paths:
 - **The provider can't be reached to check an org or group:** at sign-in,
   refused until it answers. Later, the last good result holds for
-  `MEMBERSHIP_GRACE` (#66).
+  `MEMBERSHIP_GRACE` ([#66](https://github.com/l7aromeo/user-memory/issues/66)).
 - **A member who left the org:** refused at the next check, with a message
-  naming the org (#66).
+  naming the org ([#66](https://github.com/l7aromeo/user-memory/issues/66)).
 - **`host allow remove` of the rule that admitted a signed-in user:** the
   user keeps working until the next membership check or the next sign-in.
   See [Open points](#open-points).
@@ -187,11 +187,11 @@ sequenceDiagram
 ```
 
 `disable` serves the owner's store again, or another user's with `--keep`.
-It asks at a terminal (#63). Turning accounts on again restores the
+It asks at a terminal ([#63](https://github.com/l7aromeo/user-memory/issues/63)). Turning accounts on again restores the
 dormant users; nothing is merged or deleted.
 
 Error paths:
-- **No terminal:** see [Open points](#open-points); #63 says it asks at a
+- **No terminal:** see [Open points](#open-points); [#63](https://github.com/l7aromeo/user-memory/issues/63) says it asks at a
   terminal but not what happens without one.
 - **`--keep` names a removed user:** refused.
 - **A dormant user's client:** the 401 above, at its next request.
@@ -221,7 +221,7 @@ sequenceDiagram
 ```
 
 `remove` disables at once: tokens revoked, sign-in refused. `purge` is the
-only path that deletes memories, after offering an export (#63).
+only path that deletes memories, after offering an export ([#63](https://github.com/l7aromeo/user-memory/issues/63)).
 
 Error paths:
 - **`remove` of the owner:** see [Open points](#open-points).
@@ -231,12 +231,12 @@ Error paths:
   the store stays in place; the command says so and `restore` undoes the
   disable.
 - **`restore` while a restore of that user's backup runs:** refused, as
-  #70 refuses a user removed while restoring.
+  [#70](https://github.com/l7aromeo/user-memory/issues/70) refuses a user removed while restoring.
 
 ## Registry backups and restore
 
 Daily, in `<data>/accounts-backups/`, 7 kept, by the same online backup as
-memory stores, and checked when the server starts and hourly (#52, #63).
+memory stores, and checked when the server starts and hourly ([#52](https://github.com/l7aromeo/user-memory/issues/52), [#63](https://github.com/l7aromeo/user-memory/issues/63)).
 
 ```mermaid
 sequenceDiagram
@@ -255,7 +255,7 @@ sequenceDiagram
 ```
 
 Users sign in again. A memory-store restore never touches the registry, so
-revoked tokens and removed users stay so (#63).
+revoked tokens and removed users stay so ([#63](https://github.com/l7aromeo/user-memory/issues/63)).
 
 Error paths:
 - **The backup is damaged or from a newer version:** refused before the
@@ -263,7 +263,7 @@ Error paths:
 - **The backup's `stores` rows name a folder that's gone** (a store
   purged after the backup): see [Open points](#open-points).
 
-## Operating per-user stores (#70)
+## Operating per-user stores ([#70](https://github.com/l7aromeo/user-memory/issues/70))
 
 ```
 user-memory host backup restore --user USER BACKUP
@@ -292,7 +292,7 @@ sequenceDiagram
 ```
 
 Error paths:
-- **The user is removed while restoring:** refused (#70).
+- **The user is removed while restoring:** refused ([#70](https://github.com/l7aromeo/user-memory/issues/70)).
 - **Writes waiting on the gate past `BUSY`:** they fail with today's
   "database is locked" message and the client retries; the restore
   doesn't wait for them.
@@ -304,28 +304,28 @@ Error paths:
 `migrate` upgrades every store the registry lists, each with its own
 upgrade backup. A store that fails stays at its version and is refused
 alone, with today's upgrade message naming it; the others are upgraded and
-served (#70). The order of the steps, with the registry first, is in
+served ([#70](https://github.com/l7aromeo/user-memory/issues/70)). The order of the steps, with the registry first, is in
 [02-data-model.md](02-data-model.md#migrations).
 
 Error paths:
 - **One store damaged:** only its user gets "Database health check
-  failed", with the repair command for their store (#70).
+  failed", with the repair command for their store ([#70](https://github.com/l7aromeo/user-memory/issues/70)).
 - **No registry:** one store, as today.
 
 ### Repairing
 
 `repair --user USER` repairs one store; `--all-users` each in turn. Each
 gets the backup repair makes today. The server keeps serving the others
-(#70). A repair drops the store's held connection first, through #57's
+([#70](https://github.com/l7aromeo/user-memory/issues/70)). A repair drops the store's held connection first, through [#57](https://github.com/l7aromeo/user-memory/issues/57)'s
 explicit call.
 
 ### Sizes and backups in doctor
 
 doctor, on the server, reports each store's size and stale or failed
 automatic backups, by store id. It never shows memory text, and there's no
-size limit (#70). When the disk fills, these lines find the cause.
+size limit ([#70](https://github.com/l7aromeo/user-memory/issues/70)). When the disk fills, these lines find the cause.
 
-## Per-store gates and caches (#57)
+## Per-store gates and caches ([#57](https://github.com/l7aromeo/user-memory/issues/57))
 
 Three things are single per process today: the write gate
 (`static WRITERS: Gate`, `src/memory/schema.rs:283`), the vector cache
@@ -352,12 +352,12 @@ flowchart LR
 
 Error paths:
 - **More active stores than the bound:** the least recently used is
-  evicted and reloads on its next search; results are unchanged (#57).
+  evicted and reloads on its next search; results are unchanged ([#57](https://github.com/l7aromeo/user-memory/issues/57)).
 - **A store's path changes** (`remove`, `restore`): its gate, cache slot
   and held connection go with the old path; see
   [Open points](#open-points).
 
-## An export's source (#69)
+## An export's source ([#69](https://github.com/l7aromeo/user-memory/issues/69))
 
 An export file gains a top-level field:
 
@@ -365,7 +365,7 @@ An export file gains a top-level field:
 "source": {"server": "SHA256:…", "store": "<store id>", "kind": "user", "id": "<user id>", "login": "github:alice"}
 ```
 
-- `server` is the server key's fingerprint (#58), or before keys exist,
+- `server` is the server key's fingerprint ([#58](https://github.com/l7aromeo/user-memory/issues/58)), or before keys exist,
   the store identity hash used for session snapshots.
 - `kind` is `user` now; a group's export later uses `kind: "group"`. A
   local store's export has `kind: "local"` and no id.
@@ -411,18 +411,18 @@ Error paths:
 Resolved by the user's decisions, and now in the issues:
 
 1. Every store the registry lists gets the start, hourly, quiet-hour and
-   last backup checks, in one sweep (#70).
-2. The registry gets the quiet-hour and shutdown checks too (#63).
+   last backup checks, in one sweep ([#70](https://github.com/l7aromeo/user-memory/issues/70)).
+2. The registry gets the quiet-hour and shutdown checks too ([#63](https://github.com/l7aromeo/user-memory/issues/63)).
 3. `enable` with an owner it can't resolve:
-   `github:alice could not be found at github.com; accounts stay off.` (#63)
-4. `disable` and `purge` refuse without a terminal (#63).
-5. `host users remove` refuses the owner; link another owner first (#63).
+   `github:alice could not be found at github.com; accounts stay off.` ([#63](https://github.com/l7aromeo/user-memory/issues/63))
+4. `disable` and `purge` refuse without a terminal ([#63](https://github.com/l7aromeo/user-memory/issues/63)).
+5. `host users remove` refuses the owner; link another owner first ([#63](https://github.com/l7aromeo/user-memory/issues/63)).
 6. A removed allow rule takes effect at the next membership check, or at
-   once for a `user:` rule (#63).
+   once for a `user:` rule ([#63](https://github.com/l7aromeo/user-memory/issues/63)).
 7. Restoring a registry backup that names a purged store marks that user
-   removed and lists them (#63).
+   removed and lists them ([#63](https://github.com/l7aromeo/user-memory/issues/63)).
 8. Restoring an older backup upgrades it after the swap, with its own
-   `.bak` (#70).
+   `.bak` ([#70](https://github.com/l7aromeo/user-memory/issues/70)).
 9. Gates and caches are keyed by store id when there's a registry, by
-   path without one (#57).
-10. Before #58, `source.server` uses the URL hash #61 uses (#69).
+   path without one ([#57](https://github.com/l7aromeo/user-memory/issues/57)).
+10. Before [#58](https://github.com/l7aromeo/user-memory/issues/58), `source.server` uses the URL hash [#61](https://github.com/l7aromeo/user-memory/issues/61) uses ([#69](https://github.com/l7aromeo/user-memory/issues/69)).
