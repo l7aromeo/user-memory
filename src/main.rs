@@ -863,6 +863,9 @@ async fn main() -> Result<()> {
             let settings = choice.settings()?;
             let home = setup::embedding_home()?;
             if matches!(home, setup::EmbeddingHome::Local) {
+                // Before the slow probe: a setting with nowhere to be kept
+                // is refused at once.
+                setup::check_saved_setup()?;
                 // Checked and calibrated before saving, so a failing endpoint
                 // leaves the setting as it was.
                 let prepared = memory::embedding::prepare(&db, &settings)?;
@@ -892,10 +895,23 @@ async fn main() -> Result<()> {
             }
         }
         Command::Embedding { command } => {
-            if setup::configured_remote()?.is_some() {
-                anyhow::bail!(
-                    "Run embedding commands on the memory server that owns the database, for example: docker compose exec memory user-memory embedding show"
-                );
+            let name = match command {
+                EmbeddingCommand::Show => "embedding show",
+                _ => "embedding sync",
+            };
+            match setup::embedding_home()? {
+                // The installer's Docker server here: its setting is beside
+                // compose.yaml, and its store in the container.
+                setup::EmbeddingHome::Docker(dir) => {
+                    if matches!(command, EmbeddingCommand::Show) {
+                        println!("{}", setup::docker_embedding_show(&dir)?);
+                    } else {
+                        setup::docker_embedding_sync(&dir)?;
+                    }
+                    return Ok(());
+                }
+                setup::EmbeddingHome::Remote(url) => return Err(on_the_server(&url, name)),
+                setup::EmbeddingHome::Local => {}
             }
             let settings = setup::embedding_settings();
             match command {

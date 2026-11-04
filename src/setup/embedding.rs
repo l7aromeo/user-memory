@@ -234,6 +234,84 @@ fn apply_docker_with(docker: &Path, dir: &Path, settings: &Settings) -> Result<S
     }
 }
 
+/// What `embedding show` prints on the machine that runs the installer's
+/// Docker server in `dir`: the setting from its embedding.env, then the
+/// container's own probe and calibration lines. When the container can't
+/// answer, Docker's reason goes to stderr and the command to run follows.
+pub(super) fn docker_show(dir: &Path) -> Result<String> {
+    let file = dir.join(DOCKER_ENV);
+    let settings = match fs::read_to_string(&file) {
+        Ok(text) => parse(&text, &file)?,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Settings::new(),
+        Err(err) => return Err(err).with_context(|| format!("Cannot read {}", file.display())),
+    };
+    let Some(url) = settings.get("USER_MEMORY_EMBED_URL") else {
+        return Ok("Embedding: off; search uses keywords only".into());
+    };
+    let mut lines = vec![endpoint_line(url)];
+    let model = settings.get("USER_MEMORY_EMBED_MODEL");
+    if let Some(model) = model {
+        lines.push(format!("Model: {model}"));
+    }
+    if settings.contains_key("USER_MEMORY_EMBED_API_KEY_FILE") {
+        lines.push("API key: in the server's volume".into());
+    }
+    let compose = Compose::new(dir.join("compose.yaml"));
+    let answered = compose.exec(&[], &["embedding", "show"]);
+    match answered {
+        Ok(out) if out.status.success() => {
+            // The container read the same file: its endpoint, and its model
+            // when the file names one, are already shown.
+            let own = String::from_utf8_lossy(&out.stdout);
+            lines.extend(
+                own.lines()
+                    .filter(|line| {
+                        !line.starts_with("Endpoint: ")
+                            && !(model.is_some() && line.starts_with("Model: "))
+                    })
+                    .map(str::to_owned),
+            );
+        }
+        answered => {
+            match answered {
+                Ok(out) => eprint!("{}", String::from_utf8_lossy(&out.stderr)),
+                Err(err) => eprintln!("{err:#}"),
+            }
+            lines.push(format!(
+                "Probe and stored vectors: {}",
+                compose.exec_hint("embedding show")
+            ));
+        }
+    }
+    Ok(lines.join("\n"))
+}
+
+/// The endpoint line for `url` as embedding.env holds it, which is how the
+/// container reaches it: the host gateway is this machine.
+fn endpoint_line(url: &str) -> String {
+    let here = reqwest::Url::parse(url)
+        .ok()
+        .is_some_and(|url| url.host_str() == Some(DOCKER_HOST));
+    if here {
+        format!("Endpoint: {url} (this machine, as the Docker server reaches it)")
+    } else {
+        format!("Endpoint: {url}")
+    }
+}
+
+/// `embedding sync` in the installer's Docker server in `dir`, with its
+/// output shown as it comes.
+pub(super) fn docker_sync(dir: &Path) -> Result<()> {
+    Compose::new(dir.join("compose.yaml")).run(&[
+        "exec",
+        "-T",
+        crate::server::compose::SERVICE,
+        "user-memory",
+        "embedding",
+        "sync",
+    ])
+}
+
 /// Replaces `file` with `text` in one rename.
 fn write_atomically(file: &Path, text: &str) -> Result<()> {
     let temporary = file.with_extension(format!("{}", std::process::id()));

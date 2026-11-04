@@ -5,7 +5,7 @@
 //! they keep the questions about installing, the downloads and the checksum
 //! checks.
 
-mod compose;
+pub mod compose;
 
 pub use compose::Compose;
 

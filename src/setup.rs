@@ -223,6 +223,30 @@ pub fn embedding_home() -> Result<EmbeddingHome> {
     })
 }
 
+/// Why a store on this machine can't take an embedding setting: no saved
+/// setup to keep it in, as inside the installer's Docker server, whose
+/// setting is kept on the machine that runs it.
+const NO_SAVED_SETUP: &str = "No saved setup beside this binary to keep the embedding setting in. On the installer's Docker server, run `user-memory embedding set` on the machine that runs the container, which keeps the setting in its embedding.env; otherwise run `user-memory setup` first";
+
+/// Fails, before anything slow, when a store on this machine has no saved
+/// setup to keep an embedding setting in.
+pub fn check_saved_setup() -> Result<()> {
+    let directory = current_directory().context("Cannot locate this binary")?;
+    installation(&directory)?.context(NO_SAVED_SETUP)?;
+    Ok(())
+}
+
+/// What `embedding show` prints on the machine that runs the installer's
+/// Docker server in `dir`.
+pub fn docker_embedding_show(dir: &Path) -> Result<String> {
+    embedding::docker_show(dir)
+}
+
+/// `embedding sync` in the installer's Docker server in `dir`.
+pub fn docker_embedding_sync(dir: &Path) -> Result<()> {
+    embedding::docker_sync(dir)
+}
+
 /// Saves `settings` (empty for keyword search only) where the store lives
 /// and applies them, returning what to tell the user. A store on this
 /// machine keeps them in the saved setup; the installer's Docker server is
@@ -237,8 +261,7 @@ pub fn apply_embedding(
     match home {
         EmbeddingHome::Local => {
             let directory = current_directory().context("Cannot locate this binary")?;
-            let mut saved = installation(&directory)?
-                .context("No saved setup beside this binary; run user-memory setup first")?;
+            let mut saved = installation(&directory)?.context(NO_SAVED_SETUP)?;
             saved.embedding = settings.clone();
             write_installation(&directory, &saved)?;
             let shadowed: Vec<&str> = embedding::SETTINGS

@@ -362,7 +362,8 @@ fn commands(value: &serde_json::Value, found: &mut Vec<String>) {
 /// port, `compose stop` and `down` stop it and wait for it to exit, `compose cp` copies its token out, and a
 /// one-off container's shell runs with the store folder `$HOME/server` as
 /// `/data`. `$HOME/docker-down` makes `docker info` fail; `$HOME/docker-ps`
-/// is what `docker ps` prints.
+/// is what `docker ps` prints. `compose exec … user-memory embedding show`
+/// runs a real `$FAKE_HOST embedding show` on that store.
 fn docker(args: &[String]) -> u8 {
     log(&at("docker.log"), args);
     match args.first().map_or("", String::as_str) {
@@ -400,6 +401,35 @@ fn compose(args: &[String]) -> u8 {
             eprintln!("The embedding endpoint did not answer the probe");
             return 1;
         }
+    } else if all
+        .find(" exec ")
+        .is_some_and(|at| all[at..].contains(" user-memory embedding show "))
+    {
+        // The container's own `embedding show`, with the settings compose
+        // gives it from embedding.env. `$HOME/container-down` stands for a
+        // container that isn't running.
+        if at("container-down").exists() {
+            eprintln!("service \"memory\" is not running");
+            return 1;
+        }
+        fs::create_dir_all(&server).unwrap();
+        let settings = Path::new(&file).with_file_name("embedding.env");
+        let mut command = Command::new(host());
+        command
+            .args(["embedding", "show"])
+            .env("USER_MEMORY_DB", server.join("memories.sqlite3"))
+            .env_remove("USER_MEMORY_URL")
+            .env_remove("USER_MEMORY_TOKEN_FILE");
+        for line in fs::read_to_string(settings).unwrap_or_default().lines() {
+            if let Some((name, value)) = line.split_once('=') {
+                command.env(name, value);
+            }
+        }
+        let status = command.status().unwrap();
+        return status
+            .code()
+            .and_then(|code| u8::try_from(code).ok())
+            .unwrap_or(1);
     } else if all.contains(" --entrypoint sh memory -c ") {
         // A one-off container's shell, with the store folder as /data. The
         // script's own exit status is ignored, as the shell fake's was.
