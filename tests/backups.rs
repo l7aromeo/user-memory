@@ -13,14 +13,17 @@ use sandbox::Sandboxed;
 #[path = "support/time.rs"]
 mod time;
 use time::STUCK;
+#[path = "support/session.rs"]
+mod session;
+use session::Serve;
 
 use rusqlite::{Connection, OpenFlags};
-use serde_json::{Value, json};
+use serde_json::json;
 use std::{
     fs,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader},
     path::{Path, PathBuf},
-    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+    process::{Child, Command, Stdio},
     time::{Duration, Instant, SystemTime},
 };
 use tempfile::{TempDir, tempdir};
@@ -134,80 +137,20 @@ fn wait_while_running(server: &mut Child, what: &str, done: impl Fn() -> bool) {
     }
 }
 
-/// A `user-memory serve` of `store`, with the extra environment `env`.
-struct Serve {
-    child: Child,
-    input: Option<ChildStdin>,
-    output: BufReader<ChildStdout>,
-    next_id: u64,
-}
-
 impl Serve {
+    /// A `user-memory serve` of `store`, with the extra environment `env`.
     fn start(store: &Store, env: &[(&str, &str)]) -> Self {
         let mut command = store.command(&["serve"]);
         command.envs(env.iter().copied());
-        let mut child = command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let input = child.stdin.take();
-        let output = BufReader::new(child.stdout.take().unwrap());
-        let mut serve = Self {
-            child,
-            input,
-            output,
-            next_id: 1,
-        };
-        serve.ask(
-            "initialize",
-            json!({"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}),
-        );
-        serve.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
-        serve
-    }
-
-    fn send(&mut self, message: Value) {
-        let input = self.input.as_mut().unwrap();
-        writeln!(input, "{message}").unwrap();
-        input.flush().unwrap();
-    }
-
-    fn ask(&mut self, method: &str, params: Value) -> Value {
-        let id = self.next_id;
-        self.next_id += 1;
-        self.send(json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}));
-        loop {
-            let mut line = String::new();
-            assert!(
-                self.output.read_line(&mut line).unwrap() > 0,
-                "serve closed"
-            );
-            let message: Value = serde_json::from_str(&line).unwrap();
-            if message["id"] == id {
-                return message["result"].clone();
-            }
-        }
+        Self::spawn(command)
     }
 
     fn record(&mut self, content: &str) {
-        let result = self.ask(
-            "tools/call",
-            json!({"name":"record","arguments":{"category":"tooling","title":content,"content":content,"scope":"global","user_confirmed":true}}),
+        let reply = self.call(
+            "record",
+            json!({"category":"tooling","title":content,"content":content,"scope":"global","user_confirmed":true}),
         );
-        let reply: Value =
-            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(reply["stored"], true, "{reply}");
-    }
-
-    /// Ends the session as a client does, closing the server's input, and
-    /// returns what the server wrote to stderr.
-    fn close(mut self) -> String {
-        drop(self.input.take());
-        let out = time::finish(self.child, "serve");
-        assert!(out.status.success(), "{out:?}");
-        String::from_utf8_lossy(&out.stderr).into_owned()
     }
 }
 
