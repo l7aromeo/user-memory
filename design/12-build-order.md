@@ -82,6 +82,7 @@ flowchart LR
     I68 --> I73
     I62 --> I72
     I64 --> I72
+    I97 --> I72
     I72 --> I74
     I58 --> I68
     I67 --> I62
@@ -118,8 +119,9 @@ order in [#56](https://github.com/l7aromeo/user-memory/issues/56).
 | 3 | [#61](https://github.com/l7aromeo/user-memory/issues/61), [#64](https://github.com/l7aromeo/user-memory/issues/64), [#68](https://github.com/l7aromeo/user-memory/issues/68), [#70](https://github.com/l7aromeo/user-memory/issues/70) | Switching; GitHub sign-in; connect links; per-user operations | [#60](https://github.com/l7aromeo/user-memory/issues/60) ([#61](https://github.com/l7aromeo/user-memory/issues/61), [#68](https://github.com/l7aromeo/user-memory/issues/68)); [#58](https://github.com/l7aromeo/user-memory/issues/58) and [#63](https://github.com/l7aromeo/user-memory/issues/63) ([#64](https://github.com/l7aromeo/user-memory/issues/64)); [#63](https://github.com/l7aromeo/user-memory/issues/63) ([#70](https://github.com/l7aromeo/user-memory/issues/70)) |
 | 4 | [#65](https://github.com/l7aromeo/user-memory/issues/65), [#66](https://github.com/l7aromeo/user-memory/issues/66), [#67](https://github.com/l7aromeo/user-memory/issues/67), [#71](https://github.com/l7aromeo/user-memory/issues/71), [#73](https://github.com/l7aromeo/user-memory/issues/73) | GitLab; membership; linked identities; uninstall sign-out; the accounts guide | [#64](https://github.com/l7aromeo/user-memory/issues/64) ([#65](https://github.com/l7aromeo/user-memory/issues/65), [#66](https://github.com/l7aromeo/user-memory/issues/66), [#71](https://github.com/l7aromeo/user-memory/issues/71) with [#60](https://github.com/l7aromeo/user-memory/issues/60)); [#64](https://github.com/l7aromeo/user-memory/issues/64) and [#43](https://github.com/l7aromeo/user-memory/issues/43) ([#67](https://github.com/l7aromeo/user-memory/issues/67)); [#63](https://github.com/l7aromeo/user-memory/issues/63), [#64](https://github.com/l7aromeo/user-memory/issues/64) and [#68](https://github.com/l7aromeo/user-memory/issues/68) ([#73](https://github.com/l7aromeo/user-memory/issues/73)) |
 | 5 | [#62](https://github.com/l7aromeo/user-memory/issues/62) | Confirmation by prompt, with every phrase | [#61](https://github.com/l7aromeo/user-memory/issues/61) and [#67](https://github.com/l7aromeo/user-memory/issues/67) |
-| 6 | [#72](https://github.com/l7aromeo/user-memory/issues/72), [#53](https://github.com/l7aromeo/user-memory/issues/53), [#97](https://github.com/l7aromeo/user-memory/issues/97) | The servers playbook; the rule dialog; copying a local store | [#62](https://github.com/l7aromeo/user-memory/issues/62) and [#64](https://github.com/l7aromeo/user-memory/issues/64) ([#72](https://github.com/l7aromeo/user-memory/issues/72)); [#62](https://github.com/l7aromeo/user-memory/issues/62) ([#53](https://github.com/l7aromeo/user-memory/issues/53)); [#60](https://github.com/l7aromeo/user-memory/issues/60), [#43](https://github.com/l7aromeo/user-memory/issues/43) and [#62](https://github.com/l7aromeo/user-memory/issues/62) ([#97](https://github.com/l7aromeo/user-memory/issues/97)) |
-| 7 | [#74](https://github.com/l7aromeo/user-memory/issues/74) | Evaluations | [#72](https://github.com/l7aromeo/user-memory/issues/72), [#62](https://github.com/l7aromeo/user-memory/issues/62) and [#96](https://github.com/l7aromeo/user-memory/issues/96) |
+| 6 | [#53](https://github.com/l7aromeo/user-memory/issues/53), [#97](https://github.com/l7aromeo/user-memory/issues/97) | The rule dialog; copying a local store | [#62](https://github.com/l7aromeo/user-memory/issues/62) ([#53](https://github.com/l7aromeo/user-memory/issues/53)); [#60](https://github.com/l7aromeo/user-memory/issues/60), [#43](https://github.com/l7aromeo/user-memory/issues/43) and [#62](https://github.com/l7aromeo/user-memory/issues/62) ([#97](https://github.com/l7aromeo/user-memory/issues/97)) |
+| 7 | [#72](https://github.com/l7aromeo/user-memory/issues/72) | The servers playbook | [#62](https://github.com/l7aromeo/user-memory/issues/62), [#64](https://github.com/l7aromeo/user-memory/issues/64) and [#97](https://github.com/l7aromeo/user-memory/issues/97) |
+| 8 | [#74](https://github.com/l7aromeo/user-memory/issues/74) | Evaluations | [#72](https://github.com/l7aromeo/user-memory/issues/72), [#62](https://github.com/l7aromeo/user-memory/issues/62) and [#96](https://github.com/l7aromeo/user-memory/issues/96) |
 | any | [#96](https://github.com/l7aromeo/user-memory/issues/96) | The evaluation harness | v0.10.0's [#46](https://github.com/l7aromeo/user-memory/issues/46); each part as the feature it tests lands |
 | unscheduled | [#54](https://github.com/l7aromeo/user-memory/issues/54) | Hermes and Pi research | Any time |
 
@@ -182,9 +184,9 @@ playbook ([#72](https://github.com/l7aromeo/user-memory/issues/72)) for a second
 | [#69](https://github.com/l7aromeo/user-memory/issues/69) | any | v0.11.0 | none | [04](04-accounts-mode.md) |
 | [#70](https://github.com/l7aromeo/user-memory/issues/70) | 3 | v0.11.0 | [#63](https://github.com/l7aromeo/user-memory/issues/63) | [04](04-accounts-mode.md) |
 | [#71](https://github.com/l7aromeo/user-memory/issues/71) | 4 | v0.11.0 | [#60](https://github.com/l7aromeo/user-memory/issues/60), [#64](https://github.com/l7aromeo/user-memory/issues/64) | [05](05-remotes-and-switching.md) |
-| [#72](https://github.com/l7aromeo/user-memory/issues/72) | 6 | v0.11.0 | [#62](https://github.com/l7aromeo/user-memory/issues/62), [#64](https://github.com/l7aromeo/user-memory/issues/64) | [11](11-skill-docs-evals.md) |
+| [#72](https://github.com/l7aromeo/user-memory/issues/72) | 7 | v0.11.0 | [#62](https://github.com/l7aromeo/user-memory/issues/62), [#64](https://github.com/l7aromeo/user-memory/issues/64), [#97](https://github.com/l7aromeo/user-memory/issues/97) | [11](11-skill-docs-evals.md) |
 | [#73](https://github.com/l7aromeo/user-memory/issues/73) | 4 | v0.11.0 | [#64](https://github.com/l7aromeo/user-memory/issues/64), [#68](https://github.com/l7aromeo/user-memory/issues/68), [#63](https://github.com/l7aromeo/user-memory/issues/63) | [11](11-skill-docs-evals.md) |
-| [#74](https://github.com/l7aromeo/user-memory/issues/74) | 7 | v0.11.0 | [#72](https://github.com/l7aromeo/user-memory/issues/72), [#96](https://github.com/l7aromeo/user-memory/issues/96) | [11](11-skill-docs-evals.md) |
+| [#74](https://github.com/l7aromeo/user-memory/issues/74) | 8 | v0.11.0 | [#72](https://github.com/l7aromeo/user-memory/issues/72), [#96](https://github.com/l7aromeo/user-memory/issues/96) | [11](11-skill-docs-evals.md) |
 | [#96](https://github.com/l7aromeo/user-memory/issues/96) | any | v0.11.0 | none | [11](11-skill-docs-evals.md) |
 | [#97](https://github.com/l7aromeo/user-memory/issues/97) | 6 | v0.11.0 | [#60](https://github.com/l7aromeo/user-memory/issues/60), [#43](https://github.com/l7aromeo/user-memory/issues/43), [#62](https://github.com/l7aromeo/user-memory/issues/62) | [11](11-skill-docs-evals.md) |
 
@@ -211,10 +213,8 @@ Still open:
 1. **[#54](https://github.com/l7aromeo/user-memory/issues/54)** stays unscheduled: the Hermes Agent and Pi questions in
    [10](10-agent-integrations.md) wait for trials and a design issue per
    app.
-2. **[#72](https://github.com/l7aromeo/user-memory/issues/72)'s "move memories" note** ([11](11-skill-docs-evals.md) open
-   point 3): the playbook should say an export on a client is written on
-   that machine, and use [#97](https://github.com/l7aromeo/user-memory/issues/97)'s `remote copy` for a local store. [#72](https://github.com/l7aromeo/user-memory/issues/72) has no
-   owner yet.
-3. **[#67](https://github.com/l7aromeo/user-memory/issues/67)'s confirmation line** still says "at a terminal or by [#62](https://github.com/l7aromeo/user-memory/issues/62)'s
-   phrase"; it should say "through [#62](https://github.com/l7aromeo/user-memory/issues/62)'s confirmation", as [#60](https://github.com/l7aromeo/user-memory/issues/60), [#61](https://github.com/l7aromeo/user-memory/issues/61) and
-   [#64](https://github.com/l7aromeo/user-memory/issues/64) now do.
+
+Settled since, in the issues: [#67](https://github.com/l7aromeo/user-memory/issues/67) now says `link`, `unlink` and
+`delete` go through [#62](https://github.com/l7aromeo/user-memory/issues/62)'s confirmation, and [#72](https://github.com/l7aromeo/user-memory/issues/72)'s playbook says an
+export on a client is written on that machine and uses [#97](https://github.com/l7aromeo/user-memory/issues/97)'s
+`remote copy` for a local store ([#72](https://github.com/l7aromeo/user-memory/issues/72) ← [#97](https://github.com/l7aromeo/user-memory/issues/97) added).

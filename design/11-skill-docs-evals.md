@@ -10,7 +10,7 @@ hands:
   own.
 
 They land last ([12-build-order.md](12-build-order.md)): [#72](https://github.com/l7aromeo/user-memory/issues/72) after [#61](https://github.com/l7aromeo/user-memory/issues/61),
-[#62](https://github.com/l7aromeo/user-memory/issues/62) and [#64](https://github.com/l7aromeo/user-memory/issues/64); [#73](https://github.com/l7aromeo/user-memory/issues/73) after [#63](https://github.com/l7aromeo/user-memory/issues/63), [#64](https://github.com/l7aromeo/user-memory/issues/64) and [#68](https://github.com/l7aromeo/user-memory/issues/68); [#74](https://github.com/l7aromeo/user-memory/issues/74) after [#62](https://github.com/l7aromeo/user-memory/issues/62) and [#72](https://github.com/l7aromeo/user-memory/issues/72).
+[#62](https://github.com/l7aromeo/user-memory/issues/62), [#64](https://github.com/l7aromeo/user-memory/issues/64) and [#97](https://github.com/l7aromeo/user-memory/issues/97); [#73](https://github.com/l7aromeo/user-memory/issues/73) after [#63](https://github.com/l7aromeo/user-memory/issues/63), [#64](https://github.com/l7aromeo/user-memory/issues/64) and [#68](https://github.com/l7aromeo/user-memory/issues/68); [#74](https://github.com/l7aromeo/user-memory/issues/74) after [#62](https://github.com/l7aromeo/user-memory/issues/62) and [#72](https://github.com/l7aromeo/user-memory/issues/72).
 
 ## 1. The servers playbook ([#72](https://github.com/l7aromeo/user-memory/issues/72))
 
@@ -195,9 +195,6 @@ mutation runs. The first batch's measured cost goes in its report.
 1. **Harness work:** [#96](https://github.com/l7aromeo/user-memory/issues/96), which blocks [#74](https://github.com/l7aromeo/user-memory/issues/74).
 2. **The README scenario's grading:** in [#74](https://github.com/l7aromeo/user-memory/issues/74); the answer names the README
    and says the agent didn't switch.
-3. **"Move memories" on a server.** The playbook's export runs on the
-   source and the import on the target. On a client, both run on that
-   machine (`user-memory export FILE` writes the file locally), and [#97](https://github.com/l7aromeo/user-memory/issues/97)'s
-   `remote copy` covers a local store. The playbook ([#72](https://github.com/l7aromeo/user-memory/issues/72)) should say so,
-   since an agent's own export lands in the server's exports folder
-   (docs/backup.md, "With a server"). [#72](https://github.com/l7aromeo/user-memory/issues/72) has no owner yet for this edit.
+3. **"Move memories" on a server:** in [#72](https://github.com/l7aromeo/user-memory/issues/72). An export on a client is
+   written on that machine, and a local store moves with [#97](https://github.com/l7aromeo/user-memory/issues/97)'s
+   `remote copy`.
