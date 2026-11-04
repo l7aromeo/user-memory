@@ -294,10 +294,11 @@ impl Drop for Turn {
     }
 }
 
-/// How long a writer waits for the store: for another process's write turn,
-/// and as SQLite's busy timeout for SQLite's own locks. Writers queue fairly,
-/// so a writer waits out only those ahead of it. Each commit waits until the
-/// disk has its data, as full durability needs: a few milliseconds on a
+/// How long a writer waits at each stage of taking the store: its process's
+/// turn, another process's write turn, and, as SQLite's busy timeout,
+/// SQLite's own locks. Writers take turns in no promised order, and the
+/// bound holds per stage, not for the whole write. Each commit waits until
+/// the disk has its data, as full durability needs: a few milliseconds on a
 /// working disk, seconds on a slow, busy one, where 5 s was too short for a
 /// queue of eight. Past this the writer holding the turn has stalled.
 pub(crate) const BUSY: Duration = Duration::from_secs(30);

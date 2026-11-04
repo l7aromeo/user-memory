@@ -46,24 +46,25 @@ rollback journal mode.
 
 Writers take turns. Within a process they queue for the store; across
 processes, such as one server per agent session plus the command line, each
-writer first takes an exclusive `flock` lock on `<store>.lock` beside the
-store (mode 0600, created with it and kept), and releases it when its
-transaction ends. The queue is fair, so a writer waits out only those ahead
-of it, for at most 30 seconds, which is also SQLite's busy timeout. Each
-commit waits until the disk has its data, which keeps every write durable
-and on a slow, busy disk can take seconds. Past the 30 seconds a write fails
-with "database is locked: another process kept its write turn on the store
-for 30 s", or, when it is still queued behind another write of its own
-process, "database is locked: another write in this process kept its write
-turn on the store for 30 s". Once the log passes about 4 MB, the commit that finds it so
-copies it into the store after passing its turn on, so that copy never holds
-up other writers; SQLite's own copy inside the commit is off. A copy that
-fails is reported on stderr and retried by the next commit; the write it
-followed has succeeded. Readers take
-no lock. A server does its store work apart from the threads that read
+writer first takes an exclusive lock on `<store>.lock` beside the store
+(`flock` on Unix, `LockFileEx` on Windows; owner-only, created with it and
+kept), and releases it when its transaction ends. No order is promised,
+within a process or across processes. A writer waits at most 30 seconds at
+each stage: its process's turn, the store's lock file, and SQLite's own lock
+(its busy timeout). Each commit waits until the disk has its data, which
+keeps every write durable and on a slow, busy disk can take seconds. Past
+the 30 seconds a write fails with "database is locked: another process kept
+its write turn on the store for 30 s", or, when it is still queued behind
+another write of its own process, "database is locked: another write in this
+process kept its write turn on the store for 30 s". Once the log passes
+about 4 MB, the commit that finds it so copies it into the store after
+passing its turn on, so that copy never holds up other writers; SQLite's own
+copy inside the commit is off. A copy that fails is reported on stderr and
+retried by the next commit; the write it followed has succeeded. Readers
+take no lock. A server does its store work apart from the threads that read
 requests and send replies, so while its writes wait it goes on answering
-other calls, reads at once. The lock file holds nothing: restoring a backup leaves it as it
-is, and uninstall with `--purge` deletes it with the store.
+other calls, reads at once. The lock file holds nothing: restoring a backup
+leaves it as it is, and uninstall with `--purge` deletes it with the store.
 
 ## The keyword index
 
