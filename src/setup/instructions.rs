@@ -449,6 +449,13 @@ fn update(path: &Path, next: impl Fn(Option<&str>) -> Result<Next>) -> Result<Ch
     update_reading(path, read, next)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// When the latest write on this thread stopped waiting for its file
+    /// to go quiet, so a test can bound the wait apart from the write.
+    static WAIT_ENDED: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
 /// [`update`] with the file read by `read`, so a test can change the file
 /// at an exact point of a write.
 fn update_reading(
@@ -478,6 +485,8 @@ fn update_reading(
             std::thread::sleep(wait.min(deadline.saturating_duration_since(Instant::now())));
             continue;
         }
+        #[cfg(test)]
+        WAIT_ENDED.set(Some(Instant::now()));
         let next = next?;
         if !matches!(next, Next::Keep) && is_link(path) {
             return Err(linked(path));
@@ -1287,16 +1296,22 @@ mod tests {
             )
             .unwrap();
             let before = changed(&path);
+            WAIT_ENDED.set(None);
             let started = Instant::now();
             let change = if remove {
                 remove_codex(&path).map(|_| Change::Written)
             } else {
                 write_codex(&path, &rules("b"))
             };
-            let waited = started.elapsed();
             assert_eq!(change.unwrap(), Change::Written);
             assert_waited(before, if remove { "remove" } else { "write" });
-            assert!(waited < WAIT_LIMIT, "{waited:?}");
+            // WAIT_LIMIT bounds the wait, not the write after it, which a
+            // loaded runner can stall.
+            let waited = WAIT_ENDED.get().unwrap().duration_since(started);
+            assert!(
+                waited < WAIT_LIMIT,
+                "stopped waiting {waited:?} after the call"
+            );
             let text = fs::read_to_string(&path).unwrap();
             assert!(text.ends_with("# Mine, again\n"), "{text:?}");
             assert_eq!(text.contains(&rules("b")), !remove, "{text:?}");
