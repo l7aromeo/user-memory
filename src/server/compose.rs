@@ -10,15 +10,21 @@ use std::{
 /// The server's service in compose.yaml.
 pub const SERVICE: &str = "memory";
 
+/// The Docker command the installers and the user's shell run: the first
+/// `docker` on PATH, or the bare name, which then fails as not found.
+pub fn docker() -> PathBuf {
+    crate::setup::on_path("docker").unwrap_or_else(|| PathBuf::from("docker"))
+}
+
 pub struct Compose {
     docker: PathBuf,
     file: PathBuf,
 }
 
 impl Compose {
-    /// `docker` on PATH, for the project whose compose.yaml is `file`.
+    /// [`docker`]'s Docker, for the project whose compose.yaml is `file`.
     pub fn new(file: PathBuf) -> Self {
-        Self::with_docker(PathBuf::from("docker"), file)
+        Self::with_docker(docker(), file)
     }
 
     /// [`Compose::new`] with `docker` as the Docker command.
