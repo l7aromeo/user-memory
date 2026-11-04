@@ -49,6 +49,8 @@ Restore or import:
 
 Moving memories between machines needs the CLI: agents cannot reach files outside the exports directory. The same commands work on a local install and on a client connected to a server, where the file is written or read on the client's machine.
 
+An export is plain JSON that user-memory doesn't encrypt. When it goes to another machine, tell the user to move it over an encrypted channel, such as scp, or to encrypt it first with a tool they trust, and to delete the copy once it is imported.
+
 To export or import part of the memories, add read's filters: `--scope`, `--project`, `--category`, `--type`, `--source`, `--status` (every status unless given) and `--origin`. A filtered import skips a pattern whose supporting memories are neither imported with it nor already stored, and counts it in `skipped.unsupported_inferences`.
 
 On this machine, a local install or a client of a server alike (`--project .` names this folder's project):
