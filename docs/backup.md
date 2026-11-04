@@ -20,7 +20,9 @@ beside it: `~/.local/share/user-memory/backups/memories-<UTC date>.sqlite3`
 (on Windows `%LOCALAPPDATA%\user-memory\backups\`), readable only by you. The newest 7 are kept; older ones are deleted.
 Changes followed by a quiet stretch don't wait for the next day's change:
 the server your agent runs copies them once the store has had no change for
-an hour, and as the session ends, replacing that day's backup. Nothing runs
+an hour, and as the session ends, replacing that day's backup. A program
+reading that backup then, such as `backup list`, delays the replace by up to
+two seconds, since Windows can't replace a file while it's open. Nothing runs
 on a schedule, so a store that hasn't changed since its newest backup gets
 no new one. A backup that fails never stops the change;
 [doctor](troubleshooting.md#from-doctor) reports it.
