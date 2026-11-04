@@ -135,6 +135,56 @@ fn a_file_export_restores_into_a_fresh_store_after_a_preview() {
 }
 
 // In Docker the export travels through stdout and back in through stdin.
+// A file written before this field existed, or by a version that ignores it,
+// imports the same with or without `source`.
+#[test]
+fn an_export_with_a_source_imports_like_one_without() {
+    let s = Store::new();
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/export/with-source.json");
+    let mut stripped: Value = serde_json::from_slice(&fs::read(&fixture).unwrap()).unwrap();
+    stripped.as_object_mut().unwrap().remove("source");
+    let bare = s.root.path().join("bare.json");
+    fs::write(&bare, stripped.to_string()).unwrap();
+    let with = s.value(&["import", fixture.to_str().unwrap()]);
+    let mut without = s.value(&["import", bare.to_str().unwrap()]);
+    assert!(
+        with["source"].is_object() && with["source_note"].is_string(),
+        "{with}"
+    );
+    assert!(without.get("source").is_none() && without.get("source_note").is_none());
+    let mut with = with;
+    with.as_object_mut().unwrap().remove("source");
+    with.as_object_mut().unwrap().remove("source_note");
+    without.as_object_mut().unwrap().remove("source");
+    assert_eq!(with, without);
+}
+
+// An export names its store; importing another store's file says so, and
+// importing a store's own file does not.
+#[test]
+fn export_names_its_source_and_import_of_another_stores_file_says_so() {
+    let (a, b) = (Store::new(), Store::new());
+    a.seed();
+    let file = a.root.path().join("a.json");
+    a.ok(&["export", file.to_str().unwrap()]);
+    let document: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    assert_eq!(document["format_version"], 2);
+    assert_eq!(document["source"]["kind"], "local");
+    let elsewhere = b.value(&["import", file.to_str().unwrap()]);
+    assert_eq!(elsewhere["source"], document["source"]);
+    assert!(
+        elsewhere["source_note"]
+            .as_str()
+            .unwrap()
+            .starts_with("This export came from a different memory store"),
+        "{elsewhere}"
+    );
+    let own = a.value(&["import", file.to_str().unwrap()]);
+    assert_eq!(own["source"], document["source"]);
+    assert!(own.get("source_note").is_none(), "{own}");
+}
+
 #[test]
 fn stdio_export_and_import_round_trip_with_the_summary_on_stderr() {
     let s = Store::new();
