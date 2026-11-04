@@ -238,6 +238,41 @@ fn a_running_server_replaces_todays_backup_once_the_store_is_quiet() {
     assert_eq!(memories(&store.backup(0)), 2);
 }
 
+// A backup that failed holds off the next checks for RETRY, but not the
+// last one as the session ends: a native store has no server again until
+// the next session, so its changes would miss every backup until then.
+#[test]
+fn a_session_ending_after_a_failed_backup_still_backs_up() {
+    let root = tempdir().unwrap();
+    let store = Store {
+        db: root.path().join("memory.sqlite3"),
+        root,
+    };
+    fs::create_dir_all(store.backup(0)).unwrap();
+    store.record_on_the_command_line("Uses zsh for every shell session");
+    let note = store.db.with_file_name("backups").join("last-failure");
+    fs::remove_file(&note).unwrap();
+    let mut serve = Serve::start(
+        &store,
+        &[
+            ("USER_MEMORY_BACKUP_QUIET_MS", "0"),
+            ("USER_MEMORY_BACKUP_CHECK_MS", "20"),
+        ],
+    );
+    wait_while_running(&mut serve.child, "failed backup", || note.is_file());
+    // What made it fail is gone before the session ends.
+    fs::remove_dir(store.backup(0)).unwrap();
+    let stderr = serve.close();
+    assert_eq!(
+        stderr.matches("the automatic backup of").count(),
+        1,
+        "{stderr}"
+    );
+    assert_eq!(store.backups(), [store.backup(0)]);
+    assert_eq!(memories(&store.backup(0)), 1);
+    assert!(!note.exists());
+}
+
 // A reader holding today's backup as the quiet check replaces it, as
 // `backup list` does while it counts each backup's memories, delays the
 // replace instead of failing it: Windows refuses to rename over a file
