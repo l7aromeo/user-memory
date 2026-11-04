@@ -266,12 +266,30 @@ async fn authenticate(State(token): State<String>, request: Request, next: Next)
     next.run(request).await
 }
 
+/// Resolves when the process is asked to stop: Ctrl-C (SIGINT, which the
+/// Docker server's compose file sends) everywhere, and SIGTERM on Unix.
+pub async fn stopped() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        if let Ok(mut terminate) = signal(SignalKind::terminate()) {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = terminate.recv() => {}
+            }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
+}
+
 pub async fn host(options: HostOptions) -> Result<()> {
     let db = options.db.unwrap_or_else(crate::db_path);
-    let _held = crate::memory::hold(&db);
     if !db.is_absolute() {
         bail!("Server database must use an absolute path");
     }
+    let backups = crate::memory::backups::watch(&db);
+    let held = crate::memory::hold(&db);
     let token = host_token(&options.token_file)?;
     crate::connect(&db)?;
     let listener = tokio::net::TcpListener::bind(options.listen).await?;
@@ -321,10 +339,13 @@ pub async fn host(options: HostOptions) -> Result<()> {
     eprintln!("Access-token file: {}", options.token_file.display());
     axum::serve(listener, router)
         .with_graceful_shutdown(async move {
-            let _ = tokio::signal::ctrl_c().await;
+            stopped().await;
             shutdown.cancel();
         })
         .await?;
+    // As `serve` does: the log goes into the store before the last check.
+    drop(held);
+    drop(backups);
     Ok(())
 }
 

@@ -17,10 +17,13 @@ server, see [back up and restore](server.md#back-up-and-restore).
 The store backs itself up once a day. The first change to your memories
 once the newest backup is a day old copies the store into a `backups` folder
 beside it: `~/.local/share/user-memory/backups/memories-<UTC date>.sqlite3`
-(on Windows `%LOCALAPPDATA%\user-memory\backups\`), readable only by you. The newest 7 are kept; older ones are deleted. Nothing
-runs on a schedule, so a day without changes makes no backup. A backup that
-fails never stops the change; [doctor](troubleshooting.md#from-doctor) reports
-it.
+(on Windows `%LOCALAPPDATA%\user-memory\backups\`), readable only by you. The newest 7 are kept; older ones are deleted.
+Changes followed by a quiet stretch don't wait for the next day's change:
+the server your agent runs copies them once the store has had no change for
+an hour, and as the session ends, replacing that day's backup. Nothing runs
+on a schedule, so a store that hasn't changed since its newest backup gets
+no new one. A backup that fails never stops the change;
+[doctor](troubleshooting.md#from-doctor) reports it.
 
 ```bash
 user-memory backup list

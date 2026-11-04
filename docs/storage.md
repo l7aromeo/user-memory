@@ -124,6 +124,21 @@ update, forget, import, links, re-indexing and `project move`. Setup makes
 one too when the store has memories, so an upgraded store has one at once.
 A store without memories gets none.
 
+A server (`serve` for each agent session, `host` for a shared server) also
+checks, on a thread of its own beside its work: when it starts, every hour
+while it runs (`CHECK_EVERY`), and as it stops, on its input closing, Ctrl-C
+or, on Unix, SIGTERM. A check makes a backup when the store or its log was
+written after the newest backup and either that backup is 24 hours old or
+the store has had no change for an hour (`QUIET`); the check as it stops
+needs no quiet hour, since no server may look again for days. A backup made
+the same day replaces that day's file, so it uses no rotation slot. A store
+unchanged since its newest backup never gets one, so copies of the same
+memories never rotate distinct older backups out. The server closes its
+connection, whose log goes into the store, before that last check, and
+waits for it at most 5 seconds (`SHUTDOWN_WAIT`); a copy cut short is left
+as a partial file. Several servers of one store may check at once: each copy
+is renamed into place, so the newest wins.
+
 Each copy is taken like migrate's: SQLite's online backup from a read-only
 connection, so it includes writes still in the log, into
 `.<name>.partial-<process id>` in the folder, converted to the rollback

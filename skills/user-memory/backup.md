@@ -4,7 +4,7 @@ An export holds every memory (active, stale and superseded), the conversations e
 
 ## Automatic daily backups
 
-The store already backs itself up: the first write once the newest backup is a day old copies it into the backups folder beside it (`~/.local/share/user-memory/backups/` for a local install, `%LOCALAPPDATA%\user-memory\backups\` on Windows, `/data/backups/` in the Docker server), and the newest 7 are kept. When the user asks for a backup, say so; an export is for a copy elsewhere, such as another machine.
+The store already backs itself up: the first write once the newest backup is a day old copies it into the backups folder beside it (`~/.local/share/user-memory/backups/` for a local install, `%LOCALAPPDATA%\user-memory\backups\` on Windows, `/data/backups/` in the Docker server), and the newest 7 are kept. Changes are also copied once the store has had no change for an hour, and when the session's server stops, replacing that day's backup. When the user asks for a backup, say so; an export is for a copy elsewhere, such as another machine.
 
 To restore one, the user runs the steps on the command line, because a restore replaces the live store and every agent, this one included, must stop using it first:
 1. The user runs `user-memory backup list` where the store lives (Docker server: `docker compose exec memory user-memory backup list` in the server's compose folder; on a client, `backup list` refuses and prints the exact command for its server). It lists each backup with its time and memory count, then the two commands that restore one.

@@ -1,6 +1,8 @@
 //! Automatic daily backups of a store, rotated in a `backups` folder beside
 //! it. A write makes one after its turn has passed on, so other writers
-//! never wait for it, and a failed backup never fails the write.
+//! never wait for it, and a failed backup never fails the write. A server
+//! also checks when it starts, while it runs and as it stops, so changes
+//! followed by a quiet stretch reach a backup without another write.
 
 use super::migrate::{copy_into, create_private, memory_rows};
 use crate::{private, shell};
@@ -10,7 +12,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Mutex, mpsc},
     time::{Duration, Instant, SystemTime},
 };
 
@@ -21,9 +23,26 @@ pub const KEEP: usize = 7;
 /// The folder beside the store that holds its automatic backups.
 pub const FOLDER: &str = "backups";
 
-/// A write makes a backup when the newest is at least this old, so a store
-/// written every day gets one a day.
+/// A changed store gets a backup when the newest is at least this old, so a
+/// store written every day gets one a day.
 const DUE: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// A changed store also gets a backup once it has had no change for this
+/// long, replacing that day's: an hour lets a session's burst of writes end
+/// in one copy, while changes followed by a quiet stretch wait at most this
+/// long, not until the next write a day later.
+const QUIET: Duration = Duration::from_secs(60 * 60);
+
+/// How often a running server checks for a backup due: as often as
+/// [`QUIET`] can make one due, and seldom enough that a server that holds
+/// the store for days lists its backups folder only 24 times a day.
+const CHECK_EVERY: Duration = Duration::from_secs(60 * 60);
+
+/// How long a stopping server waits for its last check. A copy of a store
+/// of tens of megabytes takes seconds on a slow disk; a client that ends
+/// its session must not be held much longer, and the Docker server's stop
+/// grace period (compose.yaml) is 15 seconds.
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
 
 /// Doctor asks for a backup once the newest is older than this while
 /// memories changed since: two days of writes without one.
@@ -226,6 +245,32 @@ impl Drop for Copying<'_> {
 /// failure goes to stderr and to the folder's failure note, which doctor
 /// reports.
 pub fn back_up_if_due(db: &Path) {
+    back_up_when(db, quiet());
+}
+
+/// Whether `db` needs a backup: it has none, or it changed since the newest
+/// and either that one is [`DUE`] old or the store has had no change for
+/// `quiet`. An unchanged store never gets one, so copies of the same
+/// memories never rotate distinct older backups out.
+fn due(db: &Path, quiet: Duration) -> bool {
+    let Ok(backups) = list(db) else {
+        return true;
+    };
+    let Some(newest) = backups.first() else {
+        return true;
+    };
+    last_change(db).is_some_and(|changed| {
+        changed > newest.modified && (age(newest.modified) >= DUE || age(changed) >= quiet)
+    })
+}
+
+/// [`back_up_if_due`] with the store counting as quiet after `quiet`.
+fn back_up_when(db: &Path, quiet: Duration) {
+    // A server may start before its store exists, as the Docker server does
+    // on a new volume: nothing to keep yet, and nothing failed.
+    if !db.is_file() {
+        return;
+    }
     let key = key(db);
     let start = with_state(|state| {
         let retrying = state
@@ -238,13 +283,7 @@ pub fn back_up_if_due(db: &Path) {
         return;
     }
     let _copying = Copying(&key);
-    let due = match list(db) {
-        Ok(backups) => backups
-            .first()
-            .is_none_or(|newest| age(newest.modified) >= DUE),
-        Err(_) => true,
-    };
-    if !due {
+    if !due(db, quiet) {
         return;
     }
     // A store just created has had no memory written yet: nothing to keep.
@@ -261,6 +300,71 @@ pub fn back_up_if_due(db: &Path) {
             note_failure(db, &format!("{err:#}"));
         }
     }
+}
+
+/// A server's backup checks of a store, until it drops: one at once, one
+/// every [`CHECK_EVERY`], and a last one as it drops, which backs up any
+/// change not yet in a backup, quiet or not, since no server may look again
+/// for days. Each runs on a thread of its own, beside the server's work.
+pub struct Watch {
+    stop: Option<mpsc::Sender<()>>,
+    stopped: mpsc::Receiver<()>,
+}
+
+/// Starts the checks of `db` for a server that keeps it.
+pub fn watch(db: &Path) -> Watch {
+    let db = db.to_path_buf();
+    let (stop, stopping) = mpsc::channel::<()>();
+    let (done, stopped) = mpsc::channel();
+    std::thread::spawn(move || {
+        back_up_when(&db, quiet());
+        while let Err(mpsc::RecvTimeoutError::Timeout) = stopping.recv_timeout(check_every()) {
+            back_up_when(&db, quiet());
+        }
+        back_up_when(&db, Duration::ZERO);
+        let _ = done.send(());
+    });
+    Watch {
+        stop: Some(stop),
+        stopped,
+    }
+}
+
+impl Drop for Watch {
+    /// Runs the last check and waits for it, at most [`SHUTDOWN_WAIT`]: a
+    /// copy cut short by the process ending is left as a partial file,
+    /// never taken for a backup.
+    fn drop(&mut self) {
+        drop(self.stop.take());
+        let _ = self.stopped.recv_timeout(SHUTDOWN_WAIT);
+    }
+}
+
+/// [`QUIET`], which debug builds take in milliseconds from
+/// `USER_MEMORY_BACKUP_QUIET_MS` so tests need not wait an hour.
+fn quiet() -> Duration {
+    from_env_ms("USER_MEMORY_BACKUP_QUIET_MS").unwrap_or(QUIET)
+}
+
+/// [`CHECK_EVERY`], which debug builds take in milliseconds from
+/// `USER_MEMORY_BACKUP_CHECK_MS`.
+fn check_every() -> Duration {
+    from_env_ms("USER_MEMORY_BACKUP_CHECK_MS").unwrap_or(CHECK_EVERY)
+}
+
+/// The milliseconds in the environment variable `name`.
+#[cfg(debug_assertions)]
+fn from_env_ms(name: &str) -> Option<Duration> {
+    std::env::var(name)
+        .ok()
+        .and_then(|ms| ms.parse().ok())
+        .map(Duration::from_millis)
+}
+
+/// A release build always uses the constants.
+#[cfg(not(debug_assertions))]
+fn from_env_ms(_name: &str) -> Option<Duration> {
+    None
 }
 
 /// Makes a backup of `db` now, replacing today's if there is one.
@@ -371,6 +475,18 @@ fn age(time: SystemTime) -> Duration {
     SystemTime::now().duration_since(time).unwrap_or_default()
 }
 
+/// When the store at `db` or its log was last written, if either holds
+/// anything. A reader opening the store creates an empty log, which holds
+/// no write.
+fn last_change(db: &Path) -> Option<SystemTime> {
+    ["", "-wal"]
+        .iter()
+        .filter_map(|suffix| fs::metadata(suffixed(db, suffix)).ok())
+        .filter(|metadata| metadata.len() > 0)
+        .filter_map(|metadata| metadata.modified().ok())
+        .max()
+}
+
 /// What doctor says about `db`'s automatic backups.
 pub struct Status {
     folder: PathBuf,
@@ -391,13 +507,7 @@ pub fn status(db: &Path) -> Result<Status> {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
         Err(err) => return Err(err).with_context(|| format!("Cannot read {}", folder.display())),
     };
-    // A reader opening the store creates an empty log, which holds no write.
-    let written = ["", "-wal"]
-        .iter()
-        .filter_map(|suffix| fs::metadata(suffixed(db, suffix)).ok())
-        .filter(|metadata| metadata.len() > 0)
-        .filter_map(|metadata| metadata.modified().ok())
-        .max();
+    let written = last_change(db);
     let changed_since = match (written, backups.first()) {
         (Some(written), Some(newest)) => written > newest.modified,
         (written, None) => written.is_some(),
