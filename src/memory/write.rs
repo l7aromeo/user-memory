@@ -667,7 +667,7 @@ pub fn update(db: &Path, input: Update) -> Result<Value> {
             "UPDATE memories SET title=?2,updated_at=CURRENT_TIMESTAMP WHERE id=?1",
             params![memory_id.to_string(), title],
         )?;
-        tx.commit()?;
+        tx.commit_removing()?;
         return Ok(json!({"updated":true,"id":memory_id,"status":old.status}));
     }
     // Wording (title, context, reason or evidence note) is not the user
@@ -757,7 +757,7 @@ pub fn update(db: &Path, input: Update) -> Result<Value> {
         )?;
     }
     add_origin(&tx, memory_id, &next.origin)?;
-    tx.commit()?;
+    tx.commit_removing()?;
     let mut result = json!({"updated":true,"id":memory_id,"status":status});
     if revived {
         result["revived"] = json!(true);
@@ -882,7 +882,7 @@ pub fn forget(db: &Path, input: Forget) -> Result<Value> {
             .difference(&orphaned)
             .collect::<Vec<_>>()
     );
-    tx.commit()?;
+    tx.commit_removing()?;
     Ok(result)
 }
 

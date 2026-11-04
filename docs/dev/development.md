@@ -65,6 +65,10 @@ source out.
   between and after calls; `serve.rs` makes one call.
 
 - `tests/acceptance.rs` — end-to-end user scenarios.
+- `tests/forgotten_text.rs` — text a forget, a correction or an import
+  removed leaves the store file, its log, the keyword index and later
+  backups, checked in the bytes on disk; and `migrate` rewrites a store
+  that still holds text forgotten before.
 - `tests/backups.rs` — a server's own backup checks, through `serve` and
   `host`: at start, once the store is quiet, and as it stops. They shorten
   the quiet hour and the hourly check with `USER_MEMORY_BACKUP_QUIET_MS` and

@@ -154,6 +154,10 @@ pub fn connect(db: &Path) -> Result<Connection> {
     conn.busy_timeout(BUSY)?;
     // Per connection and ignored inside a transaction, so set it first.
     conn.pragma_update(None, "foreign_keys", true)?;
+    // Deleted and replaced content is overwritten with zeros rather than
+    // left in free space, where a forgotten memory's text would stay in
+    // the file and in every page-by-page backup of it.
+    conn.pragma_update(None, "secure_delete", true)?;
     let found = version(&conn)?;
     if found != SCHEMA_VERSION {
         #[cfg(debug_assertions)]
@@ -433,6 +437,65 @@ pub(super) fn checkpoint(conn: &Connection) -> rusqlite::Result<()> {
     conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(()))
 }
 
+/// How long clearing the log after a write that removed text waits for
+/// readers to finish: they hold the log for milliseconds, and a forget's
+/// reply must not wait as long as a writer may ([`BUSY`]).
+const CLEAR_LOG_WAIT: Duration = Duration::from_secs(1);
+
+/// Copies the whole log into the store and empties it, so no earlier
+/// version of a page, such as one holding a forgotten memory's text, stays
+/// in the log file. Waits at most [`CLEAR_LOG_WAIT`] for readers; a log a
+/// reader still holds is left, and noted on stderr.
+fn clear_log(conn: &Connection, db: &str) {
+    let cleared = conn.busy_timeout(CLEAR_LOG_WAIT).and_then(|()| {
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+            r.get::<_, i64>(0)
+        })
+    });
+    let _ = conn.busy_timeout(BUSY);
+    match cleared {
+        Ok(0) => {}
+        Ok(_) => eprintln!(
+            "user-memory: the log of {db} still holds earlier versions of what was removed: another connection was reading it; the next write that removes text clears it"
+        ),
+        Err(err) => eprintln!("user-memory: clearing the log of {db} failed: {err}"),
+    }
+}
+
+/// Rewrites the store at `db` without its free space (SQLite's `VACUUM`)
+/// when it holds memories, then clears the log, and says whether it did.
+/// A store written before deleted content was overwritten keeps forgotten
+/// text in free space inside its pages, which no count shows, so setup and
+/// migrate rewrite every store with memories. Waits for other writers as
+/// long as a write does; past that it fails with SQLite's busy error and
+/// the store is left as it was.
+pub fn compact(db: &Path) -> Result<bool> {
+    compact_waiting(db, turn_wait())
+}
+
+/// [`compact`], waiting at most `wait` for other writers.
+fn compact_waiting(db: &Path, wait: Duration) -> Result<bool> {
+    let conn = connect(db)?;
+    let memories: i64 = conn.query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))?;
+    if memories == 0 {
+        return Ok(false);
+    }
+    conn.busy_timeout(wait)?;
+    conn.execute_batch("VACUUM")?;
+    conn.busy_timeout(BUSY)?;
+    clear_log(&conn, &db.to_string_lossy());
+    Ok(true)
+}
+
+/// The note when [`compact`] could not rewrite the store at `db`: nothing is
+/// lost, and the next setup or migrate tries again.
+pub fn compact_skipped(db: &Path, err: &anyhow::Error) -> String {
+    format!(
+        "user-memory: rewriting {} without its free space was skipped ({err:#}); text forgotten before this version may stay in it until the next setup or migrate",
+        db.display()
+    )
+}
+
 impl Write<'_> {
     /// Indexes the memories this write changed, commits, passes the turns
     /// on, then copies a long log into the store and makes the day's backup
@@ -443,6 +506,19 @@ impl Write<'_> {
     /// stderr, and the backup runs either way. A write inside another on
     /// this thread leaves the backup to the outer one, which holds the turn.
     pub(super) fn commit(self) -> Result<()> {
+        self.finish(false)
+    }
+
+    /// [`commit`](Self::commit) for a write that removed or replaced
+    /// memory text: the keyword index also drops the removed words, which
+    /// it otherwise keeps until its segments merge, and after the commit
+    /// the log is cleared, so neither the store's files nor a backup made
+    /// after hold the old text.
+    pub(super) fn commit_removing(self) -> Result<()> {
+        self.finish(true)
+    }
+
+    fn finish(self, removed: bool) -> Result<()> {
         let Self {
             tx,
             file,
@@ -450,6 +526,9 @@ impl Write<'_> {
             conn,
         } = self;
         super::index::settle(&tx)?;
+        if removed {
+            super::index::merge(&tx)?;
+        }
         tx.commit()?;
         drop(file);
         let outermost = turn.is_some();
@@ -457,7 +536,9 @@ impl Write<'_> {
         if let Some(db) = conn.path().filter(|path| !path.is_empty()) {
             let mut log = std::ffi::OsString::from(db);
             log.push("-wal");
-            if fs::metadata(&log).is_ok_and(|log| log.len() > CHECKPOINT_BYTES)
+            if removed {
+                clear_log(conn, db);
+            } else if fs::metadata(&log).is_ok_and(|log| log.len() > CHECKPOINT_BYTES)
                 && let Err(err) = checkpoint(conn)
             {
                 // The write is already stored; the next commit tries again.
@@ -813,5 +894,41 @@ mod tests {
             Ok(refused) => assert!(refused, "the nested write got a second write lock"),
             Err(_) => panic!("nested write deadlocked on the process write lock"),
         }
+    }
+
+    // While another connection holds the write lock past the wait, compact
+    // fails with SQLite's busy error and leaves the store as it was; setup
+    // and migrate print compact_skipped and go on.
+    #[test]
+    fn compact_gives_up_on_a_store_another_writer_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("m.sqlite3");
+        connect(&db)
+            .unwrap()
+            .execute(
+                "INSERT INTO memories (id,memory_type,category,title,content) VALUES ('0bd1ba49-2b63-4aab-8d57-38d9be10a281','fact','tooling','A fact','A fact')",
+                [],
+            )
+            .unwrap();
+        let writer = Connection::open(&db).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let before = fs::read(&db).unwrap();
+        let err = compact_waiting(&db, Duration::from_millis(100)).unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<rusqlite::Error>()
+                .and_then(rusqlite::Error::sqlite_error_code),
+            Some(rusqlite::ErrorCode::DatabaseBusy),
+            "{err:#}"
+        );
+        assert_eq!(fs::read(&db).unwrap(), before);
+        assert_eq!(
+            compact_skipped(&db, &err),
+            format!(
+                "user-memory: rewriting {} without its free space was skipped (database is locked: Error code 5: The database file is locked); text forgotten before this version may stay in it until the next setup or migrate",
+                db.display()
+            )
+        );
+        writer.execute_batch("ROLLBACK").unwrap();
+        assert!(compact_waiting(&db, Duration::from_millis(100)).unwrap());
     }
 }
