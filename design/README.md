@@ -35,7 +35,7 @@ jump to the part you are deciding.
 | [09-security.md](09-security.md) | Threat model | all |
 | [10-agent-integrations.md](10-agent-integrations.md) | Hermes Agent and Pi | #54 |
 | [11-skill-docs-evals.md](11-skill-docs-evals.md) | The servers playbook, the accounts guide, the evaluations | #72, #73, #74 |
-| [12-build-order.md](12-build-order.md) | Phases, the issue map, a proposed v0.11.0, risks | all |
+| [12-build-order.md](12-build-order.md) | Phases, the issue map, what v0.11.0 holds, risks | all |
 
 ## Conventions
 

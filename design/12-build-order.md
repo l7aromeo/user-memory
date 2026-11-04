@@ -1,9 +1,14 @@
 # 12. Build order
 
-How the open issues depend on each other, the order to build them in, a
-proposed v0.11.0, and the risks. The dependencies are the issues'
+How the open issues depend on each other, the order to build them in,
+what v0.11.0 holds, and the risks. The dependencies are the issues'
 blocked-by links on GitHub as of 2026-11-05, plus the "Depends on" lines in
 their bodies where no link exists.
+
+**Decided:** the user chose option A (section 4). The v0.11.0 milestone
+holds #53, #56, #57, #58 and #60 to #74: 19 open issues. #54 stays
+unscheduled. Four blocked-by links were added: #68 ← #58, #73 ← #63,
+#62 ← #67 and #53 ← #62.
 
 ## 1. Before v0.11: what v0.10.0 must deliver
 
@@ -44,6 +49,7 @@ flowchart LR
     I73["#73 accounts guide"]
     I72["#72 servers playbook"]
     I74["#74 evaluations"]
+    I53["#53 approval decision"]
 
     I59 --> I48
     I58 --> I60
@@ -68,8 +74,10 @@ flowchart LR
     I62 --> I72
     I64 --> I72
     I72 --> I74
+    I58 --> I68
+    I67 --> I62
+    I62 --> I53
     I58 -.-> I69
-    I67 -.-> I62
     I65 -.-> I66
 ```
 
@@ -78,11 +86,10 @@ no link:
 
 - **#69 on #58:** for the fingerprint. Before #58 it uses the store's
   identity hash, so it can land at any time.
-- **#62 on #67:** for the account commands' phrases.
 - **#66 on #65:** for GitLab membership.
 
-Not in the graph: #53 (a decision) and #54 (research), which block
-nothing.
+#53 is the approval decision, now after #62, whose prompt mechanism its
+option O3 would reuse. #54 (research) is unscheduled and blocks nothing.
 
 ## 3. Phases
 
@@ -96,62 +103,32 @@ order in #56.
 | any | #69 | The export's `source` field | Any time; it uses #58's fingerprint once that lands |
 | 2 | #60, #63 | Remotes on the client; accounts mode, per-user stores, allow rules | #58 and #48 (#60); #57 and #48 (#63) |
 | 3 | #61, #64, #68, #70 | Switching; GitHub sign-in; connect links; per-user operations | #60 (#61, #68); #58 and #63 (#64); #63 (#70) |
-| 4 | #62, #65, #66, #67, #71, #73 | Confirmation by prompt; GitLab; membership; linked identities; uninstall sign-out; the accounts guide | #61 (#62); #64 (#65, #66, #71 with #60); #64 and #43 (#67); #63, #64 and #68 (#73) |
-| 5 | #72 | The servers playbook | #62 and #64 |
-| 6 | #74 | Evaluations | #72 and #62 |
-| any | #53, #54 | The approval decision; Hermes and Pi research | Any time |
+| 4 | #65, #66, #67, #71, #73 | GitLab; membership; linked identities; uninstall sign-out; the accounts guide | #64 (#65, #66, #71 with #60); #64 and #43 (#67); #63, #64 and #68 (#73) |
+| 5 | #62 | Confirmation by prompt, with every phrase | #61 and #67 |
+| 6 | #72, #53 | The servers playbook; the approval decision | #62 and #64 (#72); #62 (#53) |
+| 7 | #74 | Evaluations | #72 and #62 |
+| unscheduled | #54 | Hermes and Pi research | Any time |
 
-#62 can land in phase 4 with the remote phrases and gain the account
-phrases when #67 lands, or wait for #67. Its body says "#61, and #67 for
-the account commands".
+With #62 ← #67, #62 lands once, with every phrase, as #56's order has it.
 
-## 4. A proposed v0.11.0
+## 4. What v0.11.0 holds
 
-Two ways to cut the release. The user decides.
+Two cuts were weighed. The user chose option A.
 
-### Option A: everything in one release
+### Option A: everything in one release (chosen)
 
-All of #57, #58, #60 to #74, plus #69. One upgrade note, one set of docs.
-It is the largest release yet: 19 issues, a new public surface (OAuth
-endpoints, `remote`, `login`, `account`, `host accounts|users|allow|provider|invite|key`),
-and two registry migrations.
+The v0.11.0 milestone holds #53, #56, #57, #58 and #60 to #74: 19 open
+issues, with #56 as the tracking issue. One upgrade note, one set of docs.
+It is the largest release yet: a new public surface (OAuth endpoints,
+`remote`, `login`, `account`, `host accounts|users|allow|provider|invite|key`),
+and two registry migrations. #54 stays unscheduled.
 
-### Option B: switching in v0.11.0, accounts in v0.12.0 (proposed)
+### Option B: switching first, accounts after (not chosen)
 
-**v0.11.0, "one person, several servers":**
-
-| Issue | Why it fits |
-|---|---|
-| #57 | Needed by accounts later; harmless and measurable now. |
-| #58 | The base of every safe switch. |
-| #60 | Remotes and the one-time move to `default`. |
-| #61 | Switching, with sessions kept on their server. |
-| #62 | Confirmation by prompt, with the four remote phrases. |
-| #68 | Connect links: on a single-user server, an invite redeems for a client token, with no sign-in. |
-| #69 | The export's `source`, with the fingerprint. |
-| #53 | The decision, so v0.12 can include O3 if chosen. |
-| #54 | The research notes, so a design issue can follow. |
-
-**v0.12.0, "accounts":** #63, #64, #65, #66, #67, #70, #71, #72, #73,
-#74, and #62's account phrases.
-
-Why B:
-
-- v0.11.0 then needs no OAuth, no allow rules and no account tables. Its
-  only server change is the key and the invite table.
-- A single person with a home and a work server gets the whole benefit:
-  named remotes, safe switching, pinned keys, invites instead of copied
-  tokens.
-- The security-heavy parts (brokered OAuth, membership, merges) ship
-  together, with their guide, playbook and evaluations.
-
-What B costs:
-
-- #71 depends on #64 for `DELETE /auth/token`, so uninstall's sign-out of
-  every remote waits for v0.12.0, unless #48's revoke endpoint covers it
-  (open point 2).
-- #72 and #74 depend on #64 for their sign-in workflow, so agents get no
-  servers playbook in v0.11.0 unless #72 is split (open point 3).
+Switching (#57, #58, #60, #61, #62's remote phrases, #68, #69) in v0.11.0,
+and accounts (#63 to #67, #70 to #74) in v0.12.0. It would have shipped
+without OAuth first, but left uninstall's sign-out (#71) and the servers
+playbook (#72) for a second release.
 
 ## 5. Risks
 
@@ -171,47 +148,41 @@ What B costs:
 
 ## 6. Issue map
 
-| Issue | Phase | Option B release | Blocked by (links) | Main file |
+| Issue | Phase | Release | Blocked by (links) | Main file |
 |---|---|---|---|---|
-| #53 | any | v0.11.0 (decision) | none | [06](06-confirmation-and-approval.md) |
-| #54 | any | v0.11.0 (research) | none | [10](10-agent-integrations.md) |
+| #53 | 6 | v0.11.0 | #62 | [06](06-confirmation-and-approval.md) |
+| #54 | unscheduled | none | none | [10](10-agent-integrations.md) |
+| #56 | tracking | v0.11.0 | its sub-issues | [00](00-overview.md) |
 | #57 | 1 | v0.11.0 | none | [04](04-accounts-mode.md) |
 | #58 | 1 | v0.11.0 | none | [03](03-identity-and-auth.md) |
 | #60 | 2 | v0.11.0 | #58, #48 | [05](05-remotes-and-switching.md) |
 | #61 | 3 | v0.11.0 | #60 | [05](05-remotes-and-switching.md) |
-| #62 | 4 | v0.11.0 (remote phrases) | #61 | [06](06-confirmation-and-approval.md) |
-| #63 | 2 | v0.12.0 | #57, #48 | [04](04-accounts-mode.md) |
-| #64 | 3 | v0.12.0 | #58, #63 | [03](03-identity-and-auth.md) |
-| #65 | 4 | v0.12.0 | #64 | [03](03-identity-and-auth.md) |
-| #66 | 4 | v0.12.0 | #64 | [03](03-identity-and-auth.md) |
-| #67 | 4 | v0.12.0 | #64, #43 | [03](03-identity-and-auth.md) |
-| #68 | 3 | v0.11.0 | #60 | [05](05-remotes-and-switching.md) |
+| #62 | 5 | v0.11.0 | #61, #67 | [06](06-confirmation-and-approval.md) |
+| #63 | 2 | v0.11.0 | #57, #48 | [04](04-accounts-mode.md) |
+| #64 | 3 | v0.11.0 | #58, #63 | [03](03-identity-and-auth.md) |
+| #65 | 4 | v0.11.0 | #64 | [03](03-identity-and-auth.md) |
+| #66 | 4 | v0.11.0 | #64 | [03](03-identity-and-auth.md) |
+| #67 | 4 | v0.11.0 | #64, #43 | [03](03-identity-and-auth.md) |
+| #68 | 3 | v0.11.0 | #60, #58 | [05](05-remotes-and-switching.md) |
 | #69 | any | v0.11.0 | none | [04](04-accounts-mode.md) |
-| #70 | 3 | v0.12.0 | #63 | [04](04-accounts-mode.md) |
-| #71 | 4 | v0.12.0 | #60, #64 | [05](05-remotes-and-switching.md) |
-| #72 | 5 | v0.12.0 | #62, #64 | [11](11-skill-docs-evals.md) |
-| #73 | 4 | v0.12.0 | #64, #68 | [11](11-skill-docs-evals.md) |
-| #74 | 6 | v0.12.0 | #72 | [11](11-skill-docs-evals.md) |
+| #70 | 3 | v0.11.0 | #63 | [04](04-accounts-mode.md) |
+| #71 | 4 | v0.11.0 | #60, #64 | [05](05-remotes-and-switching.md) |
+| #72 | 6 | v0.11.0 | #62, #64 | [11](11-skill-docs-evals.md) |
+| #73 | 4 | v0.11.0 | #64, #68, #63 | [11](11-skill-docs-evals.md) |
+| #74 | 7 | v0.11.0 | #72 | [11](11-skill-docs-evals.md) |
 
 ## 7. Open points that block scheduling
 
 From this file:
 
-1. **Option A or B.** The user decides how to cut the release.
-2. **#71 under option B.** #71 uses `DELETE /auth/token` from #64, and so
-   does #60's `remote remove`. If #48 lets a machine revoke its own token
-   without accounts, #71 could move to v0.11.0, and #60 needs it anyway.
-   #48 needs a line naming the endpoint a machine uses to revoke its own
-   token.
-3. **#72 under option B.** Splitting #72 into a switching playbook
-   (v0.11.0) and a sign-in playbook (v0.12.0) would give agents the
-   switching rules when switching ships. That needs an issue edit or a new
-   issue.
-4. **Missing links.** #68's body depends on #58, #48 and #60, but only #60
-   is linked. #73's body depends on #63, #64 and #68, but only #64 and #68
-   are linked. #69's dependency on #58 is soft, so it needs no link.
-   Proposed links: #68 ← #58 and #73 ← #63, and either #62 ← #67 or a
-   sentence in #62 saying the remote phrases ship first.
+1. **The release cut:** decided, option A.
+2. **Missing links:** added (#68 ← #58, #73 ← #63, #62 ← #67, #53 ← #62).
+3. **The self-revoke endpoint.** #60's `remote remove` and #71 both use
+   `DELETE /auth/token`, which #64 defines. #48 needs a line naming the
+   endpoint a machine uses to revoke its own token, so #60 can use it
+   before accounts exist. Listed again below, with the shared points.
+
+The rest wait for the user.
 
 From the other files:
 
@@ -253,7 +224,7 @@ Shared across files, and the first to settle:
 - **`remote trust`** ([03](03-identity-and-auth.md) 1,
   [05](05-remotes-and-switching.md) 1): needed by #58 and #62, owned by no
   issue. Proposed home: #60.
-- **The self-revoke endpoint** (open point 2 above): `remote remove` (#60)
+- **The self-revoke endpoint** (open point 3 above): `remote remove` (#60)
   and uninstall (#71) both revoke this machine's token, but the endpoint,
   `DELETE /auth/token`, is defined by #64. #48 should own it, so #60 can
   use it before accounts exist.
