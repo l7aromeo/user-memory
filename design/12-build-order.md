@@ -6,9 +6,16 @@ blocked-by links on GitHub as of 2026-11-05, plus the "Depends on" lines in
 their bodies where no link exists.
 
 **Decided:** the user chose option A (section 4). The v0.11.0 milestone
-holds #53, #56, #57, #58 and #60 to #74: 19 open issues. #54 stays
-unscheduled. Four blocked-by links were added: #68 ← #58, #73 ← #63,
-#62 ← #67 and #53 ← #62.
+holds #53, #56, #57, #58, #60 to #74, #96 and #97: 21 open issues. #54
+stays unscheduled. Blocked-by links added since the first draft:
+#68 ← #58, #73 ← #63, #62 ← #67, #53 ← #62, #74 ← #96, and #97 ← #60,
+#43 and #62.
+
+The user also decided how confirmation works ([06](06-confirmation-and-approval.md)):
+one native confirmation, the terminal or a dialog, for rules (#53) and
+sensitive commands (#62), with the typed phrase only where no display can
+show a dialog. Approval codes are dropped. #96 (the evaluation harness)
+and #97 (copying a local store into a server account) are new.
 
 ## 1. Before v0.11: what v0.10.0 must deliver
 
@@ -49,7 +56,9 @@ flowchart LR
     I73["#73 accounts guide"]
     I72["#72 servers playbook"]
     I74["#74 evaluations"]
-    I53["#53 approval decision"]
+    I53["#53 rule dialog"]
+    I96["#96 eval harness"]
+    I97["#97 copy a local store"]
 
     I59 --> I48
     I58 --> I60
@@ -77,6 +86,10 @@ flowchart LR
     I58 --> I68
     I67 --> I62
     I62 --> I53
+    I96 --> I74
+    I60 --> I97
+    I43 --> I97
+    I62 --> I97
     I58 -.-> I69
     I65 -.-> I66
 ```
@@ -88,8 +101,8 @@ no link:
   identity hash, so it can land at any time.
 - **#66 on #65:** for GitLab membership.
 
-#53 is the approval decision, now after #62, whose prompt mechanism its
-option O3 would reuse. #54 (research) is unscheduled and blocks nothing.
+#53 comes after #62, whose native dialog it shares. #54 (research) is
+unscheduled and blocks nothing.
 
 ## 3. Phases
 
@@ -105,8 +118,9 @@ order in #56.
 | 3 | #61, #64, #68, #70 | Switching; GitHub sign-in; connect links; per-user operations | #60 (#61, #68); #58 and #63 (#64); #63 (#70) |
 | 4 | #65, #66, #67, #71, #73 | GitLab; membership; linked identities; uninstall sign-out; the accounts guide | #64 (#65, #66, #71 with #60); #64 and #43 (#67); #63, #64 and #68 (#73) |
 | 5 | #62 | Confirmation by prompt, with every phrase | #61 and #67 |
-| 6 | #72, #53 | The servers playbook; the approval decision | #62 and #64 (#72); #62 (#53) |
-| 7 | #74 | Evaluations | #72 and #62 |
+| 6 | #72, #53, #97 | The servers playbook; the rule dialog; copying a local store | #62 and #64 (#72); #62 (#53); #60, #43 and #62 (#97) |
+| 7 | #74 | Evaluations | #72, #62 and #96 |
+| any | #96 | The evaluation harness | v0.10.0's #46; each part as the feature it tests lands |
 | unscheduled | #54 | Hermes and Pi research | Any time |
 
 With #62 ← #67, #62 lands once, with every phrase, as #56's order has it.
@@ -117,8 +131,8 @@ Two cuts were weighed. The user chose option A.
 
 ### Option A: everything in one release (chosen)
 
-The v0.11.0 milestone holds #53, #56, #57, #58 and #60 to #74: 19 open
-issues, with #56 as the tracking issue. One upgrade note, one set of docs.
+The v0.11.0 milestone holds #53, #56, #57, #58, #60 to #74, #96 and #97:
+21 open issues, with #56 as the tracking issue. One upgrade note, one set of docs.
 It is the largest release yet: a new public surface (OAuth endpoints,
 `remote`, `login`, `account`, `host accounts|users|allow|provider|invite|key`),
 and two registry migrations. #54 stays unscheduled.
@@ -142,7 +156,8 @@ playbook (#72) for a second release.
 | Per-store gates slow one store down | #57 | `just search-budget` and `tests/concurrency.rs` on one store, before and after. |
 | GitLab device grant support varies by version | #65 | Offer the web way only on an older instance, and say why. |
 | GitLab group tokens may need a paid plan on the hosted service | #66 | Confirm before the docs promise it (#66). |
-| An agent learns to type the phrase or handle tokens | #62, #72 | #74's evaluations, each with a mutation check. |
+| An agent learns to type the phrase or handle tokens | #62, #72 | #74's evaluations, each with a mutation check (#96). |
+| A dialog can't show where the user is | #53, #62 | Detect a display per OS; fall back to the pending rule or the typed phrase, never to no confirmation. |
 | Windows parity | #60, #62, #71 | Owner-only files through `src/private.rs`; the Windows uninstaller does the same as #71 requires. |
 | v0.10.0 slips | all | Nothing here starts before #48 and #59; #57 and #58 are the only phase-1 work. |
 
@@ -169,65 +184,37 @@ playbook (#72) for a second release.
 | #71 | 4 | v0.11.0 | #60, #64 | [05](05-remotes-and-switching.md) |
 | #72 | 6 | v0.11.0 | #62, #64 | [11](11-skill-docs-evals.md) |
 | #73 | 4 | v0.11.0 | #64, #68, #63 | [11](11-skill-docs-evals.md) |
-| #74 | 7 | v0.11.0 | #72 | [11](11-skill-docs-evals.md) |
+| #74 | 7 | v0.11.0 | #72, #96 | [11](11-skill-docs-evals.md) |
+| #96 | any | v0.11.0 | none | [11](11-skill-docs-evals.md) |
+| #97 | 6 | v0.11.0 | #60, #43, #62 | [11](11-skill-docs-evals.md) |
 
-## 7. Open points that block scheduling
+## 7. Open points
 
-From this file:
+Settled by the user's decisions (2026-11-05), and now in the issues:
 
-1. **The release cut:** decided, option A.
-2. **Missing links:** added (#68 ← #58, #73 ← #63, #62 ← #67, #53 ← #62).
-3. **The self-revoke endpoint.** #60's `remote remove` and #71 both use
-   `DELETE /auth/token`, which #64 defines. #48 needs a line naming the
-   endpoint a machine uses to revoke its own token, so #60 can use it
-   before accounts exist. Listed again below, with the shared points.
+- **The release cut:** option A, with #96 and #97 added.
+- **The links:** #68 ← #58, #73 ← #63, #62 ← #67, #53 ← #62, #74 ← #96,
+  #97 ← #60, #43 and #62.
+- **Confirmation:** one native confirmation for rules and sensitive
+  commands; the typed phrase only without a display; approval codes
+  dropped (#53, #62; [06](06-confirmation-and-approval.md)).
+- **Remotes:** `remote trust` and `remote set-token` in #60; remote names
+  are lowercase letters, digits and `-`; the migration pins at first
+  contact; the `serve` and SessionStart window is closed (#61).
+- **The self-revoke endpoint:** `DELETE /auth/token` belongs to #48, so
+  #60 and #71 use it before accounts exist.
+- **Every file's other open points:** applied as proposed. Each file's
+  "Open points" section says where each went.
 
-The rest wait for the user.
+Still open:
 
-From the other files:
-
-- [06](06-confirmation-and-approval.md): who revokes a lapsed `login`
-  token; the characters allowed in a remote name; #53's decision.
-- [07](07-state-machines.md): the damaged-registry message with accounts
-  on.
-- [08](08-edge-cases.md): the `login` message for a server older than
-  accounts.
-- [10](10-agent-integrations.md): Hermes hooks and the "app's CLI" rule;
-  the name of the list form that replaces `both`.
-- [11](11-skill-docs-evals.md): the evaluation harness work #74 assumes.
-
-- [01](01-architecture.md): #61's stop hook doesn't exist; how `serve`
-  finds the session's record.
-- [02](02-data-model.md): where membership checks are kept; what `purge`
-  does to a user's rows; store and user id shapes; allow rules as one row
-  each; `client_tokens.user` for the owner; #39's and #42's references
-  after #61; the client migration without a reachable server; the
-  registry and #52's checks.
-- [03](03-identity-and-auth.md): `remote trust` has no issue; messages
-  that name a remote before #60; replacing a remote's token after #48's
-  revoked or expired messages; the accounts-on notice for pre-accounts
-  client tokens.
-- [04](04-accounts-mode.md): backups of every store; the registry's quiet
-  and shutdown checks; `enable` with an unknown owner; `disable` and
-  `purge` without a terminal; removing the owner; a removed allow rule; a
-  registry backup naming a purged store; restoring an older backup; gate
-  keys by store id; `source.server` before #58.
-- [05](05-remotes-and-switching.md): `remote trust`; replacing a remote's
-  token; a remote with no token; the `serve` and SessionStart window;
-  `remote use` under an environment override; the rules block on a 401;
-  uninstall and a key mismatch; the rules header without accounts.
-- [09](09-security.md): the token held in `pending-confirmation`; the key
-  check's per-session cache.
-
-Shared across files, and the first to settle:
-
-- **`remote trust`** ([03](03-identity-and-auth.md) 1,
-  [05](05-remotes-and-switching.md) 1): needed by #58 and #62, owned by no
-  issue. Proposed home: #60.
-- **The self-revoke endpoint** (open point 3 above): `remote remove` (#60)
-  and uninstall (#71) both revoke this machine's token, but the endpoint,
-  `DELETE /auth/token`, is defined by #64. #48 should own it, so #60 can
-  use it before accounts exist.
-- **The client migration without a reachable server**
-  ([02](02-data-model.md) 8, [05](05-remotes-and-switching.md) 3): one
-  answer in #60.
+1. **#54** stays unscheduled: the Hermes Agent and Pi questions in
+   [10](10-agent-integrations.md) wait for trials and a design issue per
+   app.
+2. **#72's "move memories" note** ([11](11-skill-docs-evals.md) open
+   point 3): the playbook should say an export on a client is written on
+   that machine, and use #97's `remote copy` for a local store. #72 has no
+   owner yet.
+3. **#67's confirmation line** still says "at a terminal or by #62's
+   phrase"; it should say "through #62's confirmation", as #60, #61 and
+   #64 now do.

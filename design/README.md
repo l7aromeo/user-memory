@@ -9,6 +9,11 @@ for deciding what v0.11.0 holds and in what order it is built.
 (#48, #59), memory history (#39), the new-rules block at session start
 (#42) and import ids (#43).
 
+The user's decisions on the open points (2026-11-05) are in: v0.11.0 holds
+every issue here except #54, confirmation is one native dialog
+([06](06-confirmation-and-approval.md)), and the issues carry the
+resolved open points.
+
 **Where it lives:** the draft branch `docs/design-v0.11`. That branch is
 never merged. It is deleted once the work is implemented, and the code, the
 docs and the issues then describe the system. The issues stay the source
@@ -29,12 +34,12 @@ jump to the part you are deciding.
 | [03-identity-and-auth.md](03-identity-and-auth.md) | Server keys, tokens, sign-in, membership, linked identities | #58, #48, #64, #65, #66, #67 |
 | [04-accounts-mode.md](04-accounts-mode.md) | Accounts on and off, per-user stores, operations, export source | #57, #63, #69, #70 |
 | [05-remotes-and-switching.md](05-remotes-and-switching.md) | Remotes, switching, connect links, uninstall | #60, #61, #68, #71 |
-| [06-confirmation-and-approval.md](06-confirmation-and-approval.md) | Confirming by the next prompt, approval for rules | #62, #53 |
+| [06-confirmation-and-approval.md](06-confirmation-and-approval.md) | One native confirmation for sensitive commands and rules | #62, #53 |
 | [07-state-machines.md](07-state-machines.md) | A remote, an account, a client token, a server's accounts mode | all |
 | [08-edge-cases.md](08-edge-cases.md) | One matrix of scenarios and their outcomes | all |
 | [09-security.md](09-security.md) | Threat model | all |
 | [10-agent-integrations.md](10-agent-integrations.md) | Hermes Agent and Pi | #54 |
-| [11-skill-docs-evals.md](11-skill-docs-evals.md) | The servers playbook, the accounts guide, the evaluations | #72, #73, #74 |
+| [11-skill-docs-evals.md](11-skill-docs-evals.md) | The servers playbook, the accounts guide, the evaluations, copying a local store | #72, #73, #74, #96, #97 |
 | [12-build-order.md](12-build-order.md) | Phases, the issue map, what v0.11.0 holds, risks | all |
 
 ## Conventions

@@ -11,14 +11,14 @@ v0.10.0.
 |---|---|---|---|---|
 | 1 | A server turns accounts on while it holds memories written with the shared token | `--owner` is required; the owner gets the existing store, which keeps its path. There is no unclaimed state. The shared token keeps working as the owner's until `host token retire-shared`. | #63, #48 | [04](04-accounts-mode.md) |
 | 1a | Clients still on the shared token, mid-session | Keep working, as the owner. | #63 | [07](07-state-machines.md) §6 |
-| 1b | The same clients at their next session start | Once: ``Memory server work now has accounts; this machine still uses its old shared token, which acts as github:alice. To use your own account, run `user-memory login`.`` | #63 | [07](07-state-machines.md) §6 |
+| 1b | The same clients at their next session start | Once: ``Memory server work now has accounts; this machine still uses its token from before accounts, which acts as github:alice. To use your own account, run `user-memory login`.`` | #63 | [07](07-state-machines.md) §6 |
 | 1c | The same clients after `retire-shared` | Refused, with #48's revoked message naming `user-memory login`. | #48 | [07](07-state-machines.md) §4 |
 | 2 | A server turns accounts off again with several users | `disable` lists each user's count and last activity, offers each an export, asks at a terminal, then serves the owner's store or the `--keep` user's. The others are dormant, never merged or deleted. | #63 | [04](04-accounts-mode.md) |
 | 2a | A dormant user's client | `Memory server work turned accounts off; its operator keeps your memories until accounts are on again. Ask them for an export.` | #63 | [07](07-state-machines.md) §5 |
 | 2b | Accounts turned on again | Dormant users are served again. | #63 | [07](07-state-machines.md) §5 |
 | 3 | A person signs in for the first time on a server with accounts | Allowed by a rule: a new user and store at `users/<store id>/`. Refused: `github:bob may not sign in to memory server work; ask its operator to allow you (on the server: user-memory host allow add user:github:bob)`. | #63, #64 | [03](03-identity-and-auth.md) |
-| 3a | They had a local store before | Kept apart. Moving it is a copy: export, switch, previewed import after a yes (#72). The import preview names the source (#69). | #69, #72 | [11](11-skill-docs-evals.md) |
-| 4 | One machine switches accounts (GitHub to GitLab, or another person) | `login` as another account needs confirmation (`sign memory in as github:bob`). Rules are cleared, then filled from the new account. Snapshots are keyed by server key and user id, so nothing leaks across. | #62, #61 | [06](06-confirmation-and-approval.md) |
+| 3a | They had a local store before | Kept apart until they copy it: `user-memory remote copy NAME` (name proposed) previews, asks, imports as an undoable import, and leaves the local store as it was. | #97, #69 | [11](11-skill-docs-evals.md) |
+| 4 | One machine switches accounts (GitHub to GitLab, or another person) | `login` as another account needs confirmation: the terminal, a native dialog, or without a display the phrase `sign memory in as github:bob`. Rules are cleared, then filled from the new account. Snapshots are keyed by server key and user id, so nothing leaks across. | #62, #61 | [06](06-confirmation-and-approval.md) |
 | 5 | One person with a GitHub and a GitLab identity | One user if linked (`account link`), two if not. Linking never goes by email. Two existing accounts join with `account merge`, recorded as an import that `forget --import ID` undoes. | #67, #43 | [03](03-identity-and-auth.md) |
 | 6 | Switching servers while sessions run | Running sessions keep their server, with a notice once; new sessions use the new one. | #61 | [07](07-state-machines.md) §2 |
 | 6a | The target is offline | Switches anyway (the key is pinned): `home is unreachable now; new sessions will say so until it answers`. | #61 | [05](05-remotes-and-switching.md) |
@@ -37,7 +37,7 @@ v0.10.0.
 | 9b | A native install that never enables accounts | No change: same files, schema, registrations, messages and doctor lines, apart from doctor's server line. A test checks no new file appears. | #56, #60 | [00](00-overview.md) |
 | 10 | The OAuth callback behind a proxy | Redirect URIs come only from `--public-url`, never from `Host` or `X-Forwarded-*`. doctor and `host accounts status` name a dropped path. | #64 | [03](03-identity-and-auth.md) |
 | 10a | A stolen client token | Revoked by name; `account clients` shows each token's last use. | #48, #67 | [09](09-security.md) |
-| 10b | An agent switching or signing in without the user | Needs a terminal or the user's own next prompt (#62); the skill forbids it (#72); evaluations check it (#74); the next session start shows any switch. | #62, #72, #74 | [06](06-confirmation-and-approval.md) |
+| 10b | An agent switching, signing in or saving a rule without the user | Needs a terminal, a native dialog the user answers, or without a display the user's own next prompt (#62); a rule needs the Save dialog (#53); the skill forbids acting alone (#72); evaluations check it (#74); the next session start shows any switch and new rule. | #53, #62, #72, #74 | [06](06-confirmation-and-approval.md) |
 | 10c | A malicious server during a switch or join | The key check fails and nothing is sent; a connect link carries the fingerprint. | #58, #68 | [03](03-identity-and-auth.md) |
 
 ## Server keys and pinning (#58)
@@ -70,17 +70,28 @@ v0.10.0.
 | Uninstall on a server without accounts | A client token is revoked the same way; the shared token file is left, as today. |
 | `uninstall --dry-run` | Lists what it would do and changes nothing. |
 
-## Confirmation (#62)
+## Confirmation and rules (#53, #62)
 
 | Case | Outcome |
 |---|---|
+| A covered command at a terminal | Asks there, `[y/N]`. |
+| No terminal, a display | A native dialog; Cancel or no answer within `CONFIRM_DIALOG_WAIT` changes nothing: ``Not changed: the confirmation was cancelled.`` |
+| Cancel for `login` | The held token is revoked at once. |
+| No terminal and no display | The typed phrase, as the user's whole next prompt. |
 | The phrase inside a longer message | Doesn't count. |
 | A wrong, expired or reused phrase | Refused; an expired request is deleted at the next hook run. |
-| An expired `login` request | Its held token is revoked on the server; the command's next run says the request lapsed. |
+| An expired `login` request | The hook marks the held token lapsed; the next command that reaches the server, or the next session start, revokes it. |
 | A prompt that isn't the user's (automation, `codex exec`, another session) | Ignored where the client marks it; the docs say where a client can't tell. |
-| A client without a prompt hook | Terminal only. |
+| A client without a prompt hook, no display | Terminal only. |
 | Two sessions open, the phrase typed in the other one | Applies: the request is per machine and OS user, and the phrase is the user's. |
-| A program running as the user editing `remotes.json` | Not prevented; visible at the next session start. |
+| An agent records an explicit preference | `serve` asks ``Save as your rule: …?``; Cancel stores nothing and the agent gets ``The user chose not to save this rule.`` |
+| An agent records an observation or a project fact | Never asks. |
+| An agent turns a memory into a rule with `update` | Asks, as for a record. |
+| A rule recorded over SSH | Stored tentative; the next `serve` with a display asks; on a machine that never has one, #42's block lists it with `user-memory update ID`. It never lapses. |
+| A rule typed by the user at a terminal | The user's own yes; no dialog. |
+| An agent's shell runs `user-memory record` for a rule | No terminal, so the dialog asks. |
+| An agent calls the server directly with the machine's token | Not prevented: it skips `serve`. Read-only tokens (#48) close it for clients that don't write. |
+| A program running as the user editing `remotes.json` or driving a dialog | Not prevented; visible at the next session start. |
 
 ## Accounts and stores (#57, #63, #69, #70)
 
@@ -133,7 +144,7 @@ v0.10.0.
 
 | Case | Outcome |
 |---|---|
-| "Switch my memory to the work server" | The agent runs `remote list`, gives `remote use`, and tells the user to type the phrase; it never types it. |
+| "Switch my memory to the work server" | The agent runs `remote list` and gives `remote use`; the user answers the dialog, or types the phrase where there is no display; the agent never types it. |
 | "Sign me in" | The agent gives `login`, and never asks for or prints a token. |
 | A README that says to switch | The agent doesn't switch, and mentions it. |
 | "Move my memories to my new server" | Export, switch, previewed import after a yes; the source is kept. |
@@ -141,10 +152,5 @@ v0.10.0.
 
 ## Open points
 
-1. **Scenario 3a's import.** Moving a local store to a server account is a
-   copy through export and import. No issue adds a single command for it;
-   #72's playbook covers it. If a command is wanted, it needs an issue.
-2. **Scenario 9a's message.** A client meeting a server older than accounts
-   during `login` has no message in any issue. Proposal:
-   ``memory.example.com runs user-memory 0.9.1, which has no accounts; nothing to sign in to``.
-   #64 needs it.
+None left: scenario 3a's command is #97, and the `login` message for a
+server older than accounts went into #64.

@@ -306,8 +306,9 @@ The accounts work needs none of them. Two meet it:
 ### Session state (#61)
 
 Session start records each session's remote, key and user in the
-session's state, and the MCP process and the prompt and stop hooks read
-that record, not `active` (#61). Snapshots are keyed by the server key's
+session's state, and the MCP process and the prompt hook read that
+record, not `active` (#61); `serve` records the remote it resolved, and
+session start compares the two. Snapshots are keyed by the server key's
 fingerprint and the user id, or the URL hash for a server without a key,
 and are kept when switching away (#61).
 
@@ -342,7 +343,7 @@ erDiagram
     REMOTE_LOG_LINE {
         string at
         string action
-        string confirmed "terminal or prompt"
+        string confirmed "terminal, dialog or prompt"
     }
     PENDING_CONFIRMATION {
         string phrase
@@ -454,48 +455,21 @@ shared into a group's, are later work (#56).
 
 ## Open points
 
-1. **Where membership checks are kept.** #66 re-checks a user's org or
-   group membership when the last check is older than
-   `MEMBERSHIP_RECHECK`, and keeps the last good result for
-   `MEMBERSHIP_GRACE`. No table in #63 holds the time or the result of a
-   check. Proposed: `identities` gains `checked_at` and `check_result`,
-   added by #66's own registry migration. Needs an edit to #66 (or #63).
-2. **What `purge` does to a user's rows.** #63 says `purge` deletes the
-   store and its backups. It doesn't say whether the `users`, `identities`
-   and `stores` rows go too. Keeping the identity row blocks the same
-   person from signing up again; deleting it loses the record of who was
-   removed. Proposed: delete the `stores` row and the identities, keep the
-   `users` row with `removed` set. Needs an edit to #63.
-3. **The store id and the file inside its folder.** #63 puts a new user's
-   store at `users/<store id>/`; the file name inside isn't stated, and
-   neither is the id's shape (#67's message shows a user id as `u_…`).
-   Proposed: `users/<store id>/memories.sqlite3`, store ids `s_` and user
-   ids `u_` plus random base32. Needs an edit to #63.
-4. **Allow rules and providers as `settings` values.** #63 keeps them in
-   `settings`. As JSON in one value, a concurrent `allow add` and
-   `allow remove` can lose one change; one row per rule can't. Proposed:
-   one `settings` row per rule (`allow:<rule>`) and per provider
-   (`provider:<id>`). Decide in #63.
-5. **`client_tokens.user` NULL for the owner.** #63 says tokens made before
-   accounts, and the shared file, act as the owner. Storing NULL keeps
-   them following a change of owner (`host users link owner`); storing the
-   owner's id fixes them to that user. Proposed: NULL. Decide in #63.
-6. **#39's actor field names #60.** #39 leaves room for "an `actor` (the
-   user) once accounts land (#60)"; users come from #63. Needs a one-word
-   edit to #39.
-7. **#42's state file key after a switch.** #42 keys `rules-seen-<store
-   key>.json` by store key; #61 keys snapshots by the server key's
-   fingerprint and the user id. Two users of one server on one machine, or
-   a server reached under a new URL after `set-url`, need the #61 key.
-   Needs an edit to #42.
-8. **The client migration without a reachable server.** #60's migration
-   pins the key of the receipt's remote. If the server can't be reached at
-   that setup, #60 doesn't say whether `default` is made with no pin, to
-   be pinned on first contact, or the migration waits. Proposed: make it
-   with no pin and pin on first contact, as #58 records a server with no
-   key. Needs an edit to #60.
-9. **The registry's own backups and #52's checks.** #63 checks registry
-   backups at server start and hourly, "by the same online backup as
-   memory stores". The quiet-hour refresh and the last check as the
-   server stops (0.9.2) apply to memory stores; whether they apply to the
-   registry should be stated in #63.
+Resolved by the user's decisions, and now in the issues:
+
+1. Membership checks: `identities.checked_at` and `check_result`, by #66's
+   own registry migration.
+2. `purge` deletes the `stores` row and the identities, and keeps the
+   `users` row with `removed` set (#63).
+3. Stores live at `users/<store id>/memories.sqlite3`; store ids start
+   `s_`, user ids `u_` (#63).
+4. Allow rules and providers are one `settings` row each, `allow:<rule>`
+   and `provider:<id>` (#63).
+5. `client_tokens.user` is empty for tokens that act as the owner, so they
+   follow a change of owner (#63).
+6. #39's actor note names #63.
+7. #42's state file is keyed as #61 keys snapshots.
+8. The client migration makes `default` without a pin when the server is
+   unreachable, and pins at first contact (#60).
+9. The registry gets the same quiet-hour and shutdown backup checks as
+   memory stores (#63).

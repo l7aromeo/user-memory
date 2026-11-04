@@ -76,7 +76,7 @@ Error paths:
 Clients still on the shared token see, once, at their next session start:
 
 ```output
-Memory server work now has accounts; this machine still uses its old shared token, which acts as github:alice. To use your own account, run `user-memory login`.
+Memory server work now has accounts; this machine still uses its token from before accounts, which acts as github:alice. To use your own account, run `user-memory login`.
 ```
 
 ## Routing a request
@@ -408,47 +408,21 @@ Error paths:
 
 ## Open points
 
-1. **Backups of every store.** 0.9.2's backup checks (#52) run for the
-   one store a `host` process holds, through `backups::watch(db)`. With a
-   store per user, each store needs the same start, hourly, quiet-hour and
-   last checks. One sweep over the `stores` rows would do it. Neither #63
-   nor #70 says so. Needs an edit to #70.
-2. **The quiet-hour refresh and shutdown check for the registry.** #63
-   checks the registry's backups at start and hourly; 0.9.2 added a refresh
-   once a store is quiet for an hour and a last check as the server stops.
-   State in #63 whether the registry gets them.
-3. **`enable` when the owner's identity can't be resolved.** #63 resolves
-   `github:alice` at once but gives no message for an unknown login or an
-   unreachable provider. Proposed:
-   `github:alice could not be found at github.com; accounts stay off.`
-   Needs an edit to #63.
-4. **`disable` and `purge` without a terminal.** #63 says `disable` asks
-   at a terminal and `purge` offers an export; neither says what happens
-   in a script. Proposed: both refuse without a terminal, naming the
-   command to run at one, as #61 does for `remote use`. Needs an edit to
-   #63.
-5. **Removing the owner.** #63 doesn't say whether `host users remove`
-   accepts the owner. The shared token acts as the owner, so removing the
-   owner leaves it acting as a removed user. Proposed: refuse, and say to
-   link another owner first. Needs an edit to #63.
-6. **An allow rule removed.** #63 doesn't say whether `host allow remove`
-   affects users already signed in. Proposed: they keep working until the
-   next membership check (#66), or at once for a `user:` rule. Needs an
-   edit to #63.
-7. **A registry backup naming a purged store.** Restoring a registry
-   backup made before a `purge` brings back a `stores` row whose folder is
-   gone. Proposed: restore marks such users removed and lists them. Needs
-   an edit to #63.
-8. **Restoring a backup from an older schema version.** #70 swaps a
-   user's backup in; a backup from before an upgrade is at an older
-   version. Proposed: restore upgrades it after the swap, with its own
-   `.bak`, as `migrate` would. Needs an edit to #70.
-9. **Gates and caches keyed by path.** #57 keys the gate map by resolved
-   store path. `remove` and `restore` move a store's folder, so a key by
-   path splits one store into two gates while a request is in flight.
-   Proposed: key by store id when there's a registry, by path without one.
-   Needs an edit to #57.
-10. **`source.server` before #58.** #69 uses "the store identity hash used
-    for session snapshots" before keys exist; #61 rekeys snapshots by the
-    key's fingerprint and the user. After #61, the fallback should be the
-    URL hash #61 uses for a server without a key. Needs an edit to #69.
+Resolved by the user's decisions, and now in the issues:
+
+1. Every store the registry lists gets the start, hourly, quiet-hour and
+   last backup checks, in one sweep (#70).
+2. The registry gets the quiet-hour and shutdown checks too (#63).
+3. `enable` with an owner it can't resolve:
+   `github:alice could not be found at github.com; accounts stay off.` (#63)
+4. `disable` and `purge` refuse without a terminal (#63).
+5. `host users remove` refuses the owner; link another owner first (#63).
+6. A removed allow rule takes effect at the next membership check, or at
+   once for a `user:` rule (#63).
+7. Restoring a registry backup that names a purged store marks that user
+   removed and lists them (#63).
+8. Restoring an older backup upgrades it after the swap, with its own
+   `.bak` (#70).
+9. Gates and caches are keyed by store id when there's a registry, by
+   path without one (#57).
+10. Before #58, `source.server` uses the URL hash #61 uses (#69).

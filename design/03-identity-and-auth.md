@@ -292,8 +292,8 @@ Error paths:
   `/.well-known/user-memory`:** doctor and `host accounts status` name
   the dropped path.
 - **A key mismatch at the first step:** nothing is sent, #58's message.
-- **`login` as another account, without a terminal:** a pending request
-  (#62), with the phrase `sign memory in as github:bob`.
+- **`login` without a terminal:** the native dialog (#62); without a
+  display, a pending request with the phrase `sign memory in as github:bob`.
 - **A login rename on GitHub:** harmless; accounts use the numeric id.
 
 ## Signing in with GitLab (#65)
@@ -385,7 +385,7 @@ sequenceDiagram
   participant A as account link gitlab
   participant S as Server
   participant P as GitLab
-  A->>A: confirm: a terminal, or the phrase "link gitlab:alice to my memory" (#62)
+  A->>A: confirm: a terminal, the native dialog, or the phrase "link gitlab:alice to my memory" (#62)
   A->>S: key check, start a sign-in with gitlab, as the current user
   S->>P: the broker flow of #64, with GitLab
   U->>P: approve
@@ -441,32 +441,20 @@ once; its memories wait in `removed/` until the operator purges them:
 Your account github:alice on memory server work is disabled; its memories wait for the operator, who can restore or delete them.
 ```
 
-`link`, `unlink` and `delete` need confirmation at a terminal or by #62's
-phrase (`link gitlab:alice to my memory`,
-`unlink github:alice from my memory`, `delete my memory account`).
+`link`, `unlink` and `delete` need confirmation at a terminal or in the
+native dialog, and without a display by #62's phrase
+(`link gitlab:alice to my memory`, `unlink github:alice from my memory`,
+`delete my memory account`).
 
 ## Open points
 
-1. **`remote trust` has no issue.** #58's mismatch message and #62's
-   table use `user-memory remote trust work SHA256:9a1b…`, but neither
-   #60's command list nor #58's contract names the command. Edit #60 to
-   add `user-memory remote trust NAME FINGERPRINT` (re-pin after a
-   confirmed key change, logged in `remote-log`), or #58 to own it.
-2. **Messages that name a remote before remotes exist.** #58's and
-   #63's messages say "work", but #58 and #63 don't depend on #60. Until
-   #60 lands, a client has only the URL. Edit #58 and #63 to say the
-   messages use the remote's name once #60 is in, and the URL before.
-3. **The revoked and expired messages after #60.** #48's fix line says
-   "run the installer with --url … --token-file FILE". With remotes, the
-   fix for a remote is to give that remote a new token file, and #60 has
-   no command for it: `remote add` takes a new name, and `remote remove`
-   refuses the active remote. Edit #60 to add a way to replace a remote's
-   token (for example `remote add NAME URL --token-file F` accepted for an
-   existing name whose key matches), and #48's messages to name it once
-   #60 is in. See [05-remotes-and-switching.md](05-remotes-and-switching.md),
-   open point 2.
-4. **The accounts-on notice for pre-accounts client tokens.** #63's
-   notice says "this machine still uses its old shared token". After #48,
-   most machines hold their own pre-accounts client token, which also
-   acts as the owner (#63). Edit #63 so the notice covers both ("its
-   token from before accounts").
+Resolved by the user's decisions, and now in the issues:
+
+1. `user-memory remote trust NAME FINGERPRINT` belongs to #60, confirmed
+   like the other sensitive commands (#62).
+2. #58's and #63's messages use the remote's name once #60 is in, and the
+   URL before.
+3. `user-memory remote set-token NAME FILE` (#60) replaces a remote's
+   token after a check of the pinned key; #48's revoked and expired
+   messages name it once #60 is in.
+4. #63's accounts-on notice covers any token from before accounts.

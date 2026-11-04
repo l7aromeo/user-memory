@@ -99,7 +99,7 @@ flowchart LR
 | Standing rules | None; the first-turn index carries the rules section | Marked block in `~/.pi/agent/AGENTS.md` |
 | Index at session start | `pre_llm_call` hook when `is_first_turn` | The extension's `session_start`, added at the first `before_agent_start` |
 | Change notices | `pre_llm_call` on later turns | The extension's `before_agent_start` |
-| Confirmation (#62) | The prompt is `extra.user_message` | The prompt when `messageType` is `"user"` |
+| Confirmation (#53, #62) | The native dialog from `serve` or the CLI; without a display, the prompt is `extra.user_message` | The native dialog; without a display, the prompt when `messageType` is `"user"` |
 | Session's server (#61) | Keyed by `session_id` | Keyed by the session UUID |
 | Skill | `skills.external_dirs` lists `~/.agents/skills` | Already read |
 | doctor | Registration, hook consent, the skill directory | Registration and exposure, the extension file, the rules block |
@@ -147,8 +147,11 @@ Nothing in [05](05-remotes-and-switching.md) or [06](06-confirmation-and-approva
 is specific to Claude Code or Codex. Each new app needs:
 
 - its hooks to record the session's server at the first turn (#61);
-- its prompt passed to the confirmation check (#62), with a note in the
-  docs where the app can't tell a user's prompt from an automated one;
+- nothing for the native dialog, which `serve` and the CLI show
+  themselves (#53, #62);
+- its prompt passed to the typed-phrase check, for machines without a
+  display (#62), with a note in the docs where the app can't tell a user's
+  prompt from an automated one;
 - its rules location in the list that `remote use` clears and refills.
 
 ## 4. Still to find out, by trial

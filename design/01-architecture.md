@@ -77,9 +77,10 @@ flowchart LR
   `configured_remote`), and keeps it for its lifetime, which is the
   session's.
 - **Hooks.** SessionStart writes the rules into the instruction files and
-  prints the index and notices. UserPromptSubmit prints notices and, after
-  #62, applies a typed confirmation. Each run resolves the server again,
-  which is why #61 records the session's remote at session start.
+  prints the index and notices. UserPromptSubmit prints notices and, on a
+  machine without a display, applies a typed confirmation (#62). Each run
+  resolves the server again, which is why #61 records the session's remote
+  at session start.
 - **CLI.** The user's own interface: memory commands, setup, doctor, and
   the new `remote`, `login`, `logout` and `account` commands.
 - **Client files.** `~/.config/user-memory/remotes.json` (version 1) with
@@ -236,23 +237,11 @@ it resolved at its own start.
 
 ## Open points
 
-1. **No stop hook.** #61 says "The MCP process, and the prompt and stop
-   hooks, use that record". Today only SessionStart and UserPromptSubmit
-   exist (`src/setup/hooks.rs`, `HOOKS`). Edit #61 to say "the MCP process
-   and the prompt hook", or add a Stop hook as its own issue.
-2. **Which session record `serve` reads.** The hooks get a session id in
-   their payload; `serve` doesn't. #61 says the MCP process uses the
-   session's record, not `active`. As built today, `serve` resolves once at
-   its own start, which is enough when nothing switches between the app
-   starting `serve` and running SessionStart. A switch in that short window
-   would leave `serve` and the hooks on different servers, and neither can
-   see the other's choice. Options:
-   - accept the window, which needs a confirmed switch to land within
-     the moments between the two starts, and say so in #61;
-   - have `serve` write the remote it resolved to the state folder, keyed
-     by something the hooks can also derive for the same session, and
-     have SessionStart compare. What key both sides share has to be
-     checked for each client when building.
+Resolved by the user's decisions, and now in the issues:
 
-   Edit #61 to say which. See
-   [05-remotes-and-switching.md](05-remotes-and-switching.md), open point 4.
+1. **No stop hook:** #61 now names only the MCP process and the prompt
+   hook.
+2. **The window between `serve` and SessionStart:** closed. `serve`
+   records the remote it resolved where the hooks find it for the same
+   session, and SessionStart compares and warns when they differ (#61).
+   The key both sides share is checked per client when building.

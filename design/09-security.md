@@ -84,7 +84,7 @@ flowchart LR
 | T6 | A token lands in a tool's output, a log or an agent's context | `host token add` writes to `--out` or a terminal only; tokens never appear in errors, hook output or logs (a test greps for one); the skill says an agent never reads a token file | #48 |
 | T7 | A token sent to the wrong server during a switch | one token per remote, chosen by remote name; the key check for that remote's pin comes first | #60, #61 |
 | T8 | A switch mixes two servers inside a session, or leaves one server's rules under another | sessions keep the server they started on; the rules block is cleared, then filled from the target with a header naming the source | #61 |
-| T9 | The agent switches servers or accounts, or trusts a new key, on its own or because text told it to | no `--yes`; a terminal or the user's own next prompt, typed exactly, confirms; every switch is announced at the next session start with the command to undo it | #61, #62 |
+| T9 | The agent switches servers or accounts, or trusts a new key, on its own or because text told it to | no `--yes`; the terminal or a native dialog the user answers confirms, and without a display only the user's own next prompt, typed exactly; every switch is announced at the next session start with the command to undo it | #61, #62 |
 | T10 | A rollback brings back a retired shared token | `retire-shared` replaces the file's token with an unknown one | #48 |
 | T11 | A restored memory store brings back revoked tokens or removed users | tokens and users live in the registry, outside every store; restoring the registry revokes every token | #59, #63 |
 | T12 | Another user of the server reads or writes your memories | a token resolves to one user and that user's store; no code derives a holder from a path; a test checks two users never cross-read | #63 |
@@ -96,19 +96,21 @@ flowchart LR
 | T18 | Flooding the unauthenticated sign-in endpoint | pending sign-ins per address bounded by a named constant, `slow_down` beyond it, kept in memory and expiring after 15 minutes | #64 |
 | T19 | A forged provider webhook removes or restores access | `X-Hub-Signature-256` for GitHub and `X-Gitlab-Token` for GitLab; unverified events are ignored | #66 |
 | T20 | An import of someone else's export adds their rules to your account | the export's `source` field is shown in the import preview when it differs | #69 |
-| T21 | A text the agent read becomes a rule | `user_confirmed` limits what it proves (#40); new rules shown at session start (#42); stronger options are #53's decision | #53 |
+| T21 | A text the agent read becomes a rule | `serve`, or the CLI without a terminal, saves a rule only after the user's Save in a native dialog; without a display it stays pending until the user answers; new rules shown at session start (#42) | #53 |
 | T22 | An uninstalled machine leaves working tokens | uninstall revokes each reachable remote's token and lists what it left | #71 |
 | T23 | A provider token kept by the server is stolen | the user's provider token is discarded at sign-in; only the operator's own credentials are kept, owner-only in `<data>/oauth/` | #64, #66 |
-| T24 | A pending confirmation is applied by something other than the user | the whole trimmed prompt must equal the phrase; it expires after `CONFIRMATION_EXPIRY`; it's used once; prompts the client marks as not the user's are ignored | #62 |
+| T24 | A pending confirmation is applied by something other than the user | used only without a display; the whole trimmed prompt must equal the phrase; it expires after `CONFIRMATION_EXPIRY`; it's used once; prompts the client marks as not the user's are ignored | #62 |
+| T25 | An agent skips the dialog by calling the server directly with the machine's token | not prevented; read-only tokens (#48) close it for clients that don't write; #42's block shows every new rule | #48, #53 |
 
 ## What the design leaves out
 
 - **A program running as the user that sets out to act as the user.** It
-  can read the token files, edit `remotes.json` or the store directly, and
-  run the CLI. No scheme short of operating-system approval stops it
-  (#53, O5). The design makes such changes visible (switch notices,
-  `remote-log`, new-sign-in notices) but can't prevent them. #62's docs
-  state this limit.
+  can read the token files, edit `remotes.json` or the store directly,
+  call the server without `serve`, or drive a dialog through the desktop's
+  accessibility tools. The native dialog (#53, #62) stops accidents and
+  injected text, not a program set on it. The design makes such changes
+  visible (switch notices, `remote-log`, new-sign-in notices, #42's new
+  rules) but can't prevent them. #53's and #62's docs state this limit.
 - **A compromised server.** A server can read every store it holds. Users
   of a server trust its operator with their memories; per-user stores
   separate users from each other, not from the operator.
@@ -135,16 +137,14 @@ flowchart LR
 - A phrase inside a longer message, an expired request, a wrong phrase
   and a reused phrase are all refused (#62).
 - `state` and PKCE are checked (#64).
+- Cancel, or no answer, in the native dialog stores nothing and changes
+  nothing (#53, #62).
 
 ## Open points
 
-1. **The pending confirmation holds a live token.** For `login` without a
-   terminal, #62 keeps the new token in `pending-confirmation` until the
-   phrase or expiry, and revokes it on expiry. The file is owner-only,
-   like the token files. Edit #62 to say the file is written through
-   `src/private.rs` and deleted, not just emptied, once used.
-2. **The key check's cache.** #58 allows caching the check for the
-   session, keyed by session id, if it's too slow for `PROMPT_LIMIT`. A
-   key changed mid-session would then be seen only at the next session.
-   That is acceptable, since the session keeps its server anyway (#61);
-   edit #58 to say so.
+Resolved by the user's decisions, and now in the issues:
+
+1. `pending-confirmation` is written through `src/private.rs` and deleted
+   once used (#62).
+2. A key changed mid-session is seen at the next session start; the
+   session keeps its server anyway (#58).

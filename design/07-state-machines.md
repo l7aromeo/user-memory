@@ -6,7 +6,7 @@ issues' own.
 
 1. [A remote on a machine](#1-a-remote-on-a-machine) (#58, #60, #61, #64, #71)
 2. [A session's server](#2-a-sessions-server) (#61)
-3. [A pending confirmation](#3-a-pending-confirmation) (#62)
+3. [A pending confirmation](#3-a-pending-confirmation) (#62); a pending rule is in [06](06-confirmation-and-approval.md) section 3.4 (#53)
 4. [A client token](#4-a-client-token) (#48, #63, #64, #67, #68, #71)
 5. [An account](#5-an-account) (#63, #66, #67)
 6. [A server's accounts mode](#6-a-servers-accounts-mode) (#59, #63, #68)
@@ -111,18 +111,20 @@ Error paths:
   Memory now uses "home" for new sessions; this session keeps "work" until you restart it.
   ```
 - **The next session start** says what changed, with the command to undo
-  it (#61). See [06](06-confirmation-and-approval.md) section 1.7.
+  it (#61). See [06](06-confirmation-and-approval.md) section 2.6.
 - **The recorded server is unreachable:** today's
   `User memory unavailable: …`, with the reason.
 
 ## 3. A pending confirmation
 
-`~/.local/state/user-memory/pending-confirmation` holds at most one
-request (#62).
+Only a machine without a display uses it: elsewhere a covered command
+asks at the terminal or with a native dialog, and changes nothing until
+the user answers. `~/.local/state/user-memory/pending-confirmation` holds
+at most one request (#62).
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Pending : a covered command runs without a terminal
+    [*] --> Pending : a covered command runs with no terminal and no display
     Pending --> Pending : a newer covered command replaces it
     Pending --> Applied : the exact phrase is the whole next prompt
     Pending --> Lapsed : 10 minutes pass
@@ -134,11 +136,13 @@ Error paths:
 
 - **A phrase inside other text, a wrong phrase, a reused phrase:** no
   transition.
-- **Lapsed with a held `login` token:** the token is revoked on the server,
-  and the command's next run says the request lapsed. Which process
-  revokes is open point 1 of [06](06-confirmation-and-approval.md).
+- **Lapsed with a held `login` token:** the hook marks the token lapsed;
+  the next `user-memory` command that reaches the server, or the next
+  session start, revokes it, and the command's next run says the request
+  lapsed (#62).
 - **The hook's local write fails:** stays Pending, and the user is told.
-- **At a terminal** the command asks there and never creates a request.
+- **At a terminal or with a dialog** the command asks there and never
+  creates a request.
 
 ## 4. A client token
 
@@ -147,9 +151,9 @@ registry's `client_tokens` table (#48, #59).
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Held : login without a terminal, before the phrase
-    Held --> Valid : the phrase applies it
-    Held --> Revoked : the request lapses
+    [*] --> Held : login, before the dialog or the phrase is answered
+    Held --> Valid : Sign in, or the phrase, applies it
+    Held --> Revoked : Cancel, no answer, or the request lapses
     [*] --> Valid : host token add, login, or an invite redeemed
     Valid --> Valid : used, last use updated at most hourly
     Valid --> Expired : 90 days unused, or its --expires date
@@ -273,14 +277,19 @@ Error paths:
   held the shared token reaches the owner's memories until it is retired
   (#63). Clients on it see, once:
   ```output
-  Memory server work now has accounts; this machine still uses its old shared token, which acts as github:alice. To use your own account, run `user-memory login`.
+  Memory server work now has accounts; this machine still uses its token from before accounts, which acts as github:alice. To use your own account, run `user-memory login`.
   ```
 - **`disable`:** lists each user with their memory count and last
   activity, offers each an export, and asks at a terminal. Nothing is
   merged or deleted.
-- **Damaged registry:**
+- **Damaged registry,** with tokens only (#59):
   ```output
   The server's token registry /data/accounts.sqlite3 cannot be read (file is not a database). Move it aside and issue each client a new token with `user-memory host token add`.
+  ```
+  With accounts on (#63), where moving it aside would lose who holds which
+  store:
+  ```output
+  The server's account registry /data/accounts.sqlite3 cannot be read (file is not a database). Restore its latest backup with `user-memory host backup restore --registry BACKUP`; the backups are in /data/accounts-backups/, and users sign in again afterwards.
   ```
 - **A registry with a newer schema:** refused, with a message to upgrade
   the binary (#59).
@@ -289,14 +298,8 @@ Error paths:
 
 ## Open points
 
-1. **Damaged registry with accounts on.** #59's message tells the operator
-   to move the registry aside and issue new tokens. With accounts on, the
-   registry also holds users, identities and the store map, so moving it
-   aside would lose who holds which store. The fix with accounts is to
-   restore the registry's latest backup with
-   `user-memory host backup restore --registry BACKUP` (#63). #63 needs the
-   message for that case, or #59's message needs a second form.
-2. **Held tokens.** #48 has no "held" state; #62 holds a token for `login`
-   before the phrase applies. Proposal: a held token is an ordinary valid
-   token whose file the client doesn't use until the request applies, so
-   the server needs no new state. #62 could say so.
+Resolved by the user's decisions, and now in the issues:
+
+1. A damaged registry with accounts on gets #63's message, above.
+2. A held token is an ordinary client token whose file the client doesn't
+   use until the confirmation applies (#62).

@@ -5,7 +5,8 @@ one with a link, and signs out of all of them on uninstall. Covers #60,
 #61, #68 and #71.
 
 Keys, tokens and sign-in are in [03-identity-and-auth.md](03-identity-and-auth.md).
-The confirmation phrases are in
+How each command is confirmed (the terminal, the native dialog, or the
+typed phrase without a display) is in
 [06-confirmation-and-approval.md](06-confirmation-and-approval.md). The
 states of a remote on a machine are in [07-state-machines.md](07-state-machines.md).
 The client files are in [02-data-model.md](02-data-model.md).
@@ -28,9 +29,9 @@ The client files are in [02-data-model.md](02-data-model.md).
   login), client name and token path, and when it was added.
 - `~/.config/user-memory/remotes/<name>.token`: one per remote, owner-only,
   never inside the JSON.
-- `~/.local/state/user-memory/remote-log`: every add, use, trust, login and
-  logout, with the time and whether it was confirmed at a terminal or by a
-  prompt.
+- `~/.local/state/user-memory/remote-log`: every add, use, trust,
+  set-token, login and logout, with the time and how it was confirmed: at
+  a terminal, in the native dialog, or by the typed phrase (#62).
 
 ### Commands
 
@@ -55,7 +56,7 @@ sequenceDiagram
   R->>S: GET /.well-known/user-memory?nonce=...&url=... (#58)
   S-->>R: info and signature
   R->>R: verify, compare with every pin in remotes.json
-  R->>U: show the host and fingerprint, ask (a terminal, or #62's phrase)
+  R->>U: show the host and fingerprint, ask (a terminal, the dialog, or the phrase)
   U->>R: yes
   R->>R: copy F to remotes/home.token, owner-only
   R->>R: write the remote and its pin to remotes.json in one rename, append to remote-log
@@ -66,16 +67,17 @@ Error paths:
 - **The same key as another remote:** a warning,
   `"home" is the same server as "work" (same key)`.
 - **The signature doesn't verify:** refused, nothing saved.
-- **Without a terminal:** a pending request (#62) with the phrase
-  `trust memory server home 9a1b2c3d` (the last 8 characters of the
-  fingerprint).
+- **Without a terminal:** the native dialog (#62); without a display, a
+  pending request with the phrase `trust memory server home 9a1b2c3d` (the
+  last 8 characters of the fingerprint).
 - **Unreachable:** nothing to pin, so the remote isn't added (see open
   point 3 for adding before the server is up).
 
 ### Changing a remote
 
 - `set-url` is accepted only when the server at the new URL proves the
-  pinned key, as for a domain move. Its phrase is
+  pinned key, as for a domain move. It confirms like the others; its
+  phrase, without a display, is
   `move memory server work to memory2.example.com`.
 - `rename` changes the name in `remotes.json`, the token file's name and
   the active pointer, in one rename of the JSON.
@@ -135,7 +137,7 @@ sequenceDiagram
   participant T as home's server
   participant F as remotes.json / remote-log
   participant I as Instruction files
-  Use->>U: confirm (a terminal, or the phrase "switch memory to home" (#62))
+  Use->>U: confirm (a terminal, the native dialog, or the phrase (#62))
   U->>Use: yes
   Use->>T: key check with home's pin
   alt key matches, version fits, no sign-in needed
@@ -172,8 +174,9 @@ Error paths:
   ``home runs user-memory 0.9.1; this client needs 0.11 or newer. Update the server, or keep using work.``
 - **Without a terminal, before #62:**
   `Switching memory servers needs you at a terminal; run "user-memory remote use home" yourself.`
-- **Without a terminal, after #62:** a pending request and its phrase
-  `switch memory to home`; the hook applies it (see below).
+- **Without a terminal, after #62:** the native dialog; without a display,
+  a pending request and its phrase `switch memory to home`, which the hook
+  applies (see below).
 - **The active remote is set by the environment** (`USER_MEMORY_URL`):
   see open point 5.
 
@@ -313,11 +316,11 @@ Error paths:
 - **The sign-in is declined, expires or is refused by team's allow
   rules:** nothing is switched; the machine stays on home, and #64's
   message is shown.
-- **Without a terminal (#62):** the command runs the sign-in, then holds
-  the new token in `pending-confirmation` and prints
-  `switch memory to team`. The hook writes the token and sets active on
-  the exact phrase. When the request expires, the held token is revoked
-  on team.
+- **Without a terminal (#62):** the command runs the sign-in, then asks in
+  the native dialog. Without a display, it holds the new token in
+  `pending-confirmation` and prints `switch memory to team`; the hook
+  writes the token and sets active on the exact phrase. Cancel, or an
+  expired request, revokes the held token on team.
 - **team has the same key as another remote:** the warning
   `"team" is the same server as "work" (same key)`; the user decides.
 
@@ -352,7 +355,7 @@ sequenceDiagram
 The notice, as #63 words it:
 
 ```output
-Memory server work now has accounts; this machine still uses its old shared token, which acts as github:alice. To use your own account, run `user-memory login`.
+Memory server work now has accounts; this machine still uses its token from before accounts, which acts as github:alice. To use your own account, run `user-memory login`.
 ```
 
 Error paths:
@@ -363,7 +366,8 @@ Error paths:
   store goes whole to the owner (#63), who can give them a filtered export.
 - **`login home` when the old token works:** a sign-in as a named account
   replaces the token file; it's `login` as another account, so without a
-  terminal it needs `sign memory in as github:bob`.
+  terminal it asks in the native dialog, or without a display needs
+  `sign memory in as github:bob`.
 - **The notice's wording for a client token:** see
   [03-identity-and-auth.md](03-identity-and-auth.md), open point 4.
 
@@ -475,40 +479,22 @@ Error paths:
 
 ## Open points
 
-1. **`remote trust`.** Used by #58 and #62, owned by no issue. See
-   [03-identity-and-auth.md](03-identity-and-auth.md), open point 1.
-2. **Replacing a remote's token.** After a revoke or expiry on a server
-   without accounts, the user needs to give an existing remote a new
-   token file. #60 has no command for it. Edit #60, for example to let
-   `remote add NAME URL --token-file F` replace the token of an existing
-   remote whose key matches, or add `remote set-token NAME F`.
-3. **A remote with no token, or not reachable when added.** #60 allows
-   `remote add` without `--token-file`, and #61's checks cover a sign-in
-   only for a server with accounts. Edit #61 so `remote use` to a server
-   without accounts and without a token refuses, with a message such as
-   `home has no token on this machine; ask its operator for a token file or a connect link`.
-   Edit #60 to say whether `add` and the migration need the server
-   reachable to pin its key (this design: `add` does; the migration keeps
-   the remote unpinned and pins on first contact, which then counts as a
-   first use).
-4. **The window between `serve` and SessionStart.** See
-   [01-architecture.md](01-architecture.md), open point 2.
-5. **`remote use` under an environment override.** `USER_MEMORY_URL` and
-   `USER_MEMORY_DB` take priority over the active remote (#60), so a
-   switch doesn't reach processes started with them. Edit #61 to have
-   `remote use` say so when either is set in its own environment, and
-   doctor to name the override.
-6. **The rules block when the account is dormant or signed out.** #61
-   says the block never holds another server's or account's rules. #63's
-   dormant answer and #64's `logout` (which clears the block) leave open
-   what session start does when the active remote answers 401. This
-   design: session start clears the block on a 401 for the active remote,
-   as `logout` does. Edit #61 or #63 to say so.
-7. **Uninstall and a key mismatch.** #71 covers reachable and
-   unreachable remotes. A remote whose key doesn't match must not get the
-   token, so it is left like an unreachable one. Edit #71 to say so, with
-   the `Left:` line naming the mismatch.
-8. **The header's wording without accounts.** #61 gives the header with
-   an account. This design uses
+Resolved by the user's decisions, and now in the issues:
+
+1. `remote trust` belongs to #60.
+2. `remote set-token NAME FILE` replaces a remote's token (#60).
+3. `remote use` to a server without accounts and without a token refuses
+   with
+   ``home has no token on this machine; ask its operator for a token file or a connect link, then run `user-memory remote set-token home FILE` ``
+   (#61); `add` needs the server reachable, and the migration pins at
+   first contact (#60).
+4. The window between `serve` and SessionStart is closed (#61).
+5. `remote use` says when `USER_MEMORY_URL` or `USER_MEMORY_DB` overrides
+   the switch, and doctor names the override (#61).
+6. Session start clears the rules block on a 401 from the active remote,
+   as `logout` does (#61).
+7. Uninstall leaves a remote whose key doesn't match like an unreachable
+   one, with a `Left:` line naming the mismatch (#71).
+8. The rules header without accounts is
    `<!-- Rules on memory server home (memory.home.example); rewritten by user-memory. -->`
-   for a server without accounts. Edit #61 to fix the wording once.
+   (#61).

@@ -33,8 +33,10 @@ token. The open issues turn that into:
    backup never delete memories. Only `host users purge` deletes, and only
    after it offers an export (#63).
 4. **The agent can't act for the user.** Every command that changes where
-   memory goes or whose it is needs the user at a terminal, or the
-   command's exact phrase as the user's whole next prompt (#62). There is
+   memory goes or whose it is needs the user at a terminal, or a native
+   dialog on the user's machine; only a machine without a display falls
+   back to the command's exact phrase as the user's next prompt (#62).
+   A rule an agent records is saved only after the same dialog (#53). There is
    no `--yes`.
 5. **A token goes only to the server it belongs to.** Every process checks
    the server's key before it sends one (#58).
@@ -54,7 +56,7 @@ These are out of scope for v0.11, with the reason. Most are listed as
 | An `/account` web page | The CLI covers revoking a lost machine (`account clients revoke`, #67). |
 | An actor field in memory history | #39 records the client; the user is implied by the store until groups exist. |
 | Self-service restore | Restore replaces a store while it is served; it stays the operator's (#70). Users export at any time. |
-| Proving a person approved a rule | No scheme stops a program running as the user from forging a yes on purpose ([06](06-confirmation-and-approval.md), #53). |
+| Stopping a program that sets out to forge a yes | A program running as the user can skip `serve`'s dialog or drive it; the dialog stops accidents and injected text ([06](06-confirmation-and-approval.md), #53). |
 | Isolation from the server's operator | The operator can read every store. The accounts guide says so (#73). |
 
 ## Principles
@@ -96,20 +98,21 @@ These are out of scope for v0.11, with the reason. Most are listed as
 | accounts mode | Whether a server routes tokens to per-user stores (`host accounts enable`) or serves one store. |
 | dormant | A user whose store is kept but not served while accounts are off (#63). |
 | removed | A disabled user whose store waits in `removed/` for restore or purge (#63). |
-| confirmation phrase | The exact text a user types as their next prompt to apply a pending command (#62). |
+| native confirmation | The terminal's question, or a native Save/Cancel dialog on the user's machine, for rules and sensitive commands (#53, #62). |
+| confirmation phrase | The exact text a user types as their next prompt to apply a pending command, on a machine without a display (#62). |
 
 ## Scope per issue
 
 | Issue | Title (short) | Main file | Also in |
 |---|---|---|---|
-| #53 | Approval the server can rely on for rules | [06](06-confirmation-and-approval.md) | [09](09-security.md) |
+| #53 | A native dialog before a rule is saved | [06](06-confirmation-and-approval.md) | [09](09-security.md) |
 | #54 | More agent apps: Hermes Agent and Pi | [10](10-agent-integrations.md) | [01](01-architecture.md) |
 | #56 | Accounts, isolation and switching (tracking) | this file | all |
 | #57 | Per-store write gate, connection and vector cache | [04](04-accounts-mode.md) | [01](01-architecture.md), [02](02-data-model.md) |
 | #58 | Server key and client pin | [03](03-identity-and-auth.md) | [05](05-remotes-and-switching.md), [07](07-state-machines.md) |
 | #60 | Remotes | [05](05-remotes-and-switching.md) | [02](02-data-model.md), [07](07-state-machines.md) |
 | #61 | Switching remotes | [05](05-remotes-and-switching.md) | [07](07-state-machines.md) |
-| #62 | Confirming by the next prompt | [06](06-confirmation-and-approval.md) | [05](05-remotes-and-switching.md) |
+| #62 | Confirming at the terminal or with a native dialog | [06](06-confirmation-and-approval.md) | [05](05-remotes-and-switching.md) |
 | #63 | Accounts on and off, per-user stores, allow rules | [04](04-accounts-mode.md) | [02](02-data-model.md), [07](07-state-machines.md) |
 | #64 | Sign-in with GitHub | [03](03-identity-and-auth.md) | [07](07-state-machines.md) |
 | #65 | Sign-in with GitLab | [03](03-identity-and-auth.md) | |
@@ -122,6 +125,8 @@ These are out of scope for v0.11, with the reason. Most are listed as
 | #72 | The skill's servers playbook | [11](11-skill-docs-evals.md) | |
 | #73 | The accounts guide | [11](11-skill-docs-evals.md) | |
 | #74 | Evaluations of switching, sign-in and moving | [11](11-skill-docs-evals.md) | |
+| #96 | The evaluations' test server and checks | [11](11-skill-docs-evals.md) | |
+| #97 | Copy a local store into a server account | [11](11-skill-docs-evals.md) | [08](08-edge-cases.md) |
 
 v0.10.0 issues this design builds on: #48 and #59 (tokens and the
 registry), #39 (history), #42 (new rules at session start), #43 (import
