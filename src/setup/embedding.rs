@@ -3,13 +3,13 @@
 //! after the environment. The installer's Docker server reads them from an
 //! `embedding.env` beside its compose.yaml instead.
 
-use crate::paths;
+use crate::{paths, server::Compose};
 use anyhow::{Context, Result, bail};
 use std::{
     collections::BTreeMap,
     env, fs,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Stdio,
 };
 
 /// Every embedding setting; other keys in a dotenv file are ignored.
@@ -191,10 +191,7 @@ fn apply_docker_with(docker: &Path, dir: &Path, settings: &Settings) -> Result<S
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(err) => return Err(err).with_context(|| format!("Cannot read {}", file.display())),
     };
-    let compose = Compose {
-        docker,
-        file: dir.join("compose.yaml"),
-    };
+    let compose = Compose::with_docker(docker.to_owned(), dir.join("compose.yaml"));
     // The old key waits beside the new one until the change has worked.
     compose.shell(
         &format!("[ ! -f {DOCKER_KEY} ] || mv -f {DOCKER_KEY} {DOCKER_KEY}.previous"),
@@ -206,8 +203,8 @@ fn apply_docker_with(docker: &Path, dir: &Path, settings: &Settings) -> Result<S
             let key = fs::File::open(key).with_context(|| format!("Cannot read {key}"))?;
             compose.shell(&format!("umask 077 && cat >{DOCKER_KEY}"), key.into())?;
         }
-        compose.run(&["up", "-d", "--wait"], Stdio::null())?;
-        compose.run(
+        compose.output(&["up", "-d", "--wait"], Stdio::null())?;
+        compose.output(
             &["exec", "-T", "memory", "user-memory", "embedding", "sync"],
             Stdio::null(),
         )
@@ -225,7 +222,7 @@ fn apply_docker_with(docker: &Path, dir: &Path, settings: &Settings) -> Result<S
                         Stdio::null(),
                     )
                 })
-                .and_then(|_| compose.run(&["up", "-d", "--wait"], Stdio::null()));
+                .and_then(|_| compose.output(&["up", "-d", "--wait"], Stdio::null()));
             match restored {
                 Ok(_) => Err(err.context("The embedding setting was not changed")),
                 Err(again) => Err(err.context(format!(
@@ -243,48 +240,6 @@ fn write_atomically(file: &Path, text: &str) -> Result<()> {
     fs::write(&temporary, text)
         .and_then(|()| fs::rename(&temporary, file))
         .with_context(|| format!("Cannot write {}", file.display()))
-}
-
-/// `docker compose` for the installer's server, by its compose.yaml.
-struct Compose<'a> {
-    docker: &'a Path,
-    file: PathBuf,
-}
-
-impl Compose<'_> {
-    /// Runs `docker compose -f FILE ARGS` with `input`, its errors shown to
-    /// the user; returns its trimmed output.
-    fn run(&self, args: &[&str], input: Stdio) -> Result<String> {
-        let out = Command::new(self.docker)
-            .arg("compose")
-            .arg("-f")
-            .arg(&self.file)
-            .args(args)
-            .stdin(input)
-            .stderr(Stdio::inherit())
-            .output()
-            .context("Cannot run docker")?;
-        if !out.status.success() {
-            bail!("docker compose {} failed (above)", args.join(" "));
-        }
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
-    }
-    /// Runs a shell command in a one-off server container, with the volume.
-    fn shell(&self, script: &str, input: Stdio) -> Result<String> {
-        self.run(
-            &[
-                "run",
-                "--rm",
-                "-T",
-                "--entrypoint",
-                "sh",
-                "memory",
-                "-c",
-                script,
-            ],
-            input,
-        )
-    }
 }
 
 /// One setting: the environment first, then `saved`, with where it came from.
