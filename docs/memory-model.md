@@ -190,6 +190,17 @@ CLI: `user-memory record … --confirms ID`, `--supersedes ID` (repeatable, add
   Without the map, import changes nothing and lists the memories that need a
   title (the tool by id only). A field over its limit is refused, not cut.
 - Restoring an older backup brings back memories forgotten since.
+- An export records the store that wrote it as `source`, beside `selection`,
+  without changing the format version: `{"server": "sha256:<hex>", "kind":
+  "local"}`, where `server` is the SHA-256 of the store's identity (its
+  resolved file path), so the file never holds the path. Older versions
+  ignore the field. The import summary echoes a readable `source` and, when
+  it is not the importing store's own, adds `source_note`:
+  ``This export came from a different memory store (source sha256:1a2b3c4d5e6f); importing adds its memories to this one.``
+  It is a notice only and never blocks an import. A file without `source`, or
+  with an unreadable one, imports as before. A store moved to another path
+  counts as another store, and two servers with the same file path (for
+  example both in Docker at `/data`) cannot be told apart.
 - A client connected to a remote server exports from and imports into that
   server, as with a local store: the file is written on the client, mode 0600,
   and the server's refusals come through. It needs no permission beyond the

@@ -361,6 +361,25 @@ fn surface(root: &TempDir) -> Surface {
     for result in &results {
         keys(result, &mut fields);
     }
+    // A file from another store, whose summary adds `source_note`.
+    let foreign = json!({"format": "user-memory-export", "format_version": 2,
+        "source": {"server": format!("sha256:{}", "0".repeat(64)), "kind": "local"},
+        "memories": [], "distinct_pairs": []});
+    let mut child = binary(home, &db)
+        .args(["import", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(foreign.to_string().as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    keys(&serde_json::from_slice(&out.stdout).unwrap(), &mut fields);
     let kinds: BTreeSet<String> = results[0]["groups"]
         .as_array()
         .unwrap()

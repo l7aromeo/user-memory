@@ -180,20 +180,10 @@ async fn remember(
 /// What the session's memories come from, which names its snapshot.
 fn store_identity() -> Option<String> {
     let remote = setup::configured_remote().ok()?;
-    Some(identity(
+    Some(crate::paths::identity(
         remote.as_ref().map(|remote| remote.url.as_str()),
         &db_path(),
     ))
-}
-
-/// The identity of the memories behind `server`'s address, or of the local
-/// store at `db` without one: its path spelled the same before the store
-/// file is created as after.
-fn identity(server: Option<&str>, db: &Path) -> String {
-    match server {
-        Some(url) => format!("server {url}"),
-        None => format!("store {}", crate::paths::resolved(db).to_string_lossy()),
-    }
 }
 
 /// Hook output before a prompt: a notice of what changed in memory since the
@@ -732,36 +722,6 @@ fn capped(text: String, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // Each server, and each local store, names snapshots of its own: two
-    // servers differ, and a server differs from a store at any path.
-    #[test]
-    fn every_store_and_server_has_its_own_identity() {
-        let db = Path::new("/home/u/.local/share/user-memory/memories.sqlite3");
-        let identities: std::collections::BTreeSet<String> = [
-            identity(Some("https://a.example.com/mcp"), db),
-            identity(Some("https://b.example.com/mcp"), db),
-            identity(None, db),
-            identity(None, Path::new("/tmp/dev/memories.sqlite3")),
-        ]
-        .into_iter()
-        .collect();
-        assert_eq!(identities.len(), 4, "{identities:?}");
-        assert_eq!(
-            identity(Some("https://a.example.com/mcp"), db),
-            "server https://a.example.com/mcp"
-        );
-        assert_eq!(
-            identity(None, db),
-            format!("store {}", crate::paths::resolved(db).to_string_lossy())
-        );
-        // A store named by a bare file name is the one in the current folder.
-        let bare = identity(None, Path::new("memories.sqlite3"));
-        assert!(
-            Path::new(bare.trim_start_matches("store ")).is_absolute(),
-            "{bare}"
-        );
-    }
 
     /// A fake index of three pages whose second cursor is refused `stale`
     /// times, as when the store changes between page reads; returns the
