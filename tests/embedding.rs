@@ -6,6 +6,8 @@
     reason = "integration tests may unwrap: a failed unwrap is a failed test"
 )]
 
+#[path = "support/fake.rs"]
+mod fake;
 #[path = "support/sandbox.rs"]
 mod sandbox;
 use sandbox::Sandboxed;
@@ -392,7 +394,22 @@ fn a_client_of_a_server_is_sent_to_the_server() {
     let said = text(&out);
     assert!(!out.status.success(), "{said}");
     assert!(
-        said.contains("docker compose exec memory user-memory embedding"),
+        said.contains("Run embedding show on the memory server that owns the database: on the machine that serves http://127.0.0.1:9/mcp, run: user-memory embedding show"),
+        "{said}"
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_user-memory"))
+        .args(["embedding", "sync"])
+        .sandboxed(&s.home)
+        .env("USER_MEMORY_URL", "http://127.0.0.1:9/mcp")
+        .env("USER_MEMORY_TOKEN_FILE", &token)
+        .output()
+        .unwrap();
+    let said = text(&out);
+    assert!(!out.status.success(), "{said}");
+    assert!(
+        said.contains(
+            "on the machine that serves http://127.0.0.1:9/mcp, run: user-memory embedding sync"
+        ),
         "{said}"
     );
     // A server the installer did not set up here owns its setting.
@@ -524,4 +541,204 @@ fn set_with_a_failing_endpoint_saves_nothing() {
     assert!(!out.status.success(), "{said}");
     assert!(said.contains("did not answer the probe"), "{said}");
     assert!(i.receipt().get("embedding").is_none(), "{}", i.receipt());
+}
+
+/// The port the test Docker server's compose.yaml publishes; nothing
+/// listens there, as these commands never reach the server itself.
+const DOCKER_PORT: &str = "18765";
+
+/// A client of the installer's Docker server on this machine: its project
+/// folder with compose.yaml and embedding.env, the fake `docker` on PATH,
+/// and the server's URL as this machine's remote.
+struct DockerClient {
+    store: Store,
+    dir: PathBuf,
+    cli: PathBuf,
+    token: PathBuf,
+}
+
+impl DockerClient {
+    fn new(embedding_env: &str) -> Self {
+        let store = Store::new();
+        let data = if cfg!(windows) {
+            store.home.join("AppData").join("Local")
+        } else {
+            store.home.join(".local").join("share")
+        };
+        let dir = data.join("user-memory").join("docker");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("compose.yaml"),
+            format!("    ports:\n      - \"127.0.0.1:{DOCKER_PORT}:8765\"\n"),
+        )
+        .unwrap();
+        std::fs::write(dir.join("embedding.env"), embedding_env).unwrap();
+        let cli = store.home.join("cli");
+        std::fs::create_dir_all(&cli).unwrap();
+        fake::fake(&cli, "docker");
+        let token = store.home.join("token");
+        std::fs::write(&token, "x".repeat(40)).unwrap();
+        Self {
+            store,
+            dir,
+            cli,
+            token,
+        }
+    }
+    fn run(&self, args: &[&str]) -> Output {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_user-memory"));
+        command
+            .args(args)
+            .sandboxed(&self.store.home)
+            .env("PATH", &self.cli)
+            .env(
+                "USER_MEMORY_URL",
+                format!("http://127.0.0.1:{DOCKER_PORT}/mcp"),
+            )
+            .env("USER_MEMORY_TOKEN_FILE", &self.token)
+            .env("FAKE_HOST", env!("CARGO_BIN_EXE_user-memory"));
+        for name in EMBED_ENV {
+            command.env_remove(name);
+        }
+        command.output().unwrap()
+    }
+    fn docker_log(&self) -> String {
+        std::fs::read_to_string(self.store.home.join("docker.log")).unwrap_or_default()
+    }
+}
+
+// On the installer's Docker server's machine, show prints the setting from
+// embedding.env; with it off, there's nothing to ask the container.
+#[test]
+fn show_on_the_docker_servers_machine_reads_its_setting() {
+    let c = DockerClient::new("");
+    let out = c.run(&["embedding", "show"]);
+    let said = text(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(
+        said.contains("Embedding: off; search uses keywords only"),
+        "{said}"
+    );
+    assert!(!c.docker_log().contains(" exec "), "{}", c.docker_log());
+}
+
+// With a model set, show prints the setting, then the container's own
+// probe and calibration, without its repeat of the endpoint.
+#[test]
+fn show_on_the_docker_servers_machine_asks_the_container() {
+    let endpoint = Endpoint::start(Answer::Separating);
+    let c = DockerClient::new(&format!(
+        "USER_MEMORY_EMBED_URL={}/embeddings\nUSER_MEMORY_EMBED_MODEL=fake-model\n",
+        endpoint.url
+    ));
+    let out = c.run(&["embedding", "show"]);
+    let said = text(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(
+        said.contains(&format!("Endpoint: {}/embeddings\n", endpoint.url)),
+        "{said}"
+    );
+    assert!(said.contains("Model: fake-model"), "{said}");
+    assert!(said.contains("Vector length: "), "{said}");
+    assert_eq!(said.matches("Endpoint: ").count(), 1, "{said}");
+    assert_eq!(said.matches("Model: ").count(), 1, "{said}");
+    assert!(
+        c.docker_log()
+            .contains("exec -T memory user-memory embedding show"),
+        "{}",
+        c.docker_log()
+    );
+}
+
+// A container that isn't running still leaves the setting shown, with the
+// command that gives the rest once it runs.
+#[test]
+fn show_names_the_container_command_when_docker_cannot_answer() {
+    let c = DockerClient::new(
+        "USER_MEMORY_EMBED_URL=http://host.docker.internal:11434/v1/embeddings\nUSER_MEMORY_EMBED_MODEL=fake-model\nUSER_MEMORY_EMBED_API_KEY_FILE=/data/embedding-key\nUSER_MEMORY_EMBED_ALLOW_HTTP=1\n",
+    );
+    std::fs::write(c.store.home.join("container-down"), "").unwrap();
+    let out = c.run(&["embedding", "show"]);
+    let said = text(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(
+        said.contains("Endpoint: http://host.docker.internal:11434/v1/embeddings (this machine, as the Docker server reaches it)"),
+        "{said}"
+    );
+    assert!(said.contains("Model: fake-model"), "{said}");
+    // The key is named by where it is, never by its path or value.
+    assert!(said.contains("API key: in the server's volume"), "{said}");
+    assert!(!said.contains("embedding-key"), "{said}");
+    assert!(said.contains("service \"memory\" is not running"), "{said}");
+    assert!(
+        said.contains(&format!(
+            "Probe and stored vectors: docker compose -f '{}' exec memory user-memory embedding show",
+            c.dir.join("compose.yaml").display()
+        )),
+        "{said}"
+    );
+}
+
+// sync on the Docker server's machine runs in the container, and fails
+// when it fails there.
+#[test]
+fn sync_on_the_docker_servers_machine_runs_in_the_container() {
+    let c = DockerClient::new(
+        "USER_MEMORY_EMBED_URL=http://host.docker.internal:11434/v1/embeddings\n",
+    );
+    let out = c.run(&["embedding", "sync"]);
+    let said = text(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(
+        c.docker_log()
+            .contains("exec -T memory user-memory embedding sync"),
+        "{}",
+        c.docker_log()
+    );
+    std::fs::write(c.store.home.join("sync-fails"), "").unwrap();
+    let out = c.run(&["embedding", "sync"]);
+    let said = text(&out);
+    assert!(!out.status.success(), "{said}");
+    assert!(said.contains("did not answer the probe"), "{said}");
+    assert!(
+        said.contains("docker compose exec -T memory user-memory embedding sync failed"),
+        "{said}"
+    );
+}
+
+// Without a saved setup there's nowhere to keep a setting: set says where
+// to run it before the slow probe and calibration, and off before dropping
+// any vector.
+#[test]
+fn set_and_off_without_a_saved_setup_say_where_to_run_them() {
+    let s = Store::new();
+    s.record("Keep commits small");
+    let endpoint = Endpoint::start(Answer::Separating);
+    let out = s.run(Some(&endpoint), &["embedding", "sync"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let vectors: i64 = s.query("SELECT count(*) FROM memory_vectors");
+    assert_eq!(vectors, 1);
+    let probed = endpoint.requests.lock().unwrap().len();
+    let wanted = "On the installer's Docker server, run `user-memory embedding set` on the machine that runs the container";
+    let out = s.run(
+        None,
+        &[
+            "embedding",
+            "set",
+            "--url",
+            &endpoint.url,
+            "--model",
+            "fake-model",
+        ],
+    );
+    let said = text(&out);
+    assert!(!out.status.success(), "{said}");
+    assert!(said.contains(wanted), "{said}");
+    assert_eq!(endpoint.requests.lock().unwrap().len(), probed, "{said}");
+    let out = s.run(None, &["embedding", "off"]);
+    let said = text(&out);
+    assert!(!out.status.success(), "{said}");
+    assert!(said.contains(wanted), "{said}");
+    let vectors: i64 = s.query("SELECT count(*) FROM memory_vectors");
+    assert_eq!(vectors, 1);
 }

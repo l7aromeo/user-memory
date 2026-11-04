@@ -253,14 +253,24 @@ vectors from two models cannot be compared. Running the installer again with
 The installer's Docker server reads the setting from
 `~/.local/share/user-memory/docker/embedding.env`, and an API key from its
 volume; a native store keeps it beside the binary. The Docker server reaches
-Ollama on this machine as `host.docker.internal`: Docker Desktop on a Mac or
-PC forwards that to Ollama's default `127.0.0.1:11434`, but on Linux Ollama
-must also listen on the Docker bridge address, for example with
-`OLLAMA_HOST=172.17.0.1:11434`.
+Ollama on this machine as `host.docker.internal`. Docker Desktop on a Mac or
+PC forwards that to Ollama's default `127.0.0.1:11434`. With Docker Engine on
+Linux, Ollama must also listen on the Docker bridge address, for example
+with `OLLAMA_HOST=172.17.0.1:11434`. Docker Desktop on Linux runs containers
+in a virtual machine, as on a Mac; if the probe line of
+`user-memory embedding show` says it failed there, set Ollama to listen on
+the bridge address the same way.
 
 `user-memory embedding show` prints the endpoint, the model, its vector
 length and how duplicates are detected. `user-memory embedding off` returns
-to keyword search and drops the stored vectors.
+to keyword search and drops the stored vectors. On the machine that runs the
+installer's Docker server, run them all there, not in the container: `show`
+prints the setting from `embedding.env`, naming `host.docker.internal` as
+this machine and an API key only as ``API key: in the server's volume``, then
+the container's own probe and calibration. When the container isn't
+running, it prints the command for the rest instead, as
+``Probe and stored vectors: docker compose -f … exec memory user-memory embedding show``.
+`embedding sync` runs in the container the same way.
 
 A model other than `qwen3-embedding:4b` is calibrated automatically: user-memory
 embeds example memory pairs that ship with it (restatements, exceptions,

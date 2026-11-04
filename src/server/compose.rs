@@ -82,6 +82,14 @@ impl Compose {
             .context("Cannot run docker")
     }
 
+    /// The command a user runs for `user-memory ARGS` in the container.
+    pub fn exec_hint(&self, args: &str) -> String {
+        format!(
+            "docker compose -f {} exec {SERVICE} user-memory {args}",
+            crate::shell::quote(&self.file)
+        )
+    }
+
     /// Runs `script` in a one-off server container's shell, with the
     /// volume, returning its output.
     pub fn shell(&self, script: &str, input: Stdio) -> Result<String> {

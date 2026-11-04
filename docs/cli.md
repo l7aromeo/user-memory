@@ -195,8 +195,8 @@ they refuse and say to run them on the server:
 | `user-memory repair` | Checks the store in full and, if it is damaged, backs it up and rebuilds its indexes ([repair](storage.md#checking-and-repairing-the-store)). `--db PATH` names another store. |
 | `user-memory reindex` | Rebuilds the keyword index and embeds every memory that lacks a current vector. |
 | `user-memory embedding set --url URL --model NAME` | Chooses the embedding model for semantic search: checks it, calibrates it, saves it and embeds every memory again. `--key-file FILE`, `--dimensions N` and `--allow-http` as in [embedding settings](configuration.md#embedding-settings). |
-| `user-memory embedding sync` | Checks, calibrates and re-embeds with the setting in effect. |
-| `user-memory embedding show` | Shows the endpoint, model, vector length and how duplicates are detected. |
+| `user-memory embedding sync` | Checks, calibrates and re-embeds with the setting in effect. On the installer's Docker server's machine, it runs in the container. |
+| `user-memory embedding show` | Shows the endpoint, model, vector length and how duplicates are detected. On the installer's Docker server's machine, it shows the setting from `embedding.env`, then asks the container for the rest. On a client of another server, `show` and `sync` name the command to run on that server's machine. |
 | `user-memory embedding off` | Keyword search only; stored vectors are dropped. |
 
 ## Run by the clients
