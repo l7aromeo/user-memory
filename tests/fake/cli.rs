@@ -359,7 +359,7 @@ fn commands(value: &serde_json::Value, found: &mut Vec<String>) {
 
 /// A Docker CLI that records every call in `$HOME/docker.log`. `compose up`
 /// starts a real `user-memory host` (`$FAKE_HOST`) on the compose file's
-/// port, `compose stop` stops it, `compose cp` copies its token out, and a
+/// port, `compose stop` and `down` stop it and wait for it to exit, `compose cp` copies its token out, and a
 /// one-off container's shell runs with the store folder `$HOME/server` as
 /// `/data`. `$HOME/docker-down` makes `docker info` fail; `$HOME/docker-ps`
 /// is what `docker ps` prints.
@@ -532,7 +532,13 @@ fn compose_port(compose: &str) -> Option<u16> {
     })
 }
 
-/// Stops the server `compose up` started; whether one was running.
+/// How long a stop waits for the server to exit: the stop grace period of
+/// the installer's compose file, after which Docker would kill it.
+const STOP_WAIT: Duration = Duration::from_secs(15);
+
+/// Stops the server `compose up` started and waits for it to exit, as
+/// Docker waits for a container before it removes its volume; whether one
+/// was running.
 fn stop_server() -> bool {
     let Ok(pid) = fs::read_to_string(at("server.pid")) else {
         return false;
@@ -547,10 +553,35 @@ fn stop_server() -> bool {
         kill.arg(pid);
         kill
     };
-    kill.stdout(Stdio::null())
+    let stopped = kill
+        .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .is_ok_and(|status| status.success())
+        .is_ok_and(|status| status.success());
+    if stopped {
+        let deadline = std::time::Instant::now() + STOP_WAIT;
+        while running(pid) && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+    stopped
+}
+
+/// Whether the process `pid` still runs.
+fn running(pid: &str) -> bool {
+    if cfg!(windows) {
+        Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .output()
+            .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).contains(pid))
+    } else {
+        Command::new("kill")
+            .args(["-0", pid])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
 }
 
 /// Whether a server answers HTTP on `port` within 10 seconds, as
