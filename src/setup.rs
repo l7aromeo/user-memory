@@ -1841,15 +1841,8 @@ async fn server_doctor(
     };
     // The store's own checks, by the release inside the container; it
     // reaches GitHub through this doctor only.
-    let out = Command::new("docker")
-        .arg("compose")
-        .arg("-f")
-        .arg(dir.join("compose.yaml"))
-        .args(["exec", "-T", "-e", &format!("{}=1", update::OFF)])
-        .args(["memory", "user-memory", "doctor", "--server-only"])
-        .stdin(std::process::Stdio::null())
-        .output()
-        .context("Cannot run docker")?;
+    let out = crate::server::Compose::new(dir.join("compose.yaml"))
+        .exec(&[(update::OFF, "1")], &["doctor", "--server-only"])?;
     print!("{}", String::from_utf8_lossy(&out.stdout));
     match out.status.code() {
         Some(0) => Ok(Health::Good),

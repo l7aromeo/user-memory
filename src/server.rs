@@ -5,6 +5,10 @@
 //! they keep the questions about installing, the downloads and the checksum
 //! checks.
 
+mod compose;
+
+pub use compose::Compose;
+
 use crate::{
     private,
     setup::removal::{self, Memories, Report},
@@ -292,14 +296,14 @@ fn install(install: &Install) -> Result<()> {
         compose_yaml(&place.dir, &place.name, place.port, &bind, &hosts),
     )
     .with_context(|| format!("cannot write {}", compose_file.display()))?;
-    let compose = Compose(compose_file);
+    let compose = Compose::new(compose_file);
     compose.run(&["build"])?;
     if place.upgrade {
         // The new image migrates the store (backing it up first) before the
         // new server starts, as the repository's upgrade does. It checks the
         // store first, so a store that needs titles leaves the running
         // server untouched.
-        if !compose.store_check(install.titles.as_deref())? {
+        if !store_check(&compose, install.titles.as_deref())? {
             bail!(
                 "the store cannot be upgraded yet, and the server keeps running the previous version; when the message above lists memories without titles, write the titles map the user approves and run the installer again with --titles FILE"
             );
@@ -308,19 +312,19 @@ fn install(install: &Install) -> Result<()> {
         let migrated = match &install.titles {
             Some(titles) => compose.status(
                 &["run", "--rm", "-T", "memory", "migrate", "--titles", "-"],
-                Some(titles),
+                titles_input(titles)?,
             )?,
-            None => compose.status(&["run", "--rm", "memory", "migrate"], None)?,
+            None => compose.status(&["run", "--rm", "memory", "migrate"], Stdio::inherit())?,
         };
         if !migrated {
-            return Err(compose.migrate_failed(install.titles.as_deref()));
+            return Err(migrate_failed(&compose, install.titles.as_deref()));
         }
     } else if install.titles.is_some() {
         println!("No titles map was needed: a new server starts with an empty store.");
     }
     compose.run(&["up", "-d", "--wait"])?;
     if let Some(token_file) = &install.token_file {
-        compose.copy_token(token_file)?;
+        copy_token(&compose, token_file)?;
     }
     Ok(())
 }
@@ -357,7 +361,7 @@ fn remove(remove: &Remove) -> Result<bool> {
         return Ok(true);
     }
     let decided = choice.decide(&format!("the Docker volume {volume}"))?;
-    let compose = Compose(compose_file.clone());
+    let compose = Compose::new(compose_file.clone());
     if decided == Some(true) {
         let path = removal::export_path()?;
         let file = private::create_file(fs::OpenOptions::new().write(true).create_new(true), &path)
@@ -570,106 +574,89 @@ fn docker_output(args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
 }
 
-/// `docker compose` for the project, with Docker's own output shown as it
-/// comes.
-struct Compose(PathBuf);
+/// A titles map, as stdin for `migrate --titles -`.
+fn titles_input(titles: &Path) -> Result<Stdio> {
+    Ok(fs::File::open(titles)
+        .with_context(|| format!("cannot read the titles map {}", titles.display()))?
+        .into())
+}
 
-impl Compose {
-    fn command(&self, args: &[&str]) -> Command {
-        let mut command = Command::new("docker");
-        command.arg("compose").arg("-f").arg(&self.0).args(args);
-        command
-    }
-    /// Whether `args` succeeded, with `input` (a titles map) as stdin.
-    fn status(&self, args: &[&str], input: Option<&Path>) -> Result<bool> {
-        let mut command = self.command(args);
-        if let Some(input) = input {
-            command.stdin(
-                fs::File::open(input)
-                    .with_context(|| format!("cannot read the titles map {}", input.display()))?,
-            );
-        }
-        Ok(command.status().context("Cannot run docker")?.success())
-    }
-    fn run(&self, args: &[&str]) -> Result<()> {
-        if !self.status(args, None)? {
-            bail!("docker compose {} failed (above)", args.join(" "));
-        }
-        Ok(())
-    }
-    /// The new image's `migrate --check`, with the titles map when given.
-    fn store_check(&self, titles: Option<&Path>) -> Result<bool> {
-        match titles {
-            Some(titles) => self.status(
-                &[
-                    "run", "--rm", "-T", "memory", "migrate", "--check", "--titles", "-",
-                ],
-                Some(titles),
-            ),
-            None => self.status(&["run", "--rm", "memory", "migrate", "--check"], None),
-        }
-    }
-    /// Why the migration failed. The new image refuses the old store, so
-    /// the server cannot start again until it is migrated. The check passed
-    /// before the stop; a second check says whether memories without titles
-    /// arrived in between or Docker or the store itself is failing.
-    fn migrate_failed(&self, titles: Option<&Path>) -> anyhow::Error {
-        let mut recheck = match titles {
-            Some(_) => self.command(&[
+/// The new image's `migrate --check`, with the titles map when given.
+fn store_check(compose: &Compose, titles: Option<&Path>) -> Result<bool> {
+    match titles {
+        Some(titles) => compose.status(
+            &[
                 "run", "--rm", "-T", "memory", "migrate", "--check", "--titles", "-",
-            ]),
-            None => self.command(&["run", "--rm", "memory", "migrate", "--check"]),
-        };
-        if let Some(titles) = titles
-            && let Ok(file) = fs::File::open(titles)
-        {
-            recheck.stdin(file);
-        }
-        let Ok(out) = recheck.output() else {
-            return anyhow::anyhow!(
-                "the store was not upgraded and the server stays stopped; checking the store again failed too (above), so Docker or the store may be failing; fix that, then run the installer again"
-            );
-        };
-        if out.status.success() {
-            return anyhow::anyhow!(
-                "the store was not upgraded and the server stays stopped; see the message above, then run the installer again"
-            );
-        }
-        let said = format!(
-            "{}{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        if said.contains("needs a title for every memory") {
-            return anyhow::anyhow!(
-                "memories recorded after the check and before the server stopped need titles too (listed above); the store was not upgraded and the server stays stopped; add them to the titles map the user approves and run the installer again with --titles FILE"
-            );
-        }
-        eprintln!("{}", said.trim_end());
-        anyhow::anyhow!(
+            ],
+            titles_input(titles)?,
+        ),
+        None => compose.status(
+            &["run", "--rm", "memory", "migrate", "--check"],
+            Stdio::inherit(),
+        ),
+    }
+}
+
+/// Why the migration failed. The new image refuses the old store, so
+/// the server cannot start again until it is migrated. The check passed
+/// before the stop; a second check says whether memories without titles
+/// arrived in between or Docker or the store itself is failing.
+fn migrate_failed(compose: &Compose, titles: Option<&Path>) -> anyhow::Error {
+    let mut recheck = match titles {
+        Some(_) => compose.command(&[
+            "run", "--rm", "-T", "memory", "migrate", "--check", "--titles", "-",
+        ]),
+        None => compose.command(&["run", "--rm", "memory", "migrate", "--check"]),
+    };
+    if let Some(titles) = titles
+        && let Ok(file) = fs::File::open(titles)
+    {
+        recheck.stdin(file);
+    }
+    let Ok(out) = recheck.output() else {
+        return anyhow::anyhow!(
             "the store was not upgraded and the server stays stopped; checking the store again failed too (above), so Docker or the store may be failing; fix that, then run the installer again"
-        )
+        );
+    };
+    if out.status.success() {
+        return anyhow::anyhow!(
+            "the store was not upgraded and the server stays stopped; see the message above, then run the installer again"
+        );
     }
-    /// Copies the server's access token to `token_file`, readable only by
-    /// this user, replacing it in one rename.
-    fn copy_token(&self, token_file: &Path) -> Result<()> {
-        let folder = token_file.parent().context("Invalid token file path")?;
-        fs::create_dir_all(folder)
-            .with_context(|| format!("cannot create {}", folder.display()))?;
-        private::restrict(folder).with_context(|| format!("cannot create {}", folder.display()))?;
-        let temporary = token_file.with_extension(format!("{}", std::process::id()));
-        let copied = self
-            .command(&["cp", "memory:/data/access-token"])
-            .arg(&temporary)
-            .status();
-        if !copied.is_ok_and(|status| status.success()) {
-            let _ = fs::remove_file(&temporary);
-            bail!("cannot copy the access token out of the container");
-        }
-        private::restrict(&temporary)?;
-        fs::rename(&temporary, token_file)
-            .with_context(|| format!("cannot save the access token as {}", token_file.display()))
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    if said.contains("needs a title for every memory") {
+        return anyhow::anyhow!(
+            "memories recorded after the check and before the server stopped need titles too (listed above); the store was not upgraded and the server stays stopped; add them to the titles map the user approves and run the installer again with --titles FILE"
+        );
     }
+    eprintln!("{}", said.trim_end());
+    anyhow::anyhow!(
+        "the store was not upgraded and the server stays stopped; checking the store again failed too (above), so Docker or the store may be failing; fix that, then run the installer again"
+    )
+}
+
+/// Copies the server's access token to `token_file`, readable only by
+/// this user, replacing it in one rename.
+fn copy_token(compose: &Compose, token_file: &Path) -> Result<()> {
+    let folder = token_file.parent().context("Invalid token file path")?;
+    fs::create_dir_all(folder).with_context(|| format!("cannot create {}", folder.display()))?;
+    private::restrict(folder).with_context(|| format!("cannot create {}", folder.display()))?;
+    let temporary = token_file.with_extension(format!("{}", std::process::id()));
+    let copied = compose
+        .command(&["cp", "memory:/data/access-token"])
+        .arg(&temporary)
+        .status();
+    if !copied.is_ok_and(|status| status.success()) {
+        let _ = fs::remove_file(&temporary);
+        bail!("cannot copy the access token out of the container");
+    }
+    private::restrict(&temporary)?;
+    fs::rename(&temporary, token_file)
+        .with_context(|| format!("cannot save the access token as {}", token_file.display()))
 }
 
 #[cfg(test)]
