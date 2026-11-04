@@ -291,15 +291,24 @@ fn back_up_when(db: &Path, quiet: Duration) {
         Ok(_) => {
             with_state(|state| state.failed.remove(&key));
         }
-        Err(err) => {
-            with_state(|state| state.failed.insert(key.clone(), Instant::now()));
-            eprintln!(
-                "user-memory: the automatic backup of {} failed: {err:#}",
-                db.display()
-            );
-            note_failure(db, &format!("{err:#}"));
-        }
+        Err(err) => report_failure(db, &key, &err),
     }
+}
+
+/// Reports a failed backup of `db` on stderr and in the folder's note, and
+/// holds off retries for [`RETRY`]. A store that is gone, removed during
+/// the check as an uninstall removes it, failed nothing a backup could fix:
+/// it gets no report.
+fn report_failure(db: &Path, key: &Path, err: &anyhow::Error) {
+    if !db.is_file() {
+        return;
+    }
+    with_state(|state| state.failed.insert(key.to_path_buf(), Instant::now()));
+    eprintln!(
+        "user-memory: the automatic backup of {} failed: {err:#}",
+        db.display()
+    );
+    note_failure(db, &format!("{err:#}"));
 }
 
 /// A server's backup checks of a store, until it drops: one at once, one
@@ -435,8 +444,11 @@ fn make(db: &Path) -> Result<Made> {
 }
 
 /// Creates the backups folder, owner-only like the store's own folder.
+/// Creates the backups folder inside the store's folder, which must exist:
+/// a store removed while a server checks it, as an uninstall does, never
+/// gets its folder back.
 fn create_folder(folder: &Path) -> Result<()> {
-    private::create_dir(folder).with_context(|| format!("Cannot create {}", folder.display()))
+    private::create_subdir(folder).with_context(|| format!("Cannot create {}", folder.display()))
 }
 
 /// Deletes the backups past the newest [`KEEP`], and copies cut short more
@@ -744,6 +756,32 @@ mod tests {
         assert!(!has_memories(&db).unwrap());
         back_up_when(&db, Duration::ZERO);
         assert!(!folder(&db).exists());
+    }
+
+    // A failure noted for a store whose folder was removed, as an uninstall
+    // removes it while a server checks, never brings the folder back.
+    #[test]
+    fn a_failure_note_never_recreates_a_removed_store_folder() {
+        let dir = tempdir().unwrap();
+        let held = dir.path().join("server");
+        fs::create_dir(&held).unwrap();
+        let db = store(&held);
+        fs::remove_dir_all(&held).unwrap();
+        note_failure(&db, "unable to open database file");
+        assert!(!held.exists());
+    }
+
+    // A check whose store went away during it reports nothing: no note and
+    // no wait before the next try, since nothing a backup could fix failed.
+    #[test]
+    fn a_store_removed_during_a_check_gets_no_failure_report() {
+        let dir = tempdir().unwrap();
+        let db = store(dir.path());
+        fs::remove_file(&db).unwrap();
+        let key = key(&db);
+        report_failure(&db, &key, &anyhow::anyhow!("unable to open database file"));
+        assert!(!folder(&db).exists());
+        assert!(!with_state(|state| state.failed.contains_key(&key)));
     }
 
     // The first write of a day makes that day's backup; a second makes none.

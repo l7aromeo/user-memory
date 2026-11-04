@@ -46,6 +46,24 @@ pub fn create_dir(dir: &Path) -> io::Result<()> {
     }
 }
 
+/// Creates the private folder `dir` inside its existing parent, never the
+/// parent itself: a folder that belongs inside another, such as a store's
+/// backups, must not bring back a parent that was removed. Succeeds when
+/// `dir` already exists.
+pub fn create_subdir(dir: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    let created = {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new().mode(0o700).create(dir)
+    };
+    #[cfg(windows)]
+    let created = fs::create_dir(dir).and_then(|()| windows::restrict(dir, true));
+    match created {
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists && dir.is_dir() => Ok(()),
+        created => created,
+    }
+}
+
 /// Opens `path` with `options`; a file it creates is private before this
 /// returns. An existing file keeps its permissions on Unix.
 pub fn create_file(options: &mut OpenOptions, path: &Path) -> io::Result<File> {
