@@ -89,7 +89,7 @@ pub struct Record {
     #[arg(long = "distinct-from")]
     #[serde(default)]
     pub distinct_from: Vec<MemoryRef>,
-    /// True only when the user, in this conversation, stated or approved this exact memory in their own words and, for scope global, that it holds in every project; for an observation or inference, only once the user approved recording it.
+    /// True only when the user, in this conversation, stated or approved this exact memory in their own words and, for scope global, that it holds in every project. Explicit and global records need it; an observation or inference needs evidence instead.
     #[arg(skip)]
     #[serde(default)]
     pub user_confirmed: bool,

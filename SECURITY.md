@@ -34,4 +34,6 @@ hooks and setup, the installers and uninstallers, and the release builds.
 The [privacy notes](docs/privacy.md) say what is stored where and what
 leaves your machine: for example, the access token reads and writes every
 memory, and the store is not encrypted, so both rely on the files being
-readable only by you.
+readable only by you. The store trusts every client that holds its token or
+runs as you: any of them can confirm a memory as yours ([what the server can
+check](docs/memory-model.md#what-the-server-can-and-cannot-check)).

@@ -226,10 +226,11 @@ fn initialization_delivers_portable_memory_guidance_and_keeps_tools_available() 
             );
         }
     }
-    // Agents set it on their own judgment, so it says exactly when it is true.
+    // Agents set it on their own judgment, so it says exactly when it is
+    // true, and names only the records the server refuses without it.
     assert_eq!(
         property("record", "user_confirmed")["description"],
-        "True only when the user, in this conversation, stated or approved this exact memory in their own words and, for scope global, that it holds in every project; for an observation or inference, only once the user approved recording it."
+        "True only when the user, in this conversation, stated or approved this exact memory in their own words and, for scope global, that it holds in every project. Explicit and global records need it; an observation or inference needs evidence instead."
     );
     // The index and the instruction files are built from titles, so the
     // schema says a record needs one. Scope has no default: a global memory
