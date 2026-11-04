@@ -15,7 +15,8 @@
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::{
-    fmt::Display,
+    error::Error,
+    fmt::{self, Display},
     fs,
     future::Future,
     path::Path,
@@ -26,6 +27,13 @@ use std::{
 const DEFAULT_MODEL: &str = "qwen3-embedding:4b";
 /// Inputs per request; keeps request bodies and model batches moderate.
 const BATCH: usize = 32;
+/// Most of an error reply's body read for its reason: a provider's error
+/// fits many times over, and an endpoint can't make the client hold an
+/// endless body until the request times out.
+const ERROR_BODY_BYTES: usize = 4096;
+/// Most characters of an endpoint's reason shown: enough for a provider's
+/// message, short enough for one terminal line and a server log entry.
+const ERROR_REASON_CHARS: usize = 300;
 
 static WARNED: AtomicBool = AtomicBool::new(false);
 static HINTED: AtomicBool = AtomicBool::new(false);
@@ -211,12 +219,16 @@ impl Config {
             if let Some(key) = &self.api_key {
                 request = request.bearer_auth(key);
             }
-            let reply: Value = request
+            let response = request
                 .send()
                 .await
-                .context("Embedding endpoint unreachable")?
-                .error_for_status()
-                .context("Embedding endpoint refused the request")?
+                .context("Embedding endpoint unreachable")?;
+            if let Err(status) = response.error_for_status_ref() {
+                let reason = reason(response, self.api_key.as_deref()).await;
+                return Err(anyhow::Error::new(Refused { status, reason })
+                    .context("Embedding endpoint refused the request"));
+            }
+            let reply: Value = response
                 .json()
                 .await
                 .context("Embedding endpoint returned invalid JSON")?;
@@ -224,6 +236,89 @@ impl Config {
         }
         Ok(vectors)
     }
+}
+
+/// An error status, caused by the endpoint's own reason when it gave one,
+/// so the reason prints after the status line.
+#[derive(Debug)]
+struct Refused {
+    status: reqwest::Error,
+    reason: Option<Reason>,
+}
+
+/// What the endpoint said in its error reply.
+#[derive(Debug)]
+struct Reason(String);
+
+impl Display for Refused {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.status.fmt(f)
+    }
+}
+
+impl Error for Refused {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        self.reason
+            .as_ref()
+            .map(|reason| reason as &(dyn Error + 'static))
+    }
+}
+
+impl Display for Reason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "The endpoint said: {}", self.0)
+    }
+}
+
+impl Error for Reason {}
+
+/// The reason in an error reply's body, read up to [`ERROR_BODY_BYTES`];
+/// `None` when the body is empty or can't be read.
+async fn reason(mut response: reqwest::Response, key: Option<&str>) -> Option<Reason> {
+    let mut body = Vec::new();
+    while body.len() < ERROR_BODY_BYTES {
+        match response.chunk().await {
+            Ok(Some(chunk)) => body.extend_from_slice(&chunk),
+            _ => break,
+        }
+    }
+    body.truncate(ERROR_BODY_BYTES);
+    reason_in(&body, key).map(Reason)
+}
+
+/// The message in `body`: an OpenAI-style `error.message`, an `error`
+/// string (Ollama's native API, many proxies), a top-level `message`, or
+/// else the text. The API key it may repeat is masked, control characters
+/// become spaces so a body can't drive the terminal, and the result is cut
+/// to [`ERROR_REASON_CHARS`].
+fn reason_in(body: &[u8], key: Option<&str>) -> Option<String> {
+    let text = String::from_utf8_lossy(body);
+    let found = serde_json::from_str::<Value>(&text)
+        .ok()
+        .and_then(|reply| {
+            reply["error"]["message"]
+                .as_str()
+                .or_else(|| reply["error"].as_str())
+                .or_else(|| reply["message"].as_str())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| text.into_owned());
+    let found = match key {
+        Some(key) => found.replace(key, "[key]"),
+        None => found,
+    };
+    let clean: String = found
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let words = clean.split_whitespace().collect::<Vec<_>>().join(" ");
+    if words.is_empty() {
+        return None;
+    }
+    Some(match words.char_indices().nth(ERROR_REASON_CHARS) {
+        Some((end, _)) => format!("{}…", &words[..end]),
+        None => words,
+    })
 }
 
 /// Vectors from an embeddings response, ordered by their `index`.
@@ -345,6 +440,83 @@ mod tests {
             instruction: String::new(),
             api_key: None,
         }
+    }
+
+    #[test]
+    fn an_error_reply_gives_the_endpoints_reason() {
+        for (body, reason) in [
+            (
+                r#"{"error":{"message":"model not found"}}"#,
+                "model not found",
+            ),
+            (r#"{"error":"model not found"}"#, "model not found"),
+            (
+                r#"{"object":"error","message":"model not found"}"#,
+                "model not found",
+            ),
+            ("upstream timed out\n", "upstream timed out"),
+            ("bad\x1b[2Jterminal\u{9b}31m", "bad [2Jterminal 31m"),
+            (
+                r#"{"error":"Incorrect API key sk-secret"}"#,
+                "Incorrect API key [key]",
+            ),
+        ] {
+            assert_eq!(
+                reason_in(body.as_bytes(), Some("sk-secret")).as_deref(),
+                Some(reason),
+                "{body}"
+            );
+        }
+        for empty in ["", " \n\t"] {
+            assert_eq!(reason_in(empty.as_bytes(), None), None);
+        }
+        let long = "é".repeat(ERROR_REASON_CHARS + 1);
+        let cut = reason_in(long.as_bytes(), None).unwrap();
+        assert_eq!(cut, format!("{}…", "é".repeat(ERROR_REASON_CHARS)));
+        let exact = "é".repeat(ERROR_REASON_CHARS);
+        assert_eq!(reason_in(exact.as_bytes(), None).unwrap(), exact);
+    }
+
+    // An endpoint that streams an endless error body is read only up to the
+    // limit: the error comes back at once, not at the request's timeout.
+    #[test]
+    fn an_endless_error_body_is_read_only_up_to_the_limit() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1/embeddings", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            while reader.read_line(&mut line).unwrap_or(0) > 2 {
+                line.clear();
+            }
+            let _ = stream.write_all(
+                b"HTTP/1.1 500 Internal Server Error\r\nTransfer-Encoding: chunked\r\n\r\n",
+            );
+            let chunk = format!("400\r\n{}\r\n", "x".repeat(0x400));
+            while stream.write_all(chunk.as_bytes()).is_ok() {}
+        });
+        let config = Config {
+            url: reqwest::Url::parse(&url).unwrap(),
+            model: "test".into(),
+            dimensions: None,
+            instruction: String::new(),
+            api_key: None,
+        };
+        let started = std::time::Instant::now();
+        let err = config
+            .embed_within(&["a".into()], Duration::from_secs(30))
+            .unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(10), "{err:#}");
+        let said = format!("{err:#}");
+        assert!(said.contains("500 Internal Server Error"), "{said}");
+        assert!(
+            said.contains(&format!(
+                "The endpoint said: {}…",
+                "x".repeat(ERROR_REASON_CHARS)
+            )),
+            "{said}"
+        );
     }
 
     fn embeds(config: &Config) {
