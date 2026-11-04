@@ -13,6 +13,7 @@ use axum::{
 use clap::Args;
 use rmcp::{
     RoleClient, RoleServer, ServiceExt,
+    service::{RxJsonRpcMessage, TxJsonRpcMessage},
     transport::{
         StreamableHttpClientTransport, Transport, stdio,
         streamable_http_client::StreamableHttpClientTransportConfig,
@@ -353,7 +354,8 @@ pub async fn connect(connection: Connection) -> Result<()> {
     let remote = connection.transport()?;
     let (input, output) = stdio();
     let local = rmcp::transport::async_rw::AsyncRwTransport::new_server(input, output);
-    forward(local, remote).await
+    let endpoint = connection.url.clone();
+    forward(local, remote, || connection.transport(), &endpoint).await
 }
 
 /// Starts a send before the next message is read, then lets it finish
@@ -430,28 +432,125 @@ fn answered(message: &impl serde::Serialize) -> Option<serde_json::Value> {
     message.get("id").cloned()
 }
 
+/// Reestablish the upstream session without repeating a client request.
+async fn reconnect<R: Transport<RoleClient>>(
+    mut remote: R,
+    initialize: Option<RxJsonRpcMessage<RoleServer>>,
+    initialized: Option<RxJsonRpcMessage<RoleServer>>,
+) -> Result<(R, Option<serde_json::Value>)> {
+    let init = initialize.context("Client did not initialize")?;
+    let init_id = serde_json::to_value(&init)?
+        .get("id")
+        .cloned()
+        .context("Client initialization has no request ID")?;
+    Transport::<RoleClient>::send(&mut remote, init).await?;
+    let result = loop {
+        let reply = Transport::<RoleClient>::receive(&mut remote)
+            .await
+            .context("Memory server connection closed")?;
+        let result = serde_json::to_value(reply)?;
+        if result.get("id") == Some(&init_id) {
+            if result.get("error").is_some() {
+                bail!("Memory server rejected initialization");
+            }
+            if result.get("result").is_some() {
+                break result;
+            }
+        }
+    };
+    let version = result.pointer("/result/serverInfo/version").cloned();
+    if let Some(notice) = initialized {
+        Transport::<RoleClient>::send(&mut remote, notice).await?;
+    }
+    Ok((remote, version))
+}
+
 /// Relays messages between a local MCP client and the memory server. After
 /// the server answers a write, the instruction files on this machine are
 /// brought in line with it, beside the relay.
-async fn forward(
+async fn forward<R: Transport<RoleClient>>(
     mut local: impl Transport<RoleServer>,
-    mut remote: impl Transport<RoleClient>,
+    mut remote: R,
+    mut new_remote: impl FnMut() -> Result<R>,
+    endpoint: &str,
 ) -> Result<()> {
     let mut sends = tokio::task::JoinSet::<Result<()>>::new();
+    let mut outgoing = tokio::task::JoinSet::<Result<()>>::new();
     let mut syncs = tokio::task::JoinSet::new();
     let mut writes = Vec::new();
+    let mut pending: Vec<(serde_json::Value, bool)> = Vec::new();
+    let mut initialize: Option<RxJsonRpcMessage<RoleServer>> = None;
+    let mut initialized: Option<RxJsonRpcMessage<RoleServer>> = None;
+    let mut initial_version: Option<serde_json::Value> = None;
+    let mut disconnected = false;
     let mut error = None;
     loop {
         tokio::select! {
             message = Transport::<RoleServer>::receive(&mut local) => {
                 let Some(message) = message else { break; };
                 let message = with_folder_projects(message);
+                let value = serde_json::to_value(&message)?;
+                let method = value.get("method").and_then(|v| v.as_str()).unwrap_or("");
+                if method == "initialize" || method == "server/discover" {
+                    initialize = Some(message.clone());
+                } else if method == "notifications/initialized" {
+                    initialized = Some(message.clone());
+                }
+                if let Some(id) = value.get("id") && value.get("method").is_some() {
+                    pending.push((id.clone(), method == "tools/call"));
+                }
+                if disconnected {
+                    if method == "initialize" || method == "server/discover" {
+                        match new_remote() {
+                            Ok(next) => { remote = next; disconnected = false; }
+                            Err(_) => {
+                                fail_pending(&mut local, &mut sends, &mut pending, endpoint)?;
+                                continue;
+                            }
+                        }
+                    } else {
+                        let recovered = async {
+                            reconnect(new_remote()?, initialize.clone(), initialized.clone()).await
+                        };
+                        match tokio::time::timeout(Duration::from_secs(10), recovered).await {
+                            Ok(Ok((next, version))) => {
+                                remote = next;
+                                disconnected = false;
+                                if let (Some(first), Some(current)) = (&initial_version, &version)
+                                    && first != current
+                                {
+                                    let notice: TxJsonRpcMessage<RoleServer> = serde_json::from_value(serde_json::json!({"jsonrpc":"2.0","method":"notifications/tools/list_changed"}))?;
+                                    let send = Transport::<RoleServer>::send(&mut local, notice);
+                                    start_in_order(&mut sends, async move { send.await.context("Cannot send memory server response to client") });
+                                }
+                            }
+                            _ => {
+                                fail_pending(&mut local, &mut sends, &mut pending, endpoint)?;
+                                writes.clear();
+                                continue;
+                            }
+                        }
+                    }
+                }
                 writes.extend(write_call(&message));
                 let send = Transport::<RoleClient>::send(&mut remote, message);
-                start_in_order(&mut sends, async move { send.await.context("Memory server request failed") });
+                start_in_order(&mut outgoing, async move { send.await.context("Memory server request failed") });
             }
-            message = Transport::<RoleClient>::receive(&mut remote) => {
-                let Some(message) = message else { error = Some(anyhow::anyhow!("Memory server connection closed")); break; };
+            message = Transport::<RoleClient>::receive(&mut remote), if !disconnected => {
+                let Some(message) = message else {
+                    outgoing.shutdown().await;
+                    fail_pending(&mut local, &mut sends, &mut pending, endpoint)?;
+                    writes.clear();
+                    disconnected = true;
+                    continue;
+                };
+                let value = serde_json::to_value(&message)?;
+                if initial_version.is_none() && let Some(version) = value.pointer("/result/serverInfo/version") {
+                    initial_version = Some(version.clone());
+                }
+                if let Some(id) = value.get("id") && (value.get("result").is_some() || value.get("error").is_some()) {
+                    pending.retain(|(request_id, _)| request_id != id);
+                }
                 if let Some(id) = answered(&message)
                     && let Some(at) = writes.iter().position(|write| *write == id)
                 {
@@ -461,6 +560,14 @@ async fn forward(
                 let send = Transport::<RoleServer>::send(&mut local, message);
                 start_in_order(&mut sends, async move { send.await.context("Cannot send memory server response to client") });
             }
+            result = outgoing.join_next(), if !outgoing.is_empty() => {
+                if result.context("Connector send task disappeared").and_then(|r| r.context("Connector send task failed")).and_then(|r| r).is_err() {
+                    outgoing.shutdown().await;
+                    fail_pending(&mut local, &mut sends, &mut pending, endpoint)?;
+                    writes.clear();
+                    disconnected = true;
+                }
+            }
             result = sends.join_next(), if !sends.is_empty() => {
                 match result.context("Connector send task disappeared").and_then(|r| r.context("Connector send task failed")).and_then(|r| r) {
                     Ok(()) => {},
@@ -469,6 +576,7 @@ async fn forward(
             }
         }
     }
+    outgoing.shutdown().await;
     sends.shutdown().await;
     let _ = tokio::time::timeout(crate::session::hook_time(crate::setup::SYNC_LIMIT), async {
         while syncs.join_next().await.is_some() {}
@@ -485,6 +593,31 @@ async fn forward(
     } else {
         Ok(())
     }
+}
+
+fn fail_pending(
+    local: &mut impl Transport<RoleServer>,
+    sends: &mut tokio::task::JoinSet<Result<()>>,
+    pending: &mut Vec<(serde_json::Value, bool)>,
+    endpoint: &str,
+) -> Result<()> {
+    let message = format!(
+        "The memory server at {endpoint} did not answer; the call may not have completed. Check the endpoint and access token. Memory reconnects on the next call."
+    );
+    for (id, tool) in pending.drain(..) {
+        let response = if tool {
+            serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"isError":true,"content":[{"type":"text","text":message}]}})
+        } else {
+            serde_json::json!({"jsonrpc":"2.0","id":id,"error":{"code":-32603,"message":message}})
+        };
+        let response: TxJsonRpcMessage<RoleServer> = serde_json::from_value(response)?;
+        let send = Transport::<RoleServer>::send(local, response);
+        start_in_order(sends, async move {
+            send.await
+                .context("Cannot send memory server response to client")
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -767,7 +900,12 @@ mod tests {
             replies,
             sent: sent.clone(),
         };
-        let task = runtime.spawn(forward(local, remote));
+        let task = runtime.spawn(forward(
+            local,
+            remote,
+            || Err(anyhow::anyhow!("not used")),
+            "test",
+        ));
         runtime.block_on(async {
             while written.lock().unwrap().len() < 2 || sent.lock().unwrap().len() < 3 {
                 tokio::time::sleep(Duration::from_millis(5)).await;
@@ -780,5 +918,57 @@ mod tests {
             ["notifications/initialized", "tools/list", "resources/list"]
         );
         assert_eq!(*written.lock().unwrap(), ["response 2", "response 3"]);
+    }
+
+    #[test]
+    fn reconnect_notifies_only_when_the_server_version_changes() {
+        for (next_version, changed) in [("1", false), ("2", true)] {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let (sent, written, resumed) = (Log::default(), Log::default(), Log::default());
+                let (to_local, incoming) = mpsc::unbounded_channel();
+                let (to_remote, replies) = mpsc::unbounded_channel();
+                let (to_next, next_replies) = mpsc::unbounded_channel();
+                let local = Local { incoming, written: written.clone() };
+                let remote = Remote { replies, sent: sent.clone() };
+                let mut next = Some(Remote { replies: next_replies, sent: resumed.clone() });
+                let task = tokio::spawn(forward(local, remote, move || next.take().context("no transport"), "test"));
+                let wait_for = |log: Log, n| async move {
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        while log.lock().unwrap().len() < n {
+                            tokio::time::sleep(Duration::from_millis(5)).await;
+                        }
+                    }).await.unwrap();
+                };
+                let init = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}});
+                let init_reply = |version| serde_json::json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"test","version":version}}});
+                to_local.send(message(init)).unwrap();
+                wait_for(sent.clone(), 1).await;
+                to_remote.send(message(init_reply("1"))).unwrap();
+                wait_for(written.clone(), 1).await;
+                to_local.send(message(serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}))).unwrap();
+                wait_for(sent.clone(), 2).await;
+                to_local.send(message(serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}))).unwrap();
+                to_local.send(message(serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}}))).unwrap();
+                wait_for(sent.clone(), 4).await;
+                drop(to_remote);
+                wait_for(written.clone(), 3).await;
+                to_next.send(message(init_reply(next_version))).unwrap();
+                to_next.send(message(serde_json::json!({"jsonrpc":"2.0","id":4,"result":{}}))).unwrap();
+                to_local.send(message(serde_json::json!({"jsonrpc":"2.0","id":4,"method":"tools/list","params":{}}))).unwrap();
+                wait_for(written.clone(), if changed { 5 } else { 4 }).await;
+                let output = written.lock().unwrap().clone();
+                for id in [2, 3, 4] {
+                    assert_eq!(output.iter().filter(|item| **item == format!("response {id}")).count(), 1);
+                }
+                assert_eq!(output.iter().filter(|item| *item == "notifications/tools/list_changed").count(), usize::from(changed));
+                assert_eq!(*resumed.lock().unwrap(), ["initialize", "notifications/initialized", "tools/list"]);
+                drop(to_local);
+                task.await.unwrap().unwrap();
+            });
+        }
     }
 }
