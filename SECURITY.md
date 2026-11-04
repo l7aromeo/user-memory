@@ -36,4 +36,6 @@ leaves your machine: for example, the access token reads and writes every
 memory, and the store is not encrypted, so both rely on the files being
 readable only by you. The store trusts every client that holds its token or
 runs as you: any of them can confirm a memory as yours ([what the server can
-check](docs/memory-model.md#what-the-server-can-and-cannot-check)).
+check](docs/memory-model.md#what-the-server-can-and-cannot-check)). For a lost
+disk, and for exports and backups that leave the machine, see [protecting the
+store and its copies](docs/backup.md#copies-that-leave-the-machine).

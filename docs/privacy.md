@@ -26,9 +26,18 @@ use, SQLite keeps two working files beside it, `memories.sqlite3-wal` and
 `memories.sqlite3-shm`, which can hold recent changes. All three are
 readable only by their owner; copy, move or delete them together. An empty
 `memories.sqlite3.lock` beside them lets one writer at a time in; it holds
-no data. The store
-is not encrypted. user-memory has no secret scanner, so never ask an agent to store
-passwords, keys, tokens, source code or sensitive personal details.
+no data. The store is not encrypted. user-memory has no secret scanner, so
+never ask an agent to store passwords, keys, tokens, source code or
+sensitive personal details.
+
+Owner-only files don't help when a disk is lost or stolen, so turn on
+full-disk or volume encryption on every machine that holds the store or its
+backups: FileVault on macOS, BitLocker on Windows (Device Encryption on
+Windows Home), LUKS on Linux. For the Docker server, that is the host's disk
+under the `user-memory-data` volume; on Docker Desktop, the host's disk
+holds the VM disk image the volume lives in. Exports and backup copies that
+leave the machine are plain data, which user-memory doesn't encrypt:
+[encrypt them first](backup.md#copies-that-leave-the-machine).
 
 On each machine running the client:
 

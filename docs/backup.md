@@ -66,9 +66,15 @@ later changes into the restored store. Restoring replaces the store, so
 memories recorded since that backup are lost, and memories forgotten since
 come back.
 
+A backup is a whole copy of the store, as plain as the store itself: before
+one leaves this machine, see
+[copies that leave the machine](#copies-that-leave-the-machine).
+
 ## Export and import
 
 An export is one JSON file you can keep anywhere, such as off this machine.
+It is plain JSON: before it leaves this machine, see
+[copies that leave the machine](#copies-that-leave-the-machine).
 
 ```bash
 user-memory export memories.json
@@ -129,7 +135,23 @@ backups and restore steps are in
 ## Move a native store to a server
 
 Export on the old machine, import on the server, then run the installer on
-the old machine with the server's address.
+the old machine with the server's address. Move the export as
+[copies that leave the machine](#copies-that-leave-the-machine) says, and
+delete it once it is imported.
+
+## Copies that leave the machine
+
+user-memory doesn't encrypt exports or backups: each is plain data, readable
+by anyone who gets the file. The store's own machine is covered by disk
+encryption ([privacy](privacy.md#what-is-stored)); a copy elsewhere is not.
+
+- Encrypt a copy before it leaves the machine, with a tool you trust, such
+  as `age` or an encrypted archive, or keep it on a disk you encrypt.
+- Move it over an encrypted channel, such as `scp`, never by email or chat.
+- Delete the copy once you no longer need it, such as after an import.
+
+Which copies still hold a forgotten memory, and for how long, is in
+[privacy](privacy.md#what-a-forgotten-memory-leaves).
 
 ## What backups leave out
 
