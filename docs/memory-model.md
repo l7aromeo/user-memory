@@ -1,6 +1,6 @@
 # Memory model
 
-What a memory holds, the rules the server enforces when one is recorded, how
+What a memory holds, the rules the server checks when one is recorded, how
 duplicates are resolved, and what an export file holds. For the ideas in
 plain words, see [how it works](how-it-works.md).
 
@@ -40,7 +40,7 @@ it.
 
 ## Provenance rules
 
-The server enforces these when a memory is recorded or changed:
+The server checks these when a memory is recorded or changed:
 
 - **Explicit** statements require the agent to truthfully set
   `user_confirmed=true`.
@@ -82,6 +82,23 @@ Example explicit preference (`record` arguments):
   "user_confirmed": true
 }
 ```
+
+### What the server can and cannot check
+
+- `user_confirmed` is the client's statement that the user approved. The
+  server checks that it was given where it is required, not that a person
+  gave it.
+- A program running as you, including an agent with a shell, can make any
+  change you can. The [command line](cli.md#record-and-correct) counts what
+  is typed there as your yes, so a program that runs it on your behalf gives
+  that yes too. On a server, every client holding its token can do the same.
+- What limits the harm:
+  - only explicit, confirmed memories of a rule type become your rules;
+  - a running session hears of every change in its
+    [change notice](how-it-works.md#change-notices-during-a-session);
+  - `forget --origin` removes everything one conversation recorded;
+  - [automatic backups](backup.md#automatic-backups) keep the store as it
+    was before.
 
 ## Duplicates and corrections
 

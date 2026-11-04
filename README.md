@@ -23,9 +23,11 @@ apart.
 - **Your rules in every session.** Your standing rules are written into each
   client's own instruction file, and every session starts with an index of
   what applies to its project.
-- **Nothing stored as your rule without your yes.** An agent asks before it
-  records what you said, and before it records anything for every project.
-  What it only observed needs evidence and stays tentative.
+- **Nothing stored as your rule without your yes.** An agent that follows
+  the rules asks before it records what you said, and before it records
+  anything for every project. What it only observed needs evidence and stays
+  tentative. The server can't tell whether a person said yes: [what it can
+  check](docs/memory-model.md#what-the-server-can-and-cannot-check).
 - **Project memory that follows the repository.** A project is named by its
   git remote, so every clone on every machine shares it.
 - **Changes reach running sessions.** When another session or machine

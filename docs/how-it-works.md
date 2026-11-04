@@ -36,8 +36,8 @@ flowchart LR
   client -->|"HTTP(S) + access token"| host
 ```
 
-- **The server** (`user-memory host`) owns the memories. It enforces the
-  rules (provenance, duplicate checks, approval for changes) and serves the
+- **The server** (`user-memory host`) owns the memories. It checks the
+  rules (provenance, duplicates, approval for changes) and serves the
   MCP tools. It runs in Docker on this machine, natively, or on one host
   shared behind HTTPS ([running the server](server.md)).
 - **The client** is the same binary on each machine. Setup registers it with

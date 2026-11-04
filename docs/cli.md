@@ -52,7 +52,11 @@ the projects you list. They take:
 ## Record and correct
 
 A memory you record on the command line counts as confirmed by you, a global
-one included: typing it is your yes. `--scope` is required:
+one included: typing it is your yes. So do `update`, `forget` and
+`review --keep`. A program that runs these commands for you, such as an
+agent with a shell, gives that yes too ([what the server can
+check](memory-model.md#what-the-server-can-and-cannot-check)). `--scope` is
+required:
 
 ```bash
 user-memory record --type preference --category programming --scope global \
