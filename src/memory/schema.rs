@@ -422,7 +422,7 @@ thread_local! {
 }
 
 /// Copies the log into the store with SQLite's passive checkpoint.
-fn checkpoint(conn: &Connection) -> rusqlite::Result<()> {
+pub(super) fn checkpoint(conn: &Connection) -> rusqlite::Result<()> {
     #[cfg(test)]
     if FAIL_CHECKPOINT.get() {
         return Err(rusqlite::Error::SqliteFailure(

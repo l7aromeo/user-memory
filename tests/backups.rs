@@ -313,6 +313,31 @@ fn a_server_that_wrote_backs_up_the_write_as_its_session_ends() {
     assert_eq!(modified(&store.backup(0)), backed_up, "a second copy");
 }
 
+// A quiet backup taken while the log still holds the write includes it.
+// When the session ends, closing the last connection copies that log into
+// the store, which changes the file but not its memories: the last check
+// must not copy them again, which past midnight would take a rotation slot.
+#[test]
+fn a_session_ending_after_a_quiet_backup_makes_no_second_copy() {
+    let store = Store::new();
+    let mut serve = Serve::start(
+        &store,
+        &[
+            ("USER_MEMORY_BACKUP_QUIET_MS", "300"),
+            ("USER_MEMORY_BACKUP_CHECK_MS", "50"),
+        ],
+    );
+    serve.record("Prefers rebase merges for pull requests");
+    wait_while_running(&mut serve.child, "backup of the quiet store", || {
+        memories(&store.backup(0)) == 2
+    });
+    let backed_up = modified(&store.backup(0));
+    // Past the next check, so a second copy would show in the time.
+    std::thread::sleep(Duration::from_millis(200));
+    serve.close();
+    assert_eq!(modified(&store.backup(0)), backed_up, "a second copy");
+}
+
 // A client may end the session with SIGTERM rather than by closing the
 // server's input; the last check still runs.
 #[cfg(unix)]

@@ -132,11 +132,14 @@ written after the newest backup and either that backup is 24 hours old or
 the store has had no change for an hour (`QUIET`); the check as it stops
 needs no quiet hour, since no server may look again for days. A backup made
 the same day replaces that day's file, so it uses no rotation slot. A store
-unchanged since its newest backup never gets one, so copies of the same
-memories never rotate distinct older backups out. The server closes its
-connection, whose log goes into the store, before that last check, and
-waits for it at most 5 seconds (`SHUTDOWN_WAIT`); a copy cut short is left
-as a partial file. Several servers of one store may check at once: each copy
+unchanged since its newest backup gets none, so copies of the same memories
+don't rotate distinct older backups out. Each backup first copies the log
+into the store (a passive checkpoint), so the checkpoint as the last
+connection closes has nothing left to write and the store doesn't look
+changed; only a log another process was still reading at the backup can
+cause one copy of the same memories again. The server closes its connection
+before that last check, and waits for it at most 5 seconds
+(`SHUTDOWN_WAIT`); a copy cut short is left as a partial file. Several servers of one store may check at once: each copy
 is renamed into place, so the newest wins.
 
 Each copy is taken like migrate's: SQLite's online backup from a read-only

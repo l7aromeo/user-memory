@@ -393,6 +393,14 @@ fn make(db: &Path) -> Result<Made> {
     let partial = folder.join(format!(".{name}{PARTIAL}{}", std::process::id()));
     // Left by an earlier process that had this id and was stopped mid-copy.
     let _ = fs::remove_file(&partial);
+    // The copy holds the log either way. Copying the log into the store
+    // first means the checkpoint as the last connection closes has nothing
+    // left to write, so it doesn't make the store look changed since this
+    // backup. Passive: it waits for no one, and a log a reader still needs
+    // is copied later, at worst making one copy of the same memories again.
+    if let Ok(store) = Connection::open(db) {
+        let _ = super::schema::checkpoint(&store);
+    }
     create_private(&partial).with_context(|| format!("Cannot create {}", partial.display()))?;
     let copied = copy_into(db, &partial).and_then(|memories| {
         fs::rename(&partial, &path).with_context(|| format!("Cannot write {}", path.display()))?;
@@ -938,13 +946,17 @@ mod tests {
     }
 
     // The copy holds what the write-ahead log holds and the store file does
-    // not have yet.
+    // not have yet: the checkpoint before the copy can't take a log that a
+    // reader with an older snapshot still needs.
     #[test]
     fn a_backup_holds_writes_not_yet_copied_from_the_log() {
         let dir = tempdir().unwrap();
         let db = store(dir.path());
-        // Kept open, so the log stays until the test reads it.
-        let _open = connect(&db).unwrap();
+        // Kept open, so the log stays until the test reads it, and reading
+        // since before the write, so no checkpoint can copy it.
+        let reader = connect(&db).unwrap();
+        reader.execute_batch("BEGIN").unwrap();
+        memory_rows(&reader).unwrap();
         add(&db);
         let alone = dir.path().join("alone");
         fs::create_dir(&alone).unwrap();
