@@ -1127,7 +1127,15 @@ fn import(
         )?;
     }
     let staled = newly_stale(&tx, &before)?;
-    tx.commit()?;
+    // Taking the file's side replaces memories' text, which must not stay
+    // in the store's files, as for a correction.
+    let replaced = on_conflict == OnConflict::UseFile
+        && plans.iter().any(|plan| matches!(plan, Plan::Conflict));
+    if replaced {
+        tx.commit_removing()?;
+    } else {
+        tx.commit()?;
+    }
     summary.insert("applied".into(), json!(true));
     summary.remove("will_stale");
     summary.insert("staled".into(), json!(staled));

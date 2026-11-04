@@ -42,6 +42,30 @@ cannot share the log. `doctor` reports the mode. Backups that `migrate`,
 so they include writes still in the log, and are one whole file each, in the
 rollback journal mode.
 
+## Removed text
+
+Text a forget, a correction or an import that takes the file's side removes
+leaves the store's files with the change:
+
+- every connection sets `PRAGMA secure_delete`, so SQLite overwrites deleted
+  and replaced content with zeros instead of leaving it in free space;
+- the same transaction merges the keyword index (its `optimize`), which
+  otherwise keeps a deleted entry's words until its segments merge;
+- after the commit, the log is copied into the store and emptied
+  (`wal_checkpoint(TRUNCATE)`), so no earlier version of a page stays in
+  `<store>-wal`. It waits at most a second for readers; a log another
+  connection is still reading stays until the next such write, and a note
+  says so on stderr.
+
+A backup made after holds none of the removed text; one made before keeps
+it until it is deleted ([privacy](privacy.md)). A store written before this
+version can hold text forgotten then in free space inside its pages, which
+no count shows, so setup and `user-memory migrate` (which upgrades the
+installer's Docker server's store) rewrite a store with memories after its
+automatic backup (`VACUUM`). A store without memories isn't rewritten. When
+another writer holds the store past the usual 30 seconds, the rewrite is
+skipped with a note, and the next setup or migrate tries again.
+
 ## Writers take turns
 
 Writers take turns. Within a process they queue for the store; across

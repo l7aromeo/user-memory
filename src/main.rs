@@ -653,6 +653,14 @@ async fn main() -> Result<()> {
                 memory::migrate(&store, titles.as_ref())?
             };
             println!("{}", migration.describe(&store));
+            // The installer's Docker server upgrades its store here rather
+            // than through setup, so this rewrite reaches it too.
+            if !check
+                && store.is_file()
+                && let Err(err) = memory::compact(&store)
+            {
+                eprintln!("{}", memory::compact_skipped(&store, &err));
+            }
             if titles.is_some()
                 && let Some(note) = migration.unused_titles()
             {

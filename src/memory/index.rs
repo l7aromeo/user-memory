@@ -161,6 +161,18 @@ pub(super) fn settle(conn: &Connection) -> Result<()> {
     drain(conn)
 }
 
+/// Merges the keyword index's segments into one, inside the caller's write
+/// transaction. A contentless index keeps a deleted entry's words in its
+/// segments until they merge; a write that removed text merges them, so
+/// none of its words stay in the store.
+pub(super) fn merge(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "INSERT INTO search_words(search_words) VALUES('optimize')",
+        [],
+    )?;
+    Ok(())
+}
+
 /// Indexes the memories queued in `search_pending`, inside the caller's
 /// write transaction. Every write runs it before committing, so the index
 /// matches the memories in each committed state. An index stamped by other

@@ -51,7 +51,10 @@ only by you. Upgrade and repair backups (`.bak` files) sit beside the store,
 and the [automatic backups](backup.md#automatic-backups), a week of daily
 copies, in the `backups` folder beside it, readable only by you. A forgotten
 memory stays in the backups made before you forgot it, until 7 newer
-backups have replaced them. Protect them like the store.
+backups have replaced them. Protect them like the store. The store itself,
+its log and every backup made after keep none of a forgotten memory's text,
+or of text a correction replaced
+([removed text](storage.md#removed-text)).
 
 ## Where the token lives
 

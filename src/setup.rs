@@ -1091,6 +1091,9 @@ pub async fn install(options: &Options) -> Result<()> {
         }
         crate::connect(&paths.db)?;
         crate::memory::backups::back_up_if_due(&paths.db);
+        if let Err(err) = crate::memory::compact(&paths.db) {
+            eprintln!("{}", crate::memory::compact_skipped(&paths.db, &err));
+        }
     }
     println!("Installing user memory…");
     install_binary(&paths.binary)?;

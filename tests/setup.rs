@@ -1037,6 +1037,48 @@ fn doctor_fails_on_a_real_error_and_still_lists_what_the_user_must_do() {
     );
 }
 
+// A store from before this version keeps text forgotten then in free space
+// inside its pages; setup rewrites a store with memories after its backup,
+// so the text leaves the store file.
+#[test]
+fn setup_rewrites_a_store_holding_text_forgotten_before() {
+    let s = Sandbox::new();
+    s.client("codex", false);
+    s.codex_trust("trusted");
+    let db = s.path("private memory.sqlite3");
+    assert_success(
+        &Command::new(env!("CARGO_BIN_EXE_user-memory"))
+            .args(["record", "--category", "tooling", "--title", "Uses zsh"])
+            .args(["--content", "Uses zsh", "--scope", "global"])
+            .sandboxed(s.path("home"))
+            .env("USER_MEMORY_DB", &db)
+            .env_remove("USER_MEMORY_URL")
+            .output()
+            .unwrap(),
+    );
+    let marker = b"zq7marker";
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.pragma_update(None, "secure_delete", false).unwrap();
+    conn.execute(
+        "INSERT INTO memories (id,memory_type,category,title,content) VALUES ('0bd1ba49-2b63-4aab-8d57-38d9be10a281','fact','tooling','Deploy key','The deploy key zq7marker is in the vault')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "DELETE FROM memories WHERE id='0bd1ba49-2b63-4aab-8d57-38d9be10a281'",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    let holds = |bytes: Vec<u8>| bytes.windows(marker.len()).any(|w| w == marker);
+    assert!(
+        holds(fs::read(&db).unwrap()),
+        "the store holds the forgotten text"
+    );
+    assert_success(&s.run(&["setup", "--client", "codex"]));
+    assert!(!holds(fs::read(&db).unwrap()));
+}
+
 // A store that already holds memories gets its first automatic backup from
 // setup, so doctor right after an upgrade asks for nothing; a store with
 // memories and no backup is an Action needed step until `backup now`.
