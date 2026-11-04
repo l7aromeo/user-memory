@@ -294,7 +294,9 @@ does and how to undo it.
 The server backs its store up once a day, as a native store does
 ([automatic backups](backup.md#automatic-backups)): the first change once the
 newest backup is a day old copies the store into `/data/backups/` in the
-volume, and the newest 7 are kept. Doctor on the server reports the newest.
+volume, and the newest 7 are kept. The server also checks every hour, and as
+it stops, so changes followed by an hour without any are copied too,
+replacing that day's backup. Doctor on the server reports the newest.
 
 ```bash
 docker compose -f ~/.local/share/user-memory/docker/compose.yaml exec memory user-memory backup list

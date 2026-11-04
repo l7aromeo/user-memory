@@ -62,6 +62,12 @@ source out.
   `netsh`), reserved across processes with a lock file.
 
 - `tests/acceptance.rs` — end-to-end user scenarios.
+- `tests/backups.rs` — a server's own backup checks, through `serve` and
+  `host`: at start, once the store is quiet, and as it stops. They shorten
+  the quiet hour and the hourly check with `USER_MEMORY_BACKUP_QUIET_MS` and
+  `USER_MEMORY_BACKUP_CHECK_MS`, in milliseconds. Those variables are for
+  tests only: debug builds read them, and a release build always uses the
+  constants in `src/memory/backups.rs`.
 - `tests/fixtures/server/` — the `compose.yaml` and `Dockerfile` the shell
   installer wrote before `src/server.rs` took the work over; the module's
   unit tests require the same bytes, so an installed server never changes

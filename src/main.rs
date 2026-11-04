@@ -734,15 +734,30 @@ async fn main() -> Result<()> {
             if let Some(connection) = connection {
                 return remote::connect(connection).await;
             }
-            let _held = memory::hold(&db);
+            let backups = memory::backups::watch(&db);
+            let held = memory::hold(&db);
             let service = UserMemoryServer {
                 db,
                 in_client_folder: true,
             }
             .serve(stdio())
             .await?;
-            service.waiting().await?;
+            // A client ends the session by closing the server's input, and
+            // may send SIGTERM after; either way the last backup check runs.
+            let signalled = tokio::select! {
+                ended = service.waiting() => { ended?; false }
+                () = remote::stopped() => true,
+            };
+            // Closed first: the last connection copies the log into the
+            // store, which the last check must not take for a later change.
+            drop(held);
             setup::finish_background_syncs().await;
+            drop(backups);
+            if signalled {
+                // Exit now: the blocked read of the input must not hold the
+                // runtime open.
+                std::process::exit(0);
+            }
         }
         Command::Index(input) => println!("{}", memory::index(&db, &input)?),
         Command::Record(mut input) => {
