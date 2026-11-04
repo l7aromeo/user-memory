@@ -199,7 +199,7 @@ enum Docker {
 
 /// Whether Docker is installed, and running.
 fn docker_state() -> Docker {
-    let info = Command::new("docker")
+    let info = Command::new(compose::docker())
         .arg("info")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -566,7 +566,7 @@ volumes:
 }
 
 fn docker_output(args: &[&str]) -> Result<String> {
-    let out = Command::new("docker")
+    let out = Command::new(compose::docker())
         .args(args)
         .stderr(Stdio::null())
         .output()

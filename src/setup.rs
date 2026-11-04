@@ -851,13 +851,20 @@ fn program_files(name: &str, windows: bool, pathext: Option<&std::ffi::OsStr>) -
         .collect()
 }
 
-fn find_client(name: &str) -> Option<PathBuf> {
+/// The program `name` in the first PATH folder that holds it, as a shell
+/// finds it. On Windows a bare name given to `Command` is looked for in
+/// System32 and the Windows folder before PATH, unlike in a shell.
+pub(crate) fn on_path(name: &str) -> Option<PathBuf> {
     let files = program_files(name, cfg!(windows), env::var_os("PATHEXT").as_deref());
-    if let Some(path) = env::var_os("PATH").and_then(|paths| {
+    env::var_os("PATH").and_then(|paths| {
         env::split_paths(&paths)
             .flat_map(|dir| files.iter().map(move |file| dir.join(file)))
             .find(|p| executable(p))
-    }) {
+    })
+}
+
+fn find_client(name: &str) -> Option<PathBuf> {
+    if let Some(path) = on_path(name) {
         return Some(path);
     }
     #[cfg(target_os = "macos")]
