@@ -60,6 +60,9 @@ source out.
 - `tests/support/port.rs` gives each test a port no other test or process
   takes: below the system's ephemeral range (read from `sysctl`, `/proc` or
   `netsh`), reserved across processes with a lock file.
+- `tests/support/session.rs` keeps a `user-memory serve` running across
+  tool calls, as an agent session does, for tests of what the server does
+  between and after calls; `serve.rs` makes one call.
 
 - `tests/acceptance.rs` — end-to-end user scenarios.
 - `tests/backups.rs` — a server's own backup checks, through `serve` and
