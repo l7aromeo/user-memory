@@ -372,11 +372,17 @@ pub fn now(db: &Path) -> Result<Made> {
     make(db)
 }
 
-/// Whether the store at `db` holds any memory.
+/// Whether the store at `db` holds any memory. A store still being created,
+/// its file there before its tables, holds none.
 fn has_memories(db: &Path) -> Result<bool> {
     let store = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     store.busy_timeout(super::schema::BUSY)?;
-    Ok(memory_rows(&store)? > 0)
+    let created: bool = store.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type='table' AND name='memories')",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(created && memory_rows(&store)? > 0)
 }
 
 fn make(db: &Path) -> Result<Made> {
@@ -726,6 +732,18 @@ mod tests {
 
     fn names(db: &Path) -> Vec<String> {
         list(db).unwrap().iter().map(Backup::name).collect()
+    }
+
+    // A check that comes while a server creates the store, its file there
+    // before its tables, finds no memories and notes no failure.
+    #[test]
+    fn a_store_whose_tables_are_not_created_yet_holds_no_memories() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("memories.sqlite3");
+        fs::write(&db, "").unwrap();
+        assert!(!has_memories(&db).unwrap());
+        back_up_when(&db, Duration::ZERO);
+        assert!(!folder(&db).exists());
     }
 
     // The first write of a day makes that day's backup; a second makes none.
