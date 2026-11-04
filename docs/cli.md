@@ -133,6 +133,21 @@ except from a backup. Nothing is ever deleted automatically, so write a
 memory's content, context and reason to read well without the chat it came
 from.
 
+Forgetting removes the memory's text from the store and from every backup
+made after. Copies made before keep it, and restoring one brings the memory
+back: the automatic backups, the `.bak` files beside the store and your
+exports. [Privacy](privacy.md#what-a-forgotten-memory-leaves) lists every
+copy and how long each lasts. To remove every copy, such as after a secret
+was stored by mistake:
+
+1. Run `user-memory backup now` where the store lives, for a backup without
+   it. On a store upgraded from an earlier version, do this after setup or
+   `user-memory migrate` has rewritten the store
+   ([removed text](storage.md#removed-text)).
+2. Delete the older backups that `user-memory backup list` shows, the
+   `.bak` files beside the store, and every export made before the forget.
+   You can no longer go back to any of them.
+
 ## Projects
 
 | Command | Effect |

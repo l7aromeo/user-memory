@@ -22,3 +22,5 @@ Forget only on the user's explicit request, and say what will be lost before doi
 CLI equivalent for the user: `user-memory forget ID` or `user-memory forget --origin ORIGIN`.
 
 Forgetting deletes; an older backup restored later brings the memories back (see [backup.md](backup.md)).
+
+When the user calls what was forgotten sensitive, such as a secret or a client's name, say once that copies made before the forget still hold it: the automatic backups, the upgrade, repair and project-move backups beside the store, any export, the title in session files for up to 30 days, other machines' instruction files until their next session start, and a non-local embeddings endpoint that embedded it. To remove every copy, the user runs `user-memory backup now` where the store lives, then deletes the older backups that `user-memory backup list` shows, the upgrade, repair and project-move backups, and any export from before the forget. Leave the deletions to the user: each one removes a way back.
