@@ -52,6 +52,15 @@ struct Host {
     session: RefCell<Option<String>>,
 }
 
+struct ChildGuard(Child);
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 impl Host {
     fn start(root: TempDir) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_user-memory"))
@@ -145,6 +154,25 @@ impl Host {
             body
         };
         (status, body)
+    }
+    fn restart(&mut self) {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_user-memory"))
+            .args(["host", "--listen", &self.address, "--db"])
+            .arg(self.root.path().join("shared.sqlite3"))
+            .arg("--token-file")
+            .arg(self.root.path().join("token"))
+            .sandboxed(self.root.path())
+            .env_remove("USER_MEMORY_DB")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        assert!(line.starts_with("Listening: http://"), "{line}");
+        self.child = child;
     }
     fn rpc(&self, message: Value) -> Value {
         let (status, body) = self.request(Some(TOKEN), message);
@@ -359,6 +387,77 @@ fn connector_forwards_initialization_and_tools_without_a_local_database() {
     drop(input);
     assert!(child.wait().unwrap().success());
     assert!(!sandbox::folder(client.path(), "store").exists());
+}
+
+#[test]
+fn connector_answers_a_tool_call_when_the_host_stops() {
+    let mut host = Host::start(root());
+    let client = tempdir().unwrap();
+    let client_token = client.path().join("token");
+    fs::write(&client_token, TOKEN).unwrap();
+    let mut child = ChildGuard(
+        Command::new(env!("CARGO_BIN_EXE_user-memory"))
+            .arg("connect")
+            .arg("--url")
+            .arg(format!("http://{}/mcp", host.address))
+            .arg("--token-file")
+            .arg(&client_token)
+            .sandboxed(client.path())
+            .env_remove("USER_MEMORY_DB")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let mut input = child.0.stdin.take().unwrap();
+    let output = lines(child.0.stdout.take().unwrap());
+    writeln!(input, "{}", initialize(1)).unwrap();
+    input.flush().unwrap();
+    assert!(reply(&output).get("result").is_some());
+    writeln!(
+        input,
+        "{}",
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"})
+    )
+    .unwrap();
+    input.flush().unwrap();
+    host.child.kill().unwrap();
+    host.child.wait().unwrap();
+    writeln!(input, "{}", call(2, "index", json!({}))).unwrap();
+    input.flush().unwrap();
+    let value = reply(&output);
+    assert_eq!(value["id"], 2);
+    assert_eq!(value["result"]["isError"], true);
+    assert!(!value.to_string().contains(TOKEN));
+    writeln!(
+        input,
+        "{}",
+        json!({"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}})
+    )
+    .unwrap();
+    input.flush().unwrap();
+    let unavailable = reply(&output);
+    assert_eq!(unavailable["id"], 3);
+    assert!(unavailable.get("error").is_some());
+    host.restart();
+    writeln!(input, "{}", call(4, "index", json!({}))).unwrap();
+    input.flush().unwrap();
+    let recovered = reply(&output);
+    assert_eq!(recovered["id"], 4);
+    assert_ne!(recovered["result"]["isError"], true);
+    host.child.kill().unwrap();
+    host.child.wait().unwrap();
+    fs::write(host.root.path().join("token"), "f".repeat(64)).unwrap();
+    host.restart();
+    writeln!(input, "{}", call(5, "index", json!({}))).unwrap();
+    input.flush().unwrap();
+    let unauthorized = reply(&output);
+    assert_eq!(unauthorized["id"], 5);
+    assert_eq!(unauthorized["result"]["isError"], true);
+    assert!(!unauthorized.to_string().contains(TOKEN));
+    drop(input);
+    assert!(child.0.wait().unwrap().success());
 }
 
 // Unix only: it runs setup with a Unix PATH ("<cli>:/usr/bin:/bin") and the
