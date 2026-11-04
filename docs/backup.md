@@ -24,7 +24,8 @@ an hour, and as the session ends, replacing that day's backup. A program
 reading that backup then, such as `backup list`, delays the replace by up to
 two seconds, since Windows can't replace a file while it's open. Nothing runs
 on a schedule, so a store that hasn't changed since its newest backup gets
-no new one. A backup that fails never stops the change;
+no new one. A backup that fails never stops the change, and the server
+tries again an hour later, and as the session ends;
 [doctor](troubleshooting.md#from-doctor) reports it.
 
 ```bash

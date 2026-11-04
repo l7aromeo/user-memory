@@ -255,7 +255,7 @@ impl Drop for Copying<'_> {
 /// failure goes to stderr and to the folder's failure note, which doctor
 /// reports.
 pub fn back_up_if_due(db: &Path) {
-    back_up_when(db, quiet());
+    back_up_when(db, quiet(), false);
 }
 
 /// Whether `db` needs a backup: it has none, or it changed since the newest
@@ -274,8 +274,12 @@ fn due(db: &Path, quiet: Duration) -> bool {
     })
 }
 
-/// [`back_up_if_due`] with the store counting as quiet after `quiet`.
-fn back_up_when(db: &Path, quiet: Duration) {
+/// [`back_up_if_due`] with the store counting as quiet after `quiet`. A
+/// `last` check, as a server stops, is never held off by an earlier
+/// failure: a native store has no server again until the next session, so
+/// waiting out [`RETRY`] would leave its changes out of every backup until
+/// then.
+fn back_up_when(db: &Path, quiet: Duration, last: bool) {
     // A server may start before its store exists, as the Docker server does
     // on a new volume: nothing to keep yet, and nothing failed.
     if !db.is_file() {
@@ -283,10 +287,11 @@ fn back_up_when(db: &Path, quiet: Duration) {
     }
     let key = key(db);
     let start = with_state(|state| {
-        let retrying = state
-            .failed
-            .get(&key)
-            .is_some_and(|when| when.elapsed() < RETRY);
+        let retrying = !last
+            && state
+                .failed
+                .get(&key)
+                .is_some_and(|when| when.elapsed() < RETRY);
         !retrying && state.copying.insert(key.clone())
     });
     if !start {
@@ -305,19 +310,22 @@ fn back_up_when(db: &Path, quiet: Duration) {
     }
 }
 
-/// Reports a failed backup of `db` on stderr and in the folder's note, and
-/// holds off retries for [`RETRY`]. A store that is gone, removed during
-/// the check as an uninstall removes it, failed nothing a backup could fix:
-/// it gets no report.
+/// Reports a failed backup of `db` in the folder's note, and on stderr
+/// unless this process said so within [`RETRY`], as a last check after a
+/// failure does; holds off retries for [`RETRY`]. A store that is gone,
+/// removed during the check as an uninstall removes it, failed nothing a
+/// backup could fix: it gets no report.
 fn report_failure(db: &Path, key: &Path, err: &anyhow::Error) {
     if !db.is_file() {
         return;
     }
-    with_state(|state| state.failed.insert(key.to_path_buf(), Instant::now()));
-    eprintln!(
-        "user-memory: the automatic backup of {} failed: {err:#}",
-        db.display()
-    );
+    let earlier = with_state(|state| state.failed.insert(key.to_path_buf(), Instant::now()));
+    if !earlier.is_some_and(|when| when.elapsed() < RETRY) {
+        eprintln!(
+            "user-memory: the automatic backup of {} failed: {err:#}",
+            db.display()
+        );
+    }
     note_failure(db, &format!("{err:#}"));
 }
 
@@ -336,11 +344,11 @@ pub fn watch(db: &Path) -> Watch {
     let (stop, stopping) = mpsc::channel::<()>();
     let (done, stopped) = mpsc::channel();
     std::thread::spawn(move || {
-        back_up_when(&db, quiet());
+        back_up_when(&db, quiet(), false);
         while let Err(mpsc::RecvTimeoutError::Timeout) = stopping.recv_timeout(check_every()) {
-            back_up_when(&db, quiet());
+            back_up_when(&db, quiet(), false);
         }
-        back_up_when(&db, Duration::ZERO);
+        back_up_when(&db, Duration::ZERO, true);
         let _ = done.send(());
     });
     Watch {
@@ -782,7 +790,7 @@ mod tests {
         let db = dir.path().join("memories.sqlite3");
         fs::write(&db, "").unwrap();
         assert!(!has_memories(&db).unwrap());
-        back_up_when(&db, Duration::ZERO);
+        back_up_when(&db, Duration::ZERO, true);
         assert!(!folder(&db).exists());
     }
 
