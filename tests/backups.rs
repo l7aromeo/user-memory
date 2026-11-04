@@ -238,6 +238,45 @@ fn a_running_server_replaces_todays_backup_once_the_store_is_quiet() {
     assert_eq!(memories(&store.backup(0)), 2);
 }
 
+// A reader holding today's backup as the quiet check replaces it, as
+// `backup list` does while it counts each backup's memories, delays the
+// replace instead of failing it: Windows refuses to rename over a file
+// another program has open, and a failed backup holds off the next checks,
+// the session's last one too, for RETRY.
+#[test]
+fn a_reader_holding_todays_backup_delays_its_replace_without_a_failure() {
+    let store = Store::new();
+    let mut serve = Serve::start(
+        &store,
+        &[
+            ("USER_MEMORY_BACKUP_QUIET_MS", "300"),
+            ("USER_MEMORY_BACKUP_CHECK_MS", "50"),
+        ],
+    );
+    let reader =
+        Connection::open_with_flags(store.backup(0), OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let held: i64 = reader
+        .query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(held, 1);
+    serve.record("Prefers rebase merges for pull requests");
+    // Past the quiet time and a check, so the replace meets the reader.
+    std::thread::sleep(Duration::from_millis(700));
+    drop(reader);
+    let note = store.db.with_file_name("backups").join("last-failure");
+    wait_while_running(&mut serve.child, "backup once the reader let go", || {
+        assert!(
+            !note.exists(),
+            "the backup failed: {}",
+            fs::read_to_string(&note).unwrap_or_default()
+        );
+        memories(&store.backup(0)) == 2
+    });
+    let stderr = serve.close();
+    assert!(!stderr.contains("the automatic backup of"), "{stderr}");
+    assert_eq!(store.backups(), [store.backup(0)]);
+}
+
 // A session that wrote and then ends leaves its write in a backup, with no
 // quiet wait: a native store has no server again until the next session.
 // The server's last connection copies the log into the store as it closes;
