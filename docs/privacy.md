@@ -49,12 +49,31 @@ write records in `%LOCALAPPDATA%\user-memory\state\instructions\`, and
 Backups you make with `export` hold every memory in readable JSON, readable
 only by you. Upgrade and repair backups (`.bak` files) sit beside the store,
 and the [automatic backups](backup.md#automatic-backups), a week of daily
-copies, in the `backups` folder beside it, readable only by you. A forgotten
-memory stays in the backups made before you forgot it, until 7 newer
-backups have replaced them. Protect them like the store. The store itself,
-its log and every backup made after keep none of a forgotten memory's text,
-or of text a correction replaced
-([removed text](storage.md#removed-text)).
+copies, in the `backups` folder beside it, readable only by you. Protect
+them like the store.
+
+### What a forgotten memory leaves
+
+`forget` removes a memory's text from the store, its log and every backup
+made after, and so does a correction for the text it replaces
+([removed text](storage.md#removed-text)). Copies made before keep it, and
+restoring one of them brings the memory back:
+
+- the automatic backups made before the forget, until 7 newer backups have
+  replaced them;
+- the `.bak` files beside the store, from upgrades, repairs and project
+  moves, which are never rotated;
+- every export made before the forget, wherever you keep it;
+- the session files on each machine, which keep the memory's title until
+  they go unused for 30 days;
+- the instruction files on your other machines, which keep a forgotten
+  global rule's title until their next session start (the machine that
+  forgot it updates its own at once);
+- a non-local embeddings endpoint, which received the memory's text when it
+  was embedded and may have kept it, as its provider decides
+  ([what leaves your machine](#what-leaves-your-machine)).
+
+To remove every copy, see [forget](cli.md#forget).
 
 ## Where the token lives
 
