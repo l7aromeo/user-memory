@@ -67,8 +67,8 @@ enum Answer {
     Separating,
     /// Vectors that give every labelled pair the same cosine.
     Alike,
-    /// HTTP 500 for every request.
-    Failing,
+    /// HTTP 500 for every request, with this body.
+    Failing(&'static str),
 }
 
 /// Stand-in embeddings endpoint. The labelled pairs arrive in order, after
@@ -111,10 +111,11 @@ impl Endpoint {
                 seen.lock()
                     .unwrap()
                     .push(json!({"path": first.split(' ').nth(1), "body": request}));
-                if matches!(answer, Answer::Failing) {
+                if let Answer::Failing(reply) = answer {
                     let _ = write!(
                         stream,
-                        "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+                        "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                        reply.len()
                     );
                     continue;
                 }
@@ -176,6 +177,10 @@ impl Store {
         }
     }
     fn run(&self, endpoint: Option<&Endpoint>, args: &[&str]) -> Output {
+        self.run_with(endpoint, &[], args)
+    }
+    /// `run` with extra environment settings.
+    fn run_with(&self, endpoint: Option<&Endpoint>, env: &[(&str, &str)], args: &[&str]) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_user-memory"));
         command
             .args(args)
@@ -194,7 +199,7 @@ impl Store {
                 )
                 .env("USER_MEMORY_EMBED_MODEL", "fake-model");
         }
-        command.output().unwrap()
+        command.envs(env.iter().copied()).output().unwrap()
     }
     fn record(&self, content: &str) {
         let out = self.run(
@@ -305,15 +310,42 @@ fn a_model_that_cannot_separate_the_pairs_stays_keyword_only() {
 fn an_endpoint_that_fails_the_probe_changes_nothing() {
     let s = Store::new();
     s.record("Keep commits small");
-    let endpoint = Endpoint::start(Answer::Failing);
+    let endpoint = Endpoint::start(Answer::Failing(""));
     let out = s.run(Some(&endpoint), &["embedding", "sync"]);
     let said = text(&out);
     assert!(!out.status.success(), "{said}");
     assert!(said.contains("did not answer the probe"), "{said}");
+    // An empty error body adds no reason.
+    assert!(!said.contains("The endpoint said"), "{said}");
     let rows: i64 = s.query("SELECT count(*) FROM embedding_cutoffs");
     let vectors: i64 = s.query("SELECT count(*) FROM memory_vectors");
     assert_eq!((rows, vectors), (0, 0));
     assert_eq!(endpoint.requests.lock().unwrap().len(), 1);
+}
+
+// An endpoint's own reason for refusing, from its error body, follows the
+// status, with the API key it repeats masked.
+#[test]
+fn a_refusing_endpoint_says_why() {
+    let s = Store::new();
+    let key = s.home.join("embed-key");
+    std::fs::write(&key, "sk-test-0123456789").unwrap();
+    let endpoint = Endpoint::start(Answer::Failing(
+        r#"{"error":{"message":"error starting llama-server: binary not found (key sk-test-0123456789)"}}"#,
+    ));
+    let out = s.run_with(
+        Some(&endpoint),
+        &[("USER_MEMORY_EMBED_API_KEY_FILE", key.to_str().unwrap())],
+        &["embedding", "sync"],
+    );
+    let said = text(&out);
+    assert!(!out.status.success(), "{said}");
+    let status = said.find("HTTP status server error (500").expect(&said);
+    let reason = said
+        .find("The endpoint said: error starting llama-server: binary not found (key [key])")
+        .expect(&said);
+    assert!(status < reason, "{said}");
+    assert!(!said.contains("sk-test-0123456789"), "{said}");
 }
 
 // With semantic search off, sync drops the stored vectors: they belong to
@@ -479,7 +511,7 @@ fn set_saves_a_checked_calibrated_setting_and_off_removes_it() {
 #[test]
 fn set_with_a_failing_endpoint_saves_nothing() {
     let i = Installed::new();
-    let endpoint = Endpoint::start(Answer::Failing);
+    let endpoint = Endpoint::start(Answer::Failing(""));
     let out = i.run(&[
         "embedding",
         "set",
