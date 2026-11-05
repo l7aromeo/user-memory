@@ -109,7 +109,9 @@ to them rather than repeating them. Propose changes to it in an issue.
   comments it affects, in the same change. `cargo test --test docs` checks
   that the commands, quoted messages and links in the docs and the skill
   match the code.
-- A change users notice gets a line in the next release's notes
+- A pull request users notice gives its line for the release notes under
+  the template's *Upgrade note*. Only the release pull request adds or
+  changes `release-notes/` and `CHANGELOG.md`
   ([releasing](docs/dev/releasing.md)).
 - Write plainly: short sentences, no marketing language, no vague claims.
 
