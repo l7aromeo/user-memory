@@ -12,6 +12,7 @@ use std::{
     fs,
     io::{BufRead, BufReader, Read, Write},
     net::TcpStream,
+    path::Path,
     process::{Child, Command, Stdio},
 };
 use tempfile::{TempDir, tempdir};
@@ -395,22 +396,9 @@ fn connector_answers_a_tool_call_when_the_host_stops() {
     let client = tempdir().unwrap();
     let client_token = client.path().join("token");
     fs::write(&client_token, TOKEN).unwrap();
-    let mut child = ChildGuard(
-        Command::new(env!("CARGO_BIN_EXE_user-memory"))
-            .arg("connect")
-            .arg("--url")
-            .arg(format!("http://{}/mcp", host.address))
-            .arg("--token-file")
-            .arg(&client_token)
-            .sandboxed(client.path())
-            .env_remove("USER_MEMORY_DB")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap(),
-    );
+    let mut child = connector(&host, client.path(), &client_token);
     let mut input = child.0.stdin.take().unwrap();
+    let errors = child.0.stderr.take().unwrap();
     let output = lines(child.0.stdout.take().unwrap());
     writeln!(input, "{}", initialize(1)).unwrap();
     input.flush().unwrap();
@@ -474,6 +462,78 @@ fn connector_answers_a_tool_call_when_the_host_stops() {
     assert!(!unauthorized.to_string().contains(TOKEN));
     drop(input);
     assert!(child.0.wait().unwrap().success());
+    assert_no_token(errors);
+}
+
+/// A `user-memory connect` to `host` from a client folder `home` with the
+/// token file `token`; its stderr is piped for [`assert_no_token`].
+fn connector(host: &Host, home: &Path, token: &Path) -> ChildGuard {
+    ChildGuard(
+        Command::new(env!("CARGO_BIN_EXE_user-memory"))
+            .arg("connect")
+            .arg("--url")
+            .arg(format!("http://{}/mcp", host.address))
+            .arg("--token-file")
+            .arg(token)
+            .sandboxed(home)
+            .env_remove("USER_MEMORY_DB")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    )
+}
+
+/// Reads a finished connector's whole stderr and fails if the token is in it.
+fn assert_no_token(mut errors: impl Read) {
+    let mut said = String::new();
+    errors.read_to_string(&mut said).unwrap();
+    assert!(
+        !said.contains(TOKEN),
+        "the token is in the connector's stderr"
+    );
+}
+
+// A server restarted between two calls keeps serving the same connector:
+// the next call is answered by the restarted server, as rmcp re-initializes
+// the expired session. Guards what already worked before the relay could
+// recover from a failed call.
+#[test]
+fn connector_keeps_working_across_a_restart_between_calls() {
+    let mut host = Host::start(root());
+    let client = tempdir().unwrap();
+    let client_token = client.path().join("token");
+    fs::write(&client_token, TOKEN).unwrap();
+    let mut child = connector(&host, client.path(), &client_token);
+    let mut input = child.0.stdin.take().unwrap();
+    let errors = child.0.stderr.take().unwrap();
+    let output = lines(child.0.stdout.take().unwrap());
+    writeln!(input, "{}", initialize(1)).unwrap();
+    input.flush().unwrap();
+    assert!(reply(&output).get("result").is_some());
+    writeln!(
+        input,
+        "{}",
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"})
+    )
+    .unwrap();
+    writeln!(input, "{}", call(2, "index", json!({}))).unwrap();
+    input.flush().unwrap();
+    let before = reply(&output);
+    assert_eq!(before["id"], 2);
+    assert_ne!(before["result"]["isError"], true, "{before}");
+    host.child.kill().unwrap();
+    host.child.wait().unwrap();
+    host.restart();
+    writeln!(input, "{}", call(3, "index", json!({}))).unwrap();
+    input.flush().unwrap();
+    let after = reply(&output);
+    assert_eq!(after["id"], 3);
+    assert_ne!(after["result"]["isError"], true, "{after}");
+    drop(input);
+    assert!(child.0.wait().unwrap().success());
+    assert_no_token(errors);
 }
 
 // Unix only: it runs setup with a Unix PATH ("<cli>:/usr/bin:/bin") and the
