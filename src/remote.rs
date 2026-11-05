@@ -16,7 +16,7 @@ use rmcp::{
     service::{RxJsonRpcMessage, TxJsonRpcMessage},
     transport::{
         StreamableHttpClientTransport, Transport, stdio,
-        streamable_http_client::StreamableHttpClientTransportConfig,
+        streamable_http_client::{AuthRequiredError, StreamableHttpClientTransportConfig},
         streamable_http_server::{
             StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
         },
@@ -355,7 +355,15 @@ pub async fn connect(connection: Connection) -> Result<()> {
     let (input, output) = stdio();
     let local = rmcp::transport::async_rw::AsyncRwTransport::new_server(input, output);
     let endpoint = connection.url.clone();
-    forward(local, remote, || connection.transport(), &endpoint).await
+    let token_file = connection.token_file.clone();
+    forward(
+        local,
+        remote,
+        || connection.transport(),
+        &endpoint,
+        &token_file,
+    )
+    .await
 }
 
 /// Starts a send before the next message is read, then lets it finish
@@ -482,6 +490,7 @@ async fn forward<R: Transport<RoleClient>>(
     mut remote: R,
     mut new_remote: impl FnMut() -> Result<R>,
     endpoint: &str,
+    token_file: &Path,
 ) -> Result<()> {
     let mut sends = tokio::task::JoinSet::<Result<()>>::new();
     let mut outgoing = tokio::task::JoinSet::<Result<()>>::new();
@@ -512,8 +521,9 @@ async fn forward<R: Transport<RoleClient>>(
                     if method == "initialize" || method == "server/discover" {
                         match new_remote() {
                             Ok(next) => { remote = next; disconnected = false; }
-                            Err(_) => {
-                                fail_pending(&mut local, &mut sends, &mut pending, endpoint)?;
+                            Err(err) => {
+                                let message = Failure::of(&err).message(endpoint, token_file);
+                                fail_pending(&mut local, &mut sends, &mut pending, &message)?;
                                 continue;
                             }
                         }
@@ -533,8 +543,13 @@ async fn forward<R: Transport<RoleClient>>(
                                     start_in_order(&mut sends, async move { send.await.context("Cannot send memory server response to client") });
                                 }
                             }
-                            _ => {
-                                fail_pending(&mut local, &mut sends, &mut pending, endpoint)?;
+                            failed => {
+                                let failure = match &failed {
+                                    Ok(Err(err)) => Failure::of(err),
+                                    _ => Failure::Unanswered,
+                                };
+                                let message = failure.message(endpoint, token_file);
+                                fail_pending(&mut local, &mut sends, &mut pending, &message)?;
                                 writes.clear();
                                 continue;
                             }
@@ -548,7 +563,8 @@ async fn forward<R: Transport<RoleClient>>(
             message = Transport::<RoleClient>::receive(&mut remote), if !disconnected => {
                 let Some(message) = message else {
                     outgoing.shutdown().await;
-                    fail_pending(&mut local, &mut sends, &mut pending, endpoint)?;
+                    let message = Failure::Unanswered.message(endpoint, token_file);
+                    fail_pending(&mut local, &mut sends, &mut pending, &message)?;
                     writes.clear();
                     disconnected = true;
                     continue;
@@ -570,9 +586,10 @@ async fn forward<R: Transport<RoleClient>>(
                 start_in_order(&mut sends, async move { send.await.context("Cannot send memory server response to client") });
             }
             result = outgoing.join_next(), if !outgoing.is_empty() => {
-                if result.context("Connector send task disappeared").and_then(|r| r.context("Connector send task failed")).and_then(|r| r).is_err() {
+                if let Err(err) = result.context("Connector send task disappeared").and_then(|r| r.context("Connector send task failed")).and_then(|r| r) {
                     outgoing.shutdown().await;
-                    fail_pending(&mut local, &mut sends, &mut pending, endpoint)?;
+                    let message = Failure::of(&err).message(endpoint, token_file);
+                    fail_pending(&mut local, &mut sends, &mut pending, &message)?;
                     writes.clear();
                     disconnected = true;
                 }
@@ -604,15 +621,48 @@ async fn forward<R: Transport<RoleClient>>(
     }
 }
 
+/// Why the relay couldn't get a client's call answered.
+#[derive(Debug, PartialEq)]
+enum Failure {
+    /// The server couldn't be reached, or the connection ended.
+    Unanswered,
+    /// The server answered 401: it refused this machine's access token.
+    Refused,
+}
+
+impl Failure {
+    /// What a failed send or reconnect `err` means: rmcp reports the
+    /// server's 401 as an [`AuthRequiredError`] in the chain.
+    fn of(err: &anyhow::Error) -> Self {
+        if err.chain().any(|cause| cause.is::<AuthRequiredError>()) {
+            Self::Refused
+        } else {
+            Self::Unanswered
+        }
+    }
+
+    /// The text the client gets for each call this failure left waiting. It
+    /// names the token's file, never the token.
+    fn message(&self, endpoint: &str, token_file: &Path) -> String {
+        match self {
+            Self::Unanswered => format!(
+                "The memory server at {endpoint} did not answer; the call may not have completed. Memory reconnects on the next call."
+            ),
+            Self::Refused => format!(
+                "The memory server at {endpoint} refused this machine's access token ({}); the call was not run. Check that file, or ask the server's operator for a new token. Memory tries again on the next call.",
+                token_file.display()
+            ),
+        }
+    }
+}
+
+/// Answers every call still waiting with `message`.
 fn fail_pending(
     local: &mut impl Transport<RoleServer>,
     sends: &mut tokio::task::JoinSet<Result<()>>,
     pending: &mut Vec<(serde_json::Value, bool)>,
-    endpoint: &str,
+    message: &str,
 ) -> Result<()> {
-    let message = format!(
-        "The memory server at {endpoint} did not answer; the call may not have completed. Check the endpoint and access token. Memory reconnects on the next call."
-    );
     for (id, tool) in pending.drain(..) {
         // A tool call gets a tool error, which the agent reads. Any other
         // request gets JSON-RPC's internal error: the relay failed it, not
@@ -917,6 +967,7 @@ mod tests {
             remote,
             || Err(anyhow::anyhow!("not used")),
             "test",
+            Path::new("token"),
         ));
         runtime.block_on(async {
             while written.lock().unwrap().len() < 2 || sent.lock().unwrap().len() < 3 {
@@ -947,7 +998,7 @@ mod tests {
                 let local = Local { incoming, written: written.clone() };
                 let remote = Remote { replies, sent: sent.clone() };
                 let mut next = Some(Remote { replies: next_replies, sent: resumed.clone() });
-                let task = tokio::spawn(forward(local, remote, move || next.take().context("no transport"), "test"));
+                let task = tokio::spawn(forward(local, remote, move || next.take().context("no transport"), "test", Path::new("token")));
                 let wait_for = |log: Log, n| async move {
                     tokio::time::timeout(Duration::from_secs(5), async {
                         while log.lock().unwrap().len() < n {
