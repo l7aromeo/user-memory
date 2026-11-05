@@ -429,6 +429,13 @@ fn connector_answers_a_tool_call_when_the_host_stops() {
     let value = reply(&output);
     assert_eq!(value["id"], 2);
     assert_eq!(value["result"]["isError"], true);
+    assert!(
+        value["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("did not answer; the call may not have completed"),
+        "{value}"
+    );
     assert!(!value.to_string().contains(TOKEN));
     writeln!(
         input,
@@ -455,6 +462,15 @@ fn connector_answers_a_tool_call_when_the_host_stops() {
     let unauthorized = reply(&output);
     assert_eq!(unauthorized["id"], 5);
     assert_eq!(unauthorized["result"]["isError"], true);
+    // The server answered: a refused token names its file, never itself.
+    let said = unauthorized["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
+    assert!(
+        said.contains("refused this machine's access token")
+            && said.contains(&client_token.display().to_string()),
+        "{said}"
+    );
     assert!(!unauthorized.to_string().contains(TOKEN));
     drop(input);
     assert!(child.0.wait().unwrap().success());
