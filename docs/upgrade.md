@@ -60,6 +60,12 @@ it, the server refuses it with
 An upgrade from 0.3 needs a title for each memory
 ([titles](#upgrade-from-03-titles)).
 
+While the server restarts, a client's call gets
+``The memory server at … did not answer; the call may not have completed``
+and the next call reconnects ([troubleshooting](troubleshooting.md#from-doctor)).
+Clients don't restart for a server restart or upgrade, only when their own
+client is upgraded.
+
 To undo an upgrade, restore the backup and run the previous version's
 installer with its tag: [roll back an upgrade](#roll-back-an-upgrade)
 gives the steps for the Docker server and a native store. Memories recorded
