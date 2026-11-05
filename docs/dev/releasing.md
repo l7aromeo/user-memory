@@ -25,7 +25,9 @@ On a branch, in one pull request:
 1. Bump `version` in `Cargo.toml` (and `Cargo.lock`, with `cargo update
    --workspace`).
 2. Write the notes for users in `release-notes/v<version>.md`: what to do
-   on upgrade, what is new, what was fixed. They become the GitHub
+   on upgrade, what is new, what was fixed. They come from the *Upgrade
+   note* lines of the pull requests merged since the last release, which
+   never add or change the notes themselves. They become the GitHub
    release's text, and a release without them is refused.
 3. Make the changelog from every notes file, newest first, and commit it
    with them; it is never edited by hand:
