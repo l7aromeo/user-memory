@@ -299,6 +299,12 @@ Run the installer again on the server's machine, then on every client.
 [Upgrade a shared server](upgrade.md#upgrade-a-shared-server) says what it
 does and how to undo it.
 
+While the server restarts, a client's call gets
+``The memory server at … did not answer; the call may not have completed``
+and the next call reconnects ([troubleshooting](troubleshooting.md#from-doctor)).
+Clients don't restart for a server restart or upgrade, only when their own
+client is upgraded.
+
 ## Back up and restore
 
 The server backs its store up once a day, as a native store does
