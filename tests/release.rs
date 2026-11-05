@@ -516,7 +516,9 @@ fn a_changelog_out_of_step_with_the_notes_is_refused() {
     );
 }
 
-// This repository's own changelog is the one its notes make.
+// This repository's own changelog is the one its notes make. Only a release
+// pull request changes either, so the message also tells any other pull
+// request where its line for the notes goes instead.
 #[test]
 fn the_committed_changelog_is_made_from_the_release_notes() {
     if !has_zsh() {
@@ -524,7 +526,10 @@ fn the_committed_changelog_is_made_from_the_release_notes() {
     }
     assert!(
         changelog(&repo_file("")) == fs::read_to_string(repo_file("CHANGELOG.md")).unwrap(),
-        "CHANGELOG.md is out of date; run: scripts/client-release --changelog > CHANGELOG.md"
+        "CHANGELOG.md is not the one release-notes/ makes. In a release pull request, run: \
+         scripts/client-release --changelog > CHANGELOG.md. In any other pull request, undo \
+         the change to release-notes/ or CHANGELOG.md and put its line under Upgrade note \
+         in the pull request's description."
     );
 }
 

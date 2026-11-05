@@ -45,8 +45,10 @@ skip without them locally.
 - **Docs.** A change updates the docs and code comments it affects, in the
   same change. `cargo test --test docs` checks that the commands, quoted
   messages and links in the docs and the user-memory skill match the code.
-- **Release notes.** A change users notice gets a line in the next release's
-  notes, `release-notes/v<version>.md`, when it is prepared
+- **Release notes.** Only the release pull request adds or changes
+  `release-notes/` and `CHANGELOG.md`. Any other pull request that users
+  notice gives its line for the notes under the template's *Upgrade note*,
+  and the notes are written from those lines when the release is prepared
   ([releasing](docs/dev/releasing.md)).
 - **Commits.** [Conventional Commits](https://www.conventionalcommits.org/):
   an imperative subject under 70 characters, such as `fix(setup): keep the
