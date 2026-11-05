@@ -10,7 +10,6 @@ use std::{
     io::{Read, Write},
     net::TcpListener,
     path::{Path, PathBuf},
-    process::Command,
     sync::{Arc, Mutex},
 };
 use tempfile::{TempDir, tempdir};
@@ -36,34 +35,16 @@ fn repo_file(name: &str) -> PathBuf {
 }
 
 /// The SHA-256 of `path` in hex, as the release's `.sha256` files give it.
+/// Hashed in the test process with the digest the crate already depends
+/// on, never by reading a tool's output: `certutil` prints in the console's
+/// code page on a localized Windows, which isn't UTF-8.
 pub fn sha256(path: &Path) -> String {
-    let out = if cfg!(windows) {
-        Command::new("certutil")
-            .args(["-hashfile"])
-            .arg(path)
-            .arg("SHA256")
-            .output()
-    } else if Path::new("/usr/bin/shasum").exists() {
-        Command::new("shasum")
-            .args(["-a", "256"])
-            .arg(path)
-            .output()
-    } else {
-        Command::new("sha256sum").arg(path).output()
-    }
-    .unwrap();
-    let text = String::from_utf8(out.stdout).unwrap();
-    // certutil prints a header line first, and older versions space the bytes.
-    let hex: String = if cfg!(windows) {
-        text.lines()
-            .nth(1)
-            .unwrap_or_default()
-            .split_whitespace()
-            .collect()
-    } else {
-        text[..64].to_owned()
-    };
-    hex.to_lowercase()
+    let bytes = fs::read(path).unwrap();
+    aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, &bytes)
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 /// GitHub Releases in miniature: `<base>/latest/download/<asset>` and
@@ -201,4 +182,22 @@ fn serve(
         }
     };
     let _ = stream.write_all(&response);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The known SHA-256 of "abc" (FIPS 180-2, appendix B.1), so a wrong
+    // digest or encoding fails on every platform.
+    #[test]
+    fn sha256_gives_the_known_digest_in_lowercase_hex() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("abc.txt");
+        fs::write(&file, "abc").unwrap();
+        assert_eq!(
+            sha256(&file),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
 }

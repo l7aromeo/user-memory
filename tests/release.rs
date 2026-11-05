@@ -21,6 +21,8 @@ use std::{
 use tempfile::tempdir;
 #[path = "support/fake.rs"]
 mod fake;
+#[path = "support/releases.rs"]
+mod releases;
 
 /// The login name and git email every run sees, so the checks never depend
 /// on who runs the tests.
@@ -102,25 +104,13 @@ fn files(dir: &Path) -> Vec<String> {
 
 /// Writes `name`'s SHA-256 line beside it in `dir`, in shasum's format, as a
 /// build does.
-// Through sh, which every Unix has: the check job installs no zsh, and the
-// tests that need no script run there too.
 fn checksum(dir: &Path, name: &str) {
-    let sum = Command::new("/bin/sh")
-        .args([
-            "-c",
-            "shasum -a 256 \"$1\" 2>/dev/null || sha256sum \"$1\"",
-            "sh",
-            name,
-        ])
-        .current_dir(dir)
-        .output()
-        .unwrap();
-    assert!(
-        sum.status.success() && !sum.stdout.is_empty(),
-        "{}",
-        text(&sum).1
-    );
-    fs::write(dir.join(format!("{name}.sha256")), &sum.stdout).unwrap();
+    let sum = releases::sha256(&dir.join(name));
+    fs::write(
+        dir.join(format!("{name}.sha256")),
+        format!("{sum}  {name}\n"),
+    )
+    .unwrap();
 }
 
 fn asset(target: &str) -> String {
