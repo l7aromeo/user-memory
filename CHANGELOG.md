@@ -2,6 +2,44 @@
 
 What changed in each release, newest first.
 
+## v0.9.3
+
+### Upgrade
+
+Run the installer again on each machine:
+
+```bash
+curl -fsSL https://github.com/l7aromeo/user-memory/releases/latest/download/install.sh | sh
+```
+
+On Windows, in PowerShell:
+
+```powershell
+irm https://github.com/l7aromeo/user-memory/releases/latest/download/install.ps1 | iex
+```
+
+- The store keeps its format (schema version 6), so nothing is migrated,
+  and 0.9.2 can still open it.
+- Codex's hooks are unchanged, so Codex needs no new approval.
+- Then restart your agents and start new sessions: a session that is
+  already open keeps the connector it started with.
+
+### Fixed
+
+- **A memory server that stops no longer hangs the session.** On a client
+  of a memory server, a call made while the server is down, or with a
+  token it refuses, now gets an error instead of hanging, and the session
+  keeps its memory: the next call reconnects. A refused token names its
+  file. [Troubleshooting](https://github.com/l7aromeo/user-memory/blob/main/docs/troubleshooting.md)
+  explains both messages. Thanks to @mikemikimike for the fix
+  ([#102](https://github.com/l7aromeo/user-memory/pull/102)).
+
+### Docs
+
+- The server and upgrade docs say that open sessions keep their memory
+  while the server restarts: a call during the restart gets an error, and
+  the next one reconnects.
+
 ## v0.9.2
 
 ### Upgrade
