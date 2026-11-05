@@ -454,6 +454,35 @@ thread_local! {
     /// When the latest write on this thread stopped waiting for its file
     /// to go quiet, so a test can bound the wait apart from the write.
     static WAIT_ENDED: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+    /// The latest write's deadline on this thread, each sleep it asked for
+    /// with the time left to the deadline then, and when it gave up, so a
+    /// test can check the wait by its deadline rather than the wall clock.
+    static WAITED: std::cell::RefCell<Waited> = std::cell::RefCell::new(Waited::default());
+}
+
+/// What [`WAITED`] holds.
+#[cfg(test)]
+#[derive(Default)]
+struct Waited {
+    deadline: Option<Instant>,
+    /// Each sleep as asked for, with the time left to the deadline then.
+    sleeps: Vec<(Duration, Duration)>,
+    gave_up: Option<Instant>,
+}
+
+/// Sleeps for `pause`, which the caller keeps within the time left to
+/// `deadline`, all but [`PAUSE`] after a change. Tests record each one.
+#[cfg_attr(
+    not(test),
+    expect(unused_variables, reason = "only tests record the time left")
+)]
+fn sleep_within(pause: Duration, deadline: Instant) {
+    #[cfg(test)]
+    WAITED.with_borrow_mut(|waited| {
+        let left = deadline.saturating_duration_since(Instant::now());
+        waited.sleeps.push((pause, left));
+    });
+    std::thread::sleep(pause);
 }
 
 /// [`update`] with the file read by `read`, so a test can change the file
@@ -465,6 +494,11 @@ fn update_reading(
 ) -> Result<Change> {
     clear_stale(path);
     let deadline = Instant::now() + WAIT_LIMIT;
+    #[cfg(test)]
+    WAITED.set(Waited {
+        deadline: Some(deadline),
+        ..Waited::default()
+    });
     // Whether the file still holds `existing`, and has gone quiet since.
     let settled = |existing: &Option<String>| -> Result<bool> {
         Ok(read(path)? == *existing && until_quiet(path, existing.as_deref())?.is_zero())
@@ -482,7 +516,10 @@ fn update_reading(
         // and so may a refusal of it.
         let wait = until_quiet(path, existing.as_deref())?;
         if !wait.is_zero() {
-            std::thread::sleep(wait.min(deadline.saturating_duration_since(Instant::now())));
+            sleep_within(
+                wait.min(deadline.saturating_duration_since(Instant::now())),
+                deadline,
+            );
             continue;
         }
         #[cfg(test)]
@@ -496,7 +533,7 @@ fn update_reading(
             Next::Text(text) => text,
             Next::Remove => {
                 if !settled(&existing)? {
-                    std::thread::sleep(PAUSE);
+                    sleep_within(PAUSE, deadline);
                     continue;
                 }
                 fs::remove_file(path)
@@ -541,7 +578,7 @@ fn update_reading(
             }
             Ok(None) => {
                 let _ = fs::remove_file(&temporary);
-                std::thread::sleep(PAUSE);
+                sleep_within(PAUSE, deadline);
             }
             Err(err) => {
                 let _ = fs::remove_file(&temporary);
@@ -549,6 +586,8 @@ fn update_reading(
             }
         }
     }
+    #[cfg(test)]
+    WAITED.with_borrow_mut(|waited| waited.gave_up = Some(Instant::now()));
     bail!(
         "{} kept changing while user-memory wrote the rules, so it was left as it is; the next sync tries again",
         path.display()
@@ -1016,9 +1055,7 @@ mod tests {
                 saves
             })
         };
-        let started = Instant::now();
         let change = write_codex(&path, &rules("a"));
-        let waited = started.elapsed();
         stop.store(true, Ordering::Relaxed);
         let saves = editor.join().unwrap();
         let err = change.unwrap_err();
@@ -1033,11 +1070,26 @@ mod tests {
             use std::os::unix::fs::MetadataExt;
             assert_eq!(fs::metadata(&path).unwrap().ino(), inode);
         }
-        // Only once the bound has passed.
-        assert!(
-            waited >= WAIT_LIMIT && waited < WAIT_LIMIT + QUIET / 2,
-            "{waited:?}"
-        );
+        // Kept by its deadline, not the wall clock, which a loaded machine
+        // stretches: it gave up only once the deadline had passed, and no
+        // sleep asked for more than the time left, but for the pause after
+        // a change.
+        WAITED.with_borrow(|waited| {
+            let deadline = waited.deadline.unwrap();
+            let gave_up = waited.gave_up.unwrap();
+            assert!(
+                gave_up >= deadline,
+                "gave up {:?} before its deadline",
+                deadline - gave_up
+            );
+            assert!(!waited.sleeps.is_empty(), "it waited for the file");
+            for (asked, left) in &waited.sleeps {
+                assert!(
+                    *asked <= *left + PAUSE,
+                    "a sleep asked for {asked:?} with {left:?} left"
+                );
+            }
+        });
     }
 
     /// Dates the file at `path` past [`QUIET`], as one the user saved a
