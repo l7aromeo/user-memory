@@ -432,6 +432,11 @@ fn answered(message: &impl serde::Serialize) -> Option<serde_json::Value> {
     message.get("id").cloned()
 }
 
+/// How long the relay waits to reconnect before answering the call that
+/// asked for it with an error: the 10 seconds `probe` and `call` give a
+/// handshake, so a reconnect waits no longer than a hook would.
+const RECONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Reestablish the upstream session without repeating a client request.
 async fn reconnect<R: Transport<RoleClient>>(
     mut remote: R,
@@ -467,7 +472,11 @@ async fn reconnect<R: Transport<RoleClient>>(
 
 /// Relays messages between a local MCP client and the memory server. After
 /// the server answers a write, the instruction files on this machine are
-/// brought in line with it, beside the relay.
+/// brought in line with it, beside the relay. An upstream failure never
+/// ends the relay: its calls are answered and the next one reconnects.
+/// Ending would not even free the client, since the process can't exit
+/// while tokio's stdin reader is blocked in a read that can't be cancelled,
+/// so it would stay up, silent, until the client's next message.
 async fn forward<R: Transport<RoleClient>>(
     mut local: impl Transport<RoleServer>,
     mut remote: R,
@@ -512,7 +521,7 @@ async fn forward<R: Transport<RoleClient>>(
                         let recovered = async {
                             reconnect(new_remote()?, initialize.clone(), initialized.clone()).await
                         };
-                        match tokio::time::timeout(Duration::from_secs(10), recovered).await {
+                        match tokio::time::timeout(RECONNECT_TIMEOUT, recovered).await {
                             Ok(Ok((next, version))) => {
                                 remote = next;
                                 disconnected = false;
@@ -605,10 +614,13 @@ fn fail_pending(
         "The memory server at {endpoint} did not answer; the call may not have completed. Check the endpoint and access token. Memory reconnects on the next call."
     );
     for (id, tool) in pending.drain(..) {
+        // A tool call gets a tool error, which the agent reads. Any other
+        // request gets JSON-RPC's internal error: the relay failed it, not
+        // the server, which may never have seen it.
         let response = if tool {
             serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"isError":true,"content":[{"type":"text","text":message}]}})
         } else {
-            serde_json::json!({"jsonrpc":"2.0","id":id,"error":{"code":-32603,"message":message}})
+            serde_json::json!({"jsonrpc":"2.0","id":id,"error":{"code":rmcp::model::ErrorCode::INTERNAL_ERROR.0,"message":message}})
         };
         let response: TxJsonRpcMessage<RoleServer> = serde_json::from_value(response)?;
         let send = Transport::<RoleServer>::send(local, response);
