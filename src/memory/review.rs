@@ -369,6 +369,8 @@ fn review_with(
             let (a, b) = (&memories[i], &memories[j]);
             if distinct.contains(&(a.id.min(b.id), a.id.max(b.id)))
                 || (a.source == "observed" && b.source == "observed")
+                || a.evidence_ids.contains(&b.id)
+                || b.evidence_ids.contains(&a.id)
             {
                 continue;
             }
@@ -951,6 +953,68 @@ mod tests {
         assert_eq!(
             sorted(found[0].1.clone()),
             sorted(vec![seen, again, stated])
+        );
+    }
+
+    fn infer(conn: &Connection, content: &str, supports: &[Uuid]) -> Uuid {
+        let id = insert(
+            conn,
+            New {
+                memory_type: "behavior",
+                source: "inferred",
+                ..preference("workflow", content)
+            },
+        );
+        conn.execute(
+            "UPDATE memories SET evidence_ids=?2 WHERE id=?1",
+            params![id.to_string(), serde_json::to_string(supports).unwrap()],
+        )
+        .unwrap();
+        id
+    }
+
+    #[test]
+    fn an_inference_is_never_grouped_with_its_own_evidence() {
+        let (_dir, _db, conn) = store();
+        let one = insert(
+            &conn,
+            preference("workflow", "Asked for a demo during review"),
+        );
+        let two = insert(
+            &conn,
+            preference("workflow", "Asked for a demo during review again"),
+        );
+        let pattern = infer(&conn, "Asks for a demo during review", &[one, two]);
+        let found = groups(&conn, None, false);
+        assert!(
+            found.iter().all(|(_, ids)| !ids.contains(&pattern)),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn an_explicit_memory_outside_the_evidence_still_matches_the_pattern() {
+        let (_dir, _db, conn) = store();
+        let one = insert(&conn, preference("workflow", "Reviews start with a demo"));
+        let two = insert(&conn, preference("workflow", "Reviews begin with a demo"));
+        let pattern = infer(&conn, "Asks for a demo during review", &[one, two]);
+        let stated = insert(
+            &conn,
+            preference("workflow", "Asks for a demo during review"),
+        );
+        let found = groups(&conn, None, false);
+        assert!(
+            found
+                .iter()
+                .any(|(_, ids)| ids.contains(&pattern) && ids.contains(&stated)),
+            "{found:?}"
+        );
+        assert!(
+            found
+                .iter()
+                .all(|(_, ids)| !(ids.contains(&pattern)
+                    && (ids.contains(&one) || ids.contains(&two)))),
+            "{found:?}"
         );
     }
 

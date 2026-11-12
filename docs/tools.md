@@ -206,7 +206,8 @@ says where the origin comes from.
 In an overlap group every member is related to every other, so a chain of
 memories each related only to the next is never one group: a memory related
 to two that are not related to each other is listed in two groups, and every
-related pair appears together in some group. A group lists at most eight
+related pair appears together in some group. An inferred pattern is never
+paired with the memories it cites as evidence. A group lists at most eight
 members; a larger group of duplicates or stale patterns lists the closest
 and says how many it left out (`left_out`).
 
