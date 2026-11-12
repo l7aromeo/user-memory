@@ -1467,9 +1467,10 @@ fn succeeded(out: &std::process::Output) -> Value {
     serde_json::from_slice(&out.stdout).unwrap()
 }
 
-/// An export without its time, which differs between two exports.
+/// An export without its time and source, which differ between two stores.
 fn timeless(mut document: Value) -> Value {
     document.as_object_mut().unwrap().remove("exported_at");
+    document.as_object_mut().unwrap().remove("source");
     document
 }
 
