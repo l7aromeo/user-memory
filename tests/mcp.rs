@@ -108,6 +108,14 @@ fn initialization_delivers_portable_memory_guidance_and_keeps_tools_available() 
     drop(input);
     child.wait().unwrap();
     let init = responses.iter().find(|m| m["id"] == 1).unwrap();
+    // The server writes its own handshake reply, so its identity and
+    // capabilities are checked here rather than left to rmcp's defaults.
+    assert_eq!(init["result"]["serverInfo"]["name"], "user-memory");
+    assert_eq!(
+        init["result"]["serverInfo"]["version"],
+        env!("CARGO_PKG_VERSION")
+    );
+    assert_eq!(init["result"]["capabilities"], json!({"tools": {}}));
     let guidance = init["result"]["instructions"]
         .as_str()
         .expect("MCP initialization must carry memory workflow instructions");
