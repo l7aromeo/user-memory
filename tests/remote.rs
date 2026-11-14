@@ -1481,8 +1481,11 @@ fn succeeded(out: &std::process::Output) -> Value {
 }
 
 /// An export without its time, which differs between two exports.
+/// `document` without its time and its history: an import adds the
+/// importing store's own events, and marks the file's as imported.
 fn timeless(mut document: Value) -> Value {
     document.as_object_mut().unwrap().remove("exported_at");
+    document.as_object_mut().unwrap().remove("history");
     document
 }
 

@@ -13,7 +13,7 @@
 
 pub(super) use super::ids::SHORT_ID;
 use super::{
-    Memory,
+    Memory, history,
     ids::resolve,
     index::{
         self, Candidates, embed,
@@ -97,6 +97,10 @@ pub struct Read {
     #[command(flatten)]
     #[serde(flatten)]
     pub paging: Paging,
+    /// Also return each memory's history, oldest first: every change with its operation, time, client and the values it replaced. Restoring an earlier wording is an update with those values. An id of a forgotten memory returns what is left of its history under forgotten.
+    #[arg(long)]
+    #[serde(default)]
+    pub history: bool,
 }
 
 /// Most ids one read accepts; more is a listing, which category or index gives.
@@ -498,7 +502,11 @@ pub fn read(db: &Path, input: &Read) -> Result<Value> {
         (true, Some(_)) => {
             let mut found = candidates(&conn, &selection.filter()?)?;
             found.sort_by(group_order);
-            return paged(found, &input.paging);
+            let mut result = paged(found, &input.paging)?;
+            if input.history {
+                add_history(&conn, &mut result)?;
+            }
+            return Ok(result);
         }
         _ => bail!(
             "Give either ids or a category; to list memories by project or scope, use index with those filters"
@@ -542,6 +550,24 @@ pub fn read(db: &Path, input: &Read) -> Result<Value> {
         }
     }
     let mut result = json!({ "memories": compact(&memories)? });
+    if input.history {
+        add_history(&conn, &mut result)?;
+        // A forgotten memory's tombstones say when it went, and by whom.
+        let mut forgotten = Vec::new();
+        unknown.retain(|wanted| match history::forgotten(&conn, wanted) {
+            Ok(Some(id)) => {
+                forgotten.push(id);
+                false
+            }
+            _ => true,
+        });
+        if !forgotten.is_empty() {
+            result["forgotten"] = forgotten
+                .into_iter()
+                .map(|id| Ok(json!({"id": id, "history": history::events(&conn, id)?})))
+                .collect::<Result<Value>>()?;
+        }
+    }
     if !unknown.is_empty() {
         result["unknown"] = json!(unknown);
     }
@@ -549,6 +575,20 @@ pub fn read(db: &Path, input: &Read) -> Result<Value> {
         result["excluded"] = json!(excluded);
     }
     Ok(result)
+}
+
+/// Adds each memory's events to the memories of `result`, as `history`.
+fn add_history(conn: &Connection, result: &mut Value) -> Result<()> {
+    for memory in result["memories"].as_array_mut().into_iter().flatten() {
+        let Some(id) = memory["id"]
+            .as_str()
+            .and_then(|id| Uuid::parse_str(id).ok())
+        else {
+            continue;
+        };
+        memory["history"] = json!(history::events(conn, id)?);
+    }
+    Ok(())
 }
 
 /// Types whose explicit, confirmed memories are standing rules: the index

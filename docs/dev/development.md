@@ -504,6 +504,27 @@ on the command line reads every vector and is reported, not checked.
 after a change to search, the keyword index or the vectors, and report what
 it printed. It takes a few minutes and needs no CI.
 
+## Upgrade and write budgets
+
+Two more scripts build the same synthetic store and time what a schema
+change costs. Each needs a release build of an earlier version, made from a
+clean export (`git archive`) with its own `CARGO_TARGET_DIR`.
+
+`just upgrade-budget --from-binary OLD` builds 100,000 memories, each with a
+vector, with that build, then times `user-memory migrate` with this
+checkout's build on a fresh copy each run: the backup, every schema step and
+the rewrite, as setup runs them. It checks for one `.bak` and every
+memory's content kept byte for byte, prints the store's and the keyword
+index's sizes before and after, and fails when the median is over the
+budget in `evals/scale/upgrade.py`. A change to the stored schema runs it
+from the last release's schema and reports what it printed.
+
+`just write-budget --baseline-binary OLD` times `record`, `update` and
+`forget` as command-line processes on 100,000 memories, the median of 14
+runs after a warm-up: with that build, with this one, and with this one
+without the history's triggers. It ends with the history's size after a
+year of synthetic changes.
+
 ## Repository rules
 
 - Keep implementation plans, designs and progress logs outside the repository

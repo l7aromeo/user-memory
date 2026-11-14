@@ -302,7 +302,23 @@ fn back_up_when(db: &Path, quiet: Duration, last: bool) {
         return;
     }
     // A store just created has had no memory written yet: nothing to keep.
-    match has_memories(db).and_then(|has| has.then(|| make(db)).transpose()) {
+    let made = has_memories(db).and_then(|has| {
+        if !has {
+            return Ok(None);
+        }
+        // History past its keeping time goes before the copy, so the copy
+        // is newer than the pruning and the store does not look changed
+        // since its own backup; the backups before still hold it. A failed
+        // pruning never costs the backup.
+        if let Err(err) = super::history::prune(db) {
+            eprintln!(
+                "user-memory: dropping the old history of {} failed: {err:#}",
+                db.display()
+            );
+        }
+        make(db).map(Some)
+    });
+    match made {
         Ok(_) => {
             with_state(|state| state.failed.remove(&key));
         }

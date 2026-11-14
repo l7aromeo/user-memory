@@ -1121,8 +1121,14 @@ pub async fn install(options: &Options) -> Result<()> {
         }
         crate::connect(&paths.db)?;
         crate::memory::backups::back_up_if_due(&paths.db);
-        if let Err(err) = crate::memory::compact(&paths.db) {
-            eprintln!("{}", crate::memory::compact_skipped(&paths.db, &err));
+        match crate::memory::compact(&paths.db) {
+            // An upgrade says each of its steps: the backup, the migration
+            // and this rewrite.
+            Ok(true) if matches!(migration, crate::memory::Migration::Migrated { .. }) => {
+                println!("{}", crate::memory::compacted(&paths.db));
+            }
+            Ok(_) => {}
+            Err(err) => eprintln!("{}", crate::memory::compact_skipped(&paths.db, &err)),
         }
     }
     println!("Installing user memory…");

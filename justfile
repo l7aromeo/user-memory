@@ -49,6 +49,16 @@ search-budget *args:
     cargo build --release --locked
     python3 -I evals/scale/run.py {{ args }}
 
+# The time a store upgrade takes on 100,000 synthetic memories, from a store an earlier release built: `just upgrade-budget --from-binary OLD`.
+upgrade-budget *args:
+    cargo build --release --locked
+    python3 -I evals/scale/upgrade.py {{ args }}
+
+# Record, update and forget times on 100,000 synthetic memories, with and without the history triggers: `just write-budget --baseline-binary OLD`.
+write-budget *args:
+    cargo build --release --locked
+    python3 -I evals/scale/writes.py {{ args }}
+
 # ─── This machine ────────────────────────────────────────────────────────────
 
 # Builds from this checkout and connects the local clients: `just setup --url … --token-file …`.

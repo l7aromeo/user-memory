@@ -76,7 +76,19 @@ const STEPS: &[Step] = &[
         check: always,
         apply: to_v6,
     },
+    Step {
+        check: always,
+        apply: to_v7,
+    },
 ];
+
+/// Version 7 adds each memory's history: the events table, the writer row
+/// and the triggers that fill them. History starts empty; no memory
+/// changes.
+fn to_v7(conn: &Connection, _: Option<&Titles>) -> Result<()> {
+    conn.execute_batch(super::history::EVENTS)?;
+    Ok(())
+}
 
 /// Version 5 adds the table of computed embedding cutoffs, empty until a
 /// model without built-in cutoffs is calibrated; no memory changes. The SQL
@@ -463,6 +475,9 @@ fn run(
             })?;
             tx.pragma_update(None, "user_version", version + 1)?;
         }
+        // A step that changes the keyword index leaves it to be built here,
+        // once, with this binary's code, however many steps changed it.
+        super::index::refresh(&tx)?;
         let violations: i64 =
             tx.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| {
                 r.get(0)
@@ -731,6 +746,7 @@ mod tests {
     fn rebuild(conn: &Connection, _: Option<&Titles>) -> Result<()> {
         conn.execute_batch(
             "DROP TRIGGER memory_origin_removed;
+             DROP TRIGGER memory_event_origin_removed;
              CREATE TABLE memories_new (id TEXT PRIMARY KEY NOT NULL, created_at, updated_at, memory_type, category, context, content, reason, scope, project, source, status, evidence, evidence_ids, superseded_by, last_confirmed_at);
              INSERT INTO memories_new SELECT id,created_at,updated_at,memory_type,category,context,content,reason,scope,project,source,status,evidence,evidence_ids,superseded_by,last_confirmed_at FROM memories;
              DROP TABLE memories;

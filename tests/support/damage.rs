@@ -103,8 +103,9 @@ pub fn cross_two_id_index_entries(db: &Path) {
 }
 
 /// The keyword index loses part of its inverted index (from schema version
-/// 6) or the size record of one memory's text (before), which FTS5 reports
-/// as corruption.
+/// 6), or its structure record when nothing is indexed yet, as in a store
+/// built from a snapshot's seed rows, or the size record of one memory's
+/// text (before), which FTS5 reports as corruption.
 pub fn break_the_keyword_index(db: &Path) {
     let conn = Connection::open(db).unwrap();
     let stems: bool = conn
@@ -114,8 +115,18 @@ pub fn break_the_keyword_index(db: &Path) {
             |r| r.get(0),
         )
         .unwrap();
-    conn.execute_batch(if stems {
+    let indexed: bool = stems
+        && conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM search_words_data WHERE id > 10)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+    conn.execute_batch(if indexed {
         "DELETE FROM search_words_data WHERE id > 10"
+    } else if stems {
+        "DELETE FROM search_words_data WHERE id >= 10"
     } else {
         "DELETE FROM memory_search_docsize WHERE id = (SELECT max(id) FROM memory_search_docsize)"
     })

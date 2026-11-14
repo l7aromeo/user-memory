@@ -105,7 +105,9 @@ fn database_contains_only_the_generic_memory_schema() {
             "embedding_cutoffs",
             "memories",
             "memory_distinct",
-            "memory_origins"
+            "memory_events",
+            "memory_origins",
+            "memory_writer"
         ]
     );
     let columns: Vec<String> = conn
@@ -2058,9 +2060,9 @@ fn user_version(db: &std::path::Path) -> i64 {
 fn a_new_store_is_stamped_with_the_schema_version() {
     let s = Store::new();
     s.value(&["search"]);
-    assert_eq!(user_version(&s.db), 6);
+    assert_eq!(user_version(&s.db), 7);
     s.add("preference", "Prefer Rust");
-    assert_eq!(user_version(&s.db), 6);
+    assert_eq!(user_version(&s.db), 7);
 }
 
 #[test]
@@ -2085,7 +2087,7 @@ fn a_store_from_before_versioning_is_refused_and_left_untouched() {
         let error = String::from_utf8_lossy(&out.stderr);
         for part in [
             s.db.to_str().unwrap(),
-            "has an unversioned schema but this user-memory needs schema version 6",
+            "has an unversioned schema but this user-memory needs schema version 7",
             "it holds 1 memories and was left unchanged",
             "Move it aside",
             "existing memories are not copied automatically",
@@ -2133,7 +2135,7 @@ fn stores_from_another_version_or_program_are_refused() {
     let error = String::from_utf8_lossy(&s.run(&["search"]).stderr).into_owned();
     assert!(
         error.contains(
-            "has schema version 1 but this user-memory needs schema version 6; it holds 1 memories"
+            "has schema version 1 but this user-memory needs schema version 7; it holds 1 memories"
         ),
         "{error}"
     );
@@ -2144,7 +2146,7 @@ fn stores_from_another_version_or_program_are_refused() {
     drop(conn);
     let error = String::from_utf8_lossy(&other.run(&["search"]).stderr).into_owned();
     assert!(
-        error.contains("has an unversioned schema but this user-memory needs schema version 6; it has no user-memory table"),
+        error.contains("has an unversioned schema but this user-memory needs schema version 7; it has no user-memory table"),
         "{error}"
     );
 }
@@ -3134,6 +3136,7 @@ fn the_cli_offers_exactly_these_commands() {
             "index",
             "record",
             "read",
+            "history",
             "search",
             "review",
             "update",
