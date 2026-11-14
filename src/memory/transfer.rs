@@ -23,7 +23,7 @@
 //! memory contents, file contents or the store's path.
 
 use super::{
-    Memory, Scope, clean, ids,
+    Memory, Scope, clean, history, ids,
     schema::{SCHEMA_VERSION, SELECT, connect, row, scratch, write},
     selection::{Filter, Subset, candidates},
     similar::{Draft, Pool, similar},
@@ -338,8 +338,14 @@ pub fn export_document(db: &Path, subset: &Subset) -> Result<(String, Value)> {
         summary["selection"] = json!(subset);
         summary["links_outside"] = outside;
     }
+    let ids: Vec<Uuid> = memories.iter().map(|m| m.id).collect();
+    let events = history::exported(&conn, &ids)?;
+    summary["history"] = json!(events.len());
     document["memories"] = json!(memories);
     document["distinct_pairs"] = json!(pairs.iter().map(|(a, b)| [a, b]).collect::<Vec<_>>());
+    // The exported memories' events, oldest first; a file without this
+    // section, such as a 0.9 export, imports as before.
+    document["history"] = json!(events);
     Ok((serde_json::to_string_pretty(&document)? + "\n", summary))
 }
 
@@ -957,6 +963,23 @@ fn import(
         }
     }
 
+    // The file's history of the memories being imported. Its events are
+    // untrusted: one this store could not have written is skipped.
+    let (mut events, mut events_skipped) = (Vec::new(), 0);
+    if let Some(listed) = file.get("history") {
+        let importing: HashSet<Uuid> = rows.iter().map(|e| e.id).collect();
+        for value in listed.as_array().map(Vec::as_slice).unwrap_or_default() {
+            match history::parse(value, timestamp) {
+                Some(event) if importing.contains(&event.memory_id) => events.push(event),
+                Some(_) => {}
+                None => events_skipped += 1,
+            }
+        }
+        if !listed.is_array() {
+            events_skipped += 1;
+        }
+    }
+
     // Phase 2: merge by id against the pre-import store.
     let mut plans = Vec::new();
     let mut conflicts = Vec::new();
@@ -1068,6 +1091,12 @@ fn import(
     if let Some(selection) = &file_selection {
         summary.insert("file_selection".into(), selection.clone());
     }
+    if file.get("history").is_some() {
+        summary.insert(
+            "history".into(),
+            json!({"events": events.len(), "skipped": events_skipped}),
+        );
+    }
     if let Some((count, not_selected)) = selected {
         summary.insert("selection".into(), json!(subset));
         summary.insert("selected".into(), json!(count));
@@ -1102,7 +1131,13 @@ fn import(
     }
 
     // Phase 3: write.
-    let tx = write(&conn)?;
+    let mut tx = write(&conn)?;
+    tx.note(Some("import"), None, "")?;
+    let mark = if history::kept(&tx)? {
+        history::mark(&tx)?
+    } else {
+        0
+    };
     let before = statuses(&tx)?;
     for (entry, plan) in rows.iter().zip(&plans) {
         if matches!(plan, Plan::Conflict) && on_conflict == OnConflict::UseFile {
@@ -1125,6 +1160,24 @@ fn import(
             "INSERT OR IGNORE INTO memory_distinct (a,b) VALUES (?1,?2)",
             params![a.to_string(), b.to_string()],
         )?;
+    }
+    // The file's events go in after the import's own, marked with this
+    // import, unless the store already holds the same event.
+    let mut added_events = 0;
+    if !events.is_empty() && history::kept(&tx)? {
+        let import: String =
+            tx.query_row("SELECT strftime('%Y-%m-%dT%H:%M:%SZ','now')", [], |r| {
+                r.get(0)
+            })?;
+        for event in &events {
+            added_events += usize::from(history::add_imported(&tx, event, &import, mark)?);
+        }
+    }
+    if file.get("history").is_some() {
+        summary.insert(
+            "history".into(),
+            json!({"events": added_events, "skipped": events_skipped}),
+        );
     }
     let staled = newly_stale(&tx, &before)?;
     // Taking the file's side replaces memories' text, which must not stay
@@ -1595,10 +1648,30 @@ mod tests {
         (s, [a, b, gone, inferred, old, new, local])
     }
 
+    /// `document` without its time and its history, which an import adds
+    /// to: the importing store's own events, and the file's marked as
+    /// imported.
     fn without_time(document: &str) -> Value {
         let mut value: Value = serde_json::from_str(document).unwrap();
         value.as_object_mut().unwrap().remove("exported_at");
+        value.as_object_mut().unwrap().remove("history");
         value
+    }
+
+    /// The events of `document`'s history as the store that wrote them
+    /// had them: the fields an import keeps, without its own mark.
+    fn events(document: &str) -> Vec<Value> {
+        let value: Value = serde_json::from_str(document).unwrap();
+        value["history"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event| {
+                let mut event = event.clone();
+                event.as_object_mut().unwrap().remove("imported");
+                event
+            })
+            .collect()
     }
 
     fn import(s: &Store, document: &str, apply: bool, mode: OnConflict) -> Value {
@@ -1630,9 +1703,11 @@ mod tests {
             at.len() == 20 && at.as_bytes()[10] == b'T' && at.ends_with('Z'),
             "{at}"
         );
+        let exported_events = events(&first);
+        assert!(!exported_events.is_empty());
         assert_eq!(
             summary,
-            json!({"memories":{"confirmed":3,"stale":1,"superseded":1,"tentative":1},"distinct_pairs":1})
+            json!({"memories":{"confirmed":3,"stale":1,"superseded":1,"tentative":1},"distinct_pairs":1,"history":exported_events.len()})
         );
         // The deleted support staled its inference, which keeps the dangling id.
         assert!(first.contains(&inferred.to_string()));
@@ -1640,8 +1715,35 @@ mod tests {
         let result = import(&fresh, &first, true, OnConflict::Abort);
         assert_eq!(result["applied"], true, "{result}");
         assert_eq!(result["invalid"], json!([]));
+        assert_eq!(
+            result["history"],
+            json!({"events": exported_events.len(), "skipped": 0})
+        );
         let (second, _) = export_document(&fresh.db, &Subset::default()).unwrap();
         assert_eq!(without_time(&first), without_time(&second));
+        // Every event came along, marked as imported, beside the import's
+        // own event for each memory it added.
+        let second_events = events(&second);
+        for event in &exported_events {
+            assert!(second_events.contains(event), "{event} was not imported");
+        }
+        let marked = serde_json::from_str::<Value>(&second).unwrap()["history"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["imported"].is_string())
+            .count();
+        assert_eq!(marked, exported_events.len());
+        assert_eq!(
+            second_events
+                .iter()
+                .filter(|e| e["op"] == "import" && e["before"].is_null())
+                .count(),
+            6
+        );
+        // Importing the file again adds none of its events twice.
+        let again = import(&fresh, &first, true, OnConflict::Abort);
+        assert_eq!(again["history"], json!({"events": 0, "skipped": 0}));
         assert!(first.ends_with("}\n") && first.starts_with("{\n  \"format\""));
     }
 

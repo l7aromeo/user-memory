@@ -1,7 +1,7 @@
 //! Recording, corrections and deletion with provenance checks.
 
 use super::{
-    Memory, Scope, Source, TITLE_LIMIT, clean,
+    Memory, Scope, Source, TITLE_LIMIT, clean, history,
     ids::{MemoryRef, full_id, resolve_all, uuids},
     project_key,
     schema::{connect, get, write},
@@ -160,6 +160,10 @@ pub struct Update {
     #[arg(long = "distinct-from")]
     #[serde(default)]
     pub distinct_from: Vec<MemoryRef>,
+    /// Also reduce the memory's earlier history to tombstones (each change's operation and time, without the values it replaced), and keep no replaced values for this change: for a correction that removes something sensitive, which the history would otherwise keep for a year.
+    #[arg(long)]
+    #[serde(default)]
+    pub drop_history: bool,
     /// True only when the user asked for this correction or confirmation; never for your own revised guess. A message they typed, even mid-turn, or an answer they picked counts.
     #[arg(skip)]
     #[serde(default)]
@@ -393,7 +397,10 @@ pub fn record(db: &Path, mut input: Record) -> Result<Value> {
         None => similar::embed_draft(&draft(&input)),
     };
     let conn = connect(db)?;
-    let tx = write(&conn)?;
+    let mut tx = write(&conn)?;
+    // A merge's new memory says so in its history; every event of this
+    // write names the conversation.
+    tx.note(input.merge.then_some("merge"), None, &input.origin)?;
     // Ids may be the index's first characters: each becomes the full id it
     // names, or the call is refused.
     for refs in [
@@ -611,6 +618,9 @@ fn confirm(conn: &Connection, input: &Record, target: Uuid) -> Result<Value> {
             "confirms must name an active explicit memory with the same scope and project; to make an observation the user's own statement, call update on it with user_confirmed",
         );
     }
+    // A confirmation in the same second as the last changes nothing, and
+    // still counts in the history.
+    history::note(conn, Some("confirm"), Some(target), &input.origin)?;
     add_origin(conn, target, &input.origin)?;
     conn.execute(
         "UPDATE memories SET last_confirmed_at=CURRENT_TIMESTAMP WHERE id=?1",
@@ -644,11 +654,21 @@ pub fn update(db: &Path, input: Update) -> Result<Value> {
         return mark_distinct(db, input);
     }
     let conn = connect(db)?;
-    let tx = write(&conn)?;
+    let mut tx = write(&conn)?;
     let memory_id = match full_id(&tx, &input.memory_id)? {
         Ok(id) => id,
         Err(reason) => return Ok(json!({"updated":false,"reason":reason})),
     };
+    // An update of this memory that changes nothing is a confirmation in
+    // its history; one that moves it is an update, not a project move.
+    let origin = input
+        .origin
+        .as_deref()
+        .map(|origin| clean(origin, usize::MAX))
+        .unwrap_or_default();
+    tx.note(Some("update"), Some(memory_id), &origin)?;
+    // This write's own events are those after the memory's newest now.
+    let earlier = history::latest(&tx, memory_id)?;
     let Some(old) = get(&tx, memory_id)? else {
         return Ok(json!({"updated":false,"reason":"Memory does not exist"}));
     };
@@ -684,6 +704,9 @@ pub fn update(db: &Path, input: Update) -> Result<Value> {
             "UPDATE memories SET title=?2,updated_at=CURRENT_TIMESTAMP WHERE id=?1",
             params![memory_id.to_string(), title],
         )?;
+        if input.drop_history {
+            history::drop_history(&tx, memory_id, earlier)?;
+        }
         tx.commit_removing()?;
         return Ok(json!({"updated":true,"id":memory_id,"status":old.status}));
     }
@@ -774,6 +797,9 @@ pub fn update(db: &Path, input: Update) -> Result<Value> {
         )?;
     }
     add_origin(&tx, memory_id, &next.origin)?;
+    if input.drop_history {
+        history::drop_history(&tx, memory_id, earlier)?;
+    }
     tx.commit_removing()?;
     let mut result = json!({"updated":true,"id":memory_id,"status":status});
     if revived {
@@ -807,7 +833,8 @@ fn mark_distinct(db: &Path, mut input: Update) -> Result<Value> {
         || input.scope.is_some()
         || input.project.is_some()
         || input.origin.is_some()
-        || input.replace_origins;
+        || input.replace_origins
+        || input.drop_history;
     if changes {
         return refused("Mark memories distinct separately from changing one");
     }
@@ -876,6 +903,8 @@ pub fn forget(db: &Path, input: Forget) -> Result<Value> {
                     kept.insert(id);
                 }
             }
+            // So does its name in the history of the memories kept.
+            history::drop_origin(&tx, &origin)?;
             // The conversation's links go with it.
             let unlinked = tx.execute(
                 "DELETE FROM conversation_projects WHERE origin=?1",

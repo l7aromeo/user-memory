@@ -12,7 +12,7 @@ use uuid::Uuid;
 /// previous version in `migrate.rs`: `IF NOT EXISTS` keeps an older table or
 /// trigger as it was, so connecting refuses a store from another version
 /// instead of half upgrading it.
-pub(super) const SCHEMA_VERSION: i64 = 6;
+pub(super) const SCHEMA_VERSION: i64 = 7;
 
 /// The tables and the triggers that stale inferred patterns when their
 /// support weakens: a supporting memory deleted; one changed in what it
@@ -189,6 +189,7 @@ pub fn connect(db: &Path) -> Result<Connection> {
             tx.execute_batch(SCHEMA)?;
             tx.execute_batch(LINKS)?;
             tx.execute_batch(CUTOFFS)?;
+            tx.execute_batch(super::history::EVENTS)?;
             super::index::create(&tx)?;
             super::index::stamp_new(&tx)?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -220,6 +221,7 @@ pub fn connect(db: &Path) -> Result<Connection> {
     conn.execute_batch(SCHEMA)?;
     conn.execute_batch(LINKS)?;
     conn.execute_batch(CUTOFFS)?;
+    conn.execute_batch(super::history::EVENTS)?;
     super::index::create(&conn)?;
     Ok(conn)
 }
@@ -385,6 +387,9 @@ impl FileTurn {
 pub(super) struct Write<'c> {
     // Fields drop in order: the transaction ends before the turns pass on.
     tx: Transaction<'c>,
+    /// Whether this write named its client for the history's events, a row
+    /// it removes before committing.
+    named: bool,
     file: Option<FileTurn>,
     turn: Option<Turn>,
     conn: &'c Connection,
@@ -403,8 +408,10 @@ fn write_at<'c>(gate: &'static Gate, conn: &'c Connection, wait: Duration) -> Re
         _ => None,
     };
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let named = super::history::begin(&tx)?;
     Ok(Write {
         tx,
+        named,
         file,
         turn,
         conn,
@@ -487,6 +494,11 @@ fn compact_waiting(db: &Path, wait: Duration) -> Result<bool> {
     Ok(true)
 }
 
+/// What [`compact`] did to the store at `db` when an upgrade ran it.
+pub fn compacted(db: &Path) -> String {
+    format!("Rewrote {} without its free space.", db.display())
+}
+
 /// The note when [`compact`] could not rewrite the store at `db`: nothing is
 /// lost, and the next setup or migrate tries again.
 pub fn compact_skipped(db: &Path, err: &anyhow::Error) -> String {
@@ -497,6 +509,20 @@ pub fn compact_skipped(db: &Path, err: &anyhow::Error) -> String {
 }
 
 impl Write<'_> {
+    /// Says what this write does, for the history events its changes add:
+    /// `op` (`update`, `confirm`, `merge` or `import`, else none), the
+    /// memory it is about, and the conversation it comes from.
+    pub(super) fn note(
+        &mut self,
+        op: Option<&str>,
+        subject: Option<Uuid>,
+        origin: &str,
+    ) -> Result<()> {
+        super::history::note(&self.tx, op, subject, origin)?;
+        self.named = true;
+        Ok(())
+    }
+
     /// Indexes the memories this write changed, commits, passes the turns
     /// on, then copies a long log into the store and makes the day's backup
     /// when one is due. The copy is SQLite's
@@ -521,10 +547,14 @@ impl Write<'_> {
     fn finish(self, removed: bool) -> Result<()> {
         let Self {
             tx,
+            named,
             file,
             turn,
             conn,
         } = self;
+        if named {
+            super::history::end(&tx)?;
+        }
         super::index::settle(&tx)?;
         if removed {
             super::index::merge(&tx)?;

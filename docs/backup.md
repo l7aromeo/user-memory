@@ -26,7 +26,10 @@ two seconds, since Windows can't replace a file while it's open. Nothing runs
 on a schedule, so a store that hasn't changed since its newest backup gets
 no new one. A backup that fails never stops the change, and the server
 tries again an hour later, and as the session ends;
-[doctor](troubleshooting.md#from-doctor) reports it.
+[doctor](troubleshooting.md#from-doctor) reports it. Just before the copy,
+history events older than a year are dropped
+([history](memory-model.md#history)); the backups made before still hold
+them until they rotate out.
 
 ```bash
 user-memory backup list

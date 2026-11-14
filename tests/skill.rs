@@ -311,9 +311,20 @@ fn serve(home: &Path, db: &Path, calls: &[(&str, Value)]) -> (Vec<Value>, Vec<Va
     (tools, results)
 }
 
+/// The id of a memory forgotten before the skill's calls.
+const FORGOTTEN: &str = "1a2b3c4d-9999-4aaa-8aaa-000000000099";
+
 fn surface(root: &TempDir) -> Surface {
     let (home, db) = (root.path(), root.path().join("store/memories.sqlite3"));
     seed(home, &db);
+    // What is left of a memory forgotten long ago: its tombstones.
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute(
+            "INSERT INTO memory_events (memory_id,op) VALUES (?1,'record'),(?1,'forget')",
+            [FORGOTTEN],
+        )
+        .unwrap();
     let (tools, results) = serve(
         home,
         &db,
@@ -344,6 +355,9 @@ fn surface(root: &TempDir) -> Surface {
                 "import",
                 json!({"name": "backup.json", "apply": true, "user_confirmed": true}),
             ),
+            // A read with history, of stored memories and a forgotten one.
+            ("read", json!({"category": "shell", "history": true})),
+            ("read", json!({"ids": [FORGOTTEN], "history": true})),
         ],
     );
     let mut values = BTreeSet::new();

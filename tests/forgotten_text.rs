@@ -4,8 +4,10 @@
 )]
 
 //! Text a forget or a correction removed leaves the store's files: the
-//! store, its log and the search index, and so every backup made after.
-//! Each case looks at the bytes on disk, through the real binary.
+//! store, its log and the search index, and so every backup made after. A
+//! correction's replaced text stays only in the memory's history, until a
+//! forget, `drop_history` or pruning takes it out of that too. Each case
+//! looks at the bytes on disk, through the real binary.
 
 #[path = "support/sandbox.rs"]
 mod sandbox;
@@ -95,6 +97,27 @@ impl Store {
             .collect()
     }
 
+    /// The files of the store that hold the marker as the keyword index
+    /// stores it, which a correction's history never holds.
+    fn indexing_the_marker(&self) -> Vec<PathBuf> {
+        self.files()
+            .into_iter()
+            .filter(|path| holds(path, &indexed_tail()))
+            .collect()
+    }
+
+    /// Whether the history of memory `id` holds the marker among the values
+    /// its changes replaced.
+    fn history_holds_the_marker(&self, id: &str) -> bool {
+        let conn = Connection::open_with_flags(&self.db, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM memory_events WHERE memory_id=?1 AND instr(before,?2))",
+            [id, MARKER],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
     /// Whether the search index lists the marker as a word. A deleted word
     /// leaves this list before its bytes leave the index, so only the bytes
     /// show that it's gone.
@@ -129,12 +152,15 @@ impl Store {
 /// Whether the file at `path` holds the marker, as text or as the index
 /// stores it.
 fn holds_marker(path: &Path) -> bool {
-    let bytes = fs::read(path).unwrap();
-    [MARKER.to_owned(), indexed_tail()].iter().any(|form| {
-        bytes
-            .windows(form.len())
-            .any(|window| window == form.as_bytes())
-    })
+    holds(path, MARKER) || holds(path, &indexed_tail())
+}
+
+/// Whether the file at `path` holds the bytes of `form`.
+fn holds(path: &Path, form: &str) -> bool {
+    fs::read(path)
+        .unwrap()
+        .windows(form.len())
+        .any(|window| window == form.as_bytes())
 }
 
 /// Records memories `numbers` without the marker on the command line, as
@@ -184,21 +210,122 @@ fn a_forgotten_memory_leaves_the_store_its_log_and_later_backups() {
     assert!(!holds_marker(&store.back_up()));
 }
 
-// The same for text a correction replaced: the memory stays, its old words
-// don't.
-#[test]
-fn text_a_correction_replaced_leaves_the_store_its_log_and_later_backups() {
-    let store = Store::new();
-    let mut serve = store.serve();
-    let id = record_the_marker(&store, &mut serve);
+/// Corrects the marker out of memory `id` through `serve`, and checks that
+/// the keyword index no longer holds it while the history does.
+fn correct_the_marker(store: &Store, serve: &mut Serve, id: &str) {
     let reply: Value = serve.call(
         "update",
         json!({"memory_id":id,"content":"The deploy key is in the vault","user_confirmed":true}),
     );
     assert_eq!(reply["updated"], true, "{reply}");
+    assert_eq!(store.indexing_the_marker(), Vec::<PathBuf>::new());
+    assert!(store.history_holds_the_marker(id));
+}
+
+// The same for text a correction replaced: the memory stays, its old words
+// leave the keyword index at once, and stay in its history only until the
+// user drops it, which leaves the store, its log and later backups clean.
+#[test]
+fn text_a_correction_replaced_leaves_the_store_its_log_and_later_backups() {
+    let store = Store::new();
+    let mut serve = store.serve();
+    let id = record_the_marker(&store, &mut serve);
+    correct_the_marker(&store, &mut serve, &id);
+    let reply: Value = serve.call(
+        "update",
+        json!({"memory_id":id,"drop_history":true,"user_confirmed":true}),
+    );
+    assert_eq!(reply["updated"], true, "{reply}");
+    assert!(!store.history_holds_the_marker(&id));
     assert_eq!(store.holding_the_marker(), Vec::<PathBuf>::new());
     serve.close();
     assert!(!holds_marker(&store.back_up()));
+}
+
+// Forgetting a memory reduces its history to tombstones: the text its
+// corrections replaced leaves the store and its log with it.
+#[test]
+fn a_forgotten_memorys_history_leaves_the_store_and_its_log() {
+    let store = Store::new();
+    let mut serve = store.serve();
+    let id = record_the_marker(&store, &mut serve);
+    correct_the_marker(&store, &mut serve, &id);
+    let reply: Value = serve.call("forget", json!({"memory_id":id,"user_confirmed":true}));
+    assert_eq!(reply["deleted"], true, "{reply}");
+    assert_eq!(store.holding_the_marker(), Vec::<PathBuf>::new());
+    serve.close();
+    assert!(!holds_marker(&store.back_up()));
+}
+
+// History older than its year is dropped as the next automatic backup is
+// made, before the copy: the store, its log and that backup lose the
+// replaced text, and the backup made before still holds it.
+#[test]
+fn history_past_its_year_leaves_the_store_as_a_backup_is_made() {
+    let store = Store::new();
+    let mut serve = store.serve();
+    let id = record_the_marker(&store, &mut serve);
+    correct_the_marker(&store, &mut serve, &id);
+    serve.close();
+    // Yesterday's backup, made before the pruning.
+    let earlier = store.back_up();
+    let yesterday = earlier.with_file_name("memory-2000-01-01.sqlite3");
+    fs::rename(&earlier, &yesterday).unwrap();
+    let two_days = std::time::Duration::from_secs(2 * 24 * 60 * 60);
+    fs::File::options()
+        .write(true)
+        .open(&yesterday)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - two_days)
+        .unwrap();
+    assert!(holds_marker(&yesterday));
+    // A connection holds the store open from here, so the log keeps what is
+    // written to it, as the events aged below are, until a write clears it.
+    // A server would do, but its first backup check could make today's
+    // backup before the events are aged.
+    let held = Connection::open(&store.db).unwrap();
+    held.query_row("SELECT count(*) FROM memories", [], |_| Ok(()))
+        .unwrap();
+    Connection::open(&store.db)
+        .unwrap()
+        .execute(
+            "UPDATE memory_events SET at=datetime('now','-13 months'),last_at=datetime('now','-13 months') WHERE memory_id=?1",
+            [&id],
+        )
+        .unwrap();
+    // A write with a backup due makes it, pruning first.
+    assert!(holds_marker(&store.log()));
+    let out = store
+        .command(&["record", "--category", "travel", "--scope", "global"])
+        .args([
+            "--title",
+            "Window seat",
+            "--content",
+            "Books a window seat on flights",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&out.stdout).unwrap()["stored"],
+        true,
+        "{out:?}"
+    );
+    assert!(!store.history_holds_the_marker(&id));
+    assert_eq!(
+        store.holding_the_marker(),
+        Vec::<PathBuf>::new(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    drop(held);
+    let backups: Vec<PathBuf> = fs::read_dir(store.db.with_file_name("backups"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(backups.len(), 2, "{backups:?}");
+    for backup in backups {
+        assert_eq!(holds_marker(&backup), backup == yesterday, "{backup:?}");
+    }
 }
 
 // An import that takes the file's side of a conflict replaces the store's
@@ -223,6 +350,15 @@ fn text_an_import_replaced_leaves_the_store_and_later_backups() {
     let out = store
         .command(&["import", "--apply", "--on-conflict", "use-file"])
         .arg(&export)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    // The import keeps the replaced text in the memory's history, as a
+    // correction does, and nowhere else.
+    assert_eq!(store.indexing_the_marker(), Vec::<PathBuf>::new());
+    assert!(store.history_holds_the_marker(&id));
+    let out = store
+        .command(&["update", &id, "--drop-history"])
         .output()
         .unwrap();
     assert!(out.status.success(), "{out:?}");

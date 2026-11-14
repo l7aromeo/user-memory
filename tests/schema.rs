@@ -235,6 +235,28 @@ fn data(db: &Path) -> Vec<Vec<String>> {
     .collect()
 }
 
+/// The first schema version that keeps each memory's history.
+const HISTORY_VERSION: i64 = 7;
+
+/// Every event of the history of the store at `db`, or none for a store
+/// from before history existed.
+fn history(db: &Path) -> Option<Vec<String>> {
+    let conn = Connection::open(db).unwrap();
+    let kept: bool = conn
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE name='memory_events')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    kept.then(|| {
+        rows(
+            &conn,
+            "SELECT seq,memory_id,at,last_at,count,op,origin,client,before,imported FROM memory_events ORDER BY seq",
+        )
+    })
+}
+
 /// The keyword index of the store at `db`: every key with its memory's
 /// columns, and every stored stem with its memory and column. FTS5's own
 /// check runs first.
@@ -397,6 +419,12 @@ fn every_snapshot_migrates_to_the_current_schema_and_keeps_its_data() {
             before.iter().all(|rows| !rows.is_empty()),
             "v{n}.seed.sql must seed every table: {before:?}"
         );
+        let events = history(&db);
+        assert_eq!(
+            events.as_ref().is_some_and(|events| !events.is_empty()),
+            n >= HISTORY_VERSION,
+            "v{n}.seed.sql must seed the history once it exists"
+        );
         let out = migrate(dir.path(), &db, n);
         assert!(out.status.success(), "v{n}: {}", stderr(&out));
         if n == current {
@@ -413,6 +441,13 @@ fn every_snapshot_migrates_to_the_current_schema_and_keeps_its_data() {
         assert_eq!(version(&db), current);
         assert_eq!(normalized(&statements(&db)), target, "v{n}");
         assert_eq!(data(&db), before, "v{n} lost data");
+        // A store from before history starts with none; one with history
+        // keeps every event as it was.
+        assert_eq!(
+            history(&db),
+            Some(events.unwrap_or_default()),
+            "v{n} history"
+        );
         assert_eq!(
             keyword_index(&db),
             rebuilt_keyword_index(dir.path(), &db),

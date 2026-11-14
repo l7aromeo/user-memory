@@ -45,7 +45,10 @@ rollback journal mode.
 ## Removed text
 
 Text a forget, a correction or an import that takes the file's side removes
-leaves the store's files with the change:
+leaves the store's files with the change, apart from what a correction or
+an import keeps in the memory's [history](memory-model.md#history) of the
+values it replaced. Forgetting the memory, `update --drop-history` and the
+history's yearly pruning remove those the same way:
 
 - every connection sets `PRAGMA secure_delete`, so SQLite overwrites deleted
   and replaced content with zeros instead of leaving it in free space;

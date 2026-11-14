@@ -17,10 +17,10 @@ The tools agents call, their filters, search, the index and paging. The
 | Tool | Purpose |
 |---|---|
 | `index` | Every memory in scope, one line each (8-character id and title): rules first by category, then other memories by type; optional `topic` puts task-relevant memories first in their groups; [filters](#scope-and-filters); paged |
-| `read` | Whole memories by up to 20 ids (full or the index's 8 characters) or by category; unknown ids and ids outside `status` are reported, and `projects` and `scope` given with ids are ignored; a category read takes the [filters](#scope-and-filters) and is paged |
+| `read` | Whole memories by up to 20 ids (full or the index's 8 characters) or by category; unknown ids and ids outside `status` are reported, and `projects` and `scope` given with ids are ignored; a category read takes the [filters](#scope-and-filters) and is paged; `history: true` adds each memory's [history](memory-model.md#history), and lists a forgotten id's tombstones under `forgotten` |
 | `search` | Find relevant memories by topic; [filters](#scope-and-filters); paged |
 | `record` | Save a typed explicit memory, grounded observation, or evidence-backed inference; if similar memories exist, nothing is stored until the agent confirms, supersedes or marks it distinct |
-| `update` | Correct or confirm a memory on the user's request, or with `distinct_from` mark memories the user calls different |
+| `update` | Correct or confirm a memory on the user's request, or with `distinct_from` mark memories the user calls different; `drop_history` reduces its earlier [history](memory-model.md#history) to tombstones |
 | `forget` | Delete one memory, or every memory and link from one conversation origin, and invalidate dependent inferences; `next` says what to do about `staled` and `left_superseded` when either has entries |
 | `link` | Keep projects loaded for one conversation origin: its session start and change notices include them, after resume and compaction too; returns the linked projects' index lines; `unlink` removes. See [Conversation links](#conversation-links) |
 | `review` | On the user's request only: groups of duplicates, cross-scope copies, overlaps and stale patterns; `keep` marks a group the user leaves as is |

@@ -1864,13 +1864,13 @@ fn doctor_reports_a_store_from_another_version() {
     assert_success(&s.run(&["setup", "--client", "codex"]));
     let db = s.path("private memory.sqlite3");
     let conn = rusqlite::Connection::open(&db).unwrap();
-    conn.pragma_update(None, "user_version", 7).unwrap();
+    conn.pragma_update(None, "user_version", 99).unwrap();
     drop(conn);
     let out = s.run(&["doctor", "--client", "codex"]);
     assert!(!out.status.success());
     let error = String::from_utf8_lossy(&out.stderr);
     assert!(
-        error.contains("has schema version 7, but this user-memory is older than the store"),
+        error.contains("has schema version 99, but this user-memory is older than the store"),
         "{error}"
     );
     assert!(!error.contains("no such column"), "{error}");
@@ -2269,12 +2269,16 @@ fn setup_migrates_a_store_from_an_earlier_version_with_a_backup() {
         }
         let out = s.run(&args);
         assert_success(&out);
-        assert!(stdout(&out).contains("Backed up"), "{}", stdout(&out));
-        assert!(
-            stdout(&out).contains(&format!("from schema version {n} to {current}")),
-            "{}",
-            stdout(&out)
-        );
+        // One line per step of the upgrade, in order: the backup, the
+        // migration, the rewrite.
+        let text = stdout(&out);
+        let steps = [
+            "Backed up".to_owned(),
+            format!("from schema version {n} to {current}"),
+            "without its free space.".to_owned(),
+        ]
+        .map(|step| text.find(&step).unwrap_or_else(|| panic!("{step}: {text}")));
+        assert!(steps.is_sorted(), "{text}");
         assert_eq!(schema_version(&db), current);
         assert_success(&s.run(&["doctor", "--client", "codex"]));
     }
@@ -2291,6 +2295,7 @@ fn setup_migrates_a_store_from_an_earlier_version_with_a_backup() {
     ]);
     assert_success(&rerun);
     assert!(!stdout(&rerun).contains("Backed up"), "{}", stdout(&rerun));
+    assert!(!stdout(&rerun).contains("Rewrote"), "{}", stdout(&rerun));
     assert!(
         stdout(&rerun).contains("No titles map was needed: the store is already at schema version"),
         "{}",

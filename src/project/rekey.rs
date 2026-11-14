@@ -71,6 +71,9 @@ pub fn move_project(db: &Path, old: &str, new: &str) -> Result<Moved> {
     // One write lock from the counts to the commit, so no writer slips in
     // between the backup and the move.
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    // The memories' history names this client for the move; the row goes
+    // before the commit.
+    crate::memory::note_writer(&tx, None, None, "")?;
     let found = problems(&tx)?;
     if !found.is_empty() {
         bail!(
@@ -121,6 +124,7 @@ pub fn move_project(db: &Path, old: &str, new: &str) -> Result<Moved> {
     })();
     match moved {
         Ok((memories, links)) => {
+            crate::memory::end_writer(&tx)?;
             tx.commit()?;
             // This transaction is not the store's write turn, whose commit
             // makes the day's backup, so the move makes it here.

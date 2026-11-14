@@ -27,6 +27,7 @@ Every command has `--help`.
 | `user-memory index --instructions` | The rules text the instruction files hold. |
 | `user-memory read 68da18b4 1b827239` | Whole memories, by up to 20 ids (full, or the 8 characters the index shows). `--status all` includes stale and superseded ones. |
 | `user-memory read --category workflow` | Every memory in one category. |
+| `user-memory history 68da18b4` | A memory's history, oldest first: each change with its operation, time, client and the values it replaced. For a forgotten memory, its tombstones. `read --history` adds the same to each memory it reads. |
 | `user-memory search 'language choice'` | Memories that match a topic, best first. |
 | `user-memory review` | Groups of duplicates, project copies of global memories, one rule stated in several projects, overlaps and stale patterns. Changes nothing; `--keep ID` (repeatable) leaves the memories you name as they are, so review stops grouping them. `--project P` adds projects; `--max-groups N` limits the groups listed. |
 
@@ -110,6 +111,18 @@ only that one:
 user-memory update 68da18b4-5d40-4746-930f-22a7c859e8f7 --content 'Prefer Python for prototypes' --origin claude:session/<id> --replace-origins
 ```
 
+Every change is kept in the memory's history for a year, with the values
+it replaced ([history](memory-model.md#history)). To undo a wrong
+correction, read the earlier values with `user-memory history ID` and
+`update` the memory with them. A correction that removes something
+sensitive, which the history would otherwise keep, takes `--drop-history`:
+the memory's earlier events keep only their operation and time, and this
+change keeps no replaced values.
+
+```bash
+user-memory update 68da18b4-5d40-4746-930f-22a7c859e8f7 --content 'The deploy key is in the vault' --drop-history
+```
+
 To tell review that two memories are different, so it stops grouping them:
 
 ```bash
@@ -133,8 +146,10 @@ listed as `kept`. Patterns built
 on a forgotten memory become stale, listed as `staled`. A memory the forgotten
 one had replaced is listed as `left_superseded`: it stays hidden until
 `user-memory update ID` makes it active again. When either list has entries,
-`next` says what to do about each, one line each. Forgetting cannot be undone,
-except from a backup. Nothing is ever deleted automatically, so write a
+`next` says what to do about each, one line each. The memory's history
+keeps only tombstones, each change's operation and time, which
+`user-memory history` shows. Forgetting cannot be undone, except from a
+backup. Nothing is ever deleted automatically, so write a
 memory's content, context and reason to read well without the chat it came
 from.
 

@@ -6,8 +6,8 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use rmcp::{
-    ServiceExt, handler::server::wrapper::Parameters, tool, tool_handler, tool_router,
-    transport::stdio,
+    Peer, RoleServer, ServiceExt, handler::server::wrapper::Parameters, tool, tool_handler,
+    tool_router, transport::stdio,
 };
 use serde_json::{Value, json};
 use std::{
@@ -115,6 +115,11 @@ enum Command {
     Record(memory::Record),
     /// Read whole memories by id (or the 8 characters the index shows), or every memory of a category.
     Read(memory::Read),
+    /// Show a memory's history: every change, oldest first, with who made it and the values it replaced; what is left of a forgotten memory's.
+    History {
+        /// The memory, by its full id or the 8 characters the index shows.
+        id: memory::MemoryRef,
+    },
     /// Search user memories; optionally filter type, category and project.
     Search(memory::Search),
     /// List groups of memories the user may want to merge, forget or re-derive.
@@ -249,11 +254,16 @@ impl UserMemoryServer {
     #[tool(
         description = "Record one memory: one fact, readable without the conversation, with absolute dates and a one-line title stating it. Pick its source: explicit, what the user said, with user_confirmed; observed, what the user did, with evidence; inferred, a pattern citing two independent memories in evidence_ids. A rule to follow needs type preference, constraint or value. Skip project facts the project's own code, docs or instruction files state. Skip live state (lock holders, release phase, worktree owners): it belongs in the project's own locks, board or files. If similar memories exist, nothing is stored: call again with confirms (said again), supersedes (changed their mind) or distinct_from (genuinely different, never just to pass the check); merge with supersedes only for duplicates the user approved merging."
     )]
-    async fn record(&self, Parameters(input): Parameters<memory::Record>) -> Reply {
+    async fn record(
+        &self,
+        Parameters(input): Parameters<memory::Record>,
+        peer: Peer<RoleServer>,
+    ) -> Reply {
         let db = self.db.clone();
+        let client = self.caller(&peer);
         synced(
             blocking(Some("stored"), move || {
-                output(memory::record(&db, input), "stored")
+                memory::acting_as(&client, || output(memory::record(&db, input), "stored"))
             })
             .await,
         )
@@ -284,11 +294,18 @@ impl UserMemoryServer {
     #[tool(
         description = "Groups of duplicate, cross-scope, overlapping and stale memories to consolidate; keep marks one left as is. Only when the user asks; change nothing they have not approved."
     )]
-    async fn review(&self, Parameters(input): Parameters<memory::Review>) -> Reply {
+    async fn review(
+        &self,
+        Parameters(input): Parameters<memory::Review>,
+        peer: Peer<RoleServer>,
+    ) -> Reply {
         let db = self.db.clone();
-        blocking(None, move || match memory::review(&db, &input) {
-            Ok(groups) => Ok(groups.to_string()),
-            Err(err) => Err(json!({"error":err.to_string()}).to_string()),
+        let client = self.caller(&peer);
+        blocking(None, move || {
+            memory::acting_as(&client, || match memory::review(&db, &input) {
+                Ok(groups) => Ok(groups.to_string()),
+                Err(err) => Err(json!({"error":err.to_string()}).to_string()),
+            })
         })
         .await
     }
@@ -310,14 +327,19 @@ impl UserMemoryServer {
     #[tool(
         description = "Only when the user asks: preview an export from the exports directory by name (writes nothing), then import it with apply and user_confirmed once they approve. The preview lists what would change; nothing is written until apply with user_confirmed."
     )]
-    async fn import(&self, Parameters(input): Parameters<memory::ImportMemories>) -> Reply {
+    async fn import(
+        &self,
+        Parameters(input): Parameters<memory::ImportMemories>,
+        peer: Peer<RoleServer>,
+    ) -> Reply {
         let db = self.db.clone();
+        let client = self.caller(&peer);
         synced(
             blocking(Some("applied"), move || {
-                match memory::import_named(&db, &input) {
+                memory::acting_as(&client, || match memory::import_named(&db, &input) {
                     Ok(summary) => Ok(summary.to_string()),
                     Err(err) => Err(json!({"error":err.to_string()}).to_string()),
-                }
+                })
             })
             .await,
         )
@@ -355,11 +377,16 @@ impl UserMemoryServer {
     #[tool(
         description = "Correct a memory's wording or facts, or make an observation the user's own statement, only on the user's explicit request. A restated memory is record with confirms; a changed choice is record with supersedes. It keeps its origins; origin adds this conversation, replace_origins makes it the only one. New content stales dependent inferences."
     )]
-    async fn update(&self, Parameters(input): Parameters<memory::Update>) -> Reply {
+    async fn update(
+        &self,
+        Parameters(input): Parameters<memory::Update>,
+        peer: Peer<RoleServer>,
+    ) -> Reply {
         let db = self.db.clone();
+        let client = self.caller(&peer);
         synced(
             blocking(Some("updated"), move || {
-                output(memory::update(&db, input), "updated")
+                memory::acting_as(&client, || output(memory::update(&db, input), "updated"))
             })
             .await,
         )
@@ -368,11 +395,16 @@ impl UserMemoryServer {
     #[tool(
         description = "Forget one memory, or every memory of one conversation origin, only on the user's explicit request; give exactly one of memory_id or origin. Memories another conversation also stated are kept."
     )]
-    async fn forget(&self, Parameters(input): Parameters<memory::Forget>) -> Reply {
+    async fn forget(
+        &self,
+        Parameters(input): Parameters<memory::Forget>,
+        peer: Peer<RoleServer>,
+    ) -> Reply {
         let db = self.db.clone();
+        let client = self.caller(&peer);
         synced(
             blocking(Some("deleted"), move || {
-                output(memory::forget(&db, input), "deleted")
+                memory::acting_as(&client, || output(memory::forget(&db, input), "deleted"))
             })
             .await,
         )
@@ -416,6 +448,28 @@ impl rmcp::ServerHandler for UserMemoryServer {
         .with_instructions(INSTRUCTIONS.to_owned())
     }
 }
+
+impl UserMemoryServer {
+    /// The client a call's writes name in the memories' history: the MCP
+    /// client's name from its `initialize`, or [`UNNAMED_CLIENT`]. A shared
+    /// server serves many machines, so its events say so as `host:<name>`;
+    /// that is where an access token's own name goes once tokens carry one.
+    fn caller(&self, peer: &Peer<RoleServer>) -> String {
+        let name = peer
+            .peer_info()
+            .map(|info| info.client_info.name.trim().to_owned())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| UNNAMED_CLIENT.to_owned());
+        if self.in_client_folder {
+            name
+        } else {
+            format!("host:{name}")
+        }
+    }
+}
+
+/// The client name for an MCP client that sent none in `initialize`.
+const UNNAMED_CLIENT: &str = "unknown";
 
 /// A tool's reply: `Ok` text, or `Err` text the client receives with
 /// `isError: true`. A refusal the agent resolves, a `reason` beside a false
@@ -584,6 +638,14 @@ async fn main() -> Result<()> {
         }
         _ => {}
     }
+    // Writes from the command line name it in the memories' history; a
+    // server names each call's own client instead.
+    if !matches!(
+        cli.command,
+        Command::Serve | Command::Host(_) | Command::Connect(_)
+    ) {
+        memory::set_default_client(memory::CLI);
+    }
     if let Command::Server { command } = cli.command {
         std::process::exit(server::run(command));
     }
@@ -606,6 +668,7 @@ async fn main() -> Result<()> {
         Command::Serve
             | Command::Index(_)
             | Command::Read(_)
+            | Command::History { .. }
             | Command::Record(_)
             | Command::Search(_)
             | Command::Review(_)
@@ -621,6 +684,9 @@ async fn main() -> Result<()> {
             Command::Index(input) => Some(("index", serde_json::to_value(input)?)),
             Command::Search(input) => Some(("search", serde_json::to_value(input)?)),
             Command::Read(input) => Some(("read", serde_json::to_value(input)?)),
+            Command::History { id } => {
+                Some(("read", json!({"ids":[id],"history":true,"status":"all"})))
+            }
             Command::Review(input) => {
                 let mut value = serde_json::to_value(input)?;
                 value["user_confirmed"] = json!(true);
@@ -700,11 +766,16 @@ async fn main() -> Result<()> {
             println!("{}", migration.describe(&store));
             // The installer's Docker server upgrades its store here rather
             // than through setup, so this rewrite reaches it too.
-            if !check
-                && store.is_file()
-                && let Err(err) = memory::compact(&store)
-            {
-                eprintln!("{}", memory::compact_skipped(&store, &err));
+            if !check && store.is_file() {
+                match memory::compact(&store) {
+                    // An upgrade says each of its steps: the backup, the
+                    // migration and this rewrite.
+                    Ok(true) if matches!(migration, memory::Migration::Migrated { .. }) => {
+                        println!("{}", memory::compacted(&store));
+                    }
+                    Ok(_) => {}
+                    Err(err) => eprintln!("{}", memory::compact_skipped(&store, &err)),
+                }
             }
             if titles.is_some()
                 && let Some(note) = migration.unused_titles()
@@ -833,6 +904,14 @@ async fn main() -> Result<()> {
             "{}",
             serde_json::to_string_pretty(&memory::search(&db, &input)?)?
         ),
+        Command::History { id } => {
+            let input: memory::Read =
+                serde_json::from_value(json!({"ids":[id],"history":true,"status":"all"}))?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&memory::read(&db, &input)?)?
+            )
+        }
         Command::Update(mut input) => {
             input.user_confirmed = true;
             println!("{}", memory::update(&db, input)?);

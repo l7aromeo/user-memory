@@ -38,6 +38,8 @@ apart.
   the existing memory instead of adding a copy.
 - **Yours to manage.** Forget what one conversation taught, review
   duplicates, export everything; the store backs itself up every day.
+- **Corrections can be undone.** Each memory keeps its earlier versions for
+  a year, with who changed them, so a wrong correction can be reverted.
 - **Self-hosted.** No account and no telemetry. Besides your server and the
   embeddings endpoint you choose, it contacts only GitHub, for downloads and
   doctor's check for a newer release ([privacy](docs/privacy.md)).

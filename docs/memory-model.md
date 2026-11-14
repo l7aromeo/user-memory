@@ -171,11 +171,46 @@ Details:
 CLI: `user-memory record … --confirms ID`, `--supersedes ID` (repeatable, add
 `--merge` to consolidate), `--distinct-from ID` (repeatable).
 
+## History
+
+Every change to a memory adds an event to its history, in the same
+transaction, whichever path makes it: recording, a confirmation, a
+correction, a supersede or merge, an import, a project move, a pattern going
+stale when a support changes, a conversation removed from it, or a pair
+marked as different. `read` with `history: true` (`user-memory history ID`
+on the command line) returns them, oldest first:
+
+| Field | Meaning |
+|---|---|
+| `op` | `record`, `confirm`, `update`, `supersede`, `merge`, `forget`, `import`, `revive`, `distinct`, `stale`, `move` or `origin_removed`. |
+| `at` | When it happened. |
+| `last_at`, `count` | For confirmations: a confirmation right after another adds to that event instead of a new one, so a rule restated every session keeps one. |
+| `origin` | The conversation, when the change named one. |
+| `client` | Who wrote it: the MCP client's name from its handshake, such as `claude-code`; `cli` for the command line; `host:<name>` through a shared server. Empty for a change made outside user-memory. |
+| `before` | The changed fields' previous values, by their export names. |
+| `imported` | For an event an import brought in: when that import ran. Imported events are kept as the file had them; nothing reads them as this store's own. |
+
+- Undo a wrong correction by `update` with the values in `before`.
+- Forgetting a memory reduces its history to tombstones: each event's `op`
+  and times, nothing else. `read` with `history: true` lists a forgotten id
+  under `forgotten`, with those tombstones.
+- `update` with `drop_history` (`--drop-history`) does the same for a
+  memory that stays, and keeps no `before` for that change: for a
+  correction that removes something sensitive.
+- Events older than a year are dropped when an automatic backup is made,
+  before the copy ([automatic backups](backup.md#automatic-backups)).
+  History is for undoing recent mistakes: after a year, a rule edited once
+  no longer holds the wording it replaced. There is no limit per memory.
+- Exports carry the exported memories' events in a `history` section. An
+  import adds them marked as `imported`, skips an event the store already
+  holds or one it could not have written, and reports how many under
+  `history`. A file without the section imports as before.
+
 ## Export and import
 
 - **Export** writes the whole store — active, stale and superseded memories,
-  their conversations and the pairs marked as different — as one readable
-  JSON document. Vectors and the search index are derived and rebuilt with
+  their conversations, the pairs marked as different and their
+  [history](#history) — as one readable JSON document. Vectors and the search index are derived and rebuilt with
   `reindex`.
 - **Import** always shows a preview first: what would be added or left
   unchanged, conversations merged into identical memories, conflicts by field
