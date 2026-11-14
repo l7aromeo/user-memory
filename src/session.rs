@@ -92,8 +92,10 @@ impl HookClient {
 
 /// Said in place of the projects line when the session sees no project, so
 /// the agent links one or proposes a key rather than recording globally:
-/// this opening, then [`NO_PROJECT_SEVERAL`] or the repositories found
-/// inside with [`NO_PROJECT_LISTED`], then [`NO_PROJECT_NEW`].
+/// this opening, then the repositories found inside with
+/// [`NO_PROJECT_LISTED`], or [`NO_PROJECT_SEVERAL`] and [`NO_PROJECT_NEW`].
+/// A folder holding repositories is a workspace, never one new project, so
+/// it is never told to set a key.
 const NO_PROJECT: &str = "No project: this folder has no git remote and no .user-memory-key.";
 /// For a folder whose repositories session start did not find.
 const NO_PROJECT_SEVERAL: &str = "If it holds several repositories, link each one you work in; to load some in every session here, run `user-memory project-id --include <folder>` when the user asks for that, or propose it first.";
@@ -144,7 +146,7 @@ pub async fn start(path: PathBuf, client: Option<HookClient>) -> String {
     };
     match origin {
         Some(origin) => format!(
-            "Conversation origin: {origin} (use it as origin when recording memories from this conversation)\n{index}"
+            "Conversation origin: {origin} (use it as origin when recording, linking, or forgetting what this conversation recorded)\n{index}"
         ),
         None => index,
     }
@@ -522,7 +524,7 @@ fn seen(folder: &project::Folder, linked: &[String]) -> Seen {
 fn projects_lines(seen: &Seen, repositories: &Repositories) -> String {
     let mut lines = vec![if seen.projects.is_empty() {
         let found = if repositories.listed.is_empty() {
-            NO_PROJECT_SEVERAL.to_owned()
+            format!("{NO_PROJECT_SEVERAL} {NO_PROJECT_NEW}")
         } else {
             let mut named: Vec<String> = repositories
                 .listed
@@ -537,7 +539,7 @@ fn projects_lines(seen: &Seen, repositories: &Repositories) -> String {
                 named.join(", ")
             )
         };
-        format!("{NO_PROJECT} {found} {NO_PROJECT_NEW}")
+        format!("{NO_PROJECT} {found}")
     } else {
         // Grouped by where they come from, so a workspace of many listed
         // repositories names the source once; keys stay as agents pass them.

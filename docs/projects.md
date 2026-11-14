@@ -88,8 +88,11 @@ When the folder holds repositories, the line names them with their keys, so
 the agent can link or list them without looking for the keys:
 
 ```output
-No project: this folder has no git remote and no .user-memory-key. Repositories here: compiler (github.com/acme/compiler), notebooks (github.com/acme/notebooks), notes (local:notes). Link the ones you work in; to load some in every session here, run `user-memory project-id --include <folder>` when the user asks for that, or propose it first. If it is one new project, run `user-memory project-id --set <key>` here when the user names its key, or propose one (such as its planned remote, github.com/<owner>/<name>) and run it after their yes. Record nothing about this work as global without the user's yes.
+No project: this folder has no git remote and no .user-memory-key. Repositories here: compiler (github.com/acme/compiler), notebooks (github.com/acme/notebooks), notes (local:notes). Link the ones you work in; to load some in every session here, run `user-memory project-id --include <folder>` when the user asks for that, or propose it first.
 ```
+
+A folder holding repositories is a workspace, so the line never tells the
+agent to set a key there.
 
 It lists the folders directly inside this one that have a project: a git
 repository with a remote or with commits, or a folder with a

@@ -1467,7 +1467,7 @@ fn evidence_is_limited_to_twenty_real_memory_ids() {
         }
         s.value(&args)
     };
-    let limit = "Evidence must contain at most 20 non-nil UUID memory IDs";
+    let limit = "evidence_ids takes at most 20 memory ids";
     assert_eq!(infer_from(&support)["reason"], limit);
     assert_eq!(infer_from(&support[..20])["stored"], true);
     let nil = uuid::Uuid::nil().to_string();
@@ -2817,7 +2817,7 @@ fn rewording_an_observation_or_inference_keeps_its_source() {
     let refused = s.value(&["update", &observed, "--evidence", ""]);
     assert_eq!(
         refused["reason"],
-        "Observed behavior requires a concrete evidence note"
+        "Observed behavior needs evidence: what the user did or said that shows it."
     );
     // An inference keeps the supports it cites.
     let before = kind(&pattern);

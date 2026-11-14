@@ -896,7 +896,7 @@ fn setup_adds_session_hooks_that_load_the_project_index() {
     let context = String::from_utf8_lossy(&hook.stdout);
     assert!(
         context.starts_with(
-            "Conversation origin: claude:session/6f1c2a7e-claude (use it as origin when recording memories from this conversation)\nProjects: github.com/owner/repo (this folder)"
+            "Conversation origin: claude:session/6f1c2a7e-claude (use it as origin when recording, linking, or forgetting what this conversation recorded)\nProjects: github.com/owner/repo (this folder)"
         ),
         "{context}"
     );

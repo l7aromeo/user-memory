@@ -32,7 +32,7 @@ Both files change what every later session in that folder loads, so write them o
 | The user asks or states the need for a key for a new project without git or a remote, such as naming its key | Run `user-memory project-id --set <key>`, then report what you wrote | their request or stated need is the yes |
 | You inferred yourself that a new project without git or a remote needs a key | Propose a key, such as its planned remote `github.com/<owner>/<name>`, then run `user-memory project-id --set <key>` | needed |
 | The header reports a key file that differs from the remote | Ask to run `user-memory project move <file key> <remote key>`, then delete `.user-memory-key` | needed |
-| Something about the user that holds in every project | Ask whether it does before recording it with scope global | needed |
+| Something about the user that holds in every project | Record it with scope global and user_confirmed if the user said so; otherwise ask whether it does | their words, or needed |
 
 - `link` lasts for this conversation, through resume and compaction, and no other. Pass the origin printed at session start. A folder's own project and its listed ones always load there, so linking or unlinking them changes nothing.
 - `user-memory project-id --exclude <folder>` removes a listed folder.

@@ -247,7 +247,7 @@ fn a_restatement_is_held_back_then_recorded_as_a_confirmation() {
     );
     assert_eq!(
         out["resolve"],
-        "call record again with confirms, supersedes or distinct_from"
+        "confirms: an explicit memory said again; supersedes: the user changed their mind; distinct_from: genuinely different; to make a listed observation the user's own, update it with user_confirmed."
     );
     let confirmed = s.record(&[
         "--content",
@@ -322,7 +322,7 @@ fn confirmations_need_an_explicit_statement_about_an_active_explicit_memory_in_p
         .as_str()
         .unwrap()
         .to_owned();
-    let refusal = "confirms must name an active explicit memory with the same scope and project";
+    let refusal = "confirms must name an active explicit memory with the same scope and project; to make an observation the user's own statement, call update on it with user_confirmed";
     for (target, extra) in [
         (local.as_str(), &[][..]),
         (habit.as_str(), &[][..]),
