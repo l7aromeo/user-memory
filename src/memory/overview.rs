@@ -830,8 +830,19 @@ mod tests {
             label: "big".into(),
             index: project_index("big", 5),
         }];
-        // Room for the header and a few lines past it.
-        let room = HEADER.join("\n").chars().count() + 418;
+        // Room for the header, the shortening note, the other project's
+        // count line and a few memory lines: far less than the core needs.
+        let count_line = "  big: 5 more (index projects: [big])";
+        let memory_line = core
+            .lines()
+            .find(|l| l.contains(" memory number "))
+            .unwrap();
+        let room = [HEADER.join("\n").as_str(), SHORTENED, count_line]
+            .iter()
+            .chain([memory_line; 4].iter())
+            .map(|l| l.chars().count() + 1)
+            .sum::<usize>();
+        assert!(core.chars().count() > room * 2);
         let text = tiered(&core, &core, &projects, room);
         assert!(text.chars().count() <= room, "{text}");
         assert!(text.contains(SHORTENED), "{text}");
