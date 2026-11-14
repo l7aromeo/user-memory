@@ -21,11 +21,11 @@ The tools agents call, their filters, search, the index and paging. The
 | `search` | Find relevant memories by topic; [filters](#scope-and-filters); paged |
 | `record` | Save a typed explicit memory, grounded observation, or evidence-backed inference; if similar memories exist, nothing is stored until the agent confirms, supersedes or marks it distinct |
 | `update` | Correct or confirm a memory on the user's request, or with `distinct_from` mark memories the user calls different |
-| `forget` | Delete one memory, or every memory and link from one conversation origin, and invalidate dependent inferences |
+| `forget` | Delete one memory, or every memory and link from one conversation origin, and invalidate dependent inferences; `next` says what to do about `staled` and `left_superseded` when either has entries |
 | `link` | Keep projects loaded for one conversation origin: its session start and change notices include them, after resume and compaction too; returns the linked projects' index lines; `unlink` removes. See [Conversation links](#conversation-links) |
 | `review` | On the user's request only: groups of duplicates, cross-scope copies, overlaps and stale patterns; `keep` marks a group the user leaves as is |
 | `export` | On the user's request: write every memory, or those the [filters](memory-model.md#exporting-or-importing-part-of-the-store) select, to a JSON file in the exports directory; returns a summary only |
-| `import` | On the user's request: preview an export file from the exports directory, or the memories the filters select from it; writes only with `apply` and `user_confirmed` after the user approves |
+| `import` | On the user's request: preview an export file from the exports directory, or the memories the filters select from it; writes only with `apply` and `user_confirmed` after the user approves; `apply` without `user_confirmed` previews, and its reply's `reason` says it was not applied |
 
 ## Replies and errors
 
