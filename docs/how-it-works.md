@@ -204,7 +204,8 @@ key and end, when they do not all fit, with a count such as
 ``github.com/you/api: 54 more (index projects: [github.com/you/api])``.
 
 If the server cannot be reached, the hook prints one line,
-``User memory unavailable: …``, and the session continues without memory.
+``User memory unavailable: …``, ending with what the agent does: work
+without memory, tell the user once, and suggest `user-memory doctor`.
 
 ## Change notices during a session
 

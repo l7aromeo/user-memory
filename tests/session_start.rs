@@ -140,7 +140,7 @@ fn a_broken_store_reports_unavailable_and_exits_zero() {
     );
     assert_eq!(
         text(&out),
-        "User memory unavailable: file is not a database\n"
+        format!("User memory unavailable: file is not a database. {UNAVAILABLE_NEXT}\n")
     );
 }
 
@@ -155,8 +155,38 @@ fn a_misconfigured_remote_reports_unavailable_and_exits_zero() {
     );
     assert_eq!(
         text(&out),
-        "User memory unavailable: USER_MEMORY_URL requires USER_MEMORY_TOKEN_FILE\n"
+        format!(
+            "User memory unavailable: USER_MEMORY_URL requires USER_MEMORY_TOKEN_FILE. {UNAVAILABLE_NEXT}\n"
+        )
     );
+}
+
+// A server that can't be reached: the reason stays as doctor words it, and
+// the agent hears what to do, never to check the token itself.
+#[test]
+fn an_unreachable_remote_tells_the_agent_to_go_on_and_name_doctor() {
+    let home = tempdir().unwrap();
+    let token = home.path().join("token");
+    let secret = "s".repeat(40);
+    std::fs::write(&token, &secret).unwrap();
+    // A port nothing listens on: the connection is refused at once.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    drop(listener);
+    let out = session_start(
+        home.path(),
+        home.path(),
+        &[
+            ("USER_MEMORY_URL", &url),
+            ("USER_MEMORY_TOKEN_FILE", token.to_str().unwrap()),
+        ],
+    );
+    let shown = text(&out);
+    assert_eq!(
+        shown,
+        format!("User memory unavailable: Cannot connect to memory server. {UNAVAILABLE_NEXT}\n")
+    );
+    assert!(!shown.contains(&secret));
 }
 
 // A server that accepts but never answers is cut off by the hook's own limit,
@@ -179,7 +209,10 @@ fn a_hanging_remote_is_cut_off_quickly() {
     );
     drop(listener);
     // Only the hook's limit reports "timed out".
-    assert_eq!(text(&out), "User memory unavailable: timed out\n");
+    assert_eq!(
+        text(&out),
+        format!("User memory unavailable: timed out. {UNAVAILABLE_NEXT}\n")
+    );
 }
 
 /// Runs the hook with `payload` on stdin; `close` false keeps stdin open as
@@ -221,6 +254,9 @@ fn with_payload(
     out
 }
 
+/// What session start adds after every reason memory is unavailable.
+const UNAVAILABLE_NEXT: &str =
+    "Work without memory for now; tell the user once, and suggest they run user-memory doctor.";
 const NOTE: &str =
     "(use it as origin when recording, linking, or forgetting what this conversation recorded)";
 
@@ -291,7 +327,10 @@ fn an_open_stdin_does_not_stall_the_hook() {
     );
     // The hook waits for the rest of the payload until its own limit ends
     // it, which only the limit reports as "timed out".
-    assert_eq!(text(&out), "User memory unavailable: timed out\n");
+    assert_eq!(
+        text(&out),
+        format!("User memory unavailable: timed out. {UNAVAILABLE_NEXT}\n")
+    );
 }
 
 // A store from another version gives the usual single unavailable line.

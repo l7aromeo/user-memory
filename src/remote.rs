@@ -641,15 +641,17 @@ impl Failure {
         }
     }
 
-    /// The text the client gets for each call this failure left waiting. It
-    /// names the token's file, never the token.
+    /// The text the client gets for each call this failure left waiting: what
+    /// the agent does next. It names the token's file, never the token, and
+    /// tells the agent not to open it. A write that reached the server
+    /// before it stopped is stored, so a repeat is searched for first.
     fn message(&self, endpoint: &str, token_file: &Path) -> String {
         match self {
             Self::Unanswered => format!(
-                "The memory server at {endpoint} did not answer; the call may not have completed. Memory reconnects on the next call."
+                "The memory server at {endpoint} did not answer; the call may not have completed. Before repeating a write, search for it. Memory reconnects on the next call."
             ),
             Self::Refused => format!(
-                "The memory server at {endpoint} refused this machine's access token ({}); the call was not run. Check that file, or ask the server's operator for a new token. Memory tries again on the next call.",
+                "The memory server at {endpoint} refused this machine's access token ({}); the call was not run. Tell the user the token in that file needs replacing (user-memory doctor shows it); don't open the file. Memory tries again on the next call.",
                 token_file.display()
             ),
         }
