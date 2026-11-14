@@ -113,7 +113,7 @@ doesn't shows the new tools in its next session, and the tools it has keep
 working.
 
 On a native store, a call that arrives while setup is still migrating the
-store waits for the migration, up to 30 seconds, instead of being refused.
+store waits for the migration, up to 50 seconds, instead of being refused.
 
 If the new binary can't take a session over, the session keeps running the
 version it has, and its next tool reply says why, once:
