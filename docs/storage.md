@@ -52,8 +52,10 @@ history's yearly pruning remove those the same way:
 
 - every connection sets `PRAGMA secure_delete`, so SQLite overwrites deleted
   and replaced content with zeros instead of leaving it in free space;
-- the same transaction merges the keyword index (its `optimize`), which
-  otherwise keeps a deleted entry's words until its segments merge;
+- the keyword index stores its words (as hex stems, never the text) and
+  has FTS5's `secure-delete` set, so a deleted entry's words leave its
+  pages in the same transaction; `repair` sets it again on an index that
+  lost it;
 - after the commit, the log is copied into the store and emptied
   (`wal_checkpoint(TRUNCATE)`), so no earlier version of a page stays in
   `<store>-wal`. It waits at most a second for readers; a log another
@@ -102,9 +104,11 @@ give.
 
 - `search_keys` gives each memory a number, in the order memories were
   stored, and copies the columns search filters on.
-- `search_words` (SQLite FTS5, without a copy of the text) holds each
-  memory's stems under its number, each at the strongest field holding it:
-  category, title, type, or the text.
+- `search_words` (SQLite FTS5) holds each memory's stems under its number,
+  each at the strongest field holding it: category, title, type, or the
+  text. It stores the stems it indexes, as hex, never the text, so FTS5's
+  `secure-delete` can take a deleted memory's words out of its pages at
+  once ([removed text](#removed-text)).
 - Triggers on `memories` keep the numbers and filter columns in step with
   every write, from user-memory or any other program, and queue a changed
   memory in `search_pending`. Every write by user-memory stems what it
@@ -200,7 +204,8 @@ log would be applied to the restored store.
 `doctor` runs SQLite's full integrity check (`PRAGMA integrity_check`), which
 also compares every index with its table and checks the keyword index's
 FTS5 structure, then stems every memory again and compares the result with
-the keyword index. Two processes writing the store at once without SQLite's
+the keyword index, and checks that the keyword index removes deleted words
+at once. Two processes writing the store at once without SQLite's
 locks leave exactly that damage: an index whose entries no longer match the
 memories.
 

@@ -1210,7 +1210,7 @@ fn local_modes_run_without_questions_and_refuse_a_busy_port_or_volume() {
     assert!(
         text(&out)
             .0
-            .contains("No titles map was needed: the store is already at schema version 7."),
+            .contains("No titles map was needed: the store is already at schema version 8."),
         "{}",
         text(&out).0
     );

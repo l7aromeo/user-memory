@@ -12,7 +12,7 @@ use uuid::Uuid;
 /// previous version in `migrate.rs`: `IF NOT EXISTS` keeps an older table or
 /// trigger as it was, so connecting refuses a store from another version
 /// instead of half upgrading it.
-pub(super) const SCHEMA_VERSION: i64 = 7;
+pub(super) const SCHEMA_VERSION: i64 = 8;
 
 /// The tables and the triggers that stale inferred patterns when their
 /// support weakens: a supporting memory deleted; one changed in what it
@@ -191,7 +191,7 @@ pub fn connect(db: &Path) -> Result<Connection> {
             tx.execute_batch(CUTOFFS)?;
             tx.execute_batch(super::history::EVENTS)?;
             super::index::create(&tx)?;
-            super::index::stamp_new(&tx)?;
+            super::index::start(&tx)?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         tx.commit()?;
@@ -536,10 +536,10 @@ impl Write<'_> {
     }
 
     /// [`commit`](Self::commit) for a write that removed or replaced
-    /// memory text: the keyword index also drops the removed words, which
-    /// it otherwise keeps until its segments merge, and after the commit
-    /// the log is cleared, so neither the store's files nor a backup made
-    /// after hold the old text.
+    /// memory text: after the commit the log is cleared, so neither the
+    /// store's files nor a backup made after hold the old text. The pages
+    /// themselves lose it as it is deleted (`secure_delete`, and the keyword
+    /// index's `secure-delete`).
     pub(super) fn commit_removing(self) -> Result<()> {
         self.finish(true)
     }
@@ -556,9 +556,6 @@ impl Write<'_> {
             super::history::end(&tx)?;
         }
         super::index::settle(&tx)?;
-        if removed {
-            super::index::merge(&tx)?;
-        }
         tx.commit()?;
         drop(file);
         let outermost = turn.is_some();

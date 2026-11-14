@@ -435,3 +435,115 @@ fn migrate_leaves_a_store_without_memories_as_it_is() {
     migrate(&store, &[]);
     assert_eq!(fs::read(&store.db).unwrap(), before);
 }
+
+// Reindex and repair rebuild the keyword index without dropping its table:
+// a word deleted from an index that lost its `secure-delete` (as one
+// written by another program might) leaves the store with the rebuild,
+// which sets `secure-delete` again, so a memory forgotten after it leaves
+// no word either. Repair finds the lost setting as damage.
+#[test]
+fn a_rebuilt_index_holds_no_forgotten_word_and_drops_the_next_at_once() {
+    for rebuild in ["reindex", "repair"] {
+        let store = Store::new();
+        let mut serve = store.serve();
+        let id = record_the_marker(&store, &mut serve);
+        Connection::open(&store.db)
+            .unwrap()
+            .execute(
+                "INSERT INTO search_words(search_words, rank) VALUES('secure-delete', 0)",
+                [],
+            )
+            .unwrap();
+        let reply: Value = serve.call("forget", json!({"memory_id":id,"user_confirmed":true}));
+        assert_eq!(reply["deleted"], true, "{reply}");
+        serve.close();
+        assert_eq!(
+            store.indexing_the_marker(),
+            vec![store.db.clone()],
+            "{rebuild}: the index keeps the forgotten word"
+        );
+        let out = store.command(&[rebuild]).output().unwrap();
+        assert!(out.status.success(), "{rebuild}: {out:?}");
+        if rebuild == "repair" {
+            assert!(
+                String::from_utf8_lossy(&out.stdout)
+                    .contains("search index: it keeps deleted words until its segments merge"),
+                "{out:?}"
+            );
+        }
+        assert_eq!(
+            store.holding_the_marker(),
+            Vec::<PathBuf>::new(),
+            "{rebuild}"
+        );
+        let mut serve = store.serve();
+        let id = record_the_marker(&store, &mut serve);
+        let reply: Value = serve.call("forget", json!({"memory_id":id,"user_confirmed":true}));
+        assert_eq!(reply["deleted"], true, "{reply}");
+        assert_eq!(
+            store.holding_the_marker(),
+            Vec::<PathBuf>::new(),
+            "{rebuild}: after the rebuild"
+        );
+        serve.close();
+    }
+}
+
+/// Rows of the old keyword index beside the marker's in
+/// [`migrate_leaves_no_word_deleted_under_the_old_keyword_index`].
+const OLD_ROWS: u32 = 5_000;
+
+// A store from before the keyword index stored its columns keeps a word
+// deleted under it in the index's segments until they merge; the upgrade
+// replaces that index, and neither the store nor its log keeps the word.
+#[test]
+fn migrate_leaves_no_word_deleted_under_the_old_keyword_index() {
+    let store = Store::new();
+    let found = search(&store);
+    assert!(!found.is_empty());
+    // The index as schema version 7 had it, stamped by an earlier version
+    // so its rows are not damage, with the marker's word deleted from it.
+    // Words of many other rows make it far larger than the new index, so
+    // the upgrade cannot overwrite its pages by reusing them.
+    Connection::open(&store.db)
+        .unwrap()
+        .execute_batch(&format!(
+            "DROP TABLE search_words;
+CREATE VIRTUAL TABLE search_words USING fts5(category,title,type,body,content='',contentless_delete=1,detail=column,tokenize='ascii');
+UPDATE search_state SET stemmed_by='an earlier version';
+PRAGMA user_version=7;
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<{OLD_ROWS})
+INSERT INTO search_words(rowid,body) SELECT 2000+i,printf('%x %x',i*7919,i*104729) FROM n;
+INSERT INTO search_words(rowid,body) VALUES (1000,'{}');
+DELETE FROM search_words WHERE rowid=1000;",
+            indexed_marker()
+        ))
+        .unwrap();
+    assert!(
+        holds(&store.db, &indexed_tail()),
+        "the old index holds the word"
+    );
+    let out = migrate(&store, &[]);
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("from schema version 7 to"),
+        "{out:?}"
+    );
+    assert_eq!(store.holding_the_marker(), Vec::<PathBuf>::new());
+    assert_eq!(search(&store), found, "search after the upgrade");
+}
+
+/// The ids search finds for the other memories' words.
+fn search(store: &Store) -> Vec<Value> {
+    let out = store
+        .command(&["search", "editor theme", "--page-size", "50"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let found: Value = serde_json::from_slice(&out.stdout).unwrap();
+    found["memories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].clone())
+        .collect()
+}

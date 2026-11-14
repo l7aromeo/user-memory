@@ -6,12 +6,13 @@ otherwise) as `just search-budget` builds its store, then times each write
 as a whole command-line process, the median of many runs, with this
 checkout's release build and, on a copy, without the history's triggers,
 so the triggers' cost shows on its own. Given `--baseline-binary`, an
-earlier release's build, it times that release on a store it built, for the
-numbers a change is compared with. Prints a table in milliseconds. Nothing
-here touches the user's own store or settings.
+earlier release's build (once per release), it times that release on a
+store it built, for the numbers a change is compared with. Prints a table in
+milliseconds, with each store's size and its keyword index's. Nothing here
+touches the user's own store or settings.
 
     just write-budget
-    just write-budget --baseline-binary /path/to/0.9.3/user-memory
+    just write-budget --baseline-binary /path/to/0.9.1/user-memory --baseline-binary /path/to/0.9.3/user-memory
 """
 
 import argparse
@@ -31,6 +32,11 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 _spec = importlib.util.spec_from_file_location("scale_run", Path(__file__).with_name("run.py"))
 scale = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(scale)
+
+# The upgrade budget's size measure, so both report sizes alike.
+_spec = importlib.util.spec_from_file_location("scale_upgrade", Path(__file__).with_name("upgrade.py"))
+upgrade = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(upgrade)
 
 # Timed writes of each kind; the first is a warm-up, not counted. As many
 # as the measurements of #77 and #87 took, so medians compare.
@@ -85,8 +91,8 @@ def store(tmp, name, binary, env, memories):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--binary", type=Path, default=ROOT / "target/release/user-memory")
-    parser.add_argument("--baseline-binary", type=Path,
-                        help="an earlier release's build, timed on a store it built")
+    parser.add_argument("--baseline-binary", type=Path, action="append", default=[],
+                        help="an earlier release's build, timed on a store it built; repeatable")
     parser.add_argument("--memories", type=int, default=scale.MEMORIES)
     parser.add_argument("--runs", type=int, default=RUNS)
     args = parser.parse_args()
@@ -99,10 +105,12 @@ def main():
                "XDG_CONFIG_HOME": str(home / ".config"), "USER_MEMORY_NO_UPDATE_CHECK": "1",
                **{name: "" for name in scale.EMBED_SETTINGS}}
         rows = []
-        if args.baseline_binary:
-            db = store(tmp, "baseline", args.baseline_binary, env, args.memories)
-            rows.append(("baseline", writes(args.baseline_binary, {**env, "USER_MEMORY_DB": str(db)},
-                                            db, args.runs)))
+        for n, baseline in enumerate(args.baseline_binary):
+            name = subprocess.run([str(baseline), "--version"], capture_output=True,
+                                  text=True).stdout.strip() or f"baseline {n + 1}"
+            db = store(tmp, f"baseline{n}", baseline, env, args.memories)
+            sized = upgrade.sizes(db)
+            rows.append((name, writes(baseline, {**env, "USER_MEMORY_DB": str(db)}, db, args.runs), sized))
         db = store(tmp, "current", args.binary, env, args.memories)
         bare = tmp / "bare" / "memories.sqlite3"
         bare.parent.mkdir()
@@ -114,14 +122,17 @@ def main():
             conn.execute(f"DROP TRIGGER {trigger}")
         conn.commit()
         conn.close()
-        rows.append(("this build", writes(args.binary, {**env, "USER_MEMORY_DB": str(db)}, db, args.runs)))
+        sized = upgrade.sizes(db)
+        rows.append(("this build", writes(args.binary, {**env, "USER_MEMORY_DB": str(db)}, db, args.runs),
+                     sized))
         if triggers:
             rows.append(("without history triggers",
-                         writes(args.binary, {**env, "USER_MEMORY_DB": str(bare)}, bare, args.runs)))
-        print(f"{args.memories} memories, median of {args.runs - 1} runs after a warm-up (ms)")
-        print(f"{'':<26} {'record':>7} {'update':>7} {'forget':>7}")
-        for name, (record, update, forget) in rows:
-            print(f"{name:<26} {record:>7} {update:>7} {forget:>7}")
+                         writes(args.binary, {**env, "USER_MEMORY_DB": str(bare)}, bare, args.runs), sized))
+        print(f"{args.memories} memories, median of {args.runs - 1} runs after a warm-up (ms); "
+              "sizes of the store as built, in MB")
+        print(f"{'':<26} {'record':>7} {'update':>7} {'forget':>7} {'store':>7} {'index':>7}")
+        for name, (record, update, forget), (size, index) in rows:
+            print(f"{name:<26} {record:>7} {update:>7} {forget:>7} {size:>7} {index:>7}")
         conn = sqlite3.connect(db)
         events = conn.execute("SELECT count(*), coalesce(sum(length(before)),0) FROM memory_events").fetchone() \
             if triggers else None

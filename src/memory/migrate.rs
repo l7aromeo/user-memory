@@ -80,7 +80,26 @@ const STEPS: &[Step] = &[
         check: always,
         apply: to_v7,
     },
+    Step {
+        check: always,
+        apply: to_v8,
+    },
 ];
+
+/// Version 8 gives the keyword index stored columns, so FTS5's
+/// `secure-delete` takes a deleted entry's words out at once and a write
+/// that removes text no longer merges the whole index. The old index goes,
+/// with every word deleted under it, and so does its stamp: the rebuild
+/// that ends every upgrade ([`run`]) fills the new one and sets
+/// `secure-delete`. The SQL is written out as it was at version 8.
+fn to_v8(conn: &Connection, _: Option<&Titles>) -> Result<()> {
+    conn.execute_batch(
+        "DROP TABLE search_words;
+CREATE VIRTUAL TABLE search_words USING fts5(category,title,type,body,detail=column,tokenize='ascii');
+DELETE FROM search_state;",
+    )?;
+    Ok(())
+}
 
 /// Version 7 adds each memory's history: the events table, the writer row
 /// and the triggers that fill them. History starts empty; no memory
@@ -111,8 +130,10 @@ fn to_v5(conn: &Connection, _: Option<&Titles>) -> Result<()> {
 
 /// Version 6 replaces the FTS5 copy of every memory's text, which search
 /// stopped reading when it began stemming words, with a keyword index of
-/// each memory's stems, and builds it; no memory or vector changes. The SQL
-/// is written out as it was at version 6.
+/// each memory's stems, and queues every memory for it; no memory or vector
+/// changes. The SQL is written out as it was at version 6. The index is
+/// left unstamped: the rebuild that ends every upgrade ([`run`]) fills it
+/// once, with the index SQL of the version the upgrade ends at.
 fn to_v6(conn: &Connection, _: Option<&Titles>) -> Result<()> {
     conn.execute_batch(
         "DROP TRIGGER memory_search_inserted;
@@ -172,8 +193,7 @@ END;
 INSERT INTO search_keys(id,memory_type,category,scope,project,source,status,updated_at) SELECT id,memory_type,category,scope,project,source,status,updated_at FROM memories ORDER BY rowid;
 INSERT INTO search_pending(key) SELECT key FROM search_keys;",
     )?;
-    super::index::stamp_new(conn)?;
-    super::index::drain(conn)
+    Ok(())
 }
 
 /// A step that needs nothing from the user.
@@ -423,6 +443,10 @@ fn run(
     // and distinct pair that refers to it. The check before commit restores
     // the guarantee.
     conn.pragma_update(None, "foreign_keys", false)?;
+    // As on every connection that writes (`schema::connect`): a dropped
+    // table's pages, such as an old keyword index's, are zeroed, not left in
+    // free space.
+    conn.pragma_update(None, "secure_delete", true)?;
     // Decide and migrate under one write lock: no other writer can slip in
     // between the backup and the migration, or between steps. A check only
     // reads, so a running server keeps writing.
