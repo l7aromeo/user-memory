@@ -4,6 +4,7 @@ run outside its sandbox, and Claude's permission rules. Run with
 `python3 evals/test_run.py`."""
 
 import importlib.util
+import json
 import re
 import tempfile
 import types
@@ -442,6 +443,161 @@ class Embedding(unittest.TestCase):
         # A model with no endpoint is a mistake, not keyword-only search.
         with self.assertRaises(SystemExit):
             run.embed_settings({"USER_MEMORY_EVAL_EMBED_MODEL": "small"})
+
+
+class Models(unittest.TestCase):
+    def test_each_batch_runs_the_cheaper_models_unless_told(self):
+        self.assertEqual(run.models(False, {}), ("sonnet", "gpt-6-luna"))
+        self.assertEqual(run.models(True, {}), ("opus", run.CODEX_TOP_MODEL))
+        self.assertNotEqual(run.CODEX_TOP_MODEL, run.CODEX_DEFAULT_MODEL)
+        # The environment names a model for one run, whatever the tier.
+        environ = {"USER_MEMORY_EVAL_CLAUDE_MODEL": "opus", "USER_MEMORY_EVAL_CODEX_MODEL": "gpt-6-astra"}
+        self.assertEqual(run.models(False, environ), ("opus", "gpt-6-astra"))
+        self.assertEqual(run.models(True, {"USER_MEMORY_EVAL_CLAUDE_MODEL": ""}),
+                         ("opus", run.CODEX_TOP_MODEL))
+
+    def test_a_superseded_or_missing_codex_model_stops_the_batch(self):
+        listed = [{"id": "gpt-6-luna", "model": "gpt-6-luna", "upgrade": None},
+                  {"id": "gpt-6.1-sol", "model": "gpt-6.1-sol", "upgrade": None},
+                  {"id": "gpt-5.6-luna", "model": "gpt-5.6-luna", "upgrade": "gpt-6-luna"}]
+        self.assertEqual(run.stale_models(listed, ["gpt-6-luna", "gpt-6.1-sol", "gpt-6-luna"]), [])
+        self.assertEqual(run.stale_models(listed, ["gpt-5.6-luna", "gpt-6.1-sol"]), [
+            "Codex reports gpt-5.6-luna superseded by gpt-6-luna: name the newer model in evals/run.py"])
+        self.assertEqual(run.stale_models(listed, ["gpt-6-luna", "gpt-4"]), ["Codex lists no model gpt-4"])
+
+
+class Usage(unittest.TestCase):
+    # As Claude Code 2.1 reports them: `modelUsage` in a result event counts
+    # every turn of the conversation so far.
+    @staticmethod
+    def claude_result(input_tokens, cost):
+        return {"type": "result", "usage": {"input_tokens": 1000}, "total_cost_usd": cost, "modelUsage": {
+            "claude-sonnet-5-5": {"inputTokens": input_tokens, "outputTokens": 50 * input_tokens // 1000,
+                                  "cacheReadInputTokens": 900 * input_tokens // 1000,
+                                  "cacheCreationInputTokens": 10, "thinkingTokens": 5, "costUSD": cost}}}
+
+    # As Codex 0.163 reports it: `total` counts the thread so far.
+    @staticmethod
+    def codex_update(input_tokens):
+        return {"method": "thread/tokenUsage/updated", "params": {"tokenUsage": {
+            "total": {"inputTokens": input_tokens, "cachedInputTokens": input_tokens * 9 // 10,
+                      "outputTokens": 100, "reasoningOutputTokens": 40},
+            "last": {"inputTokens": 1, "cachedInputTokens": 0, "outputTokens": 1, "reasoningOutputTokens": 0}}}}
+
+    def test_claude_usage_comes_from_the_result_events_model_usage(self):
+        totals = run.claude_totals([{"type": "assistant"}, self.claude_result(1000, 0.0026)])
+        self.assertEqual(totals, {"claude-sonnet-5-5": {
+            "input": 1910, "cached_input": 900, "output": 50, "reasoning": 5, "cost_usd": 0.0026}})
+        self.assertEqual(run.claude_totals([{"type": "assistant"}]), {})
+
+    def test_codex_usage_comes_from_the_last_token_usage_update(self):
+        events = [self.codex_update(500), {"method": "item/completed"}, self.codex_update(2000)]
+        totals = run.codex_totals(events, "gpt-6-luna")
+        used = totals["gpt-6-luna"]
+        self.assertEqual({k: v for k, v in used.items() if k != "cost_usd"},
+                         {"input": 2000, "cached_input": 1800, "output": 100, "reasoning": 40})
+        # 200 uncached at $0.10, 1,800 cached at $0.01, 100 out at $0.50 per 1M.
+        self.assertAlmostEqual(used["cost_usd"], (200 * 0.10 + 1800 * 0.01 + 100 * 0.50) / 1e6)
+        self.assertIsNone(run.codex_totals(events, "gpt-6.1-sol")["gpt-6.1-sol"]["cost_usd"])
+        self.assertEqual(run.codex_totals([{"method": "turn/completed"}], "gpt-6-luna"), {})
+
+    def test_a_step_counts_only_what_its_turns_used(self):
+        # Two turns in one conversation, the second after a resume: both
+        # clients carry the running totals on, so each step is the change.
+        steps, totals = [], {}
+        for events in ([self.claude_result(1000, 0.0026)], [self.claude_result(3000, 0.0078)]):
+            now = run.claude_totals(events)
+            steps.append(run.usage_since(now, totals))
+            totals = now
+        self.assertEqual([s["claude-sonnet-5-5"]["input"] for s in steps], [1910, 3800])
+        self.assertAlmostEqual(steps[1]["claude-sonnet-5-5"]["cost_usd"], 0.0052)
+        trial = {}
+        for step in steps:
+            run.add_usage(trial, step)
+        self.assertEqual(trial["claude-sonnet-5-5"]["input"], 5710)
+        self.assertAlmostEqual(trial["claude-sonnet-5-5"]["cost_usd"], 0.0078)
+        # An unknown cost stays unknown in the sum.
+        run.add_usage(trial, {"claude-sonnet-5-5": {**steps[0]["claude-sonnet-5-5"], "cost_usd": None}})
+        self.assertIsNone(trial["claude-sonnet-5-5"]["cost_usd"])
+
+    def test_the_report_shows_usage_per_scenario_client_and_model(self):
+        used = {"input": 1000, "cached_input": 900, "output": 50, "reasoning": 0, "cost_usd": 0.5}
+        table = run.usage_table([
+            {"scenario": "s", "client": "claude", "usage": {"claude-sonnet-5-5": used}},
+            {"scenario": "s", "client": "claude", "usage": {"claude-sonnet-5-5": used}},
+            {"scenario": "s", "client": "codex", "usage": {"gpt-6-luna": {**used, "cost_usd": None}}},
+            # A trial saved before usage was recorded.
+            {"scenario": "t", "client": "codex"},
+        ])
+        self.assertIn("| s | claude | claude-sonnet-5-5 | 2,000 | 1,800 | 100 | 0 | $1.00 |", table)
+        self.assertIn("| s | codex | gpt-6-luna | 1,000 | 900 | 50 | 0 | - |", table)
+        self.assertIn("| all | | | 3,000 | 2,700 | 150 | 0 | - |", table)
+
+
+class CommitsAndSeeds(unittest.TestCase):
+    def grade(self, spec, messages):
+        sandbox = types.SimpleNamespace(workdir=lambda spec, projects: Path("/x"),
+                                        commit_messages=lambda path: messages)
+        return run.grade({"commits": spec}, sandbox, [], [])[0]
+
+    def test_commits_matches_a_subject(self):
+        past = "^([\\w-]+(\\([\\w-]+\\))?!?: )?[a-z]+ed\\b"
+        self.assertTrue(self.grade({"cwd": "project:n"}, ["Add x"]))
+        self.assertFalse(self.grade({"cwd": "project:n"}, []))
+        for subject in ["Added the review line", "docs: added the review line", "docs(readme)!: Added x"]:
+            self.assertTrue(self.grade({"cwd": "project:n", "matches": past}, [subject]), subject)
+        # The subject decides, not a line of the body.
+        for message in ["Add the review line", "docs: add the line\n\nAdded because reviewers asked."]:
+            self.assertFalse(self.grade({"cwd": "project:n", "matches": past}, [message]), message)
+
+    def test_a_seed_can_name_an_earlier_seed(self):
+        ids = {"old": "0f2c6a4e-1111-4222-8333-944455556666"}
+        seed = {"id": "new", "args": ["--title", "t", "--supersedes", "{seed:old}"]}
+        self.assertEqual(run.seed_args(seed, ids), ["--title", "t", "--supersedes", ids["old"]])
+        with self.assertRaises(ValueError):
+            run.seed_args({"id": "new", "args": ["--supersedes", "{seed:later}"]}, ids)
+
+    def test_seeds_are_recorded_in_order_with_earlier_ids(self):
+        recorded = []
+
+        class Sandbox:
+            def __init__(self, base, source, client):
+                self.ids = {}
+
+            def cli(self, *args):
+                recorded.append(args)
+                return json.dumps({"stored": True, "id": f"id-{len(recorded)}"})
+
+            def setup(self, hooks):
+                return ""
+        original = run.Sandbox
+        run.Sandbox = Sandbox
+        try:
+            scenario = {"seed": [{"id": "old", "args": ["--title", "a"]},
+                                 {"id": "new", "args": ["--supersedes", "{seed:old}"]}]}
+            sandbox = run.prepare(scenario, "claude", None, None, {})
+        finally:
+            run.Sandbox = original
+        self.assertEqual(recorded, [("record", "--title", "a"), ("record", "--supersedes", "id-1")])
+        self.assertEqual(sandbox.ids, {"old": "id-1", "new": "id-2"})
+
+
+class Rehearsal(unittest.TestCase):
+    def test_a_rehearse_entry_can_require_text_to_be_absent(self):
+        trial = Path(tempfile.mkdtemp())
+        sandbox = types.SimpleNamespace(binary=trial / "user-memory", env={}, db=trial / "db",
+                                        workdir=lambda spec, projects: trial)
+        header = "Rules\n  Write commit subjects in the past tense\n"
+        original = run.subprocess.run
+        run.subprocess.run = lambda *a, **k: types.SimpleNamespace(stdout=header)
+        try:
+            def notes(entry):
+                return run.header_notes({"rehearse": [{"cwd": "plain", **entry}]}, "claude", sandbox, {})
+            self.assertEqual(notes({"matches": ["past tense"], "lacks": ["imperative"]}), [])
+            self.assertEqual(len(notes({"lacks": ["past tense"]})), 1)
+            self.assertEqual(len(notes({"matches": ["imperative"]})), 1)
+        finally:
+            run.subprocess.run = original
 
 
 if __name__ == "__main__":

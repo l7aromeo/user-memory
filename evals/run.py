@@ -9,7 +9,7 @@ their answers and the files they left.
 
 Usage:
     evals/run.py [--client claude|codex|both] [--scenario NAME ...]
-                 [--budget N] [--list] [--dry-run] [--rehearse]
+                 [--budget N] [--top-models] [--list] [--dry-run] [--rehearse]
 
 Every agent session is a billed run. `--dry-run` prints the plan, the login
 files and the guard without running anything; `--rehearse` also installs
@@ -52,12 +52,40 @@ ROOT = Path(__file__).resolve().parent.parent
 HOME = Path.home()
 OUT = Path(os.environ.get("USER_MEMORY_EVAL_OUT", "/tmp/user-memory-evals"))
 
-# The user's defaults (Claude: ~/.claude/settings.json "model"; Codex:
-# ~/.codex/config.toml "model" and "model_reasoning_effort"). Trials never
-# read those files, so the defaults are passed explicitly.
-CLAUDE_MODEL = os.environ.get("USER_MEMORY_EVAL_CLAUDE_MODEL", "opus[1m]")
-CODEX_MODEL = os.environ.get("USER_MEMORY_EVAL_CODEX_MODEL", "gpt-6.1-sol")
+# Each batch runs the cheaper model of each provider's latest family: a pass
+# then says more about memory, the batch costs less, and the names follow new
+# families. `--top-models` picks the top tier instead, as for re-running a
+# failure before calling it a bug. Trials never read the user's own settings,
+# so the model is always passed explicitly.
+# Claude Code resolves its `sonnet` and `opus` aliases to the newest model of
+# that tier, so these never age.
+CLAUDE_DEFAULT_MODEL = "sonnet"
+CLAUDE_TOP_MODEL = "opus"
+# Codex has no such alias: each tier is named once here, and `--dry-run` and
+# `--rehearse` stop when Codex reports either one superseded.
+CODEX_DEFAULT_MODEL = "gpt-6-luna"
+# The top tier reruns a failure on what the user's real sessions run, as
+# Opus does for Claude Code: Codex's own default model.
+CODEX_TOP_MODEL = "gpt-6.1-sol"
 CODEX_EFFORT = os.environ.get("USER_MEMORY_EVAL_CODEX_EFFORT", "high")
+# Per 1M tokens: (input, cached input, output) in US dollars, for the batch
+# report's cost estimate of Codex trials (Claude Code reports its own). A
+# model missing here is reported with tokens only.
+CODEX_PRICES = {"gpt-6-luna": (0.10, 0.01, 0.50)}
+
+
+def models(top, environ):
+    """(Claude model, Codex model) a batch runs: the cheaper tier, the top one
+    with `top`, or what USER_MEMORY_EVAL_CLAUDE_MODEL and
+    USER_MEMORY_EVAL_CODEX_MODEL name."""
+    claude = CLAUDE_TOP_MODEL if top else CLAUDE_DEFAULT_MODEL
+    codex = CODEX_TOP_MODEL if top else CODEX_DEFAULT_MODEL
+    return (environ.get("USER_MEMORY_EVAL_CLAUDE_MODEL") or claude,
+            environ.get("USER_MEMORY_EVAL_CODEX_MODEL") or codex)
+
+
+# Set by main() from the command line and the environment.
+CLAUDE_MODEL, CODEX_MODEL = models(False, {})
 # One agent turn; a turn that takes longer is cut off and graded as is.
 TURN_TIMEOUT = 600
 # Starting a Codex app-server and answering one request.
@@ -470,6 +498,38 @@ def app_server_request(env, requests, wanted_id):
         child.wait()
 
 
+def codex_models():
+    """Codex's model list (`model/list`, hidden ones included), asked of the
+    installed Codex in an empty home: it answers from the list it ships."""
+    with tempfile.TemporaryDirectory() as home:
+        (Path(home) / ".codex").mkdir()
+        env = {"HOME": home, "CODEX_HOME": f"{home}/.codex", "PATH": "/usr/bin:/bin",
+               "LANG": os.environ.get("LANG", "en_US.UTF-8")}
+        reply = app_server_request(env, [
+            {"id": 0, "method": "initialize", "params": {"clientInfo": {"name": "eval", "version": "1"}}},
+            {"method": "initialized"},
+            {"id": 1, "method": "model/list", "params": {"includeHidden": True}},
+        ], 1)
+    if "error" in reply:
+        raise RuntimeError(f"codex model/list failed: {reply['error']}")
+    return reply["result"]["data"]
+
+
+def stale_models(listed, names):
+    """Why any of `names` should not run, from Codex's model list `listed`:
+    one Codex no longer lists, or one whose `upgrade` names its successor."""
+    by_name = {m.get("model") or m.get("id"): m for m in listed}
+    problems = []
+    for name in dict.fromkeys(names):
+        model = by_name.get(name)
+        if model is None:
+            problems.append(f"Codex lists no model {name}")
+        elif model.get("upgrade"):
+            problems.append(f"Codex reports {name} superseded by {model['upgrade']}: "
+                            "name the newer model in evals/run.py")
+    return problems
+
+
 def user_memory_hooks(sandbox):
     """The trial's user-memory hooks as Codex lists them."""
     reply = app_server_request(sandbox.env, [
@@ -702,6 +762,7 @@ class CodexSession:
             })
         result = started.get("result") or {}
         self.thread = (result.get("thread") or {}).get("id")
+        self.model = result.get("model") or CODEX_MODEL
         self.instruction_sources = result.get("instructionSources", [])
         if not self.thread:
             raise RuntimeError(f"codex thread/start failed: {started}")
@@ -1017,6 +1078,67 @@ def final_answer(client, events):
     return texts[-1] if texts else ""
 
 
+# What a usage record counts, per model.
+USAGE_FIELDS = ("input", "cached_input", "output", "reasoning", "cost_usd")
+
+
+def claude_totals(events):
+    """A Claude conversation's running usage per model after a turn: its
+    last `result` event's modelUsage, which counts every turn so far, the
+    turns of the process a resume replaced included. Input counts cached and
+    cache-written tokens too; the cost is Claude Code's own estimate."""
+    result = next((e for e in reversed(events) if e.get("type") == "result"), None)
+    totals = {}
+    for model, used in ((result or {}).get("modelUsage") or {}).items():
+        cached = used.get("cacheReadInputTokens", 0)
+        totals[model] = {
+            "input": used.get("inputTokens", 0) + cached + used.get("cacheCreationInputTokens", 0),
+            "cached_input": cached, "output": used.get("outputTokens", 0),
+            "reasoning": used.get("thinkingTokens", 0), "cost_usd": used.get("costUSD"),
+        }
+    return totals
+
+
+def codex_totals(events, model):
+    """A Codex thread's running usage after a turn: the `total` of its last
+    thread/tokenUsage/updated notification, which a resumed thread carries
+    on. Input counts cached tokens and output counts reasoning, as OpenAI
+    bills them; the cost comes from CODEX_PRICES, or is None."""
+    update = next((e for e in reversed(events) if e.get("method") == "thread/tokenUsage/updated"), None)
+    if update is None:
+        return {}
+    total = update["params"]["tokenUsage"]["total"]
+    used = {"input": total.get("inputTokens", 0), "cached_input": total.get("cachedInputTokens", 0),
+            "output": total.get("outputTokens", 0), "reasoning": total.get("reasoningOutputTokens", 0)}
+    price = CODEX_PRICES.get(model)
+    used["cost_usd"] = None if price is None else (
+        (used["input"] - used["cached_input"]) * price[0] + used["cached_input"] * price[1]
+        + used["output"] * price[2]) / 1_000_000
+    return {model: used}
+
+
+def usage_since(now, before):
+    """What a step used: running totals `now` less those `before` it, per
+    model."""
+    step = {}
+    for model, used in now.items():
+        earlier = before.get(model, {})
+        step[model] = {field: None if used.get(field) is None else
+                       used[field] - (earlier.get(field) or 0) for field in USAGE_FIELDS}
+    return step
+
+
+def add_usage(into, usage):
+    """Adds `usage` (per model) into `into`; a cost stays None once one is
+    unknown."""
+    for model, used in usage.items():
+        total = into.setdefault(model, {field: 0 for field in USAGE_FIELDS})
+        for field in USAGE_FIELDS:
+            known = total[field] is not None and used.get(field) is not None
+            total[field] = total[field] + used[field] if known else None
+    return into
+
+
 def open_session(client, sandbox, cwd, options, resume=None):
     count_run()
     if client == "claude":
@@ -1147,8 +1269,11 @@ def grade(check, sandbox, records, memories):
         hits = [a for a in asked if re.search(spec["matches"], a["command"], re.IGNORECASE)]
         return not hits, f"requests {[(a['command'][:80], a['decision']) for a in asked]}"
     if kind == "commits":
+        # A commit landed, or with `matches` one whose message matches; `^`
+        # is the start of the subject.
         messages = sandbox.commit_messages(sandbox.workdir(spec["cwd"], {}))
-        return bool(messages), f"{len(messages)} new commits: {[m[:80] for m in messages]}"
+        hits = [m for m in messages if re.search(spec.get("matches", ""), m, re.IGNORECASE)]
+        return bool(hits), f"{len(messages)} new commits: {[m[:80] for m in messages]}"
     if kind == "commits_not":
         path = sandbox.workdir(spec["cwd"], {})
         messages = sandbox.commit_messages(path)
@@ -1181,12 +1306,22 @@ def grade(check, sandbox, records, memories):
 
 # ---------------------------------------------------------------- driver
 
+def seed_args(seed, ids):
+    """A seed's `record` arguments, each `{seed:NAME}` replaced by the full id
+    of a seed recorded before it, so a seed can supersede an earlier one."""
+    def earlier(match):
+        if match.group(1) not in ids:
+            raise ValueError(f"seed {seed['id']} names {match.group(1)}, which is not an earlier seed")
+        return ids[match.group(1)]
+    return [re.sub(r"\{seed:([^}]+)\}", earlier, arg) for arg in seed["args"]]
+
+
 def prepare(scenario, client, base, source, projects):
     """A trial's sandbox with its seeds stored, user-memory set up and the
     scenario's folders in place."""
     sandbox = Sandbox(base, source, client)
     for seed in scenario.get("seed", []):
-        saved = json.loads(sandbox.cli("record", *seed["args"]))
+        saved = json.loads(sandbox.cli("record", *seed_args(seed, sandbox.ids)))
         if not saved.get("stored"):
             raise RuntimeError(f"seed {seed} refused: {saved}")
         sandbox.ids[seed["id"]] = saved["id"]
@@ -1215,6 +1350,8 @@ def trial(scenario, client, base, source, projects, guard):
     plan = steps(scenario)
     last = {step["session"]: i for i, step in enumerate(plan)}
     sessions, records, closed, conversation = {}, [], {}, {}
+    # Each conversation's running usage, which a resume carries on.
+    totals = {}
     codex_memory = codex_memory_rows(sandbox)
     try:
         for index, step in enumerate(plan):
@@ -1248,6 +1385,12 @@ def trial(scenario, client, base, source, projects, guard):
             }
             if client == "codex":
                 record["instruction_sources"] = sessions[name].instruction_sources
+            now = (claude_totals(events) if client == "claude"
+                   else codex_totals(events, getattr(sessions[name], "model", CODEX_MODEL)))
+            # A turn cut off before its usage was reported counts nothing.
+            record["usage"] = usage_since(now, totals.get(name, {})) if now else {}
+            if now:
+                totals[name] = now
             record["origins"] = origins(record)
             record["files"] = watched(scenario, sandbox)
             conversation.setdefault(name, next(iter(record["conversation_ids"]), None))
@@ -1277,7 +1420,11 @@ def trial(scenario, client, base, source, projects, guard):
         now = codex_memory_rows(sandbox)
         results.append({"check": {"codex_memory_unchanged": {}}, "passed": now == codex_memory,
                          "detail": f"rows before {codex_memory}, after {now}", "informational": True})
+    usage = {}
+    for record in records:
+        add_usage(usage, record["usage"])
     return {"scenario": scenario["name"], "client": client, "sandbox": str(sandbox.dir),
+            "model": CLAUDE_MODEL if client == "claude" else CODEX_MODEL, "usage": usage,
             "passed": all(r["passed"] for r in results if not r["informational"]),
             "checks": results, "steps": records, "stderr": closed, "memories": memories,
             "setup": sandbox.setup_output}
@@ -1306,10 +1453,14 @@ def header_notes(scenario, client, sandbox, projects):
         out = subprocess.run([str(sandbox.binary), "session-start", "--client", client],
                              cwd=cwd, env=sandbox.env, input=json.dumps(payload),
                              capture_output=True, text=True, timeout=30)
-        for pattern in entry["matches"]:
+        for pattern in entry.get("matches", []):
             if not re.search(pattern, out.stdout, re.MULTILINE):
                 notes.append(f"session start in {entry['cwd']} lacks {pattern!r}: "
                              f"{out.stdout[:400]!r}")
+        for pattern in entry.get("lacks", []):
+            hit = re.search(pattern, out.stdout, re.MULTILINE)
+            if hit:
+                notes.append(f"session start in {entry['cwd']} has {hit.group(0)!r}")
     return notes
 
 
@@ -1330,6 +1481,8 @@ def rehearse(scenarios, clients, base, source, projects, guard):
                 title = seed["args"][seed["args"].index("--title") + 1]
                 if seed.get("rule") and title not in text:
                     notes.append(f"rule {title!r} missing from {path.name}")
+                if seed.get("rule") is False and title in text:
+                    notes.append(f"{title!r} is in {path.name}")
             if client == "claude":
                 settings_file = sandbox.claude_dir / "settings.json"
                 settings = json.loads(settings_file.read_text()) if settings_file.exists() else {}
@@ -1370,7 +1523,11 @@ def main():
     parser.add_argument("--summarize", metavar="BATCH", help="rewrite a saved batch's summary")
     parser.add_argument("--codex-config", action="append", default=[], metavar="KEY=VALUE",
                         help="extra Codex -c setting, e.g. model_reasoning_summary=\"detailed\"")
+    parser.add_argument("--top-models", action="store_true",
+                        help="run each provider's top model instead of its cheaper one")
     args = parser.parse_args()
+    global CLAUDE_MODEL, CODEX_MODEL
+    CLAUDE_MODEL, CODEX_MODEL = models(args.top_models, os.environ)
     CODEX_EXTRA.extend(args.codex_config)
     for folder in [OUT] + ([Path(args.summarize)] if args.summarize else []):
         if folder.resolve().is_relative_to(ROOT):
@@ -1407,6 +1564,14 @@ def main():
     print("semantic search: " + (f"{embed['USER_MEMORY_EMBED_URL']} "
                                  f"{embed.get('USER_MEMORY_EMBED_MODEL', '(default model)')}"
                                  if embed else "off (keyword only)"))
+    print("models: " + ", ".join(
+        f"{c} {CLAUDE_MODEL if c == 'claude' else CODEX_MODEL + ' at ' + CODEX_EFFORT + ' effort'}"
+        for c in clients))
+    if "codex" in clients:
+        # A superseded name is caught here, before a batch runs on it.
+        stale = stale_models(codex_models(), [CODEX_MODEL, CODEX_DEFAULT_MODEL, CODEX_TOP_MODEL])
+        if stale:
+            sys.exit("refusing: " + "; ".join(stale))
     binary = Path(args.binary).resolve()
     if not os.access(binary, os.X_OK):
         sys.exit(f"build the binary first: {binary}")
@@ -1463,10 +1628,31 @@ def summarize(batch, results):
              "|---|---|---|---|"]
     lines += [f"| {s} | {c} | {p}/{t} | {f'{o}/{n}' if n else '-'} |"
               for (s, c), (p, t, o, n) in sorted(summary.items())]
-    lines += ["", f"Agent sessions counted so far: {counted_runs()}"]
+    lines += ["", usage_table(results), "", f"Agent sessions counted so far: {counted_runs()}"]
     text = "\n".join(lines) + "\n"
     (batch / "summary.md").write_text(text)
     return text
+
+
+def usage_table(results):
+    """Tokens and estimated cost of a batch per scenario, client and model,
+    with a total row. A trial saved before usage was recorded adds nothing."""
+    rows, total = {}, {}
+    for r in results:
+        for model, used in (r.get("usage") or {}).items():
+            add_usage(rows.setdefault((r["scenario"], r["client"], model), {}), {model: used})
+            add_usage(total, {"all": used})
+
+    def cells(used):
+        cost = used["cost_usd"]
+        return (f"{used['input']:,} | {used['cached_input']:,} | {used['output']:,} | "
+                f"{used['reasoning']:,} | {'-' if cost is None else f'${cost:.2f}'}")
+    lines = ["| scenario | client | model | input | cached input | output | reasoning | cost |",
+             "|---|---|---|---|---|---|---|---|"]
+    lines += [f"| {s} | {c} | {m} | {cells(used[m])} |" for (s, c, m), used in sorted(rows.items())]
+    if total:
+        lines.append(f"| all | | | {cells(total['all'])} |")
+    return "\n".join(lines)
 
 
 def resummarize(batch):
