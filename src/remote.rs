@@ -454,6 +454,21 @@ fn with_folder_projects<M: serde::Serialize + serde::de::DeserializeOwned>(messa
     serde_json::from_value(value).unwrap_or(message)
 }
 
+/// The tool reply `reply` with `notices` added as text items after its own
+/// content, which they leave as it was; `None`, keeping the notices for a
+/// later reply, when it is not a tool result.
+fn with_notices<M: serde::de::DeserializeOwned>(
+    reply: &serde_json::Value,
+    notices: &mut Vec<String>,
+) -> Option<M> {
+    let mut reply = reply.clone();
+    let content = reply.pointer_mut("/result/content")?.as_array_mut()?;
+    for notice in notices.drain(..) {
+        content.push(serde_json::json!({"type": "text", "text": notice}));
+    }
+    serde_json::from_value(reply).ok()
+}
+
 /// The id a successful response answers, if `message` is one.
 fn answered(message: &impl serde::Serialize) -> Option<serde_json::Value> {
     let message = serde_json::to_value(message).ok()?;
@@ -492,11 +507,10 @@ async fn reconnect<R: Transport<RoleClient>>(
             }
         }
     };
-    let version = result.pointer("/result/serverInfo/version").cloned();
     if let Some(notice) = initialized {
         Transport::<RoleClient>::send(&mut remote, notice).await?;
     }
-    Ok((remote, version))
+    Ok((remote, result.get("result").cloned()))
 }
 
 /// Relays messages between a local MCP client and the memory server. After
@@ -521,6 +535,11 @@ async fn forward<R: Transport<RoleClient>>(
     let mut initialize: Option<RxJsonRpcMessage<RoleServer>> = None;
     let mut initialized: Option<RxJsonRpcMessage<RoleServer>> = None;
     let mut initial_version: Option<serde_json::Value> = None;
+    // What the first handshake said about versions, which session start
+    // told the user; a re-handshake that says something new is told in the
+    // next tool reply.
+    let mut version_line: Option<String> = None;
+    let mut notices: Vec<String> = Vec::new();
     let mut disconnected = false;
     let mut error = None;
     loop {
@@ -553,9 +572,15 @@ async fn forward<R: Transport<RoleClient>>(
                             reconnect(new_remote()?, initialize.clone(), initialized.clone()).await
                         };
                         match tokio::time::timeout(RECONNECT_TIMEOUT, recovered).await {
-                            Ok(Ok((next, version))) => {
+                            Ok(Ok((next, handshake))) => {
                                 remote = next;
                                 disconnected = false;
+                                let version = handshake.as_ref().and_then(|result| result.pointer("/serverInfo/version")).cloned();
+                                let line = handshake.as_ref().and_then(|result| crate::setup::versions::server_line(crate::setup::versions::running(), endpoint, result));
+                                if line.is_some() && line != version_line {
+                                    notices.extend(line.clone());
+                                }
+                                version_line = line;
                                 if let (Some(first), Some(current)) = (&initial_version, &version)
                                     && first != current
                                 {
@@ -593,9 +618,15 @@ async fn forward<R: Transport<RoleClient>>(
                 let value = serde_json::to_value(&message)?;
                 if initial_version.is_none() && let Some(version) = value.pointer("/result/serverInfo/version") {
                     initial_version = Some(version.clone());
+                    version_line = value.get("result").and_then(|result| crate::setup::versions::server_line(crate::setup::versions::running(), endpoint, result));
                 }
+                let mut message = message;
                 if let Some(id) = value.get("id") && (value.get("result").is_some() || value.get("error").is_some()) {
+                    let tool = pending.iter().any(|(request_id, tool)| request_id == id && *tool);
                     pending.retain(|(request_id, _)| request_id != id);
+                    if tool && !notices.is_empty() && let Some(with) = with_notices(&value, &mut notices) {
+                        message = with;
+                    }
                 }
                 if let Some(id) = answered(&message)
                     && let Some(at) = writes.iter().position(|write| *write == id)

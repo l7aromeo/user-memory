@@ -116,10 +116,14 @@ fn initialization_delivers_portable_memory_guidance_and_keeps_tools_available() 
         init["result"]["serverInfo"]["version"],
         env!("CARGO_PKG_VERSION")
     );
-    // A replaced binary tells the app its tools changed.
+    // A replaced binary tells the app its tools changed, and the handshake
+    // names the oldest client this server takes.
     assert_eq!(
         init["result"]["capabilities"],
-        json!({"tools": {"listChanged": true}})
+        json!({
+            "tools": {"listChanged": true},
+            "experimental": {"user-memory": {"min_client": "0.8.0"}},
+        })
     );
     let guidance = init["result"]["instructions"]
         .as_str()

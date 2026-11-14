@@ -1,8 +1,22 @@
-# Upgrade a memory store
+# Upgrade user-memory
+
+Two uses: moving user-memory to a newer release ("update memory", "upgrade user-memory", a session-start line naming a version), and a store refused for its schema version.
+
+## Move to a newer release
+
+1. Run `user-memory doctor` and read three versions from it: this machine's (`user-memory --version`), the memory server's when this machine uses one (its ``Memory server version: …`` line), and the newest release (its ``user-memory … is available`` line).
+2. Say in one line what needs upgrading and to which version: this machine, the server, or both. A client of a memory server follows its server: it upgrades to the server's version, never past it.
+3. With the user's yes to that upgrade, run `user-memory upgrade --yes`; without a terminal the command needs the flag. Without the yes, give the user `user-memory upgrade` to run in a terminal, where it asks.
+4. If the server needs upgrading, say on which machine; when this is that machine, run `user-memory upgrade --yes` there, after the user's yes.
+5. Run `user-memory doctor` again and report what changed. Open sessions move to the new version on their next call; one from before 0.10.0 needs its agent restarted once.
+
+If it says ``Nothing to upgrade``, report its line. If it refuses, its line says why and that nothing was changed; report it. To go back to an earlier version, see "Roll back an upgrade" below: `user-memory upgrade` only moves forward.
+
+## The store was refused
 
 Use this when `user-memory setup`, `user-memory doctor`, the client or the session hook refuses the store because of its schema version. A refused store is always left unchanged. Pick the case by the message.
 
-## ``run the installer again (or ./setup, or `user-memory migrate`) to upgrade it``
+### ``run the installer again (or ./setup, or `user-memory migrate`) to upgrade it``
 
 The store is from an older version that this one can upgrade.
 
@@ -18,7 +32,7 @@ Docker server: `migrate` upgrades `/data/memories.sqlite3`, and the backup lands
 docker compose run --rm memory migrate --check && docker compose stop memory && docker compose run --rm memory migrate && docker compose up -d memory
 ```
 
-### Titles for the upgrade
+#### Titles for the upgrade
 
 Schema version 3 gives every memory a title: one line of at most 120 characters that states the memory so an agent can act on it. Nothing writes titles for the user, so the upgrade refuses, changing nothing, until it has one for each memory, and lists the untitled ones with their content.
 
@@ -34,11 +48,11 @@ Schema version 3 gives every memory a title: one line of at most 120 characters 
 5. Run the upgrade with it: the installer again with `--titles titles.json` (`… | sh -s -- --titles titles.json`), or `./setup --titles titles.json`, or `user-memory migrate --titles titles.json`. Docker server from a checkout: `docker compose run --rm -T memory migrate --titles - < titles.json`. Each title is stored as written, with its whitespace tidied.
 6. If it refuses again, it names the ids still missing, unknown or invalid; fix those entries and repeat.
 
-## ``this user-memory is older than the store``
+### ``this user-memory is older than the store``
 
-The store was upgraded by a newer version. Nothing needs migrating: the user updates user-memory (run the installer again, or pull the newer checkout and run `./setup`, or update the Docker image) and restarts the client. Never move the store aside for this.
+The store was upgraded by a newer version. Nothing needs migrating: user-memory on this machine moves to the newer version, as "Move to a newer release" above says (`user-memory upgrade`, or `./setup` from the newer checkout). A session from before 0.10.0 then needs its client restarted. Never move the store aside for this.
 
-## ``needs schema version … Move it aside``
+### ``needs schema version … Move it aside``
 
 The store is too old, unversioned or not a user-memory store, and cannot be upgraded in place. The user runs these steps; explain them and wait for each result:
 

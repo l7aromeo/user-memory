@@ -1947,3 +1947,274 @@ fn a_bridges_serve_hands_over_and_re_handshakes_with_the_server() {
         assert!(!said.contains(TOKEN));
     }
 }
+
+/// What the versioned fake server says in its handshake, and whether it
+/// fails the next request, as a server going down does.
+#[derive(Default)]
+struct Said {
+    version: String,
+    min_client: Option<String>,
+    fail_next: bool,
+}
+
+type Shared = std::sync::Arc<std::sync::Mutex<Said>>;
+
+/// A memory server that answers its handshake as `said` holds at the time,
+/// lists no tools and answers every tool call with "served"; its endpoint.
+fn versioned_endpoint(said: &Shared) -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let said = said.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut request = String::new();
+            let mut length = 0;
+            if reader.read_line(&mut request).is_err() {
+                continue;
+            }
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+                if let Some((key, value)) = line.split_once(':')
+                    && key.eq_ignore_ascii_case("content-length")
+                {
+                    length = value.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0; length];
+            if reader.read_exact(&mut body).is_err() {
+                continue;
+            }
+            let message: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+            let mut said = said.lock().unwrap();
+            let (status, reply) = if !request.starts_with("POST") {
+                (405, Value::Null)
+            } else if said.fail_next && message["method"] == "tools/call" {
+                said.fail_next = false;
+                drop(said);
+                // The connection ends with no answer, as a server stopping.
+                continue;
+            } else if message.get("id").is_none() {
+                (202, Value::Null)
+            } else {
+                let result = match message["method"].as_str() {
+                    Some("initialize") => {
+                        let mut capabilities = json!({"tools":{}});
+                        if let Some(min) = &said.min_client {
+                            capabilities["experimental"] =
+                                json!({"user-memory": {"min_client": min}});
+                        }
+                        json!({"result":{"protocolVersion":message["params"]["protocolVersion"],"capabilities":capabilities,"serverInfo":{"name":"user-memory","version":said.version}}})
+                    }
+                    Some("tools/list") => json!({"result":{"tools":[]}}),
+                    Some("tools/call") => {
+                        json!({"result":{"content":[{"type":"text","text":"served"}],"isError":false}})
+                    }
+                    _ => json!({"error":{"code":-32601,"message":"Method not found"}}),
+                };
+                let mut reply = json!({"jsonrpc":"2.0","id":message["id"]});
+                reply
+                    .as_object_mut()
+                    .unwrap()
+                    .extend(result.as_object().unwrap().clone());
+                (200, reply)
+            };
+            let body = if reply.is_null() {
+                String::new()
+            } else {
+                reply.to_string()
+            };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status} Reply\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    format!("http://{address}/mcp")
+}
+
+fn said(version: &str, min_client: Option<&str>) -> Shared {
+    std::sync::Arc::new(std::sync::Mutex::new(Said {
+        version: version.into(),
+        min_client: min_client.map(str::to_owned),
+        fail_next: false,
+    }))
+}
+
+/// Each row of the version table: session start says a line only when this
+/// machine is below its server's minimum, or its server below this
+/// machine's floor; a server without a minimum asks for nothing.
+#[test]
+fn session_start_says_when_either_side_is_below_the_others_floor() {
+    let home = tempdir().unwrap();
+    let token = home.path().join("token");
+    fs::write(&token, TOKEN).unwrap();
+    for (this, version, min, expected) in [
+        (
+            "0.10.1",
+            "0.11.2",
+            Some("0.11.0"),
+            Some(
+                "The memory server at {url} runs user-memory 0.11.2 and needs 0.11.0 or newer on this machine (0.10.1). Upgrade: user-memory upgrade",
+            ),
+        ),
+        ("0.11.0", "0.11.2", Some("0.11.0"), None),
+        ("0.12.0", "0.11.2", Some("0.11.0"), None),
+        (
+            "0.12.0",
+            "0.7.0",
+            None,
+            Some(
+                "This machine runs user-memory 0.12.0, which needs the memory server at {url} to run 0.8.0 or newer (it runs 0.7.0). Upgrade the server on its machine.",
+            ),
+        ),
+        ("0.0.1", "0.9.2", None, None),
+    ] {
+        let url = versioned_endpoint(&said(version, min));
+        let out = Command::new(env!("CARGO_BIN_EXE_user-memory"))
+            .arg("session-start")
+            .arg(home.path())
+            .sandboxed(home.path())
+            .env("USER_MEMORY_URL", &url)
+            .env("USER_MEMORY_TOKEN_FILE", &token)
+            .env("USER_MEMORY_TEST_VERSION", this)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        match expected {
+            Some(line) => assert_eq!(
+                stdout.lines().next(),
+                Some(line.replace("{url}", &url).as_str()),
+                "{this} with {version}: {stdout}"
+            ),
+            None => assert!(
+                !stdout.contains("memory server at") && !stdout.contains("This machine runs"),
+                "{this} with {version}: {stdout}"
+            ),
+        }
+        assert_eq!(
+            stdout.matches("Upgrade").count(),
+            usize::from(expected.is_some_and(|l| l.contains("Upgrade"))),
+            "said once: {stdout}"
+        );
+    }
+}
+
+/// A bridge, and one handed over to a new binary, says in the next tool
+/// reply when a re-handshake finds its server's minimum risen above this
+/// machine; once, and after the reply's own content.
+#[test]
+fn a_risen_minimum_is_said_in_the_next_tool_reply_after_a_re_handshake() {
+    let home = tempdir().unwrap();
+    let token = home.path().join("token");
+    fs::write(&token, TOKEN).unwrap();
+    for handed_over in [false, true] {
+        let state = said("0.10.0", Some("0.8.0"));
+        let url = versioned_endpoint(&state);
+        let bin = home.path().join(format!("bin-{handed_over}"));
+        fs::create_dir_all(&bin).unwrap();
+        let exe = bin.join(format!("user-memory{}", std::env::consts::EXE_SUFFIX));
+        fs::copy(env!("CARGO_BIN_EXE_user-memory"), &exe).unwrap();
+        let mut child = ChildGuard(
+            Command::new(&exe)
+                .arg("serve")
+                .sandboxed(home.path())
+                .env("USER_MEMORY_URL", &url)
+                .env("USER_MEMORY_TOKEN_FILE", &token)
+                .env("USER_MEMORY_TEST_VERSION", "0.10.0")
+                .env("FAKE_USER_MEMORY", env!("CARGO_BIN_EXE_user-memory"))
+                .env("FAKE_USER_MEMORY_VERSION", "0.10.0")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let mut input = child.0.stdin.take().unwrap();
+        let output = lines(child.0.stdout.take().unwrap());
+        let mut ask = |message: Value| -> Value {
+            writeln!(input, "{message}").unwrap();
+            input.flush().unwrap();
+            // A notification gets no reply.
+            if message.get("id").is_none() {
+                return Value::Null;
+            }
+            loop {
+                let reply = reply(&output);
+                if reply["id"] == message["id"] {
+                    return reply;
+                }
+            }
+        };
+        assert!(ask(initialize(1)).get("result").is_some());
+        ask(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+        let texts = |reply: &Value| -> Vec<String> {
+            reply["result"]["content"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item["text"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        assert_eq!(texts(&ask(call(2, "index", json!({})))), ["served"]);
+        state.lock().unwrap().min_client = Some("0.11.0".into());
+        let line = format!(
+            "The memory server at {url} runs user-memory 0.10.0 and needs 0.11.0 or newer on this machine (0.10.0). Upgrade: user-memory upgrade"
+        );
+        if handed_over {
+            let fakes = home.path().join("fakes");
+            fs::create_dir_all(&fakes).unwrap();
+            let staged = bin.join(format!(".new{}", std::env::consts::EXE_SUFFIX));
+            fs::copy(fake::fake(&fakes, "user-memory"), &staged).unwrap();
+            if cfg!(windows) {
+                fs::rename(&exe, bin.join("old.exe")).unwrap();
+            }
+            fs::rename(&staged, &exe).unwrap();
+        } else {
+            state.lock().unwrap().fail_next = true;
+            let failed = ask(call(3, "index", json!({})));
+            assert_eq!(failed["result"]["isError"], true, "{failed}");
+        }
+        assert_eq!(
+            texts(&ask(call(4, "index", json!({})))),
+            ["served".to_owned(), line],
+            "handed over: {handed_over}"
+        );
+        assert_eq!(
+            texts(&ask(call(5, "index", json!({})))),
+            ["served"],
+            "said twice"
+        );
+    }
+}
+
+/// The handshake says what clients compare: the server's name and
+/// version in `serverInfo`, and the oldest client it supports in
+/// `capabilities.experimental["user-memory"]`; and that its tool list can
+/// change, which a session handed over to a new binary announces.
+#[test]
+fn the_handshake_names_the_version_and_the_oldest_client() {
+    let host = Host::start(root());
+    let reply = host.rpc(initialize(1));
+    let result = &reply["result"];
+    assert_eq!(result["serverInfo"]["name"], "user-memory", "{reply}");
+    assert_eq!(result["serverInfo"]["version"], env!("CARGO_PKG_VERSION"));
+    let min = result["capabilities"]["experimental"]["user-memory"]["min_client"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no min_client: {reply}"));
+    let parts: Vec<&str> = min.split('.').collect();
+    assert!(
+        parts.len() == 3 && parts.iter().all(|part| part.parse::<u64>().is_ok()),
+        "{min}"
+    );
+    assert_eq!(
+        result["capabilities"]["tools"]["listChanged"], true,
+        "{reply}"
+    );
+}

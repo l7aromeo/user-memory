@@ -63,6 +63,110 @@ pub(crate) const HANDOVER_SINCE: Version = Version {
     patch: 0,
 };
 
+/// The oldest client this server supports, which the handshake names so a
+/// client can say when it must be upgraded. Raised only by a release whose
+/// server needs something older clients don't send: none since 0.8.0, the
+/// first that sends the 8-character memory ids this server reads.
+pub(crate) const MIN_CLIENT: Version = Version {
+    major: 0,
+    minor: 8,
+    patch: 0,
+};
+
+/// The oldest server this client supports, compared with the version the
+/// server's handshake names. Raised only by a release whose client needs
+/// something older servers lack: none since 0.8.0, the first server that
+/// reads 8-character memory ids, which this client sends.
+pub(crate) const MIN_SERVER: Version = Version {
+    major: 0,
+    minor: 8,
+    patch: 0,
+};
+
+/// Where the handshake carries user-memory's own fields: MCP's extension
+/// point, `capabilities.experimental`, under this key. `serverInfo` holds
+/// only a name and a version.
+pub(crate) const HANDSHAKE_KEY: &str = "user-memory";
+
+/// The `capabilities.experimental` a server sends in its handshake: the
+/// oldest client it supports.
+pub(crate) fn handshake_capabilities() -> rmcp::model::ExperimentalCapabilities {
+    let mut fields = rmcp::model::JsonObject::new();
+    fields.insert("min_client".into(), MIN_CLIENT.to_string().into());
+    [(HANDSHAKE_KEY.to_owned(), fields)].into_iter().collect()
+}
+
+/// What a client says about its server's handshake: one line when either
+/// side is below the other's oldest supported version, else nothing.
+/// `result` is the server's `initialize` result; a server without the
+/// `min_client` field has no minimum.
+pub(crate) fn server_line(this: &str, url: &str, result: &serde_json::Value) -> Option<String> {
+    let this = Version::parse(this)?;
+    let (shown, server, min_client) = said(result);
+    if let Some(min) = min_client
+        && this < min
+    {
+        return Some(format!(
+            "The memory server at {url} runs user-memory {shown} and needs {min} or newer on this machine ({this}). Upgrade: user-memory upgrade"
+        ));
+    }
+    if let Some(server) = server
+        && server < MIN_SERVER
+    {
+        return Some(format!(
+            "This machine runs user-memory {this}, which needs the memory server at {url} to run {MIN_SERVER} or newer (it runs {server}). Upgrade the server on its machine."
+        ));
+    }
+    None
+}
+
+/// What doctor says about the versions of a client and its server.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ServerStep {
+    /// One side is below the other's oldest supported version.
+    Action(String),
+    /// The versions differ, and both still work together.
+    Note(String),
+}
+
+/// doctor's line on this client's version against its server's: the
+/// session-start line as a step, else a note where the versions differ.
+pub(crate) fn server_step(this: &str, url: &str, result: &serde_json::Value) -> Option<ServerStep> {
+    if let Some(line) = server_line(this, url, result) {
+        return Some(ServerStep::Action(line));
+    }
+    let this = Version::parse(this)?;
+    let (_, server, _) = said(result);
+    let server = server?;
+    match server.cmp(&this) {
+        std::cmp::Ordering::Greater => Some(ServerStep::Note(format!(
+            "Memory server version: the memory server at {url} runs {server}, newer than this machine ({this}); run \"user-memory upgrade\" to match it"
+        ))),
+        std::cmp::Ordering::Less => Some(ServerStep::Note(format!(
+            "Memory server version: the memory server at {url} runs {server}, older than this machine ({this}); it can be upgraded on its own machine"
+        ))),
+        std::cmp::Ordering::Equal => None,
+    }
+}
+
+/// The server's version as it names it, as a release when it is one, and
+/// the oldest client it supports, from its `initialize` result.
+fn said(result: &serde_json::Value) -> (String, Option<Version>, Option<Version>) {
+    let shown = result
+        .pointer("/serverInfo/version")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("an unknown version")
+        .to_owned();
+    let server = Version::parse(&shown);
+    let min_client = result
+        .pointer("/capabilities/experimental")
+        .and_then(|fields| fields.get(HANDSHAKE_KEY))
+        .and_then(|fields| fields.get("min_client"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(Version::parse);
+    (shown, server, min_client)
+}
+
 /// The version in `user-memory --version`'s output (`user-memory X.Y.Z`),
 /// or `None` when the output is anything else.
 pub(crate) fn of_binary(output: &str) -> Option<Version> {
@@ -174,6 +278,82 @@ mod tests {
         assert!(version("2.1.139") < version("3.0.0"));
         assert_eq!(version("2.1.139"), MIN_WINDOWS_CLAUDE);
         assert_eq!(MIN_WINDOWS_CLAUDE.to_string(), "2.1.139");
+    }
+
+    fn handshake(version: &str, min_client: Option<&str>) -> serde_json::Value {
+        let mut result = serde_json::json!({"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"user-memory","version":version}});
+        if let Some(min) = min_client {
+            result["capabilities"]["experimental"] =
+                serde_json::json!({HANDSHAKE_KEY: {"min_client": min}});
+        }
+        result
+    }
+
+    const URL: &str = "https://memory.example.com/mcp";
+
+    /// Each row of #100's table: only a version below the other side's
+    /// floor says something at session start; doctor notes any gap.
+    #[test]
+    fn a_client_says_when_either_side_is_below_the_others_floor() {
+        let server = handshake("0.11.2", Some("0.11.0"));
+        assert_eq!(
+            server_line("0.10.1", URL, &server).as_deref(),
+            Some(
+                "The memory server at https://memory.example.com/mcp runs user-memory 0.11.2 and needs 0.11.0 or newer on this machine (0.10.1). Upgrade: user-memory upgrade"
+            )
+        );
+        assert_eq!(server_line("0.11.0", URL, &server), None);
+        assert_eq!(
+            server_step("0.11.0", URL, &server),
+            Some(ServerStep::Note("Memory server version: the memory server at https://memory.example.com/mcp runs 0.11.2, newer than this machine (0.11.0); run \"user-memory upgrade\" to match it".into()))
+        );
+        assert_eq!(server_line("0.12.0", URL, &server), None);
+        assert_eq!(
+            server_step("0.12.0", URL, &server),
+            Some(ServerStep::Note("Memory server version: the memory server at https://memory.example.com/mcp runs 0.11.2, older than this machine (0.12.0); it can be upgraded on its own machine".into()))
+        );
+        let below = Version {
+            patch: MIN_SERVER.patch,
+            minor: MIN_SERVER.minor,
+            major: MIN_SERVER.major,
+        };
+        let old = format!("{}.{}.{}", below.major, below.minor.saturating_sub(1), 0);
+        assert_eq!(
+            server_line("0.12.0", URL, &handshake(&old, None)),
+            Some(format!(
+                "This machine runs user-memory 0.12.0, which needs the memory server at https://memory.example.com/mcp to run {MIN_SERVER} or newer (it runs {old}). Upgrade the server on its machine."
+            ))
+        );
+        assert!(matches!(
+            server_step("0.12.0", URL, &handshake(&old, None)),
+            Some(ServerStep::Action(_))
+        ));
+        assert_eq!(server_step("0.11.2", URL, &server), None);
+    }
+
+    /// A server without the field, as every server before it, has no
+    /// minimum; one whose version isn't a release is never below a floor.
+    #[test]
+    fn a_server_without_a_minimum_never_asks_for_a_newer_client() {
+        assert_eq!(server_line("0.0.1", URL, &handshake("0.9.2", None)), None);
+        assert_eq!(
+            server_line("0.0.1", URL, &handshake("0.11.3-dev", Some("bad"))),
+            None
+        );
+        assert_eq!(
+            server_line("0.10.0", URL, &handshake("0.10.0", Some("0.10.0"))),
+            None
+        );
+    }
+
+    /// This build's own handshake carries the minimum where clients read it.
+    #[test]
+    fn the_handshake_carries_the_oldest_client() {
+        let fields = handshake_capabilities();
+        assert_eq!(
+            fields[HANDSHAKE_KEY]["min_client"],
+            serde_json::json!(MIN_CLIENT.to_string())
+        );
     }
 
     #[test]
