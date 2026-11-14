@@ -2074,6 +2074,16 @@ fn session_start_says_when_either_side_is_below_the_others_floor() {
             ),
         ),
         ("0.0.1", "0.9.2", None, None),
+        // This client's floor for servers, at its boundary.
+        ("0.10.0", "0.8.0", None, None),
+        (
+            "0.10.0",
+            "0.7.9",
+            None,
+            Some(
+                "This machine runs user-memory 0.10.0, which needs the memory server at {url} to run 0.8.0 or newer (it runs 0.7.9). Upgrade the server on its machine.",
+            ),
+        ),
     ] {
         let url = versioned_endpoint(&said(version, min));
         let out = Command::new(env!("CARGO_BIN_EXE_user-memory"))
@@ -2217,4 +2227,37 @@ fn the_handshake_names_the_version_and_the_oldest_client() {
         result["capabilities"]["tools"]["listChanged"], true,
         "{reply}"
     );
+}
+
+/// This server's floor for clients, at its boundary: a client of the real
+/// host from 0.8.0 on is told nothing, one below it is told to upgrade.
+#[test]
+fn the_servers_oldest_client_is_said_to_a_client_below_it() {
+    let host = Host::start(root());
+    let home = tempdir().unwrap();
+    let token = home.path().join("token");
+    fs::write(&token, TOKEN).unwrap();
+    let url = format!("http://{}/mcp", host.address);
+    for (this, told) in [("0.8.0", false), ("0.7.9", true)] {
+        let out = Command::new(env!("CARGO_BIN_EXE_user-memory"))
+            .arg("session-start")
+            .arg(home.path())
+            .sandboxed(home.path())
+            .env("USER_MEMORY_URL", &url)
+            .env("USER_MEMORY_TOKEN_FILE", &token)
+            .env("USER_MEMORY_TEST_VERSION", this)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        let line = format!(
+            "The memory server at {url} runs user-memory {} and needs 0.8.0 or newer on this machine ({this}). Upgrade: user-memory upgrade",
+            env!("CARGO_PKG_VERSION")
+        );
+        assert_eq!(
+            stdout.lines().next() == Some(line.as_str()),
+            told,
+            "{this}: {stdout}"
+        );
+    }
 }
