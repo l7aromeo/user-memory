@@ -292,8 +292,9 @@ fn feed(
 enum Running {
     /// The server runs in this process.
     Here(tokio::task::JoinHandle<Result<()>>),
-    /// A relay's child: the replaced binary serving the session.
-    Child(tokio::process::Child),
+    /// A relay's child: the replaced binary serving the session. Boxed:
+    /// a child holds its process and pipe handles, 272 bytes on Windows.
+    Child(Box<tokio::process::Child>),
 }
 
 fn start_here(inner: &Inner) -> Backend {
@@ -343,7 +344,7 @@ fn start_child(binary: &Path, state: &Path) -> io::Result<Backend> {
         input: Some(input),
         writer,
         output: BufReader::new(output).lines(),
-        running: Running::Child(child),
+        running: Running::Child(Box::new(child)),
     })
 }
 
