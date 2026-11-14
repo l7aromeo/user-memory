@@ -6,6 +6,11 @@
 //! Unix each case runs twice: handing over by `exec`, and by the relay
 //! Windows uses, which `USER_MEMORY_TEST_RELAY` turns on there.
 
+#![allow(
+    clippy::unwrap_used,
+    reason = "integration tests may unwrap: a failed unwrap is a failed test"
+)]
+
 #[path = "support/fake.rs"]
 mod fake;
 #[path = "support/sandbox.rs"]

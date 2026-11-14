@@ -4,6 +4,11 @@
 //! upgrades themselves run in tests/install.rs (Unix) and
 //! tests/windows_setup.rs (Windows).
 
+#![allow(
+    clippy::unwrap_used,
+    reason = "integration tests may unwrap: a failed unwrap is a failed test"
+)]
+
 #[path = "support/sandbox.rs"]
 mod sandbox;
 
