@@ -136,9 +136,10 @@ pub async fn start(path: PathBuf, client: Option<HookClient>) -> String {
             .await;
         }
     };
-    let (_, index) = tokio::join!(
+    let (_, index, versions) = tokio::join!(
         tokio::time::timeout_at(deadline, snapshot),
-        tokio::time::timeout_at(deadline, index(path, client, origin.clone()))
+        tokio::time::timeout_at(deadline, index(path, client, origin.clone())),
+        tokio::time::timeout_at(deadline, version_line())
     );
     let index = match index {
         Ok(Ok(text)) => capped(text, CHARS),
@@ -153,12 +154,25 @@ pub async fn start(path: PathBuf, client: Option<HookClient>) -> String {
         }
         Err(_) => format!("User memory unavailable: timed out. {UNAVAILABLE_NEXT}"),
     };
-    match origin {
+    let index = match origin {
         Some(origin) => format!(
             "Conversation origin: {origin} (use it as origin when recording, linking, or forgetting what this conversation recorded)\n{index}"
         ),
         None => index,
+    };
+    match versions.ok().flatten() {
+        Some(line) => format!("{line}\n{index}"),
+        None => index,
     }
+}
+
+/// What a client of a memory server says at session start when it or its
+/// server is below the other's oldest supported version; nothing otherwise,
+/// for a store on this machine, or when the server doesn't answer.
+async fn version_line() -> Option<String> {
+    let remote = setup::configured_remote().ok()??;
+    let result = remote.handshake().await.ok()?;
+    setup::versions::server_line(setup::versions::running(), &remote.url, &result)
 }
 
 /// The hook payload on stdin, or `None` when there is none to read.

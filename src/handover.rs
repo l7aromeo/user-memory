@@ -93,6 +93,10 @@ struct Session {
     tools: Option<Value>,
     /// Started by a relay, which hands over itself: this process never does.
     relayed: bool,
+    /// For a bridge, what its server's handshake said about versions, so a
+    /// re-handshake that says something new is told once.
+    #[serde(default)]
+    server_line: Option<String>,
 }
 
 /// What a binary's probe answers: its version, the state formats it reads
@@ -512,6 +516,7 @@ pub async fn serve(inner: Inner) -> Result<()> {
                 protocol: None,
                 tools: None,
                 relayed: false,
+                server_line: None,
             },
             Vec::new(),
         )
@@ -728,7 +733,14 @@ impl Front {
             return self.write_app(&line).await;
         };
         match id.as_str() {
-            Some(REPLAY_ID) => return Ok(()),
+            Some(REPLAY_ID) => {
+                let line = self.server_line(&message);
+                if line.is_some() && line != self.session.server_line {
+                    self.notices.extend(line.clone());
+                }
+                self.session.server_line = line;
+                return Ok(());
+            }
             Some(TOOLS_ID) => return self.compare_tools(&message).await,
             _ => {}
         }
@@ -737,6 +749,7 @@ impl Front {
                 if let Some(protocol) = message.pointer("/result/protocolVersion") {
                     self.session.protocol = protocol.as_str().map(str::to_owned);
                 }
+                self.session.server_line = self.server_line(&message);
             }
             "tools/list" => {
                 if let Some(tools) = message.pointer("/result/tools") {
@@ -757,6 +770,16 @@ impl Front {
             _ => {}
         }
         self.write_app(&line).await
+    }
+
+    /// What a bridge's server said about versions in the handshake reply
+    /// `message`, as session start says it; nothing for this binary's own
+    /// server.
+    fn server_line(&self, message: &Value) -> Option<String> {
+        let Inner::Bridge(connection) = &self.inner else {
+            return None;
+        };
+        versions::server_line(versions::running(), &connection.url, message.get("result")?)
     }
 
     /// After a hand-over: tells the app when the tools it was given changed.

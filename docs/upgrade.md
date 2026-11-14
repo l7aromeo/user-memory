@@ -141,6 +141,26 @@ and the next call reconnects ([troubleshooting](troubleshooting.md#from-doctor))
 Clients don't restart for a server restart or upgrade, only when their own
 client is upgraded.
 
+### Client and server versions
+
+A server says in its MCP handshake which version it runs (`serverInfo`)
+and the oldest client it supports
+(`capabilities.experimental["user-memory"].min_client`). Each client
+compares at session start, and again when it reconnects during a session.
+Memory keeps working wherever the older side still can; nothing is refused
+only for a version gap. When one side is below what the other supports,
+session start says so in one line, and a reconnect says it in the next
+tool reply:
+
+- ``The memory server at https://memory.example.com/mcp runs user-memory 0.11.2 and needs 0.11.0 or newer on this machine (0.10.1). Upgrade: user-memory upgrade``
+- ``This machine runs user-memory 0.12.0, which needs the memory server at https://memory.example.com/mcp to run 0.11.0 or newer (it runs 0.10.1). Upgrade the server on its machine.``
+
+A smaller gap is only noted by doctor:
+``Memory server version: the memory server at … runs …, newer than this machine (…); run "user-memory upgrade" to match it``,
+or ``…, older than this machine (…); it can be upgraded on its own machine``.
+On a client, doctor compares with its server instead of the newest
+release, since a client never moves past its server.
+
 To undo an upgrade, restore the backup and run the previous version's
 installer with its tag: [roll back an upgrade](#roll-back-an-upgrade)
 gives the steps for the Docker server and a native store. Memories recorded

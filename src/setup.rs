@@ -1670,9 +1670,23 @@ pub async fn doctor(options: &Options) -> Result<Health> {
     }
     let mut failures = Vec::new();
     let mut actions = Vec::new();
-    if options.update_check_enabled(saved.as_ref())
+    // A client of another server follows its server's version, never the
+    // newest release, which could put it ahead of the server.
+    let followed = paths
+        .remote
+        .as_ref()
+        .filter(|remote| docker_dir(&remote.url).is_none());
+    if let Some(remote) = followed {
+        if let Ok(result) = remote.handshake().await {
+            match versions::server_step(versions::running(), &remote.url, &result) {
+                Some(versions::ServerStep::Action(step)) => actions.push(step),
+                Some(versions::ServerStep::Note(note)) => println!("{note}"),
+                None => {}
+            }
+        }
+    } else if options.update_check_enabled(saved.as_ref())
         && !update::off_by_environment()
-        && let Some(notice) = update::notice(env!("CARGO_PKG_VERSION")).await
+        && let Some(notice) = update::notice(versions::running()).await
     {
         println!("{notice}");
     }
@@ -1887,7 +1901,7 @@ async fn server_doctor(
     println!("Binary: OK\nRemote MCP connection and tools: OK");
     if options.update_check_enabled(saved)
         && !update::off_by_environment()
-        && let Some(notice) = update::notice(env!("CARGO_PKG_VERSION")).await
+        && let Some(notice) = update::notice(versions::running()).await
     {
         println!("{notice}");
     }

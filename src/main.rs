@@ -454,17 +454,17 @@ impl UserMemoryServer {
 #[tool_handler(router = self.router())]
 impl rmcp::ServerHandler for UserMemoryServer {
     fn get_info(&self) -> rmcp::model::ServerConfig {
-        rmcp::model::ServerConfig::new(
-            rmcp::model::ServerCapabilities::builder()
-                .enable_tools()
-                .enable_tool_list_changed()
-                .build(),
-        )
-        .with_server_info(rmcp::model::Implementation::new(
-            "user-memory",
-            setup::versions::running(),
-        ))
-        .with_instructions(INSTRUCTIONS.to_owned())
+        let mut capabilities = rmcp::model::ServerCapabilities::builder()
+            .enable_tools()
+            .enable_tool_list_changed()
+            .build();
+        capabilities.experimental = Some(setup::versions::handshake_capabilities());
+        rmcp::model::ServerConfig::new(capabilities)
+            .with_server_info(rmcp::model::Implementation::new(
+                "user-memory",
+                setup::versions::running(),
+            ))
+            .with_instructions(INSTRUCTIONS.to_owned())
     }
 }
 
