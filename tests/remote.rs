@@ -1869,3 +1869,81 @@ fn a_refused_transfer_says_why_and_leaves_no_file() {
         "{out:?}"
     );
 }
+
+/// A bridge's `serve` hands over to a replaced binary too: the new process
+/// re-handshakes with the memory server with the app's own initialize and
+/// answers the next call on the same connection, with no new handshake
+/// from the app. On Unix both ways: `exec`, and the relay Windows uses.
+#[test]
+fn a_bridges_serve_hands_over_and_re_handshakes_with_the_server() {
+    let host = Host::start(root());
+    let ways: &[bool] = if cfg!(windows) {
+        &[true]
+    } else {
+        &[false, true]
+    };
+    for &relay in ways {
+        let client = tempdir().unwrap();
+        let token = client.path().join("token");
+        fs::write(&token, TOKEN).unwrap();
+        let bin = client.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let exe = bin.join(format!("user-memory{}", std::env::consts::EXE_SUFFIX));
+        fs::copy(env!("CARGO_BIN_EXE_user-memory"), &exe).unwrap();
+        let mut command = Command::new(&exe);
+        command
+            .arg("serve")
+            .sandboxed(client.path())
+            .env("USER_MEMORY_URL", format!("http://{}/mcp", host.address))
+            .env("USER_MEMORY_TOKEN_FILE", &token)
+            .env("FAKE_USER_MEMORY", env!("CARGO_BIN_EXE_user-memory"))
+            .env("FAKE_USER_MEMORY_VERSION", "9.9.9")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if relay {
+            command.env("USER_MEMORY_TEST_RELAY", "1");
+        }
+        let mut child = ChildGuard(command.spawn().unwrap());
+        let mut input = child.0.stdin.take().unwrap();
+        let mut errors = child.0.stderr.take().unwrap();
+        let output = lines(child.0.stdout.take().unwrap());
+        writeln!(input, "{}", initialize(1)).unwrap();
+        input.flush().unwrap();
+        assert!(reply(&output).get("result").is_some());
+        writeln!(
+            input,
+            "{}",
+            json!({"jsonrpc":"2.0","method":"notifications/initialized"})
+        )
+        .unwrap();
+        writeln!(input, "{}", call(2, "index", json!({}))).unwrap();
+        input.flush().unwrap();
+        let before = reply(&output);
+        assert_ne!(before["result"]["isError"], true, "{before}");
+
+        let fakes = client.path().join("fakes");
+        fs::create_dir_all(&fakes).unwrap();
+        let staged = bin.join(format!(".new{}", std::env::consts::EXE_SUFFIX));
+        fs::copy(fake::fake(&fakes, "user-memory"), &staged).unwrap();
+        if cfg!(windows) {
+            fs::rename(&exe, bin.join("old.exe")).unwrap();
+        }
+        fs::rename(&staged, &exe).unwrap();
+
+        writeln!(input, "{}", call(3, "index", json!({}))).unwrap();
+        input.flush().unwrap();
+        let after = reply(&output);
+        assert_eq!(after["id"], 3, "{after}");
+        assert_ne!(after["result"]["isError"], true, "relay {relay}: {after}");
+        drop(input);
+        assert!(child.0.wait().unwrap().success());
+        let mut said = String::new();
+        errors.read_to_string(&mut said).unwrap();
+        assert!(
+            said.contains("user-memory 9.9.9: took over this session from"),
+            "relay {relay}: {said}"
+        );
+        assert!(!said.contains(TOKEN));
+    }
+}

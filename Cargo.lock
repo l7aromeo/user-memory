@@ -2016,6 +2016,7 @@ dependencies = [
  "rmcp",
  "rusqlite",
  "rust-stemmers",
+ "rustix",
  "schemars",
  "serde",
  "serde_json",

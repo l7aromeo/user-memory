@@ -44,8 +44,39 @@ Setup also makes the store's first [automatic backup](backup.md#automatic-backup
 when it has none from the last day, so an upgraded store is backed up daily
 from the start.
 
-After an upgrade, restart your agents and start new sessions. Old sessions
-keep the tools they started with.
+### Open sessions
+
+From 0.10.0, open agent sessions move to the new version on their own.
+Before each message, `user-memory serve` checks whether its binary was
+replaced (by its file id, not its modified time); once no call is in
+flight, it hands the session to the new binary on the same connection,
+with no new handshake and nothing lost. On macOS and Linux the new binary
+takes over the same process; on Windows the running `serve` relays to it.
+Setup then ends with:
+
+```output
+Setup complete. Open sessions move to this version on their next memory call.
+```
+
+A first install, a newly connected agent app, and an upgrade from a
+version before 0.10.0 still need one restart of the agents, and setup says
+``Restart your connected clients once`` as before. Resumed sessions then
+pick up the new version too.
+
+When the new version adds tools, the session tells the agent app
+(`notifications/tools/list_changed`), so it can reload them; an app that
+doesn't shows the new tools in its next session, and the tools it has keep
+working.
+
+On a native store, a call that arrives while setup is still migrating the
+store waits for the migration, up to 30 seconds, instead of being refused.
+
+If the new binary can't take a session over, the session keeps running the
+version it has, and its next tool reply says why, once:
+
+- ``user-memory … replaced the binary this session runs (…), but it is older, so this session keeps …; restart your client to run …``
+- ``user-memory … replaced the binary this session runs (…), but it can't continue this session's protocol (…), so this session keeps …; restart your client to run …``
+- ``user-memory was replaced on disk, but the new binary can't take over this session (…), so this session keeps …; run user-memory doctor, then restart your client.``
 
 ## Upgrade a shared server
 

@@ -26,6 +26,49 @@ impl Version {
     }
 }
 
+/// Names, in debug builds only, the version this build reports in place
+/// of its own: the tests' "newer build" is this binary run with it set.
+#[cfg(debug_assertions)]
+pub(crate) const TEST_VERSION: &str = "USER_MEMORY_TEST_VERSION";
+
+/// The version this build reports: its own, or in a debug build the one
+/// [`TEST_VERSION`] names.
+pub(crate) fn running() -> &'static str {
+    #[cfg(debug_assertions)]
+    {
+        static OVERRIDE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+        if let Some(version) = OVERRIDE
+            .get_or_init(|| std::env::var(TEST_VERSION).ok().filter(|v| !v.is_empty()))
+            .as_deref()
+        {
+            return version;
+        }
+    }
+    env!("CARGO_PKG_VERSION")
+}
+
+/// Whether this build reports a test version in place of its own, which
+/// adds the test-only `debug_version` tool.
+pub(crate) fn test_build() -> bool {
+    running() != env!("CARGO_PKG_VERSION")
+}
+
+/// The first release whose `serve` hands itself over to a replaced binary
+/// (#98): sessions served by an earlier one keep its code until their
+/// client restarts, so setup still tells the user to restart them.
+pub(crate) const HANDOVER_SINCE: Version = Version {
+    major: 0,
+    minor: 10,
+    patch: 0,
+};
+
+/// The version in `user-memory --version`'s output (`user-memory X.Y.Z`),
+/// or `None` when the output is anything else.
+pub(crate) fn of_binary(output: &str) -> Option<Version> {
+    let line = output.lines().map(clean).find(|line| !line.is_empty())?;
+    Version::parse(line.strip_prefix("user-memory ")?)
+}
+
 impl fmt::Display for Version {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
@@ -130,6 +173,24 @@ mod tests {
         assert!(version("2.1.139") < version("3.0.0"));
         assert_eq!(version("2.1.139"), MIN_WINDOWS_CLAUDE);
         assert_eq!(MIN_WINDOWS_CLAUDE.to_string(), "2.1.139");
+    }
+
+    #[test]
+    fn a_binary_version_is_read_from_its_version_line() {
+        assert_eq!(of_binary("user-memory 0.10.0\n"), Some(version("0.10.0")));
+        assert_eq!(
+            of_binary("\u{feff}user-memory 1.2.3\r\n"),
+            Some(version("1.2.3"))
+        );
+        for output in [
+            "",
+            "user-memory",
+            "user-memory 0.10",
+            "other 0.10.0",
+            "user-memory 0.10.0-dev",
+        ] {
+            assert_eq!(of_binary(output), None, "{output:?}");
+        }
     }
 
     #[test]

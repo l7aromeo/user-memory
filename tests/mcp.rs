@@ -116,7 +116,11 @@ fn initialization_delivers_portable_memory_guidance_and_keeps_tools_available() 
         init["result"]["serverInfo"]["version"],
         env!("CARGO_PKG_VERSION")
     );
-    assert_eq!(init["result"]["capabilities"], json!({"tools": {}}));
+    // A replaced binary tells the app its tools changed.
+    assert_eq!(
+        init["result"]["capabilities"],
+        json!({"tools": {"listChanged": true}})
+    );
     let guidance = init["result"]["instructions"]
         .as_str()
         .expect("MCP initialization must carry memory workflow instructions");

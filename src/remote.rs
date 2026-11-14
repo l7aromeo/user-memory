@@ -351,8 +351,18 @@ pub async fn host(options: HostOptions) -> Result<()> {
 }
 
 pub async fn connect(connection: Connection) -> Result<()> {
-    let remote = connection.transport()?;
     let (input, output) = stdio();
+    connect_over(connection, input, output).await
+}
+
+/// The bridge to the memory server for a client on `input` and `output`:
+/// `serve`'s, behind its hand-over front, and `connect`'s on stdio.
+pub async fn connect_over(
+    connection: Connection,
+    input: impl tokio::io::AsyncRead + Send + Unpin + 'static,
+    output: impl tokio::io::AsyncWrite + Send + Unpin + 'static,
+) -> Result<()> {
+    let remote = connection.transport()?;
     let local = rmcp::transport::async_rw::AsyncRwTransport::new_server(input, output);
     let endpoint = connection.url.clone();
     let token_file = connection.token_file.clone();
