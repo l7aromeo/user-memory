@@ -89,7 +89,12 @@ pub struct Selection {
     #[serde(default)]
     pub source: Option<Source>,
     /// active (the default), stale, superseded or all. tentative: not yet the user's own word; stale: a pattern lost a supporting memory and needs re-deriving or forgetting (user-memory skill, review); superseded: replaced, kept for history.
-    #[arg(long, value_enum, default_value = "active")]
+    #[arg(
+        long,
+        value_enum,
+        default_value = "active",
+        help = "active (the default), stale, superseded or all."
+    )]
     #[serde(default)]
     pub status: StatusFilter,
     /// Only memories stated in this conversation, such as codex:thread/<id>.

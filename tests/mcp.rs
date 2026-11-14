@@ -202,6 +202,38 @@ fn initialization_delivers_portable_memory_guidance_and_keeps_tools_available() 
         assert!(property(tool, field).is_null(), "{tool} advertises {field}");
     }
     assert!(property("index", "projects").is_object());
+    // An agent reads the whole definition in the schema; a person at a
+    // terminal reads the short CLI help, which never addresses an agent.
+    let field_doc = |tool: &str, field: &str| property(tool, field)["description"].clone();
+    assert!(
+        field_doc("record", "type")
+            .as_str()
+            .unwrap()
+            .contains("It is yours, not the user's rule.")
+    );
+    assert!(
+        field_doc("search", "status")
+            .as_str()
+            .unwrap()
+            .contains("tentative: not yet the user's own word")
+    );
+    for (command, short) in [
+        (
+            "record",
+            "Otherwise decision, goal, fact, behavior, pattern, lesson, or another label",
+        ),
+        ("index", "active (the default), stale, superseded or all"),
+    ] {
+        let help = Command::new(env!("CARGO_BIN_EXE_user-memory"))
+            .args([command, "--help"])
+            .sandboxed(tmp.path())
+            .output()
+            .unwrap();
+        let help = String::from_utf8(help.stdout).unwrap();
+        assert!(help.contains(short), "{help}");
+        assert!(!help.contains("It is yours"), "{help}");
+        assert!(!help.contains("tentative:"), "{help}");
+    }
     let update_id = property("update", "memory_id");
     assert_eq!(update_id["type"], "string");
     assert_eq!(update_id["format"], "uuid");
