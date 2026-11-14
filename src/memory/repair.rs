@@ -80,6 +80,9 @@ pub fn repair(db: &Path) -> Result<Repair> {
     let mut conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_WRITE)
         .with_context(|| format!("Cannot open {}", db.display()))?;
     conn.busy_timeout(super::schema::BUSY)?;
+    // As on every connection that writes (`schema::connect`): what the
+    // rebuild deletes from the old index is zeroed, not left in free space.
+    conn.pragma_update(None, "secure_delete", true)?;
     // Check, back up and repair under one write lock, so no other writer
     // changes the store in between.
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;

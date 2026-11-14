@@ -29,10 +29,7 @@ use stems::{Field, Stems, Text, fields, stamp, token};
 ///   are keyed by their text id, and VACUUM may renumber a rowid), in the
 ///   order the memories were stored. It copies the columns search filters
 ///   on under their `memories` names, so one filter serves both tables.
-/// - `search_words` holds each memory's stems under its key, each stem in
-///   the column of the strongest field holding it, as hex tokens (see
-///   `stems::token`). It stores no text and no positions: search asks only
-///   which memories hold a stem, and in which field.
+/// - `search_words` ([`WORDS`]) holds each memory's stems under its key.
 /// - `search_pending` lists the memories whose words changed since they
 ///   were indexed. Stemming needs Rust, so triggers queue the memory and
 ///   every write drains the queue before it commits.
@@ -63,7 +60,6 @@ CREATE TABLE IF NOT EXISTS search_keys (
     status TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
-CREATE VIRTUAL TABLE IF NOT EXISTS search_words USING fts5(category,title,type,body,content='',contentless_delete=1,detail=column,tokenize='ascii');
 CREATE TABLE IF NOT EXISTS search_pending (key INTEGER PRIMARY KEY NOT NULL);
 CREATE TABLE IF NOT EXISTS search_state (
     id INTEGER PRIMARY KEY CHECK(id=1),
@@ -103,21 +99,67 @@ CREATE TRIGGER IF NOT EXISTS search_vector_deleted AFTER DELETE ON memory_vector
     INSERT INTO search_changes(id) VALUES (OLD.id);
 END;";
 
+/// The keyword index: each memory's stems under its key, each stem in the
+/// column of the strongest field holding it, as hex tokens (see
+/// `stems::token`). It holds no text and no positions: search asks only
+/// which memories hold a stem, and in which field. The index stores its
+/// columns, the same tokens, because FTS5's `secure-delete` (see [`secure`])
+/// works only on an index that can read a deleted entry's tokens back.
+/// Part of the stored schema, as [`SEARCH`] is.
+const WORDS: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS search_words USING fts5(category,title,type,body,detail=column,tokenize='ascii');";
+
 /// Creates the search tables and triggers where missing, as every open of a
 /// current store does; a store created now gets an empty index stamped as
 /// this binary's.
 pub(super) fn create(conn: &Connection) -> Result<()> {
     conn.execute_batch(SEARCH)?;
+    conn.execute_batch(WORDS)?;
     Ok(())
 }
 
-/// Stamps a store just created, whose index is empty and so current.
-pub(super) fn stamp_new(conn: &Connection) -> Result<()> {
+/// Readies the index of a store just created: empty, so current, and
+/// removing deleted words at once.
+pub(super) fn start(conn: &Connection) -> Result<()> {
     conn.execute(
         "INSERT OR IGNORE INTO search_state(id,stemmed_by) VALUES (1,?1)",
         [stamp()],
     )?;
+    secure(conn)
+}
+
+/// Makes the keyword index take a deleted or replaced entry's tokens out of
+/// its pages in the deleting transaction, so a forgotten memory's words
+/// leave the store without merging the whole index. FTS5 keeps it in the
+/// index's own config table, not in its SQL, so each creation of the table
+/// sets it.
+fn secure(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "INSERT INTO search_words(search_words, rank) VALUES('secure-delete', 1)",
+        [],
+    )?;
     Ok(())
+}
+
+/// Whether the keyword index stores its columns, as [`WORDS`] makes it; a
+/// store not yet upgraded, which repair may mend, has a contentless one.
+fn stored(conn: &Connection) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='search_words_content')",
+        [],
+        |r| r.get(0),
+    )?)
+}
+
+/// Whether the keyword index removes deleted words at once (see [`secure`]).
+fn secured(conn: &Connection) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT v FROM search_words_config WHERE k='secure-delete'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()?
+        == Some(1))
 }
 
 /// The longest token the keyword index stores whole: FTS5 cuts longer
@@ -159,18 +201,6 @@ pub(super) fn settle(conn: &Connection) -> Result<()> {
         [CHANGES_KEPT],
     )?;
     drain(conn)
-}
-
-/// Merges the keyword index's segments into one, inside the caller's write
-/// transaction. A contentless index keeps a deleted entry's words in its
-/// segments until they merge; a write that removed text merges them, so
-/// none of its words stay in the store.
-pub(super) fn merge(conn: &Connection) -> Result<()> {
-    conn.execute(
-        "INSERT INTO search_words(search_words) VALUES('optimize')",
-        [],
-    )?;
-    Ok(())
 }
 
 /// Indexes the memories queued in `search_pending`, inside the caller's
@@ -248,12 +278,25 @@ pub(super) fn drain(conn: &Connection) -> Result<()> {
 
 /// Rebuilds the keyword index from the memories with this binary's code,
 /// inside the caller's write transaction: new keys in stored order, every
-/// memory's stems, and the current stamp.
+/// memory's stems, and the current stamp. FTS5's `delete-all` works only on
+/// a contentless index, as a store not yet upgraded has, and deleting row
+/// by row reads the index a repair mends; emptying the stored columns and
+/// rebuilding the index from them drops whatever it held instead, without
+/// freeing the table's own pages, which a miscounted free-page list would
+/// refuse.
 pub(super) fn rebuild(conn: &Connection) -> Result<()> {
+    if stored(conn)? {
+        conn.execute_batch(
+            "DELETE FROM search_words_content;
+INSERT INTO search_words(search_words) VALUES('rebuild');",
+        )?;
+        secure(conn)?;
+    } else {
+        conn.execute_batch("INSERT INTO search_words(search_words) VALUES('delete-all');")?;
+    }
     conn.execute_batch(
         "DELETE FROM search_pending;
 DELETE FROM search_keys;
-INSERT INTO search_words(search_words) VALUES('delete-all');
 INSERT INTO search_keys(id,memory_type,category,scope,project,source,status,updated_at) SELECT id,memory_type,category,scope,project,source,status,updated_at FROM memories ORDER BY rowid;
 INSERT INTO search_pending(key) SELECT key FROM search_keys;",
     )?;
@@ -424,6 +467,9 @@ pub(super) fn problems(conn: &Connection) -> Result<Vec<String>> {
         found.push(format!(
             "search index: {unmatched} keys do not match their memories"
         ));
+    }
+    if stored(conn)? && !secured(conn)? {
+        found.push("search index: it keeps deleted words until its segments merge".to_owned());
     }
     let mut expected: HashMap<(i64, String), &'static str> = HashMap::new();
     let mut stems = Stems::new();

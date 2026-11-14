@@ -371,6 +371,7 @@ fn search_index_tables_are_created_once_and_follow_store_level_changes() {
             "search_state",
             "search_words",
             "search_words_config",
+            "search_words_content",
             "search_words_data",
             "search_words_docsize",
             "search_words_idx"
@@ -460,10 +461,10 @@ fn repair_and_reindex_rebuild_a_damaged_keyword_index() {
     let s = Store::new();
     preferences(&s);
     let damage = || {
+        // Empties the index, as FTS5's own rebuild from no stored rows does.
         s.sql()
-            .execute(
-                "INSERT INTO search_words(search_words) VALUES('delete-all')",
-                [],
+            .execute_batch(
+                "DELETE FROM search_words_content; INSERT INTO search_words(search_words) VALUES('rebuild');",
             )
             .unwrap();
     };

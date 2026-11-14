@@ -766,7 +766,7 @@ fn a_stale_stamp_reads_every_memory_until_migrate_rebuilds_the_index() {
     store
         .sql()
         .execute_batch(
-            "UPDATE search_state SET stemmed_by='another version'; INSERT INTO search_words(search_words) VALUES('delete-all');",
+            "UPDATE search_state SET stemmed_by='another version'; DELETE FROM search_words_content; INSERT INTO search_words(search_words) VALUES('rebuild');",
         )
         .unwrap();
     // The emptied index is not read: search stems every memory itself.
