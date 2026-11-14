@@ -1515,7 +1515,9 @@ def main():
     parser.add_argument("--client", choices=["claude", "codex", "both"], default="both")
     parser.add_argument("--scenario", action="append", default=[])
     parser.add_argument("--budget", type=int, default=100)
-    parser.add_argument("--binary", default=str(ROOT / "target/debug/user-memory"))
+    parser.add_argument("--binary", action="append", default=[], metavar="[LABEL=]PATH",
+                        help="a binary under test, labelled (such as by its commit) in the report; "
+                             "give it again to run the batch on each, as a branch beside its base")
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--rehearse", action="store_true",
@@ -1551,7 +1553,8 @@ def main():
             runs = runs_of(s, ["claude", "codex"])
             print(f"{s['name']:48} {session_opens(s)} session(s) x {len(runs)} run(s)  {s['summary']}")
         return
-    planned = sum(session_opens(s) * len(runs_of(s, clients)) for s in scenarios)
+    binaries = under_test(args.binary or [str(ROOT / "target/debug/user-memory")])
+    planned = len(binaries) * sum(session_opens(s) * len(runs_of(s, clients)) for s in scenarios)
     print(f"{planned} agent sessions planned; {counted_runs()} already counted; budget {args.budget}")
     for s in scenarios:
         runs = runs_of(s, clients)
@@ -1572,9 +1575,11 @@ def main():
         stale = stale_models(codex_models(), [CODEX_MODEL, CODEX_DEFAULT_MODEL, CODEX_TOP_MODEL])
         if stale:
             sys.exit("refusing: " + "; ".join(stale))
-    binary = Path(args.binary).resolve()
-    if not os.access(binary, os.X_OK):
-        sys.exit(f"build the binary first: {binary}")
+    for b in binaries:
+        print(f"binary {b['label']}: {b['path']} sha256 {b['sha256']}")
+    same = same_builds(binaries)
+    if same:
+        sys.exit(f"refusing: {same}")
     if args.dry_run:
         print("guard watches:")
         for path, digest in fingerprint().items():
@@ -1589,8 +1594,10 @@ def main():
     with open(batch / "guard.log", "w") as log:
         guard = Guard(log)
         guard.check("baseline re-read")
+        (batch / "binaries.json").write_text(json.dumps(binaries, indent=1))
         if args.rehearse:
-            failures = rehearse(scenarios, clients, trials, binary, spec.get("projects", {}), guard)
+            failures = sum(rehearse(scenarios, clients, trials, Path(b["path"]),
+                                    spec.get("projects", {}), guard) for b in binaries)
             print(f"\nrehearsal: {failures} trial setup(s) failed; report: {batch}")
             sys.exit(1 if failures else 0)
         if problems:
@@ -1598,11 +1605,14 @@ def main():
         if counted_runs() + planned > args.budget:
             sys.exit("refusing: the batch would exceed the run budget")
         results = []
-        for scenario in scenarios:
+        for b, scenario in [(b, s) for b in binaries for s in scenarios]:
             for client, repeat in runs_of(scenario, clients):
-                result = trial(scenario, client, trials, binary, spec.get("projects", {}), guard)
+                result = trial(scenario, client, trials, Path(b["path"]), spec.get("projects", {}), guard)
                 result["repeat"] = repeat
+                result["binary"] = b["label"]
                 name = f"{scenario['name']}-{client}-{repeat}"
+                if len(binaries) > 1:
+                    name = f"{b['label']}-{name}"
                 (batch / f"{name}.json").write_text(json.dumps(result, indent=1))
                 results.append(result)
                 print(f"{'PASS' if result['passed'] else 'FAIL'} {name}", flush=True)
@@ -1615,19 +1625,26 @@ def main():
 
 
 def summarize(batch, results):
-    """Writes and returns the pass-rate table of a batch."""
+    """Writes and returns the pass-rate table of a batch, with the binaries
+    it ran."""
     summary = {}
     for r in results:
-        key = (r["scenario"], r["client"])
+        key = (r["scenario"], r["client"], r.get("binary", "-"))
         passed, total, real, sent = summary.get(key, (0, 0, 0, 0))
         sent_origins = [o for s in r["steps"] for o in s["origins"]]
         summary[key] = (passed + r["passed"], total + 1,
                         real + sum(o["real"] for o in sent_origins), sent + len(sent_origins))
-    lines = [f"# Eval batch {batch.name}", "",
-             "| scenario | client | passed | origins with the real conversation id |",
-             "|---|---|---|---|"]
-    lines += [f"| {s} | {c} | {p}/{t} | {f'{o}/{n}' if n else '-'} |"
-              for (s, c), (p, t, o, n) in sorted(summary.items())]
+    lines = [f"# Eval batch {batch.name}", ""]
+    saved = batch / "binaries.json"
+    if saved.exists():
+        lines += ["Binaries under test:", ""]
+        lines += [f"- {b['label']}: `{b['path']}` sha256 `{b['sha256']}`"
+                  for b in json.loads(saved.read_text())]
+        lines.append("")
+    lines += ["| scenario | client | binary | passed | origins with the real conversation id |",
+              "|---|---|---|---|---|"]
+    lines += [f"| {s} | {c} | {b} | {p}/{t} | {f'{o}/{n}' if n else '-'} |"
+              for (s, c, b), (p, t, o, n) in sorted(summary.items())]
     lines += ["", usage_table(results), "", f"Agent sessions counted so far: {counted_runs()}"]
     text = "\n".join(lines) + "\n"
     (batch / "summary.md").write_text(text)
@@ -1635,24 +1652,59 @@ def summarize(batch, results):
 
 
 def usage_table(results):
-    """Tokens and estimated cost of a batch per scenario, client and model,
-    with a total row. A trial saved before usage was recorded adds nothing."""
+    """Tokens and estimated cost of a batch per scenario, client, binary and
+    model, with a total row. A trial saved before usage was recorded adds nothing."""
     rows, total = {}, {}
     for r in results:
         for model, used in (r.get("usage") or {}).items():
-            add_usage(rows.setdefault((r["scenario"], r["client"], model), {}), {model: used})
+            add_usage(rows.setdefault((r["scenario"], r["client"], r.get("binary", "-"), model), {}),
+                      {model: used})
             add_usage(total, {"all": used})
 
     def cells(used):
         cost = used["cost_usd"]
         return (f"{used['input']:,} | {used['cached_input']:,} | {used['output']:,} | "
                 f"{used['reasoning']:,} | {'-' if cost is None else f'${cost:.2f}'}")
-    lines = ["| scenario | client | model | input | cached input | output | reasoning | cost |",
-             "|---|---|---|---|---|---|---|---|"]
-    lines += [f"| {s} | {c} | {m} | {cells(used[m])} |" for (s, c, m), used in sorted(rows.items())]
+    lines = ["| scenario | client | binary | model | input | cached input | output | reasoning | cost |",
+             "|---|---|---|---|---|---|---|---|---|"]
+    lines += [f"| {s} | {c} | {b} | {m} | {cells(used[m])} |"
+              for (s, c, b, m), used in sorted(rows.items())]
     if total:
-        lines.append(f"| all | | | {cells(total['all'])} |")
+        lines.append(f"| all | | | | {cells(total['all'])} |")
     return "\n".join(lines)
+
+
+def under_test(specs):
+    """The binaries a run tests, from `--binary [LABEL=]PATH` values: each
+    with its label (the file's name unless given), resolved path and
+    SHA-256, so the report says which build each result is from."""
+    binaries = []
+    for spec in specs:
+        label, _, path = spec.rpartition("=") if "=" in spec else ("", "", spec)
+        path = Path(path).expanduser().resolve()
+        if not os.access(path, os.X_OK):
+            sys.exit(f"build the binary first: {path}")
+        binaries.append({"label": label or path.name, "path": str(path),
+                         "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+    if len({b["label"] for b in binaries}) < len(binaries):
+        sys.exit("refusing: two binaries share a label; give each its own, as LABEL=PATH")
+    return binaries
+
+
+def same_builds(binaries):
+    """Why a run comparing builds would compare one build with itself, or
+    None: two binaries with the same contents."""
+    seen = {}
+    for b in binaries:
+        if b["sha256"] in seen:
+            other = seen[b["sha256"]]
+            return (f"{other['label']} ({other['path']}) and {b['label']} ({b['path']}) are the same "
+                    "file contents, so the run would compare one build with itself. The likely cause: "
+                    "a build folder that took the second commit as already built, because `git "
+                    "archive` stamps files with the commit's time; extract with `tar -x -m` "
+                    "(evals/README.md, Running a batch).")
+        seen[b["sha256"]] = b
+    return None
 
 
 def resummarize(batch):

@@ -523,15 +523,50 @@ class Usage(unittest.TestCase):
     def test_the_report_shows_usage_per_scenario_client_and_model(self):
         used = {"input": 1000, "cached_input": 900, "output": 50, "reasoning": 0, "cost_usd": 0.5}
         table = run.usage_table([
-            {"scenario": "s", "client": "claude", "usage": {"claude-sonnet-5-5": used}},
-            {"scenario": "s", "client": "claude", "usage": {"claude-sonnet-5-5": used}},
+            {"scenario": "s", "client": "claude", "binary": "a1", "usage": {"claude-sonnet-5-5": used}},
+            {"scenario": "s", "client": "claude", "binary": "a1", "usage": {"claude-sonnet-5-5": used}},
             {"scenario": "s", "client": "codex", "usage": {"gpt-6-luna": {**used, "cost_usd": None}}},
             # A trial saved before usage was recorded.
             {"scenario": "t", "client": "codex"},
         ])
-        self.assertIn("| s | claude | claude-sonnet-5-5 | 2,000 | 1,800 | 100 | 0 | $1.00 |", table)
-        self.assertIn("| s | codex | gpt-6-luna | 1,000 | 900 | 50 | 0 | - |", table)
-        self.assertIn("| all | | | 3,000 | 2,700 | 150 | 0 | - |", table)
+        self.assertIn("| s | claude | a1 | claude-sonnet-5-5 | 2,000 | 1,800 | 100 | 0 | $1.00 |", table)
+        self.assertIn("| s | codex | - | gpt-6-luna | 1,000 | 900 | 50 | 0 | - |", table)
+        self.assertIn("| all | | | | 3,000 | 2,700 | 150 | 0 | - |", table)
+
+
+class BinariesUnderTest(unittest.TestCase):
+    def binary(self, folder, name, contents):
+        path = folder / name
+        path.write_bytes(contents)
+        path.chmod(0o755)
+        return path
+
+    def test_two_builds_with_the_same_contents_stop_the_run(self):
+        folder = Path(tempfile.mkdtemp())
+        base = self.binary(folder, "user-memory-67019a2", b"build of main")
+        same = self.binary(folder, "user-memory-a8e9f58", b"build of main")
+        other = self.binary(folder, "branch", b"build of the branch")
+        binaries = run.under_test([f"main={base}", str(same)])
+        self.assertEqual([b["label"] for b in binaries], ["main", "user-memory-a8e9f58"])
+        self.assertEqual(binaries[0]["sha256"], binaries[1]["sha256"])
+        stop = run.same_builds(binaries)
+        self.assertIn("are the same file contents", stop)
+        self.assertIn("tar -x -m", stop)
+        self.assertIsNone(run.same_builds(run.under_test([f"main={base}", f"branch={other}"])))
+        self.assertIsNone(run.same_builds(run.under_test([str(other)])))
+        with self.assertRaises(SystemExit):
+            run.under_test([f"x={base}", f"x={other}"])
+        with self.assertRaises(SystemExit):
+            run.under_test([str(folder / "missing")])
+
+    def test_the_report_names_each_binary_and_its_hash(self):
+        batch = Path(tempfile.mkdtemp())
+        (batch / "binaries.json").write_text(json.dumps(
+            [{"label": "main", "path": "/b/user-memory-67019a2", "sha256": "ab" * 32}]))
+        text = run.summarize(batch, [{"scenario": "s", "client": "codex", "binary": "main", "passed": True,
+                                      "steps": [], "usage": {}}])
+        self.assertIn(f"- main: `/b/user-memory-67019a2` sha256 `{'ab' * 32}`", text)
+        self.assertIn("| s | codex | main | 1/1 | - |", text)
 
 
 class CommitsAndSeeds(unittest.TestCase):

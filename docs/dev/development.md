@@ -443,8 +443,12 @@ STALE and nothing runs; rewrite or delete them deliberately. Entries marked
 `expect: survive` document equivalent mutants. Exit status: 0 all as expected,
 1 unexpected result, 2 stale catalog, dirty tree or bad arguments.
 
-When measuring on a clean export (`git archive`), give each export its own
-`CARGO_TARGET_DIR`; a reused one can serve a stale binary.
+When measuring on a clean export (`git archive`), extract it with `tar -x -m`
+or give each export its own `CARGO_TARGET_DIR`. `git archive` stamps files
+with the commit's time, so a reused target folder whose last build is newer
+takes the commit as built already and serves the previous binary. The
+evaluation harness prints each binary's SHA-256 and refuses to compare two
+with the same contents ([evals/README.md](../../evals/README.md#running-a-batch)).
 
 ## Agent evaluations
 

@@ -37,22 +37,33 @@ holds whole homes, binaries and projects, so each new batch keeps only the
 newest 3 batch folders there, itself included, and removes the older ones;
 `USER_MEMORY_EVAL_KEEP_TRIALS=N` keeps N. Only folders named like a batch
 (`YYYYMMDD-HHMMSS`) are removed; anything else there stays.
-`--binary` chooses the binary under test (default
-`target/debug/user-memory`).
+`--binary [LABEL=]PATH` chooses the binary under test (default
+`target/debug/user-memory`), labelled in the report by `LABEL`, such as its
+commit, or by its file name. Given more than once, the batch runs on each, as
+a branch beside its base, in one report. `--dry-run`, `--rehearse` and the
+report show each binary's path and SHA-256, and a run stops before its first
+session when two of its binaries have the same contents: that compares one
+build with itself.
 
 ## Running a batch
 
-1. Build the binary under test from a clean export with its own target
-   directory, so no stale build is tested, outside `/tmp` for the same
-   reason as the trials, and pass it with `--binary`. Reuse the one `build`
+1. Build the binary under test from a clean export, outside `/tmp` for the
+   same reason as the trials, and pass it with `--binary`. Reuse the one `build`
    folder for every commit: the export is replaced, so no file deleted
    since an earlier commit is built, and the target folder rebuilds only
-   what changed:
+   what changed. `tar -m` gives the files the time they were extracted:
+   with the commit's time, which `git archive` sets, cargo takes a commit
+   older than the last build as built already, and the binary is the
+   previous commit's. Copy each binary out, and check it holds a text only
+   that commit has:
 
        B=~/Library/Caches/user-memory-eval/build
-       rm -rf $B/export && mkdir -p $B/export && git archive <commit> | tar -x -C $B/export
+       rm -rf $B/export && mkdir -p $B/export && git archive <commit> | tar -x -m -C $B/export
        (cd $B/export && CARGO_TARGET_DIR=$B/target cargo build --locked)
+       mkdir -p $B/bin && cp $B/target/debug/user-memory $B/bin/user-memory-<commit>
 
+   To run a branch beside its base, pass both:
+   `--binary 67019a2=$B/bin/user-memory-67019a2 --binary <commit>=$B/bin/user-memory-<commit>`.
 2. Create the two eval logins (below) if they are missing; `--dry-run` says.
 3. Quit the ChatGPT and Codex apps for the whole batch: their background
    app-server writes the real `~/.codex`, which stops the batch. Check that
