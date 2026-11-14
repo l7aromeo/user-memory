@@ -49,6 +49,9 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+# The stand-in model rehearsals run the real clients against.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import fake_model  # noqa: E402
 HOME = Path.home()
 OUT = Path(os.environ.get("USER_MEMORY_EVAL_OUT", "/tmp/user-memory-evals"))
 

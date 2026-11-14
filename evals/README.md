@@ -86,6 +86,18 @@ mode a batch would use:
 starts only if the sessions already counted plus those it plans stay within
 it. After a 4-session smoke test, a 31-session batch needs `--budget 35`.
 
+## The fake model
+
+`evals/fake_model.py` stands in for the Anthropic Messages API and the
+OpenAI Responses API, so the real Claude Code and Codex can run a turn that
+bills nothing. It listens on 127.0.0.1 only, forwards nothing and answers
+each request from a script: a text, or a tool call, which can wait for the
+test to release it so the test can act during a turn. It keeps each
+request's path and JSON body, never its headers, so no token a client sends
+reaches its record or its log file, which a caller keeps in the trial
+folder. Every reply reports the same usage (`USAGE`). `python3 -I
+evals/test_run.py` checks it with plain HTTP, so it needs neither client.
+
 ## Logins
 
 Trials never use the user's own logins. Create two dedicated ones once:

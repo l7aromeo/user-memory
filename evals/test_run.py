@@ -7,7 +7,10 @@ import importlib.util
 import json
 import re
 import tempfile
+import threading
+import time
 import types
+import urllib.request
 import unittest
 from pathlib import Path
 
@@ -15,6 +18,7 @@ HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location("run", HERE / "run.py")
 run = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(run)
+fake_model = run.fake_model
 
 
 class Escalation(unittest.TestCase):
@@ -567,6 +571,68 @@ class BinariesUnderTest(unittest.TestCase):
                                       "steps": [], "usage": {}}])
         self.assertIn(f"- main: `/b/user-memory-67019a2` sha256 `{'ab' * 32}`", text)
         self.assertIn("| s | codex | main | 1/1 | - |", text)
+
+
+class FakeModel(unittest.TestCase):
+    """The fake model's own behaviour, with plain HTTP: no client needed."""
+
+    @staticmethod
+    def post(url, path, body, headers=()):
+        request = urllib.request.Request(url + path, data=json.dumps(body).encode(),
+                                         headers={"content-type": "application/json", **dict(headers)})
+        with urllib.request.urlopen(request, timeout=10) as reply:
+            return reply.read().decode()
+
+    @staticmethod
+    def events(stream):
+        return [json.loads(line[len("data: "):]) for line in stream.splitlines() if line.startswith("data: ")]
+
+    def test_it_listens_on_loopback_and_answers_from_its_script_in_order(self):
+        log = Path(tempfile.mkdtemp()) / "model.jsonl"
+        script = {"anthropic": [{"tool": "AskUserQuestion", "input": {"questions": []}}, {"text": "noted"}],
+                  "openai": [{"tool": "update_plan", "input": {"plan": []}}]}
+        with fake_model.FakeModel(script, log) as model:
+            self.assertTrue(model.url.startswith("http://127.0.0.1:"))
+            tools = [{"name": "x"}]
+            first = self.events(self.post(model.url, "/v1/messages", {"stream": True, "tools": tools},
+                                          [("authorization", "Bearer secret-token-123")]))
+            block = next(e for e in first if e["type"] == "content_block_start")["content_block"]
+            delta = next(e for e in first if e["type"] == "content_block_delta")["delta"]
+            self.assertEqual((block["type"], block["name"]), ("tool_use", "AskUserQuestion"))
+            self.assertEqual(json.loads(delta["partial_json"]), {"questions": []})
+            # Claude Code's side calls carry no tools and take no reply.
+            side = json.loads(self.post(model.url, "/v1/messages", {"messages": []}))
+            self.assertEqual(side["content"], [{"type": "text", "text": "side"}])
+            second = json.loads(self.post(model.url, "/v1/messages", {"tools": tools}))
+            self.assertEqual(second["content"], [{"type": "text", "text": "noted"}])
+            third = json.loads(self.post(model.url, "/v1/messages", {"tools": tools}))
+            self.assertEqual(third["content"], [{"type": "text", "text": "done"}])
+            openai = self.events(self.post(model.url, "/v1/responses", {"input": []}))
+            item = next(e for e in openai if e["type"] == "response.output_item.done")["item"]
+            self.assertEqual((item["type"], item["name"]), ("function_call", "update_plan"))
+            usage = next(e for e in openai if e["type"] == "response.completed")["response"]["usage"]
+            self.assertEqual((usage["input_tokens"], usage["input_tokens_details"]["cached_tokens"]),
+                             (fake_model.USAGE["input"], fake_model.USAGE["cached_input"]))
+            self.assertEqual(len(model.main_requests("anthropic")), 3)
+        # Bodies are kept; headers, and the token in one, never are.
+        logged = log.read_text()
+        self.assertEqual(len(logged.splitlines()), 5)
+        self.assertNotIn("secret-token-123", logged)
+        self.assertNotIn("authorization", logged.lower())
+        self.assertNotIn("secret-token-123", json.dumps(model.requests))
+
+    def test_a_held_reply_waits_for_release(self):
+        with fake_model.FakeModel({"openai": [{"text": "late", "hold": True}]}) as model:
+            answered = []
+            thread = threading.Thread(target=lambda: answered.append(
+                self.post(model.url, "/v1/responses", {"input": []})))
+            thread.start()
+            self.assertTrue(model.wait_held(10))
+            time.sleep(0.2)
+            self.assertEqual(answered, [])
+            model.release()
+            thread.join(10)
+            self.assertIn("late", answered[0])
 
 
 class CommitsAndSeeds(unittest.TestCase):
