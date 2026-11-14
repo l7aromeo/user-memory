@@ -66,7 +66,9 @@ pub(crate) const HANDOVER_SINCE: Version = Version {
 /// The oldest client this server supports, which the handshake names so a
 /// client can say when it must be upgraded. Raised only by a release whose
 /// server needs something older clients don't send: none since 0.8.0, the
-/// first that sends the 8-character memory ids this server reads.
+/// first that sends the 8-character memory ids this server reads. Only a
+/// client from 0.10.0 on reads it, so the floor first matters for a release
+/// after 0.10.0.
 pub(crate) const MIN_CLIENT: Version = Version {
     major: 0,
     minor: 8,
