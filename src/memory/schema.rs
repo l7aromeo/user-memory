@@ -158,8 +158,9 @@ pub fn connect(db: &Path) -> Result<Connection> {
     // left in free space, where a forgotten memory's text would stay in
     // the file and in every page-by-page backup of it.
     conn.pragma_update(None, "secure_delete", true)?;
-    let found = version(&conn)?;
-    if found != SCHEMA_VERSION {
+    let current = schema_version();
+    let found = wait_for_migration(&conn, version(&conn)?, current)?;
+    if found != current {
         #[cfg(debug_assertions)]
         pause_for_tests();
         // Refuse a store this binary does not own before taking a write
@@ -169,9 +170,9 @@ pub fn connect(db: &Path) -> Result<Connection> {
         // without their version.
         let snapshot = conn.unchecked_transaction()?;
         let found = version(&snapshot)?;
-        if found != SCHEMA_VERSION {
-            let kind = inspect(&snapshot, found, super::migrate::BASELINE, SCHEMA_VERSION)?;
-            if let Some(refusal) = refusal(&snapshot, db, found, &kind, SCHEMA_VERSION)? {
+        if found != current {
+            let kind = inspect(&snapshot, found, super::migrate::BASELINE, current)?;
+            if let Some(refusal) = refusal(&snapshot, db, found, &kind, current)? {
                 bail!(refusal);
             }
         }
@@ -180,10 +181,10 @@ pub fn connect(db: &Path) -> Result<Connection> {
         // agree.
         let tx = write(&conn)?;
         let found = version(&tx)?;
-        if found != SCHEMA_VERSION {
+        if found != current {
             // Only an empty database gets the schema; servers never migrate.
-            let kind = inspect(&tx, found, super::migrate::BASELINE, SCHEMA_VERSION)?;
-            if let Some(refusal) = refusal(&tx, db, found, &kind, SCHEMA_VERSION)? {
+            let kind = inspect(&tx, found, super::migrate::BASELINE, current)?;
+            if let Some(refusal) = refusal(&tx, db, found, &kind, current)? {
                 bail!(refusal);
             }
             tx.execute_batch(SCHEMA)?;
@@ -192,7 +193,7 @@ pub fn connect(db: &Path) -> Result<Connection> {
             tx.execute_batch(super::history::EVENTS)?;
             super::index::create(&tx)?;
             super::index::start(&tx)?;
-            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            tx.pragma_update(None, "user_version", current)?;
         }
         tx.commit()?;
     }
@@ -224,6 +225,64 @@ pub fn connect(db: &Path) -> Result<Connection> {
     conn.execute_batch(super::history::EVENTS)?;
     super::index::create(&conn)?;
     Ok(conn)
+}
+
+/// How long a `serve` that took over a session from a replaced binary
+/// waits for a store older than its code to be migrated. Setup replaces
+/// the binary first, then backs the store up and migrates it; on a large
+/// store that takes seconds, which a call then waits instead of being
+/// refused. Past it the call is refused as before: the store was not being
+/// migrated.
+const MIGRATION_WAIT: Duration = Duration::from_secs(30);
+/// How often the waiting `serve` reads the store's version again.
+const MIGRATION_POLL: Duration = Duration::from_millis(100);
+/// Until when this process waits for a migration: set by a `serve` that
+/// took over a session.
+static MIGRATION_DEADLINE: std::sync::Mutex<Option<std::time::Instant>> =
+    std::sync::Mutex::new(None);
+
+/// Makes this process wait, up to [`MIGRATION_WAIT`] from now, for a store
+/// older than its code to be migrated, instead of refusing it at once.
+pub fn expect_migration() {
+    *MIGRATION_DEADLINE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+        Some(std::time::Instant::now() + MIGRATION_WAIT);
+}
+
+/// The schema version of the store behind `conn`, found at `found`: once a
+/// migration expected by [`expect_migration`] made it `current`, or the
+/// wait ran out. Only an older store with tables waits; an empty, current,
+/// newer or foreign one never does.
+fn wait_for_migration(conn: &Connection, mut found: i64, current: i64) -> Result<i64> {
+    let deadline = *MIGRATION_DEADLINE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(deadline) = deadline else {
+        return Ok(found);
+    };
+    while found < current
+        && std::time::Instant::now() < deadline
+        && inspect(conn, found, super::migrate::BASELINE, current)? == Found::Older
+    {
+        std::thread::sleep(MIGRATION_POLL);
+        found = version(conn)?;
+    }
+    Ok(found)
+}
+
+/// The schema version this build uses: [`SCHEMA_VERSION`], or in a debug
+/// build the one `USER_MEMORY_TEST_SCHEMA_VERSION` names, for the tests of
+/// a binary that meets a store migrated to a later version.
+fn schema_version() -> i64 {
+    #[cfg(debug_assertions)]
+    if let Some(version) = std::env::var("USER_MEMORY_TEST_SCHEMA_VERSION")
+        .ok()
+        .and_then(|version| version.parse().ok())
+    {
+        return version;
+    }
+    SCHEMA_VERSION
 }
 
 /// A connection that keeps the store at `db` open while a server runs, or

@@ -3177,3 +3177,48 @@ fn a_docker_server_that_cannot_reach_ollama_on_linux_names_the_bridge_fix() {
         );
     }
 }
+
+/// Setup's restart line stays only while the release an install replaces
+/// can't hand its sessions over to the new binary: a first install, and an
+/// upgrade from a release before the hand-over, say it; an upgrade from a
+/// release with it says open sessions move on their next call. Both kinds
+/// of install. Versions come from the debug build's test version, which
+/// the installed binary reports and records.
+#[test]
+fn the_restart_line_is_said_only_for_an_upgrade_from_a_release_without_the_hand_over() {
+    const RESTART: &str = "\nSetup complete. Restart your connected clients once; memory starts automatically after that.\n";
+    const MOVES: &str =
+        "\nSetup complete. Open sessions move to this version on their next memory call.\n";
+    let releases = Releases::start();
+    for kind in ["native", "docker"] {
+        let c = Client::bare();
+        let _server = FakeServer(&c);
+        let port = closed_port().to_string();
+        let args: &[&str] = if kind == "docker" {
+            &["--local", "docker", "--port", &port]
+        } else {
+            &["--local", "native"]
+        };
+        // Installs, then an upgrade from this build's own version (before
+        // the hand-over), then from 0.10.0, which has it.
+        for (version, restart) in [
+            (env!("CARGO_PKG_VERSION"), true),
+            ("0.10.0", true),
+            ("0.10.1", false),
+        ] {
+            let out = c.install(&releases, &[("USER_MEMORY_TEST_VERSION", version)], args);
+            let (stdout, stderr) = text(&out);
+            assert!(out.status.success(), "{kind} {version}: {stderr}");
+            assert_eq!(
+                stdout.contains(RESTART),
+                restart,
+                "{kind} {version}: {stdout}"
+            );
+            assert_eq!(
+                stdout.contains(MOVES),
+                !restart,
+                "{kind} {version}: {stdout}"
+            );
+        }
+    }
+}

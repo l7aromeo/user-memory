@@ -44,6 +44,7 @@ fn main() -> ExitCode {
         "cargo-about" => 0,
         "rustc" => say("host: aarch64-apple-darwin"),
         "rustup" => say("aarch64-apple-darwin"),
+        "user-memory" => newer_build(&args),
         other => {
             eprintln!("user-memory-fake: no fake for {other:?}");
             1
@@ -751,5 +752,36 @@ fn cargo(args: &[String]) -> u8 {
             0
         }
         _ => 2,
+    }
+}
+
+/// A newer user-memory, for the hand-over and upgrade tests: the real test
+/// build at `$FAKE_USER_MEMORY`, run with the version
+/// `$FAKE_USER_MEMORY_VERSION` (and the schema version
+/// `$FAKE_USER_MEMORY_SCHEMA`, when set) that a debug build reports in
+/// place of its own. On Unix it becomes that program, keeping its process,
+/// as `exec` does; on Windows it runs it on the same input and output.
+fn newer_build(args: &[String]) -> u8 {
+    let real = env::var_os("FAKE_USER_MEMORY").unwrap();
+    let mut command = Command::new(real);
+    command.args(args).env(
+        "USER_MEMORY_TEST_VERSION",
+        env::var_os("FAKE_USER_MEMORY_VERSION").unwrap(),
+    );
+    if let Some(schema) = env::var_os("FAKE_USER_MEMORY_SCHEMA") {
+        command.env("USER_MEMORY_TEST_SCHEMA_VERSION", schema);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        panic!("exec failed: {}", command.exec());
+    }
+    #[cfg(not(unix))]
+    {
+        let status = command.status().unwrap();
+        status
+            .code()
+            .and_then(|code| u8::try_from(code).ok())
+            .unwrap_or(1)
     }
 }

@@ -4,10 +4,10 @@
 #![deny(unsafe_code)]
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use rmcp::{
     Peer, RoleServer, ServiceExt, handler::server::wrapper::Parameters, tool, tool_handler,
-    tool_router, transport::stdio,
+    tool_router,
 };
 use serde_json::{Value, json};
 use std::{
@@ -16,6 +16,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod handover;
 mod memory;
 mod paths;
 mod platform;
@@ -433,17 +434,31 @@ const _: () = assert!(
     "the server instructions are over INSTRUCTIONS_LIMIT"
 );
 
-#[tool_handler]
+impl UserMemoryServer {
+    /// The tools this server offers: its own, and in a debug build that
+    /// reports a test version, the test-only `debug_version`.
+    fn router(&self) -> rmcp::handler::server::router::tool::ToolRouter<Self> {
+        let router = Self::tool_router();
+        #[cfg(debug_assertions)]
+        if setup::versions::test_build() {
+            return router + Self::debug_router();
+        }
+        router
+    }
+}
+
+#[tool_handler(router = self.router())]
 impl rmcp::ServerHandler for UserMemoryServer {
     fn get_info(&self) -> rmcp::model::ServerConfig {
         rmcp::model::ServerConfig::new(
             rmcp::model::ServerCapabilities::builder()
                 .enable_tools()
+                .enable_tool_list_changed()
                 .build(),
         )
         .with_server_info(rmcp::model::Implementation::new(
             "user-memory",
-            env!("CARGO_PKG_VERSION"),
+            setup::versions::running(),
         ))
         .with_instructions(INSTRUCTIONS.to_owned())
     }
@@ -615,9 +630,42 @@ fn read_input(path: &Path, what: &str) -> Result<String> {
     String::from_utf8(bytes).with_context(|| format!("{what} must be UTF-8 JSON"))
 }
 
+/// This binary's own server on the store at `db`, over `input` and
+/// `output`: `serve`'s, behind [`handover`]'s front.
+async fn serve_here(
+    db: PathBuf,
+    input: impl tokio::io::AsyncRead + Send + Unpin + 'static,
+    output: impl tokio::io::AsyncWrite + Send + Unpin + 'static,
+) -> Result<()> {
+    let backups = memory::backups::watch(&db);
+    let held = memory::hold(&db);
+    let service = UserMemoryServer {
+        db,
+        in_client_folder: true,
+    }
+    .serve((input, output))
+    .await?;
+    // The front ends the session by closing the input, when the client
+    // closed its own or the process is asked to stop; the last backup
+    // check runs either way.
+    service.waiting().await?;
+    // Closed first: the last connection copies the log into the store,
+    // which the last check must not take for a later change.
+    drop(held);
+    setup::finish_background_syncs().await;
+    drop(backups);
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let mut cli = Cli::parse();
+    // The version a debug build is told to report is the one --version says.
+    let mut cli = Cli::from_arg_matches(
+        &Cli::command()
+            .version(setup::versions::running())
+            .get_matches(),
+    )
+    .unwrap_or_else(|err| err.exit());
     match &mut cli.command {
         Command::Index(input) => resolve_projects(&mut input.selection.projects)?,
         Command::Read(input) => resolve_projects(&mut input.selection.projects)?,
@@ -847,33 +895,17 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&summary)?);
         }
         Command::Serve => {
-            if let Some(connection) = connection {
-                return remote::connect(connection).await;
+            if handover::probing() {
+                // Asked by a serve about to hand over: answer before
+                // anything touches the store.
+                println!("{}", handover::probe_answer());
+                return Ok(());
             }
-            let backups = memory::backups::watch(&db);
-            let held = memory::hold(&db);
-            let service = UserMemoryServer {
-                db,
-                in_client_folder: true,
-            }
-            .serve(stdio())
-            .await?;
-            // A client ends the session by closing the server's input, and
-            // may send SIGTERM after; either way the last backup check runs.
-            let signalled = tokio::select! {
-                ended = service.waiting() => { ended?; false }
-                () = remote::stopped() => true,
+            let inner = match connection {
+                Some(connection) => handover::Inner::Bridge(connection),
+                None => handover::Inner::Local(db),
             };
-            // Closed first: the last connection copies the log into the
-            // store, which the last check must not take for a later change.
-            drop(held);
-            setup::finish_background_syncs().await;
-            drop(backups);
-            if signalled {
-                // Exit now: the blocked read of the input must not hold the
-                // runtime open.
-                std::process::exit(0);
-            }
+            return handover::serve(inner).await;
         }
         Command::Index(input) => println!("{}", memory::index(&db, &input)?),
         Command::Record(mut input) => {

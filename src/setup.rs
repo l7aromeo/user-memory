@@ -25,7 +25,7 @@ pub(crate) mod removal;
 mod skill;
 pub mod uninstall;
 mod update;
-mod versions;
+pub(crate) mod versions;
 
 pub(crate) use embedding::docker_dir;
 
@@ -160,6 +160,26 @@ struct Installation {
     /// environment first. API keys stay in files named here, never inline.
     #[serde(default, skip_serializing_if = "embedding::Settings::is_empty")]
     embedding: embedding::Settings,
+    /// The version that wrote this setup, so the next setup knows what it
+    /// replaces; none from releases before 0.10.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+}
+
+/// Whether the clients connected by setup must restart to use what it
+/// installed: always for a first install or a newly connected client, and
+/// for an upgrade from a release whose `serve` can't hand its sessions over
+/// to a replaced binary.
+fn restart_needed(saved: Option<&Installation>, clients: &[Client]) -> bool {
+    let Some(saved) = saved else {
+        return true;
+    };
+    let hands_over = saved
+        .version
+        .as_deref()
+        .and_then(versions::Version::parse)
+        .is_some_and(|version| version >= versions::HANDOVER_SINCE);
+    !hands_over || clients.iter().any(|client| !saved.clients.contains(client))
 }
 
 fn enabled() -> bool {
@@ -1218,16 +1238,20 @@ pub async fn install(options: &Options) -> Result<()> {
             server_only,
             path_added,
             embedding,
+            version: Some(versions::running().to_owned()),
         },
     )?;
+    let connected: Vec<Client> = clients.iter().map(|c| c.kind).collect();
     if server_only {
         println!(
             "\nSetup complete. This machine runs the memory server only; no agent app uses it here."
         );
-    } else {
+    } else if restart_needed(saved.as_ref(), &connected) {
         println!(
             "\nSetup complete. Restart your connected clients once; memory starts automatically after that."
         );
+    } else {
+        println!("\nSetup complete. Open sessions move to this version on their next memory call.");
     }
     if let Some(remote) = &paths.remote {
         println!("Memory server: {}", remote.url);
@@ -1986,6 +2010,47 @@ fn privacy_step(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// A first install, an upgrade from a release before the hand-over and
+    /// a newly connected client need a restart; an upgrade from a release
+    /// with the hand-over, connecting the same clients, doesn't.
+    #[test]
+    fn a_restart_is_needed_unless_the_replaced_release_hands_over() {
+        let saved = |version: Option<&str>, clients: Vec<Client>| Installation {
+            db: None,
+            remote: None,
+            clients,
+            hooks: true,
+            skill: true,
+            instructions: true,
+            update_check: true,
+            server_only: false,
+            path_added: false,
+            embedding: embedding::Settings::new(),
+            version: version.map(str::to_owned),
+        };
+        let codex = vec![Client::Codex];
+        assert!(restart_needed(None, &codex));
+        for (version, needed) in [
+            (None, true),
+            (Some("0.9.3"), true),
+            (Some("0.10.0-dev"), true),
+            (Some("0.10.0"), false),
+            (Some("1.2.0"), false),
+        ] {
+            assert_eq!(
+                restart_needed(Some(&saved(version, codex.clone())), &codex),
+                needed,
+                "{version:?}"
+            );
+        }
+        let earlier = saved(Some("0.10.0"), codex.clone());
+        assert!(restart_needed(
+            Some(&earlier),
+            &[Client::Codex, Client::Claude]
+        ));
+        assert!(!restart_needed(Some(&earlier), &[]));
+    }
+
     use super::*;
 
     /// An `mcp get` that answers, found or not registered, is an answer;
@@ -2214,6 +2279,7 @@ mod tests {
                 "USER_MEMORY_EMBED_URL".into(),
                 "https://old.example.com".into(),
             )]),
+            version: None,
         };
         let given = options(&["--env-file", file.to_str().unwrap()]);
         let (settings, note) = embedding_to_save(&given, &paths, Some(&saved)).unwrap();

@@ -1,6 +1,6 @@
-//! The Windows system calls behind private files ([`crate::private`]) and
-//! the PATH change notice and the console check: the only `unsafe` code in
-//! user-memory.
+//! The Windows system calls behind private files ([`crate::private`]), the
+//! PATH change notice, the console check and the file id that tells `serve`
+//! its binary was replaced: the only `unsafe` code in user-memory.
 //!
 //! A private file or folder has a protected access list (DACL) with one
 //! entry: full access for the user this process runs as. "Protected" drops
@@ -34,7 +34,10 @@ use windows::{
             PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, TOKEN_QUERY,
             TOKEN_USER, TokenUser,
         },
-        Storage::FileSystem::FILE_ALL_ACCESS,
+        Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, FILE_ALL_ACCESS, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+            FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle,
+        },
         System::{
             Console::GetConsoleWindow,
             SystemServices::ACCESS_ALLOWED_ACE_TYPE,
@@ -186,6 +189,24 @@ pub fn broadcast_environment_change() {
     if notice.is_ok() {
         let _ = finished.recv_timeout(Duration::from_millis(NOTICE_WAIT_MS.into()));
     }
+}
+
+/// The file id of `path`: its volume's serial number and its file index,
+/// which a file keeps through a rename and a replacement never shares. A
+/// running program's file opens too: the handle asks only to read its
+/// attributes and shares everything.
+pub fn file_id(path: &Path) -> io::Result<(u64, u64)> {
+    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+    let file = std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES.0)
+        .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0)
+        .open(path)?;
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: the handle is `file`'s, open for the whole call, and `info`
+    // is a valid out-pointer the call fills.
+    unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }?;
+    let index = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
+    Ok((u64::from(info.dwVolumeSerialNumber), index))
 }
 
 /// Whether this process's console has a window someone can type in, so a

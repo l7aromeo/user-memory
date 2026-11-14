@@ -24,7 +24,7 @@ schemars = { version = "1", features = ["uuid1"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "process", "io-util", "io-std", "sync"] }
 axum = "0.8"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream"] }
 rand = "0.9"
@@ -33,6 +33,11 @@ dunce = "1.0.5"
 rust-stemmers = "1.2"
 # SHA-256 for the instruction files' write records; rustls already builds it.
 aws-lc-rs = { version = "1", default-features = false, features = ["aws-lc-sys"] }
+
+# serve's stdin reader, which waits for input with poll before each read,
+# so no read is under way when serve hands over by exec (src/handover.rs).
+[target."cfg(unix)".dependencies]
+rustix = { version = "1", features = ["event"] }
 
 # The owner-only ACL and the PATH broadcast (src/platform/windows.rs), and
 # the user PATH in the registry.
