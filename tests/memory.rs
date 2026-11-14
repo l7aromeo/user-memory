@@ -3123,6 +3123,7 @@ fn the_cli_offers_exactly_these_commands() {
         [
             "setup",
             "doctor",
+            "upgrade",
             "uninstall",
             "endpoint",
             "serve",

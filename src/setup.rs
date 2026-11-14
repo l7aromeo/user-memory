@@ -25,6 +25,7 @@ pub(crate) mod removal;
 mod skill;
 pub mod uninstall;
 mod update;
+pub mod upgrade;
 pub(crate) mod versions;
 
 pub(crate) use embedding::docker_dir;

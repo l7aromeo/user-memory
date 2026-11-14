@@ -31,6 +31,8 @@ use windows_registry::{CURRENT_USER, Type};
 
 #[path = "support/fake.rs"]
 mod fake;
+#[path = "support/releases.rs"]
+mod releases;
 #[path = "support/time.rs"]
 mod time;
 
@@ -542,4 +544,151 @@ fn doctor_finds_nothing_to_do_after_setup() {
             said(&doctor)
         );
     }
+}
+
+/// A `serve` session kept open, read line by line on a thread.
+struct Session {
+    child: Child,
+    input: std::process::ChildStdin,
+    lines: std::sync::mpsc::Receiver<Value>,
+    errors: std::sync::mpsc::Receiver<String>,
+}
+
+impl Session {
+    fn start(mut command: Command) -> Self {
+        use std::io::{BufRead, BufReader, Read};
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let (to_lines, lines) = std::sync::mpsc::channel();
+        let output = BufReader::new(child.stdout.take().unwrap());
+        std::thread::spawn(move || {
+            for line in output.lines().map_while(Result::ok) {
+                if let Ok(message) = serde_json::from_str(&line)
+                    && to_lines.send(message).is_err()
+                {
+                    return;
+                }
+            }
+        });
+        let (to_errors, errors) = std::sync::mpsc::channel();
+        let mut stderr = child.stderr.take().unwrap();
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            let _ = stderr.read_to_string(&mut text);
+            let _ = to_errors.send(text);
+        });
+        let input = child.stdin.take().unwrap();
+        let mut session = Self {
+            child,
+            input,
+            lines,
+            errors,
+        };
+        session.ask(json!({"jsonrpc":"2.0","id":"init","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}));
+        writeln!(
+            session.input,
+            "{}",
+            json!({"jsonrpc":"2.0","method":"notifications/initialized"})
+        )
+        .unwrap();
+        session
+    }
+    fn ask(&mut self, message: Value) -> Value {
+        writeln!(self.input, "{message}").unwrap();
+        self.input.flush().unwrap();
+        loop {
+            let reply = self
+                .lines
+                .recv_timeout(time::STUCK)
+                .unwrap_or_else(|_| panic!("no reply to {message}"));
+            if reply["id"] == message["id"] {
+                return reply;
+            }
+        }
+    }
+    fn index(&mut self, id: &str) -> Value {
+        self.ask(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"index","arguments":{}}}))
+    }
+    fn close(mut self) -> String {
+        drop(self.input);
+        let _ = self.child.wait();
+        self.errors.recv_timeout(time::STUCK).unwrap_or_default()
+    }
+}
+
+/// `user-memory upgrade` replaces the binary an open session runs: the
+/// running one is set aside, the session's relay hands over to the new
+/// one, a second upgrade restarts the relay's child, and once nothing runs
+/// them the binaries set aside are removed at the next run. Run as an
+/// agent's hidden shell runs it, with no console window: only --yes
+/// confirms there.
+#[test]
+fn upgrade_replaces_the_running_binary_and_the_session_hands_over() {
+    let build = env!("CARGO_PKG_VERSION");
+    let s = Sandbox::new();
+    s.client("codex");
+    let out = s.run(&["setup", "--client", "codex"]);
+    assert!(out.status.success(), "setup failed\n{}", said(&out));
+    let releases = releases::Releases::start();
+    releases.publish(
+        &format!("v{build}"),
+        Path::new(env!("CARGO_BIN_EXE_user-memory")),
+    );
+    releases.set_latest(&format!("v{build}"));
+    let upgrade = |from: &str, args: &[&str]| -> Output {
+        let child = s
+            .installed(&["upgrade"])
+            .args(args)
+            .env("USER_MEMORY_RELEASES", &releases.base)
+            .env("USER_MEMORY_TEST_VERSION", from)
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        time::finish(child, "upgrade without a console window")
+    };
+    let mut session = Session::start(s.installed(&["serve"]));
+    assert_eq!(session.index("before")["result"]["isError"], false);
+
+    let refused = upgrade("0.9.0", &[]);
+    assert!(!refused.status.success(), "{}", said(&refused));
+    assert!(
+        said(&refused).contains("user-memory upgrade changes this machine; without a terminal to confirm, it also needs --yes. Nothing was changed."),
+        "{}",
+        said(&refused)
+    );
+    assert_eq!(s.set_aside(), Vec::<String>::new());
+
+    let first = upgrade("0.9.0", &["--yes"]);
+    assert!(first.status.success(), "{}", said(&first));
+    assert!(
+        stdout(&first).contains(&format!("Upgraded to {build}.")),
+        "{}",
+        said(&first)
+    );
+    assert_eq!(s.set_aside().len(), 1, "{:?}", s.set_aside());
+    let after = session.index("after");
+    assert_eq!(after["result"]["isError"], false, "{after}");
+
+    let second = upgrade("0.9.1", &["--yes"]);
+    assert!(second.status.success(), "{}", said(&second));
+    let again = session.index("again");
+    assert_eq!(again["result"]["isError"], false, "{again}");
+    let stderr = session.close();
+    assert_eq!(
+        stderr.matches("took over this session").count(),
+        2,
+        "{stderr}"
+    );
+
+    // Nothing runs the binaries set aside any more: the next run removes them.
+    let quiet = upgrade(build, &["--yes"]);
+    assert!(quiet.status.success(), "{}", said(&quiet));
+    assert_eq!(s.set_aside(), Vec::<String>::new());
 }

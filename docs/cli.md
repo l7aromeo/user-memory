@@ -197,6 +197,7 @@ server, with the file on your machine.
 | Command | Effect |
 |---|---|
 | `user-memory doctor` | Checks the binary, the store or server, the automatic backups, semantic search, each client, the hooks, the skill, the instruction files, the git ignore and a pending project move, and says when a newer release is out. It exits with 0 when all is well, 3 when only `Action needed:` steps are left, and 1 on an error. `--server-only` checks only the store, for a host with no agent app. |
+| `user-memory upgrade` | Moves this machine to a newer release the way it was installed, from the saved setup beside the binary: a client of a memory server to its server's version, otherwise to the newest release (`--version vX.Y.Z` picks one there). It asks first; without a terminal it needs `--yes`. `--check` only says what it would do. Upgrades only move forward ([upgrade](upgrade.md#upgrade-a-machine)). |
 | `user-memory setup` | Connects your agents again; [configuration](configuration.md#setup-options) lists its options, and [turn parts off](install.md#turn-parts-off) the common ones. |
 | `user-memory endpoint` | Prints the server address and the token file this machine uses. |
 | `user-memory secure-file PATH` | Makes a file or folder readable only by you: mode 0600 (a folder 0700) on macOS and Linux, an access list for you alone on Windows. `doctor` names it when a file of user-memory's is open to others. |

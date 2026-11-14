@@ -11,7 +11,51 @@ that needs a step from you, and how to go back.
 
 ## Upgrade a machine
 
-Run the installer again:
+Run:
+
+```bash
+user-memory upgrade
+```
+
+It upgrades this machine the way it was installed, from the setup saved
+beside the binary, so you give no options again:
+
+- A client of a memory server takes its server's version, never a newer
+  one, so it doesn't run ahead of its server:
+  ``Upgrading to 0.11.2 to match the memory server at https://memory.example.com/mcp (0.12.0 is the newest release; the server is upgraded on its own machine)``.
+  The server is upgraded on its own machine.
+- A native install, or the machine that runs the installer's Docker
+  server, takes the newest release; `--version v0.10.0` picks another.
+  The Docker server is rebuilt from that release and its store upgraded,
+  backed up first.
+
+It asks before it changes anything, naming both versions
+(``Upgrade user-memory from 0.9.3 to 0.10.0 on this machine? [y/N]``).
+Where there is no terminal to ask on, such as an agent's shell or a
+script, it needs `--yes`, which you give once you've decided.
+`--check` only says what it would do. It downloads the release's binary
+and its `.sha256` from the releases page, as the installer does, and
+installs nothing that doesn't match. The checksum comes from the same
+release as the binary, so it guards against a broken download, not a
+forged release.
+
+Upgrades only move forward: an older `--version` is refused with
+``user-memory upgrade only moves forward (this is …). To go back, restore the backup the upgrade made: see the user-memory skill's upgrade playbook.``
+([roll back an upgrade](#roll-back-an-upgrade)). Where it can't upgrade,
+it says why in one line and changes nothing; a client already ahead of its
+server says
+``Nothing to upgrade: this machine (…) is ahead of the memory server at … (…), which is upgraded on its own machine.``
+A machine set up without the installer is told to upgrade the way it was
+installed.
+
+A `user-memory host` you run yourself from this binary, under systemd or
+launchd say, keeps its version until you restart it:
+``Upgraded to …. The memory server running on this machine (user-memory host) keeps … until it restarts; restart it the way you run it.``
+
+`user-memory update` corrects a memory; typed with no memory id, it says
+``To move user-memory to a newer release, run user-memory upgrade.``
+
+You can also run the installer again:
 
 ```bash
 curl -fsSL https://github.com/l7aromeo/user-memory/releases/latest/download/install.sh | sh

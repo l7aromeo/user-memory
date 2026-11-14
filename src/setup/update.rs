@@ -21,21 +21,38 @@ pub(super) fn off_by_environment() -> bool {
 /// The line doctor prints when a release newer than `current` exists;
 /// `None` when there is none, or the check failed.
 pub(super) async fn notice(current: &str) -> Option<String> {
-    let base = env::var("USER_MEMORY_RELEASES").unwrap_or_else(|_| RELEASES.into());
-    let latest = latest(&base).await?;
+    let latest = latest(&releases_base()).await?;
     newer(&latest, current).then(|| {
-        format!("user-memory {latest} is available (this is {current}): run the installer again")
+        format!(
+            "user-memory {latest} is available (this is {current}): run \"user-memory upgrade\""
+        )
+    })
+}
+
+/// Where the releases are: [`RELEASES`], or `USER_MEMORY_RELEASES`.
+pub(super) fn releases_base() -> String {
+    env::var("USER_MEMORY_RELEASES")
+        .unwrap_or_else(|_| RELEASES.into())
+        .trim_end_matches('/')
+        .to_owned()
+}
+
+/// Whether `url` may be fetched: over HTTPS, or plain http to this machine.
+pub(super) fn allowed(url: &str) -> bool {
+    reqwest::Url::parse(url).is_ok_and(|url| {
+        let here = matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"));
+        url.scheme() == "https" || (url.scheme() == "http" && here)
     })
 }
 
 /// The newest release's version, from where `<base>/latest` redirects:
 /// `…/releases/tag/vX.Y.Z`. Only over HTTPS, or plain http to this machine.
-async fn latest(base: &str) -> Option<String> {
-    let url = reqwest::Url::parse(&format!("{}/latest", base.trim_end_matches('/'))).ok()?;
-    let here = matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"));
-    if url.scheme() != "https" && !(url.scheme() == "http" && here) {
+pub(super) async fn latest(base: &str) -> Option<String> {
+    let url = format!("{}/latest", base.trim_end_matches('/'));
+    if !allowed(&url) {
         return None;
     }
+    let url = reqwest::Url::parse(&url).ok()?;
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(TIMEOUT)

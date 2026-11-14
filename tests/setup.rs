@@ -3943,7 +3943,7 @@ fn doctor_names_a_newer_release_and_says_nothing_otherwise() {
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     assert!(
         stdout(&out).contains(&format!(
-            "user-memory 99.0.0 is available (this is {current}): run the installer again"
+            "user-memory 99.0.0 is available (this is {current}): run \"user-memory upgrade\""
         )),
         "{}",
         stdout(&out)

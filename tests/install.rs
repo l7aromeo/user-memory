@@ -50,6 +50,10 @@ struct Server {
 
 impl Server {
     fn start() -> Self {
+        Self::start_with(&[])
+    }
+    /// A server with `env` set, such as the version a debug build reports.
+    fn start_with(env: &[(&str, &str)]) -> Self {
         let root = tempdir().unwrap();
         let mut child = Command::new(env!("CARGO_BIN_EXE_user-memory"))
             .args(["host", "--listen", "127.0.0.1:0", "--db"])
@@ -57,6 +61,7 @@ impl Server {
             .arg("--token-file")
             .arg(root.path().join("access-token"))
             .env_remove("USER_MEMORY_DB")
+            .envs(env.iter().copied())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
@@ -3221,4 +3226,373 @@ fn the_restart_line_is_said_only_for_an_upgrade_from_a_release_without_the_hand_
             );
         }
     }
+}
+
+/// This build's version, the release the upgrade tests install.
+const BUILD: &str = env!("CARGO_PKG_VERSION");
+
+impl Client {
+    /// `<bin>/user-memory upgrade ARGS`, run as a build reporting `from`
+    /// against `releases`, in this machine's clean environment.
+    fn upgrade(&self, releases: &Releases, from: &str, args: &[&str]) -> Command {
+        let mut command = Command::new(self.path("bin/user-memory"));
+        command
+            .arg("upgrade")
+            .args(args)
+            .env_clear()
+            .env("HOME", self.home.path())
+            .env("CLAUDE_CONFIG_DIR", self.home.path())
+            .env("CODEX_HOME", self.path(".codex"))
+            .env("USER_MEMORY_APP_DIRS", "")
+            .env("USER_MEMORY_RELEASES", &releases.base)
+            .env("USER_MEMORY_NO_UPDATE_CHECK", "1")
+            .env(
+                "USER_MEMORY_OLLAMA_URL",
+                format!("http://127.0.0.1:{}", closed_port()),
+            )
+            .env("FAKE_HOST", env!("CARGO_BIN_EXE_user-memory"))
+            .env("TMPDIR", std::env::temp_dir())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env(
+                "PATH",
+                format!(
+                    "{}:/usr/bin:/bin:/usr/sbin:/sbin",
+                    self.path("cli").display()
+                ),
+            )
+            .env("USER_MEMORY_TEST_VERSION", from)
+            .stdin(Stdio::null());
+        command
+    }
+    /// What the installed binary says for `--version`, as the user runs it.
+    fn installed_version(&self) -> String {
+        let out = Command::new(self.path("bin/user-memory"))
+            .arg("--version")
+            .env_remove("USER_MEMORY_TEST_VERSION")
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    }
+    /// The installed binary's file id and bytes' hash: what changes when
+    /// the upgrade replaces it.
+    fn installed(&self) -> (u64, String) {
+        use std::os::unix::fs::MetadataExt;
+        let binary = self.path("bin/user-memory");
+        (fs::metadata(&binary).unwrap().ino(), sha256(&binary))
+    }
+    fn receipt(&self) -> serde_json::Value {
+        serde_json::from_slice(&fs::read(self.path("bin/.user-memory.json")).unwrap()).unwrap()
+    }
+    /// Names in the bin folder other than the binary and the receipt: what
+    /// a failed upgrade must not leave.
+    fn leftovers(&self) -> Vec<String> {
+        fs::read_dir(self.path("bin"))
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "user-memory" && name != ".user-memory.json")
+            .collect()
+    }
+}
+
+/// An upgrade's question, which the terminal tests answer.
+const UPGRADE_QUESTION: &str = "on this machine? [y/N] ";
+
+#[test]
+fn upgrade_installs_a_newer_release_keeping_the_saved_setup() {
+    let releases = Releases::start();
+    let c = Client::bare();
+    let out = c.install(&releases, &[], &["--local", "native"]);
+    assert!(out.status.success(), "{}", text(&out).1);
+    let before = c.installed();
+    let receipt = c.receipt();
+    releases.publish(
+        &format!("v{BUILD}"),
+        Path::new(env!("CARGO_BIN_EXE_user-memory")),
+    );
+    releases.set_latest(&format!("v{BUILD}"));
+
+    // Without a terminal it changes nothing unless told --yes.
+    let out = detached(c.upgrade(&releases, "0.9.0", &[]));
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(text(&out).1.contains("user-memory upgrade changes this machine; without a terminal to confirm, it also needs --yes. Nothing was changed."), "{out:?}");
+    // --check says what it would do and needs neither.
+    let out = detached(c.upgrade(&releases, "0.9.0", &["--check"]));
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        text(&out).0,
+        format!(
+            "Would upgrade user-memory from 0.9.0 to {BUILD} on this machine; nothing was changed.\n"
+        )
+    );
+    // Upgrades only move forward.
+    let out = detached(c.upgrade(&releases, "0.9.0", &["--version", "v0.8.0", "--yes"]));
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(text(&out).1.contains("user-memory upgrade only moves forward (this is 0.9.0). To go back, restore the backup the upgrade made: see the user-memory skill's upgrade playbook."), "{out:?}");
+    assert_eq!(c.installed(), before);
+    assert_eq!(c.leftovers(), Vec::<String>::new());
+
+    // At a terminal it asks, naming the versions; a yes upgrades.
+    let Some((status, screen)) = on_terminal(
+        &c.upgrade(&releases, "0.9.0", &[]),
+        &[(UPGRADE_QUESTION, "y")],
+    ) else {
+        return;
+    };
+    assert_eq!(status, 0, "{screen}");
+    assert!(
+        screen.contains(&format!(
+            "Upgrade user-memory from 0.9.0 to {BUILD} [on this machine? [y/N] ]"
+        )),
+        "{screen}"
+    );
+    assert!(screen.contains("Checksum: OK"), "{screen}");
+    assert!(
+        screen.contains(&format!("Upgraded to {BUILD}.")),
+        "{screen}"
+    );
+    let after = c.installed();
+    assert_ne!(after.0, before.0, "the binary was not replaced");
+    assert_eq!(c.installed_version(), format!("user-memory {BUILD}"));
+    // The saved setup's choices are kept; setup records the new version.
+    let mut kept = c.receipt();
+    assert_eq!(kept["version"], BUILD);
+    kept["version"] = receipt["version"].clone();
+    assert_eq!(kept, receipt);
+    assert_eq!(c.leftovers(), Vec::<String>::new());
+
+    // --yes upgrades without a terminal, and skips the question.
+    let out = detached(c.upgrade(&releases, "0.9.1", &["--yes"]));
+    assert!(out.status.success(), "{out:?}");
+    assert!(!text(&out).0.contains("[y/N]"), "{out:?}");
+    assert!(
+        text(&out).0.contains(&format!("Upgraded to {BUILD}.")),
+        "{out:?}"
+    );
+    assert_ne!(c.installed().0, after.0);
+    // The newest release is the one this machine runs: nothing to do.
+    let out = detached(c.upgrade(&releases, BUILD, &["--yes"]));
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        text(&out).0,
+        format!("Nothing to upgrade: this machine already runs {BUILD}.\n")
+    );
+}
+
+#[test]
+fn upgrade_installs_nothing_that_fails_its_checksum() {
+    let releases = Releases::start();
+    let c = Client::bare();
+    let out = c.install(&releases, &[], &["--local", "native"]);
+    assert!(out.status.success(), "{}", text(&out).1);
+    let before = c.installed();
+    let tag = format!("v{BUILD}");
+    releases.publish(&tag, Path::new(env!("CARGO_BIN_EXE_user-memory")));
+    releases.set_latest(&tag);
+    let name = format!("user-memory-{}.sha256", native_target());
+    fs::write(
+        releases.asset(&format!("download/{tag}"), &name),
+        format!("{}  user-memory\n", "0".repeat(64)),
+    )
+    .unwrap();
+    let out = detached(c.upgrade(&releases, "0.9.0", &["--yes"]));
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(text(&out).1.contains(&format!("The download of user-memory {BUILD} doesn't match its published checksum; nothing was installed.")), "{out:?}");
+    assert_eq!(c.installed(), before);
+    assert_eq!(c.leftovers(), Vec::<String>::new());
+}
+
+/// A client of a memory server follows its server, never the newest
+/// release, and says why where it can't.
+#[test]
+fn upgrade_on_a_client_takes_its_servers_version() {
+    let releases = Releases::start();
+    let s = Server::start();
+    let c = Client::new(&s);
+    let token = s.token();
+    let out = c.install(
+        &releases,
+        &[("USER_MEMORY_TOKEN", &token)],
+        &["--url", &s.base()],
+    );
+    assert!(out.status.success(), "{}", text(&out).1);
+    let url = format!("{}/mcp", s.base());
+    releases.publish(
+        &format!("v{BUILD}"),
+        Path::new(env!("CARGO_BIN_EXE_user-memory")),
+    );
+    releases.set_latest("v9.9.12");
+    let before = c.installed();
+
+    // --version is refused on a client.
+    let out = detached(c.upgrade(&releases, "0.9.0", &["--version", "v9.9.12", "--yes"]));
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(text(&out).1.contains(&format!("This machine follows the memory server at {url} ({BUILD}); upgrade the server on its machine to move it.")), "{out:?}");
+    // A machine ahead of its server stays.
+    let out = detached(c.upgrade(&releases, "9.9.0", &["--yes"]));
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        text(&out).0,
+        format!(
+            "Nothing to upgrade: this machine (9.9.0) is ahead of the memory server at {url} ({BUILD}), which is upgraded on its own machine.\n"
+        )
+    );
+    assert_eq!(c.installed(), before);
+
+    let out = detached(c.upgrade(&releases, "0.9.0", &["--yes"]));
+    let (stdout, stderr) = text(&out);
+    assert!(out.status.success(), "{stdout}\n{stderr}");
+    assert!(stdout.starts_with(&format!("Upgrading to {BUILD} to match the memory server at {url} (9.9.12 is the newest release; the server is upgraded on its own machine)\n")), "{stdout}");
+    assert!(
+        stdout.contains(&format!("Upgraded to {BUILD}.")),
+        "{stdout}"
+    );
+    assert_ne!(c.installed().0, before.0);
+    assert_eq!(c.receipt()["remote"]["url"], url);
+}
+
+#[test]
+fn upgrade_on_a_client_changes_nothing_where_its_server_has_no_release() {
+    let releases = Releases::start();
+    let c = Client::bare();
+    for (version, said) in [
+        (
+            "0.11.3-dev",
+            "runs 0.11.3-dev, which isn't a release; this machine stays at 0.9.0.",
+        ),
+        (
+            "9.9.13",
+            "runs 9.9.13, which isn't a release; this machine stays at 0.9.0.",
+        ),
+    ] {
+        let s = Server::start_with(&[("USER_MEMORY_TEST_VERSION", version)]);
+        let out = c.install(
+            &releases,
+            &[("USER_MEMORY_TOKEN", &s.token())],
+            &["--url", &s.base()],
+        );
+        assert!(out.status.success(), "{}", text(&out).1);
+        let before = c.installed();
+        let out = detached(c.upgrade(&releases, "0.9.0", &["--yes"]));
+        assert_eq!(out.status.code(), Some(1), "{version}: {out:?}");
+        assert!(
+            text(&out)
+                .1
+                .contains(&format!("The memory server at {}/mcp {said}", s.base())),
+            "{version}: {out:?}"
+        );
+        assert_eq!(c.installed(), before);
+        assert_eq!(c.leftovers(), Vec::<String>::new());
+    }
+    let s = Server::start();
+    let out = c.install(
+        &releases,
+        &[("USER_MEMORY_TOKEN", &s.token())],
+        &["--url", &s.base()],
+    );
+    assert!(out.status.success(), "{}", text(&out).1);
+    let url = format!("{}/mcp", s.base());
+    drop(s);
+    let out = detached(c.upgrade(&releases, "0.9.0", &["--yes"]));
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(text(&out).1.contains(&format!("The memory server at {url} can't be reached, so its version is unknown; nothing was changed.")), "{out:?}");
+}
+
+/// The installer's Docker server is rebuilt from the release and its store
+/// upgraded, backed up first, before this machine's binary is replaced.
+#[test]
+fn upgrade_rebuilds_the_installers_docker_server() {
+    let releases = Releases::start();
+    let c = Client::bare();
+    let _server = FakeServer(&c);
+    let port = closed_port().to_string();
+    let out = c.install(&releases, &[], &["--local", "docker", "--port", &port]);
+    assert!(out.status.success(), "{}", text(&out).1);
+    let tag = format!("v{BUILD}");
+    releases.publish(&tag, Path::new(env!("CARGO_BIN_EXE_user-memory")));
+    let build = releases.asset(
+        &format!("download/{tag}"),
+        "user-memory-aarch64-unknown-linux-gnu",
+    );
+    fs::write(&build, "linux build of the newer release").unwrap();
+    fs::write(
+        releases.asset(
+            &format!("download/{tag}"),
+            "user-memory-aarch64-unknown-linux-gnu.sha256",
+        ),
+        format!(
+            "{}  user-memory-aarch64-unknown-linux-gnu\n",
+            sha256(&build)
+        ),
+    )
+    .unwrap();
+    releases.set_latest(&tag);
+    fs::remove_file(c.path("docker.log")).unwrap();
+    let out = detached(c.upgrade(&releases, "0.9.0", &["--yes"]));
+    let (stdout, stderr) = text(&out);
+    assert!(out.status.success(), "{stdout}\n{stderr}");
+    let dir = c.docker_dir();
+    assert_eq!(
+        fs::read(dir.join("user-memory")).unwrap(),
+        fs::read(&build).unwrap()
+    );
+    let compose = format!("compose -f {}", dir.join("compose.yaml").display());
+    let calls: Vec<String> = c
+        .docker_log()
+        .lines()
+        .filter(|l| l.starts_with("compose"))
+        .map(|l| l.replace(&compose, "compose"))
+        .collect();
+    assert_eq!(
+        calls,
+        [
+            "compose build",
+            "compose run --rm memory migrate --check",
+            "compose stop memory",
+            "compose run --rm memory migrate",
+            "compose up -d --wait"
+        ]
+    );
+    assert!(
+        stdout.contains(&format!("Upgraded to {BUILD}.")),
+        "{stdout}"
+    );
+    assert_eq!(c.installed_version(), format!("user-memory {BUILD}"));
+}
+
+/// An operator's own `user-memory host` running from this binary keeps its
+/// version until the operator restarts it; upgrade never restarts it.
+#[test]
+fn upgrade_says_an_operators_own_host_keeps_its_version_until_it_restarts() {
+    let releases = Releases::start();
+    let c = Client::bare();
+    let out = c.install(&releases, &[], &["--local", "native"]);
+    assert!(out.status.success(), "{}", text(&out).1);
+    releases.publish(
+        &format!("v{BUILD}"),
+        Path::new(env!("CARGO_BIN_EXE_user-memory")),
+    );
+    releases.set_latest(&format!("v{BUILD}"));
+    let data = tempdir().unwrap();
+    let mut host = Command::new(c.path("bin/user-memory"))
+        .args(["host", "--listen", "127.0.0.1:0", "--db"])
+        .arg(data.path().join("memories.sqlite3"))
+        .arg("--token-file")
+        .arg(data.path().join("token"))
+        .env("HOME", c.home.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(host.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    assert!(line.starts_with("Listening:"), "{line}");
+    let out = detached(c.upgrade(&releases, "0.9.0", &["--yes"]));
+    let _ = host.kill();
+    let _ = host.wait();
+    let (stdout, stderr) = text(&out);
+    assert!(out.status.success(), "{stdout}\n{stderr}");
+    assert!(stdout.ends_with(&format!("Upgraded to {BUILD}. The memory server running on this machine (user-memory host) keeps 0.9.0 until it restarts; restart it the way you run it.\n")), "{stdout}");
 }

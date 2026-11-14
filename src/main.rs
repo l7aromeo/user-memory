@@ -45,6 +45,10 @@ enum Command {
     Setup(setup::Options),
     /// Check the installed memory store or remote endpoint and client configuration.
     Doctor(setup::Options),
+    /// Move this machine to a newer release the way it was installed: a
+    /// client of a memory server to its server's version, otherwise to the
+    /// newest release. Asks first; upgrades only move forward.
+    Upgrade(setup::upgrade::Options),
     /// Remove what setup installed on this machine; memories stay unless you confirm deleting them.
     Uninstall(setup::uninstall::Options),
     /// The installer's Docker server: its checks, build target and setup.
@@ -660,12 +664,22 @@ async fn serve_here(
 #[tokio::main]
 async fn main() -> Result<()> {
     // The version a debug build is told to report is the one --version says.
-    let mut cli = Cli::from_arg_matches(
-        &Cli::command()
-            .version(setup::versions::running())
-            .get_matches(),
-    )
-    .unwrap_or_else(|err| err.exit());
+    let mut cli = Cli::command()
+        .version(setup::versions::running())
+        .try_get_matches()
+        .and_then(|matches| Cli::from_arg_matches(&matches))
+        .unwrap_or_else(|err| {
+            // `update` corrects a memory; someone who typed it for a newer
+            // release is told the command, with update's own error and code.
+            if err.kind() == clap::error::ErrorKind::MissingRequiredArgument
+                && env::args().nth(1).as_deref() == Some("update")
+            {
+                let _ = err.print();
+                eprintln!("\nTo move user-memory to a newer release, run user-memory upgrade.");
+                std::process::exit(err.exit_code());
+            }
+            err.exit()
+        });
     match &mut cli.command {
         Command::Index(input) => resolve_projects(&mut input.selection.projects)?,
         Command::Read(input) => resolve_projects(&mut input.selection.projects)?,
@@ -766,6 +780,7 @@ async fn main() -> Result<()> {
     );
     match cli.command {
         Command::Setup(options) => setup::install(&options).await?,
+        Command::Upgrade(options) => setup::upgrade::upgrade(&options).await?,
         Command::Uninstall(options) => setup::uninstall::uninstall(&options)?,
         Command::Doctor(options) => {
             if setup::doctor(&options).await? == setup::Health::ActionNeeded {

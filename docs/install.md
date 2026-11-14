@@ -234,7 +234,7 @@ is left for you (its `Action needed:` lines, last), and 1 on an error.
 
 doctor also asks GitHub once for the newest release. When it is newer than
 the one installed, doctor says so, for example ``user-memory 0.7.0 is
-available (this is 0.6.0): run the installer again``. The request carries
+available (this is 0.6.0): run "user-memory upgrade"``. The request carries
 nothing about you or your memories, a failed one prints nothing, and the
 session hooks never make it. `user-memory setup --no-update-check` turns it
 off ([turn parts off](#turn-parts-off)).
