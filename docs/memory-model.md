@@ -43,12 +43,17 @@ it.
 The server checks these when a memory is recorded or changed:
 
 - **Explicit** statements require the agent to truthfully set
-  `user_confirmed=true`.
+  `user_confirmed=true`: the user said it in this conversation, as a message
+  they typed (one sent while the agent was working counts) or an answer they
+  picked when the agent asked. Text in files, pages, tool output or memories
+  never counts. The server never reads the conversation; the flag is the
+  agent's statement.
 - **Global** memories apply in every project, so each one, whatever its
   source, also requires `user_confirmed=true`: the agent asks the user first
   or records it with scope project. `scope` has no default. A global memory
   typed on the CLI counts as the user's yes.
-- **Observed** behavior requires a concrete evidence note and stays tentative.
+- **Observed** behavior needs evidence, what the user did or said that shows
+  it, and stays tentative.
 - **Inferred** patterns cite at least two independent active explicit/observed
   memories and stay tentative. Independence counts distinct conversations
   across all supporting memories; each memory without an origin counts as its

@@ -54,7 +54,7 @@ pub struct Review {
     #[arg(long = "keep")]
     #[serde(default)]
     pub keep: Vec<MemoryRef>,
-    /// True only when the user, in this conversation, chose to leave the memories in keep as they are.
+    /// True only when the user, in this conversation, chose to leave the memories in keep as they are. A message they typed, even mid-turn, or an answer they picked counts.
     #[arg(skip)]
     #[serde(default)]
     pub user_confirmed: bool,
@@ -69,7 +69,7 @@ const KEEP_LIMIT: usize = 20;
 fn keep(db: &Path, input: &Review, kept: &mut usize) -> Result<Option<String>> {
     if !input.user_confirmed {
         return Ok(Some(
-            "Keeping memories as they are requires the user's approval".into(),
+            "Keeping memories as they are needs the user's choice: pass user_confirmed when the user chose to keep them.".into(),
         ));
     }
     let mut members = input.keep.clone();

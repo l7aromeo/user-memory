@@ -801,7 +801,7 @@ fn the_index_counts_categories_types_and_scopes() {
     );
     let counts = |args: &[&str]| -> String {
         let index = index_text(&s, args);
-        let line = index.lines().nth(4).unwrap_or_default().to_owned();
+        let line = index.lines().nth(5).unwrap_or_default().to_owned();
         assert!(line.starts_with("Categories: "), "{index}");
         line
     };
@@ -828,7 +828,7 @@ fn the_index_counts_categories_types_and_scopes() {
     );
     // A copy that leaves the global rules out still counts them.
     let without = index_text(&s, &["--project", web, "--without-global-rules"]);
-    assert_eq!(without.lines().nth(4), Some(default.as_str()), "{without}");
+    assert_eq!(without.lines().nth(5), Some(default.as_str()), "{without}");
     assert!(!without.contains("Ask before pushing to main"), "{without}");
 }
 
