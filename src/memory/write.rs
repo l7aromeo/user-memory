@@ -39,7 +39,11 @@ fn default_type() -> String {
 #[derive(Clone, Args, Deserialize, Serialize, JsonSchema)]
 pub struct Record {
     /// Memory type, fact unless set. A rule the user wants followed is a preference, constraint or value: only these types become rules in the index and the instruction files. Otherwise decision, goal, fact, behavior, pattern, or another label. lesson: what you learned about working here, often from a failure: source observed, with evidence. Say what goes wrong and what to do instead, and name the tool, command, file or area as it is written, so the memory is found when work touches it. It is yours, not the user's rule. A lesson that applies in certain situations stays a lesson and is shown when it applies; a rule is for what the user wants followed in every task.
-    #[arg(long = "type", default_value = "fact")]
+    #[arg(
+        long = "type",
+        default_value = "fact",
+        help = "Memory type, fact unless set. A rule the user wants followed is a preference, constraint or value: only these types become rules in the index and the instruction files. Otherwise decision, goal, fact, behavior, pattern, lesson, or another label."
+    )]
     #[serde(rename = "type", default = "default_type")]
     pub memory_type: String,
     /// Topic/category independent from type, such as programming or communication; reuse a category the index's Categories line lists when one fits.
