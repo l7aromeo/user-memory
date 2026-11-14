@@ -107,10 +107,12 @@ version before 0.10.0 still need one restart of the agents, and setup says
 ``Restart your connected clients once`` as before. Resumed sessions then
 pick up the new version too.
 
-When the new version adds tools, the session tells the agent app
-(`notifications/tools/list_changed`), so it can reload them; an app that
-doesn't shows the new tools in its next session, and the tools it has keep
-working.
+When the new version changes the tools, the session tells the agent app
+with `notifications/tools/list_changed`. On MCP 2026-07-28 it is sent on
+the stream the app opens for it (`subscriptions/listen`); on earlier
+protocol versions it is sent directly. Claude Code reloads the tools during
+the session. Codex shows the new tools in its next session. Either way, the
+tools the app has keep working.
 
 On a native store, a call that arrives while setup is still migrating the
 store waits for the migration, up to 50 seconds, instead of being refused.

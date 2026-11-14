@@ -36,6 +36,30 @@ const REPLY_WAIT: Duration = Duration::from_secs(60);
 /// The version the newer build reports.
 const NEWER: &str = "9.9.9";
 
+/// The listen stream's id in the tests' 2026-07-28 sessions.
+const LISTEN: &str = "listen";
+
+/// How the app opens the session.
+#[derive(Clone, Copy, Debug)]
+enum Opening {
+    /// `initialize` on 2025-06-18, as Codex does.
+    Initialize,
+    /// `server/discover` on 2026-07-28, as Claude Code does.
+    Discover,
+    /// No handshake at all, which 2026-07-28 allows: every request names
+    /// its protocol in `_meta`.
+    Bare,
+}
+
+/// The `_meta` every 2026-07-28 request carries.
+fn meta() -> Value {
+    json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": {"name": "test", "version": "1"},
+        "io.modelcontextprotocol/clientCapabilities": {},
+    })
+}
+
 /// How `serve` hands over on this platform, as the tests run it.
 #[derive(Clone, Copy, Debug)]
 enum Way {
@@ -130,6 +154,18 @@ impl Place {
         fs::write(self.bin().join("user-memory.exit"), "1").unwrap();
     }
     fn serve(&self, way: Way, env: &[(&str, &str)]) -> Session {
+        self.serve_as(way, env, Opening::Initialize)
+    }
+    /// Replaces the binary with another copy of the newer build, which
+    /// reports `version`: a second upgrade in the same session.
+    fn upgrade_again(&self, version: &str) {
+        let fakes = self.dir.path().join("fakes-again");
+        fs::create_dir_all(&fakes).unwrap();
+        let fake = fake::fake(&fakes, "user-memory");
+        fs::write(self.bin().join("user-memory.version"), version).unwrap();
+        self.replace_with(&fake);
+    }
+    fn serve_as(&self, way: Way, env: &[(&str, &str)], opening: Opening) -> Session {
         let mut command = Command::new(self.binary());
         command
             .arg("serve")
@@ -142,7 +178,7 @@ impl Place {
         if matches!(way, Way::Relay) {
             command.env("USER_MEMORY_TEST_RELAY", "1");
         }
-        Session::start(command)
+        Session::start(command, opening)
     }
 }
 
@@ -155,10 +191,12 @@ struct Session {
     errors: mpsc::Receiver<String>,
     /// Messages read while waiting for another, such as notifications.
     seen: Vec<Value>,
+    /// The `_meta` each request carries: on 2026-07-28 only.
+    meta: Option<Value>,
 }
 
 impl Session {
-    fn start(mut command: Command) -> Self {
+    fn start(mut command: Command, opening: Opening) -> Self {
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -190,15 +228,67 @@ impl Session {
             lines,
             errors,
             seen: Vec::new(),
+            meta: None,
         };
-        session.write(&[
-            json!({"jsonrpc":"2.0","id":"init","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}),
-            json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
-            json!({"jsonrpc":"2.0","id":"tools","method":"tools/list","params":{}}),
-        ]);
-        session.reply("init");
+        match opening {
+            Opening::Initialize => {
+                session.write(&[
+                    json!({"jsonrpc":"2.0","id":"init","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}),
+                    json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+                    json!({"jsonrpc":"2.0","id":"tools","method":"tools/list","params":{}}),
+                ]);
+                session.reply("init");
+            }
+            Opening::Discover => {
+                session.meta = Some(meta());
+                session.write(&[
+                    json!({"jsonrpc":"2.0","id":"init","method":"server/discover","params":{"_meta":meta()}}),
+                    json!({"jsonrpc":"2.0","id":"tools","method":"tools/list","params":{"_meta":meta()}}),
+                ]);
+                session.reply("init");
+            }
+            Opening::Bare => {
+                session.meta = Some(meta());
+                session.write(&[
+                    json!({"jsonrpc":"2.0","id":"tools","method":"tools/list","params":{"_meta":meta()}}),
+                ]);
+            }
+        }
         session.reply("tools");
         session
+    }
+    /// Opens a listen stream with `notifications` as its filter.
+    fn listen_message(&self, notifications: Value) -> Value {
+        json!({"jsonrpc":"2.0","id":LISTEN,"method":"subscriptions/listen","params":{"_meta":self.meta,"notifications":notifications}})
+    }
+    /// Opens the listen stream for tool list changes and returns what
+    /// acknowledged it.
+    fn listen(&mut self) -> Value {
+        self.write(&[self.listen_message(json!({"toolsListChanged": true}))]);
+        // The acknowledgement is a notification: it comes before the reply.
+        let marker = self.call("after-listen", "index");
+        assert_eq!(marker["result"]["isError"], false, "{marker}");
+        self.seen
+            .iter()
+            .find(|m| m["method"] == "notifications/subscriptions/acknowledged")
+            .cloned()
+            .unwrap_or_else(|| panic!("no acknowledgement; seen {:?}", self.seen))
+    }
+    /// Closes the session as [`Session::close`] does and returns serve's
+    /// stderr and every message it wrote that no reply was awaited for: a
+    /// notification the new code sends once its tools are in may come
+    /// after the next reply, but always before serve ends.
+    fn finish(mut self) -> (String, Vec<Value>) {
+        drop(self.input.take());
+        let deadline = Instant::now() + REPLY_WAIT;
+        while self.child.try_wait().unwrap().is_none() {
+            assert!(Instant::now() < deadline, "serve did not end");
+            thread::sleep(Duration::from_millis(20));
+        }
+        let mut seen = std::mem::take(&mut self.seen);
+        seen.extend(self.lines.iter());
+        let stderr = self.errors.recv_timeout(REPLY_WAIT).unwrap_or_default();
+        (stderr, seen)
     }
     /// Writes `messages` to serve in one write.
     fn write(&mut self, messages: &[Value]) {
@@ -207,8 +297,12 @@ impl Session {
         input.write_all(bytes.as_bytes()).unwrap();
         input.flush().unwrap();
     }
-    fn call_message(id: &str, tool: &str) -> Value {
-        json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":tool,"arguments":{}}})
+    fn call_message(&self, id: &str, tool: &str) -> Value {
+        let mut message = json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":tool,"arguments":{}}});
+        if let Some(meta) = &self.meta {
+            message["params"]["_meta"] = meta.clone();
+        }
+        message
     }
     /// The reply to request `id`, keeping what came before it in `seen`.
     fn reply(&mut self, id: &str) -> Value {
@@ -228,7 +322,7 @@ impl Session {
     }
     /// Calls `tool` and returns its whole reply.
     fn call(&mut self, id: &str, tool: &str) -> Value {
-        self.write(&[Self::call_message(id, tool)]);
+        self.write(&[self.call_message(id, tool)]);
         self.reply(id)
     }
     /// Who answers: the version `debug_version` names, or `None` when the
@@ -260,6 +354,21 @@ impl Session {
     }
 }
 
+/// The messages in `seen` on the listen stream: those carrying its id.
+fn on_listen(seen: &[Value]) -> Vec<&Value> {
+    seen.iter()
+        .filter(|m| {
+            m.pointer("/params/_meta/io.modelcontextprotocol~1subscriptionId")
+                == Some(&json!(LISTEN))
+        })
+        .collect()
+}
+
+/// How many messages in `seen` are `method`.
+fn count(seen: &[Value], method: &str) -> usize {
+    seen.iter().filter(|m| m["method"] == method).count()
+}
+
 fn texts(reply: &Value) -> Vec<String> {
     reply
         .pointer("/result/content")
@@ -284,25 +393,29 @@ fn a_replaced_binary_answers_the_next_calls_on_the_same_connection() {
         // Two messages in one write around the hand-over: the first finds
         // the binary replaced, and both reach the new code.
         session.write(&[
-            Session::call_message("first", "debug_version"),
-            Session::call_message("second", "index"),
+            session.call_message("first", "debug_version"),
+            session.call_message("second", "index"),
         ]);
         let first = session.reply("first");
         let answer: Value = serde_json::from_str(&texts(&first).concat()).unwrap_or_default();
         assert_eq!(answer["version"], NEWER, "{way:?}: {first}");
         let second = session.reply("second");
         assert_eq!(second["result"]["isError"], false, "{way:?}: {second}");
-        // The new build adds a tool, so the app is told to reload them.
-        assert_eq!(
-            session.notified("notifications/tools/list_changed"),
-            1,
-            "{way:?}: {:?}",
-            session.seen
-        );
         assert_eq!(session.version("after"), Some(NEWER.into()), "{way:?}");
         assert_eq!(session.child.id(), pid);
         assert_eq!(place.state_files(), Vec::<String>::new(), "{way:?}");
-        let stderr = session.close();
+        let (stderr, seen) = session.finish();
+        // The new build adds a tool, so the app is told to reload them, as
+        // a session opened by `initialize` always was: with no stream.
+        let changed: Vec<&Value> = seen
+            .iter()
+            .filter(|m| m["method"] == "notifications/tools/list_changed")
+            .collect();
+        assert_eq!(
+            changed,
+            [&json!({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})],
+            "{way:?}: {seen:?}"
+        );
         assert!(
             stderr.contains(&format!(
                 "user-memory {NEWER}: took over this session from {}",
@@ -443,7 +556,7 @@ fn a_handed_over_serve_waits_for_a_running_migration_then_answers() {
             set_schema_version(&db, newer);
             Instant::now()
         });
-        session.write(&[Session::call_message("waits", "index")]);
+        session.write(&[session.call_message("waits", "index")]);
         let reply = session.reply("waits");
         let migrated = migration.join().unwrap();
         assert_eq!(reply["result"]["isError"], false, "{way:?}: {reply}");
@@ -506,7 +619,7 @@ fn no_hand_over_while_a_request_is_in_flight() {
         let pause = place.dir.path().join("pause");
         fs::write(&pause, "").unwrap();
         let mut session = place.serve(way, &[("USER_MEMORY_PAUSE_OPEN", pause.to_str().unwrap())]);
-        session.write(&[Session::call_message("slow", "index")]);
+        session.write(&[session.call_message("slow", "index")]);
         let reached = place.dir.path().join("pause.reached");
         let deadline = Instant::now() + REPLY_WAIT;
         while !reached.exists() {
@@ -627,4 +740,173 @@ fn a_check_ended_by_a_signal_is_tried_again_without_a_notice() {
         assert_eq!(session.version("second"), Some(NEWER.into()), "{way:?}");
         session.close();
     }
+}
+
+/// On 2026-07-28 the app hears of changed tools only on a listen stream it
+/// opened for them: the stream is acknowledged first, told nothing of a
+/// hand-over that left the tools as they were, told once of one that
+/// changed them, kept open across both without holding them back, and
+/// kept out of the hand-over files.
+#[test]
+fn a_listen_is_told_only_of_a_changed_tool_list_across_two_hand_overs() {
+    for way in ways() {
+        let place = Place::new();
+        let mut session = place.serve_as(
+            way,
+            &[("FAKE_USER_MEMORY_VERSION", env!("CARGO_PKG_VERSION"))],
+            Opening::Discover,
+        );
+        let acknowledged = session.listen();
+        assert_eq!(
+            acknowledged["params"],
+            json!({"_meta": {"io.modelcontextprotocol/subscriptionId": LISTEN}, "notifications": {"toolsListChanged": true}}),
+            "{way:?}"
+        );
+        // The same tools: a hand-over the app is told nothing of.
+        place.upgrade();
+        assert_eq!(session.version("same"), None, "{way:?}");
+        // The newer build adds a tool.
+        place.upgrade_again(NEWER);
+        assert_eq!(session.version("newer"), Some(NEWER.into()), "{way:?}");
+        assert_eq!(place.state_files(), Vec::<String>::new(), "{way:?}");
+        let (stderr, seen) = session.finish();
+        assert_eq!(
+            stderr.matches("took over this session").count(),
+            2,
+            "{way:?}: {stderr}"
+        );
+        let on_listen = on_listen(&seen);
+        assert_eq!(on_listen.len(), 2, "{way:?}: {seen:?}");
+        assert_eq!(
+            on_listen[0]["method"],
+            "notifications/subscriptions/acknowledged"
+        );
+        assert_eq!(on_listen[1]["method"], "notifications/tools/list_changed");
+        assert_eq!(
+            count(&seen, "notifications/tools/list_changed"),
+            1,
+            "{way:?}: {seen:?}"
+        );
+    }
+}
+
+/// A cancelled stream is told nothing more.
+#[test]
+fn a_cancelled_listen_is_told_nothing() {
+    for way in ways() {
+        let place = Place::new();
+        let mut session = place.serve_as(way, &[], Opening::Discover);
+        session.listen();
+        session.write(&[
+            json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":LISTEN}}),
+        ]);
+        place.upgrade();
+        assert_eq!(session.version("after"), Some(NEWER.into()), "{way:?}");
+        let (_, seen) = session.finish();
+        assert_eq!(on_listen(&seen).len(), 1, "{way:?}: {seen:?}");
+        assert_eq!(
+            count(&seen, "notifications/tools/list_changed"),
+            0,
+            "{way:?}: {seen:?}"
+        );
+    }
+}
+
+/// A 2026-07-28 app that opened no stream is told of no change: the
+/// protocol has no other way to say it.
+#[test]
+fn a_session_without_a_listen_is_told_nothing() {
+    for way in ways() {
+        let place = Place::new();
+        let mut session = place.serve_as(way, &[], Opening::Discover);
+        place.upgrade();
+        assert_eq!(session.version("after"), Some(NEWER.into()), "{way:?}");
+        let (_, seen) = session.finish();
+        assert!(seen.is_empty(), "{way:?}: {seen:?}");
+    }
+}
+
+/// With no handshake at all, the protocol comes from each request's
+/// `_meta`, and the new code asks for its tools the way the app did.
+#[test]
+fn a_session_with_no_handshake_hands_over_and_hears_of_new_tools() {
+    for way in ways() {
+        let place = Place::new();
+        let mut session = place.serve_as(way, &[], Opening::Bare);
+        session.listen();
+        place.upgrade();
+        assert_eq!(session.version("after"), Some(NEWER.into()), "{way:?}");
+        let (stderr, seen) = session.finish();
+        assert!(
+            stderr.contains("took over this session"),
+            "{way:?}: {stderr}"
+        );
+        let on_listen = on_listen(&seen);
+        assert_eq!(on_listen.len(), 2, "{way:?}: {seen:?}");
+        assert_eq!(on_listen[1]["method"], "notifications/tools/list_changed");
+    }
+}
+
+/// A listen the front was not written for gets the server's own answer, an
+/// error, as before streams were supported: the cost is only that new
+/// tools appear at the next session.
+#[test]
+fn a_listen_the_front_does_not_know_gets_the_old_answer() {
+    let place = Place::new();
+    let mut session = place.serve_as(Way::Exec, &[], Opening::Discover);
+    let mut later = meta();
+    later["io.modelcontextprotocol/protocolVersion"] = json!("2027-01-01");
+    let cases = [
+        (
+            "another kind",
+            session.listen_message(json!({"toolsListChanged": true, "tasksChanged": true})),
+        ),
+        (
+            "no tools",
+            session.listen_message(json!({"promptsListChanged": true})),
+        ),
+        (
+            "tools off",
+            session.listen_message(json!({"toolsListChanged": false})),
+        ),
+        ("another parameter", {
+            let mut message = session.listen_message(json!({"toolsListChanged": true}));
+            message["params"]["cursor"] = json!("x");
+            message
+        }),
+        (
+            "another protocol",
+            json!({"jsonrpc":"2.0","id":LISTEN,"method":"subscriptions/listen","params":{"_meta":later,"notifications":{"toolsListChanged":true}}}),
+        ),
+    ];
+    for (case, message) in cases {
+        session.write(&[message]);
+        let reply = session.reply(LISTEN);
+        assert!(reply["error"]["code"].is_i64(), "{case}: {reply}");
+    }
+    place.upgrade();
+    assert_eq!(session.version("after"), Some(NEWER.into()));
+    let (_, seen) = session.finish();
+    assert!(seen.is_empty(), "{seen:?}");
+}
+
+/// A serve stopped by a signal ends its open streams gracefully.
+#[cfg(unix)]
+#[test]
+fn a_stopped_serve_completes_its_open_listen() {
+    let place = Place::new();
+    let mut session = place.serve_as(Way::Exec, &[], Opening::Discover);
+    session.listen();
+    let stopped = Command::new("kill")
+        .args(["-TERM", &session.child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(stopped.success());
+    let complete = session.reply(LISTEN);
+    assert_eq!(
+        complete["result"],
+        json!({"resultType": "complete", "_meta": {"io.modelcontextprotocol/subscriptionId": LISTEN}}),
+        "{complete}"
+    );
+    session.close();
 }

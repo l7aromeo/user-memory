@@ -12,6 +12,9 @@
 //! update, so there is never a relay of a relay. The new binary replays the
 //! app's handshake to its server under a private id, keeps that reply from
 //! the app, and goes on with the bytes the old one had read but not handled.
+//! The front answers a 2026-07-28 app's `subscriptions/listen` stream for
+//! tool list changes itself, so the stream outlives the server process and
+//! carries the change a hand-over brings.
 
 use crate::setup::versions::{self, Version};
 use anyhow::{Context, Result};
@@ -65,6 +68,23 @@ const TEST_EXEC_FAIL: &str = "USER_MEMORY_TEST_EXEC_FAIL";
 /// (docs/dev/development.md); the next start runs. After an `exec` there is
 /// no old process to fall back to, so only a check that ran counts.
 const KILLED_CHECKS: u32 = 3;
+/// The `_meta` key that names a 2026-07-28 request's protocol version
+/// (specification 2026-07-28, basic/index, "`_meta`"; server/discover).
+const META_PROTOCOL: &str = "io.modelcontextprotocol/protocolVersion";
+/// The `_meta` key that ties a notification to the `subscriptions/listen`
+/// request whose stream it is on; its value is that request's id
+/// (specification 2026-07-28, basic/patterns/subscriptions, "Receiving
+/// Notifications").
+const META_SUBSCRIPTION: &str = "io.modelcontextprotocol/subscriptionId";
+/// The notification kinds a 2026-07-28 `subscriptions/listen` filter
+/// defines (specification 2026-07-28, basic/patterns/subscriptions,
+/// "Notification Filter").
+const LISTEN_KINDS: [&str; 4] = [
+    "toolsListChanged",
+    "promptsListChanged",
+    "resourcesListChanged",
+    "resourceSubscriptions",
+];
 
 /// The server behind the front.
 #[derive(Clone)]
@@ -97,20 +117,34 @@ struct Session {
     /// re-handshake that says something new is told once.
     #[serde(default)]
     server_line: Option<String>,
+    /// The parameters of the app's last `tools/list`. A 2026-07-28 request
+    /// must carry its protocol version and client in `_meta`, so the new
+    /// server is asked for its tools with the app's own.
+    #[serde(default)]
+    tools_params: Option<Value>,
+    /// The ids of the app's open `subscriptions/listen` streams for tool
+    /// list changes. The front answers them itself, so they outlive the
+    /// server process across a hand-over.
+    #[serde(default)]
+    listens: Vec<Value>,
 }
 
 /// What a binary's probe answers: its version, the state formats it reads
 /// and the protocol versions its server speaks.
 pub fn probe_answer() -> Value {
+    json!({"version": versions::running(), "formats": [FORMAT], "protocols": protocols()})
+}
+
+/// The protocol versions this binary's server speaks.
+fn protocols() -> Vec<String> {
     let server = crate::UserMemoryServer {
         db: PathBuf::new(),
         in_client_folder: true,
     };
-    let protocols: Vec<String> = rmcp::ServerHandler::supported_protocol_versions(&server)
+    rmcp::ServerHandler::supported_protocol_versions(&server)
         .iter()
         .map(ToString::to_string)
-        .collect();
-    json!({"version": versions::running(), "formats": [FORMAT], "protocols": protocols})
+        .collect()
 }
 
 /// Whether this process was asked for its probe answer only.
@@ -490,6 +524,34 @@ fn target(binary: &Path) -> PathBuf {
     binary.to_path_buf()
 }
 
+/// Whether the front answers `message`, a `subscriptions/listen`, itself:
+/// one on the 2026-07-28 protocol, with only the parameters and the
+/// notification kinds that version defines, asking for tool list changes.
+/// Anything else goes to the server, which answers as it always has
+/// (method not found), so what the front does not fully know costs only
+/// the reload: new tools then appear at the next session.
+fn takes_listen(message: &Value) -> bool {
+    let Some(params) = message.get("params").and_then(Value::as_object) else {
+        return false;
+    };
+    let protocol = params
+        .get("_meta")
+        .and_then(|meta| meta.get(META_PROTOCOL))
+        .and_then(Value::as_str);
+    let Some(kinds) = params.get("notifications").and_then(Value::as_object) else {
+        return false;
+    };
+    message.get("id").is_some()
+        && protocol == Some(rmcp::model::ProtocolVersion::V_2026_07_28.as_str())
+        && params
+            .keys()
+            .all(|key| key == "_meta" || key == "notifications")
+        && kinds
+            .keys()
+            .all(|kind| LISTEN_KINDS.contains(&kind.as_str()))
+        && kinds.get("toolsListChanged") == Some(&Value::Bool(true))
+}
+
 /// What the front does with a message from the app.
 enum Step {
     /// Passed to the server.
@@ -517,6 +579,8 @@ pub async fn serve(inner: Inner) -> Result<()> {
                 tools: None,
                 relayed: false,
                 server_line: None,
+                tools_params: None,
+                listens: Vec::new(),
             },
             Vec::new(),
         )
@@ -576,6 +640,7 @@ pub async fn serve(inner: Inner) -> Result<()> {
             },
             () = &mut stopped, if !signalled => {
                 signalled = true;
+                front.close_listens().await?;
                 front.end_input();
             }
         }
@@ -634,12 +699,40 @@ impl Front {
             return Ok(Step::HandOver(line));
         }
         if let Ok(message) = serde_json::from_slice::<Value>(&line) {
+            if !self.legacy()
+                && let Some(protocol) = message
+                    .pointer("/params/_meta")
+                    .and_then(|meta| meta.get(META_PROTOCOL))
+                    .and_then(Value::as_str)
+                && protocols().iter().any(|known| known == protocol)
+            {
+                // The 2026-07-28 protocol has no handshake: every request
+                // names its version, and one the server refuses is not the
+                // session's.
+                self.session.protocol = Some(protocol.to_owned());
+            }
             match message["method"].as_str() {
                 Some("initialize" | "server/discover") => {
                     self.session.handshake = Some(message.clone());
                 }
                 Some("notifications/initialized") => {
                     self.session.initialized = Some(message.clone());
+                }
+                Some("tools/list") => {
+                    self.session.tools_params = message.get("params").cloned();
+                }
+                Some("subscriptions/listen") if takes_listen(&message) => {
+                    self.listen(message["id"].clone()).await?;
+                    return Ok(Step::Passed);
+                }
+                Some("notifications/cancelled") => {
+                    let cancelled = message.pointer("/params/requestId");
+                    let before = self.session.listens.len();
+                    self.session.listens.retain(|id| Some(id) != cancelled);
+                    if self.session.listens.len() != before {
+                        // A stream the server never saw.
+                        return Ok(Step::Passed);
+                    }
                 }
                 _ => {}
             }
@@ -649,6 +742,49 @@ impl Front {
         }
         self.send(&line);
         Ok(Step::Passed)
+    }
+
+    /// Whether the app opened the session with an `initialize` handshake,
+    /// as protocols before 2026-07-28 do.
+    fn legacy(&self) -> bool {
+        self.session
+            .handshake
+            .as_ref()
+            .is_some_and(|handshake| handshake["method"] == "initialize")
+    }
+
+    /// Opens the app's `subscriptions/listen` stream `id` for tool list
+    /// changes: acknowledges it with the one kind the front honours, as the
+    /// first message carrying its id (specification 2026-07-28,
+    /// basic/patterns/subscriptions, "Acknowledgment": the server MUST
+    /// acknowledge first, and omits the kinds it does not support).
+    async fn listen(&mut self, id: Value) -> Result<()> {
+        let acknowledged = json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/subscriptions/acknowledged",
+            "params": {
+                "_meta": {META_SUBSCRIPTION: id},
+                "notifications": {"toolsListChanged": true},
+            },
+        });
+        self.write_app(&acknowledged.to_string()).await?;
+        self.session.listens.push(id);
+        Ok(())
+    }
+
+    /// Ends the open listen streams as a server that stops on its own does:
+    /// with a completion result for each (specification 2026-07-28,
+    /// basic/patterns/subscriptions, "Graceful Closure").
+    async fn close_listens(&mut self) -> Result<()> {
+        for id in std::mem::take(&mut self.session.listens) {
+            let complete = json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {"resultType": "complete", "_meta": {META_SUBSCRIPTION: id}},
+            });
+            self.write_app(&complete.to_string()).await?;
+        }
+        Ok(())
     }
 
     /// How many checks of the replacement `now` a signal ended, this one
@@ -792,13 +928,28 @@ impl Front {
             .tools
             .as_ref()
             .is_some_and(|given| given != tools);
-        if changed {
-            self.session.tools = Some(tools.clone());
-            self.write_app(
-                &json!({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
-                    .to_string(),
-            )
-            .await?;
+        if !changed {
+            return Ok(());
+        }
+        self.session.tools = Some(tools.clone());
+        if self.legacy() {
+            return self
+                .write_app(
+                    &json!({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
+                        .to_string(),
+                )
+                .await;
+        }
+        // From 2026-07-28 a change is said only on a stream the app opened
+        // for it, tagged with the stream's id (specification 2026-07-28,
+        // server/tools, "List Changed Notification"; basic/index, "`_meta`").
+        for id in self.session.listens.clone() {
+            let changed = json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/tools/list_changed",
+                "params": {"_meta": {META_SUBSCRIPTION: id}},
+            });
+            self.write_app(&changed.to_string()).await?;
         }
         Ok(())
     }
@@ -806,21 +957,30 @@ impl Front {
     /// Replays the app's handshake to a server that has not seen it, and
     /// asks for its tools, keeping both replies from the app.
     async fn replay(&mut self) -> Result<()> {
-        let Some(mut handshake) = self.session.handshake.clone() else {
-            return Ok(());
-        };
-        let method = handshake["method"].as_str().unwrap_or_default().to_owned();
-        handshake["id"] = json!(REPLAY_ID);
-        self.in_flight.insert(key(&json!(REPLAY_ID)), method);
-        self.send_value(&handshake);
+        // A 2026-07-28 app may send no handshake at all.
+        if let Some(mut handshake) = self.session.handshake.clone() {
+            let method = handshake["method"].as_str().unwrap_or_default().to_owned();
+            handshake["id"] = json!(REPLAY_ID);
+            self.in_flight.insert(key(&json!(REPLAY_ID)), method);
+            self.send_value(&handshake);
+        }
         if let Some(initialized) = self.session.initialized.clone() {
             self.send_value(&initialized);
         }
         if self.session.tools.is_some() {
+            let mut params = self
+                .session
+                .tools_params
+                .clone()
+                .unwrap_or_else(|| json!({}));
+            // The reply is the front's own, so no progress is reported.
+            if let Some(meta) = params.get_mut("_meta").and_then(Value::as_object_mut) {
+                meta.remove("progressToken");
+            }
             self.in_flight
                 .insert(key(&json!(TOOLS_ID)), "tools/list".into());
             self.send_value(
-                &json!({"jsonrpc": "2.0", "id": TOOLS_ID, "method": "tools/list", "params": {}}),
+                &json!({"jsonrpc": "2.0", "id": TOOLS_ID, "method": "tools/list", "params": params}),
             );
         }
         Ok(())
