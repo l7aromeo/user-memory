@@ -443,6 +443,8 @@ fn a_handed_over_serve_waits_for_a_running_migration_then_answers() {
         let migrated = migration.join().unwrap();
         assert_eq!(reply["result"]["isError"], false, "{way:?}: {reply}");
         assert!(Instant::now() >= migrated, "answered before the migration");
+        // The new code, which needs the migrated store, answered it.
+        assert_eq!(session.version("after"), Some(NEWER.into()), "{way:?}");
         session.close();
     }
 }
