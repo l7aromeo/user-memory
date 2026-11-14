@@ -772,11 +772,19 @@ fn newer_build(args: &[String]) -> u8 {
         std::process::abort();
     }
     let real = env::var_os("FAKE_USER_MEMORY").unwrap();
-    let mut command = Command::new(real);
-    command.args(args).env(
-        "USER_MEMORY_TEST_VERSION",
-        env::var_os("FAKE_USER_MEMORY_VERSION").unwrap(),
+    // A version file beside the copy gives one replacement a version of its
+    // own, for a session handed over more than once.
+    let version = fs::read_to_string(
+        env::current_exe()
+            .unwrap()
+            .with_file_name("user-memory.version"),
+    )
+    .map_or_else(
+        |_| env::var_os("FAKE_USER_MEMORY_VERSION").unwrap(),
+        |version| version.trim().into(),
     );
+    let mut command = Command::new(real);
+    command.args(args).env("USER_MEMORY_TEST_VERSION", version);
     if let Some(schema) = env::var_os("FAKE_USER_MEMORY_SCHEMA") {
         command.env("USER_MEMORY_TEST_SCHEMA_VERSION", schema);
     }
