@@ -131,6 +131,37 @@ impl Releases {
             .unwrap();
         }
     }
+    /// Publishes `binary` as this machine's client build of release `tag`,
+    /// with its checksum, and the server builds Docker would use.
+    pub fn publish(&self, tag: &str, binary: &Path) {
+        let layout = format!("download/{tag}");
+        fs::create_dir_all(self.dir.path().join(&layout)).unwrap();
+        let target = native_target();
+        let suffix = std::env::consts::EXE_SUFFIX;
+        let name = format!("user-memory-{target}{suffix}");
+        let asset = self.asset(&layout, &name);
+        fs::copy(binary, &asset).unwrap();
+        fs::write(
+            self.asset(&layout, &format!("{name}.sha256")),
+            format!("{}  {name}\n", sha256(&asset)),
+        )
+        .unwrap();
+        for linux in ["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"] {
+            let server = self.asset(&layout, &format!("user-memory-{linux}"));
+            if !server.exists() {
+                fs::write(&server, format!("linux build {linux}")).unwrap();
+                fs::write(
+                    self.asset(&layout, &format!("user-memory-{linux}.sha256")),
+                    format!("{}  user-memory-{linux}\n", sha256(&server)),
+                )
+                .unwrap();
+            }
+        }
+    }
+    /// Makes `<base>/latest` redirect to release `tag`, as GitHub's does.
+    pub fn set_latest(&self, tag: &str) {
+        fs::write(self.dir.path().join("latest.tag"), tag).unwrap();
+    }
     pub fn asset(&self, layout: &str, name: &str) -> PathBuf {
         self.dir.path().join(layout).join(name)
     }
@@ -158,7 +189,13 @@ fn serve(
         .filter(|rest| !rest.contains(".."))
         .map(|rest| root.join(rest));
     let dropped = flaky.lock().unwrap().remove(&path);
+    let latest = fs::read_to_string(root.join("latest.tag")).ok();
     let response = match file.and_then(|file| fs::read(file).ok()) {
+        _ if path == "/l7aromeo/user-memory/releases/latest" && latest.is_some() => format!(
+            "HTTP/1.1 302 Found\r\nLocation: https://github.com/l7aromeo/user-memory/releases/tag/{}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            latest.unwrap_or_default()
+        )
+        .into_bytes(),
         Some(body) if dropped => [
             format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",

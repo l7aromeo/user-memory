@@ -120,6 +120,17 @@ impl Connection {
         check_tools(&schemas)
     }
 
+    /// What the server says in its handshake: its `initialize` result.
+    pub async fn handshake(&self) -> Result<serde_json::Value> {
+        let service = tokio::time::timeout(Duration::from_secs(10), ().serve(self.transport()?))
+            .await
+            .context("Memory server connection timed out")?
+            .context("Cannot connect to memory server")?;
+        let info = service.peer_info().map(serde_json::to_value);
+        let _ = service.cancel().await;
+        Ok(info.context("Memory server sent no handshake")??)
+    }
+
     pub async fn call(&self, name: &'static str, arguments: serde_json::Value) -> Result<String> {
         let service = tokio::time::timeout(Duration::from_secs(10), ().serve(self.transport()?))
             .await

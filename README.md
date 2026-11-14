@@ -107,7 +107,8 @@ irm https://github.com/l7aromeo/user-memory/releases/latest/download/install.ps1
 The installer sets up a server on this machine, or connects to one you
 already run, then connects every Claude Code and Codex it finds and runs
 `user-memory doctor`. Restart Claude Code and Codex once; in Codex, run
-`/hooks` and choose **Trust** for user-memory's two hooks.
+`/hooks` and choose **Trust** for user-memory's two hooks. Later,
+`user-memory upgrade` moves an existing install to a newer release.
 [Getting started](docs/getting-started.md) walks through the first session
 and the first rule.
 

@@ -137,7 +137,7 @@ impl Terminal {
     /// The terminal, if this process has one someone can answer on: none
     /// without a controlling terminal on Unix, or on Windows without a
     /// console window, whose CONIN$ opens but no one types in.
-    fn open() -> Option<Self> {
+    pub(crate) fn open() -> Option<Self> {
         #[cfg(windows)]
         if !crate::platform::windows::console_window() {
             return None;
@@ -158,7 +158,7 @@ impl Terminal {
         Ok(answer.trim().to_owned())
     }
     /// A yes or no question; an empty answer takes `default`.
-    fn ask(&mut self, prompt: &str, default: bool) -> Result<bool> {
+    pub(crate) fn ask(&mut self, prompt: &str, default: bool) -> Result<bool> {
         let answer = self.line(prompt)?.to_lowercase();
         Ok(match answer.as_str() {
             "" => default,
