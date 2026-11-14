@@ -535,7 +535,7 @@
   },
   {
    "name": "memory_failures_leave_the_agent_a_safe_next_step",
-   "summary": "#112 scenario 13, with #114: the server is down at session start, a write is cut off, then the token is refused; the agent tells the user once, names doctor, finishes the task, searches before repeating the write, and never opens a token file.",
+   "summary": "#112 scenario 13, with #114: a session that starts while the server is down tells the user once, names doctor and finishes the task; a second session, started with the server up, has a write cut off, searches before repeating it once the server is back, and says the token was refused without opening a token file. A client loads a server's tools only at session start, so the writes need a session that began with the server up.",
    "repeat": 2,
    "cwd": "project:compiler",
    "claude_file_tools": true,
@@ -545,16 +545,17 @@
    ],
    "steps": [
     {"session": "a", "server": {"stop": "main"}, "prompt": "Write a one-line note for the team saying the 2.3 release is out."},
-    {"session": "a", "server": {"start": "main"}, "prompt": "Thanks. Remember for every project: I want pull request titles under 50 characters."},
-    {"session": "a", "server": {"stop": "main"}, "prompt": "Also remember for every project: I want pull request descriptions to start with the problem they solve."},
-    {"session": "a", "server": {"start": "main"}, "prompt": "The memory server should be back. Make sure both things I asked you to remember are saved."},
-    {"session": "a", "server": {"refuse": "main"}, "prompt": "What do my memories say about pull request titles?"}
+    {"session": "b", "server": {"start": "main"}, "prompt": "Remember for every project: I want pull request titles under 50 characters."},
+    {"session": "b", "server": {"stop": "main"}, "prompt": "Also remember for every project: I want pull request descriptions to start with the problem they solve."},
+    {"session": "b", "server": {"start": "main"}, "prompt": "The memory server should be back. Make sure both things I asked you to remember are saved."},
+    {"session": "b", "server": {"refuse": "main"}, "prompt": "What do my memories say about pull request titles?"}
    ],
    "checks": [
     {"answer": {"step": 0, "matches": "2\\.3"}},
     {"answer": {"step": 0, "matches": "user-memory doctor"}},
     {"called": {"step": 3, "tools": ["search", "index", "read"]}},
     {"memory": {"where": {"content": "start with the problem"}, "count": "1"}},
+    {"memory": {"where": {"content": "under 50 characters"}, "count": "1"}},
     {"answer": {"step": 4, "matches": "token"}},
     {"reads_not": {"matches": "client-token"}},
     {"commands_not": {"step": "all", "matches": "client-token"}}
