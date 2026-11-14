@@ -262,6 +262,17 @@ fn host_requires_authentication_and_two_devices_share_persistent_memory() {
         .as_str()
         .expect("Remote memory ID must be a UUID");
     assert!(uuid::Uuid::parse_str(memory_id).is_ok());
+    // An export from a server says where the file is in words: the
+    // server's folders are not the client's, and no path leaves the server.
+    let exported = host.rpc(call(30, "export", json!({"name":"backup.json"})));
+    let text = exported["result"]["content"][0]["text"].as_str().unwrap();
+    let summary: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(summary["exported"], true, "{text}");
+    assert_eq!(
+        summary["next"],
+        "The file is in the memory server's exports folder, on the server, not among this machine's files. For a copy here, the user runs `user-memory export FILE`."
+    );
+    assert!(!text.contains(host.root.path().to_str().unwrap()), "{text}");
     let invalid = host.rpc(call(
         5,
         "forget",
