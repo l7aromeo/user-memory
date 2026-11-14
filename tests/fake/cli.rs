@@ -761,7 +761,16 @@ fn cargo(args: &[String]) -> u8 {
 /// `$FAKE_USER_MEMORY_SCHEMA`, when set) that a debug build reports in
 /// place of its own. On Unix it becomes that program, keeping its process,
 /// as `exec` does; on Windows it runs it on the same input and output.
+///
+/// A file `user-memory.killed-once` beside the copy makes its next run end
+/// by a signal, and go: a new program the system refuses once.
 fn newer_build(args: &[String]) -> u8 {
+    let killed = env::current_exe()
+        .unwrap()
+        .with_file_name("user-memory.killed-once");
+    if fs::remove_file(&killed).is_ok() {
+        std::process::abort();
+    }
     let real = env::var_os("FAKE_USER_MEMORY").unwrap();
     let mut command = Command::new(real);
     command.args(args).env(
