@@ -456,6 +456,15 @@ that plan or API usage; the runner enforces a session budget and aborts if
 your real memory, client configuration, instruction files or logins change.
 See [evals/README.md](../../evals/README.md).
 
+A batch runs each provider's cheaper model from its latest family: Claude
+Code's `sonnet` alias and Codex's `gpt-6-luna`. A weaker agent makes a pass
+stronger evidence that memory carried the decision, and the batch costs less;
+the alias follows new families, and the runner stops when Codex reports its
+named model superseded. `--top-models` runs `opus` and Codex's top tier, for
+re-running a failure before calling it a bug. Each batch's summary reports
+the tokens and estimated cost per scenario, client and model, so budgets use
+measured figures.
+
 ## Retrieval benchmark
 
 `just retrieval-bench` measures how well `search` finds a known memory. It

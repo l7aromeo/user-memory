@@ -16,8 +16,9 @@ first; neither runs a session:
     evals/run.py --scenario codex_records_through_user_memory --client codex
     evals/run.py --budget 100
 
-`--dry-run` prints the sessions planned per scenario and client, whether the
-eval logins are in place, and what the guard watches. `--rehearse` installs
+`--dry-run` prints the sessions planned per scenario and client, the model
+each client will use, whether the eval logins are in place, and what the
+guard watches. `--rehearse` installs
 one trial per scenario and client and checks what setup wrote (instruction
 files with the seeded rules, both hooks or none, the MCP registration, and
 Codex's approval of the hooks), plus the session-start header a scenario's
@@ -147,10 +148,21 @@ current hashes are recorded as trusted in the trial's `config.toml`.
   declined, and so is everything else. `python3 evals/test_run.py` checks
   the policy. Each request and its decision is kept in the step's
   `approvals`.
-- Models are the user's defaults, passed explicitly because trials never read
-  the user's settings: `USER_MEMORY_EVAL_CLAUDE_MODEL` (default `opus[1m]`),
-  `USER_MEMORY_EVAL_CODEX_MODEL` (default `gpt-6.1-sol`) and
-  `USER_MEMORY_EVAL_CODEX_EFFORT` (default `high`).
+- Each batch runs the cheaper model of each provider's latest family: Claude
+  Code's `sonnet` alias, which it resolves to the newest Sonnet, and Codex's
+  `gpt-6-luna`, at `high` effort. A pass on a weaker agent says more about
+  memory, and the batch costs less. `--top-models` runs Claude Code's `opus`
+  and Codex's top tier instead; a failure on the cheaper models is run again
+  there before it is called a bug. `USER_MEMORY_EVAL_CLAUDE_MODEL`,
+  `USER_MEMORY_EVAL_CODEX_MODEL` and `USER_MEMORY_EVAL_CODEX_EFFORT` name
+  others for one run. The Codex tiers are named once in `evals/run.py`; every
+  run except `--list` asks the installed Codex for its model list and stops
+  when it reports one of them, or the model chosen, superseded.
+- Each trial records the tokens its sessions used: Claude Code's `result`
+  events (its `modelUsage`, with Claude Code's own cost estimate) and Codex's
+  `thread/tokenUsage/updated` notifications (priced from `CODEX_PRICES` in
+  `evals/run.py`). The batch summary shows input, cached input, output,
+  reasoning and estimated cost per scenario, client and model.
 
 The guard fingerprints the Codex binary in use, the user's real memory
 store, installed binary and receipt, `~/.claude/settings*.json`, `~/.claude/CLAUDE.md`,
@@ -169,9 +181,12 @@ and so stops the batch.
 
 ## Scenarios
 
-Each scenario may `seed` memories through the CLI (seed `id`s are referenced
-by checks; `"rule": true` marks a seed the rehearsal expects in the
-instruction file), then runs its `sessions` (one turn each) or `steps` (turns
+Each scenario may `seed` memories through the CLI, in order (seed `id`s are
+referenced by checks, and a seed's `args` may name an earlier seed as
+`{seed:NAME}`, its full id, so `"--supersedes", "{seed:old}"` replaces it;
+`"rule": true` marks a seed the rehearsal expects in the instruction file,
+and `"rule": false` one it expects absent from it),
+then runs its `sessions` (one turn each) or `steps` (turns
 naming their `session`, kept open until its last turn) in a working directory
 (`cwd`: `plain`, `folder:<path>` without git, or `project:<path>`, a checkout
 whose remote is the project in `projects` named by the path's last part, so
@@ -200,7 +215,8 @@ kept after every step, for `file` checks on one step.
 `rehearse` entries add checks to `--rehearse` that need no agent: each runs
 the trial's installed session-start hook in its `cwd` with a made-up payload
 (`source` defaults to `startup`), after linking `links` to that made-up
-conversation, and requires every `matches` pattern in the header it prints.
+conversation, and requires every `matches` pattern in the header it prints
+and no `lacks` pattern.
 
 Checks grade the final store (read with `search --scope all --status all`)
 and each step, by default the last (`"step": N`). In any string,
@@ -216,7 +232,8 @@ memory whose title or content matches.
 - `real_origin`: the step recorded with the conversation's real origin.
 - `commands` / `commands_not`: a shell command of the step (or of every step,
   `"step": "all"`) does or does not match.
-- `commits`: a commit landed after the project's first one.
+- `commits`: a commit landed after the project's first one, or with
+  `matches`, one whose message matches (`^` is the start of its subject).
 - `commits_not`: no commit after the project's first one matches.
 - `approvals_not`: no escalation Codex asked for matches, whatever the
   answer; a declined push request still counts as an attempted push.
@@ -235,4 +252,5 @@ before the first session and after the last.
 
 Checks marked `informational` are reported but do not decide the trial; a
 check may name the `client` it applies to. Scenarios marked `diagnostic` run
-only when named.
+only when named. Some diagnostics are expected to fail: they seed only the
+memory that should lose, to show another scenario's checks can fail.

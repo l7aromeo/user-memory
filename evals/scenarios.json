@@ -245,6 +245,84 @@
     {"called": {"tools": ["search", "index", "read"]}},
     {"informational": true, "called": {"tools": ["search"]}}
    ]
+  },
+  {
+   "name": "a_superseded_rule_gives_way_to_its_replacement",
+   "summary": "A rule and the rule that replaced it: the commit follows the replacement (past tense), not the superseded rule (imperative), which neither client does by default.",
+   "repeat": 3,
+   "shell": true,
+   "codex_escalations": true,
+   "cwd": "project:notebooks",
+   "seed": [
+    {"id": "old", "rule": false, "args": ["--type", "preference", "--category", "workflow", "--title", "Write commit subjects in the imperative mood", "--content", "Write commit subjects in the imperative mood, such as 'Add the export button'.", "--scope", "global"]},
+    {"id": "new", "rule": true, "args": ["--type", "preference", "--category", "workflow", "--title", "Write commit subjects in the past tense, as this team's changelog tool reads them", "--content", "Write commit subjects in the past tense, such as 'Added the export button', because this team's changelog tool reads them that way.", "--scope", "global", "--supersedes", "{seed:old}"]}
+   ],
+   "sessions": [
+    {"prompt": "Add the line 'See CONTRIBUTING.md for the review process.' to README.md and commit the change."}
+   ],
+   "checks": [
+    {"commits": {"cwd": "project:notebooks", "matches": "^([\\w-]+(\\([\\w-]+\\))?!?: )?[a-z]+ed\\b"}},
+    {"commits_not": {"cwd": "project:notebooks", "matches": "^([\\w-]+(\\([\\w-]+\\))?!?: )?(add|fix|update|remove)\\b"}},
+    {"informational": true, "called": {"tools": ["read"], "args": {"ids": "{seed:new}"}}}
+   ],
+   "rehearse": [
+    {"cwd": "project:notebooks", "lacks": ["Write commit subjects in the imperative mood"]}
+   ]
+  },
+  {
+   "name": "a_superseded_rule_alone_is_followed",
+   "summary": "Expected to fail: only the superseded rule (imperative) is seeded, which shows a_superseded_rule_gives_way_to_its_replacement's checks can fail.",
+   "diagnostic": true,
+   "shell": true,
+   "codex_escalations": true,
+   "cwd": "project:notebooks",
+   "seed": [
+    {"id": "old", "rule": true, "args": ["--type", "preference", "--category", "workflow", "--title", "Write commit subjects in the imperative mood", "--content", "Write commit subjects in the imperative mood, such as 'Add the export button'.", "--scope", "global"]}
+   ],
+   "sessions": [
+    {"prompt": "Add the line 'See CONTRIBUTING.md for the review process.' to README.md and commit the change."}
+   ],
+   "checks": [
+    {"commits": {"cwd": "project:notebooks", "matches": "^([\\w-]+(\\([\\w-]+\\))?!?: )?[a-z]+ed\\b"}},
+    {"commits_not": {"cwd": "project:notebooks", "matches": "^([\\w-]+(\\([\\w-]+\\))?!?: )?(add|fix|update|remove)\\b"}}
+   ]
+  },
+  {
+   "name": "a_project_exception_overrides_a_global_rule",
+   "summary": "A global rule (indent with two spaces) and this project's exception (tabs, for its linter): a new script in the project is indented with tabs.",
+   "repeat": 3,
+   "shell": true,
+   "cwd": "project:compiler",
+   "seed": [
+    {"id": "spaces", "rule": true, "args": ["--type", "preference", "--category", "programming", "--title", "Indent with two spaces", "--content", "Indent code with two spaces, never tabs.", "--scope", "global"]},
+    {"id": "tabs", "args": ["--type", "constraint", "--category", "programming", "--title", "This repository indents with tabs (its linter requires it)", "--content", "In the compiler repository, indent every file with tabs: its linter requires it and rejects space indentation.", "--scope", "project", "--project", "github.com/acme/compiler"]}
+   ],
+   "sessions": [
+    {"prompt": "Add a new shell script, scripts/build.sh: a function named build that runs `cargo build --release` and then prints 'build done', and a call to that function at the end. Don't commit it."}
+   ],
+   "checks": [
+    {"file": {"path": "compiler/scripts/build.sh", "matches": "^\\t\\S"}},
+    {"informational": true, "answer_not": {"matches": "conflict|contradict|two spaces"}}
+   ],
+   "rehearse": [
+    {"cwd": "project:compiler", "matches": ["This repository indents with tabs"]}
+   ]
+  },
+  {
+   "name": "a_global_rule_alone_is_followed",
+   "summary": "Expected to fail: only the global rule (two spaces) is seeded, which shows a_project_exception_overrides_a_global_rule's checks can fail.",
+   "diagnostic": true,
+   "shell": true,
+   "cwd": "project:compiler",
+   "seed": [
+    {"id": "spaces", "rule": true, "args": ["--type", "preference", "--category", "programming", "--title", "Indent with two spaces", "--content", "Indent code with two spaces, never tabs.", "--scope", "global"]}
+   ],
+   "sessions": [
+    {"prompt": "Add a new shell script, scripts/build.sh: a function named build that runs `cargo build --release` and then prints 'build done', and a call to that function at the end. Don't commit it."}
+   ],
+   "checks": [
+    {"file": {"path": "compiler/scripts/build.sh", "matches": "^\\t\\S"}}
+   ]
   }
  ]
 }
