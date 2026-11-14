@@ -421,7 +421,7 @@ fn connector_answers_a_tool_call_when_the_host_stops() {
         value["result"]["content"][0]["text"]
             .as_str()
             .unwrap()
-            .contains("did not answer; the call may not have completed"),
+            .ends_with("did not answer; the call may not have completed. Before repeating a write, search for it. Memory reconnects on the next call."),
         "{value}"
     );
     assert!(!value.to_string().contains(TOKEN));
@@ -455,8 +455,10 @@ fn connector_answers_a_tool_call_when_the_host_stops() {
         .as_str()
         .unwrap();
     assert!(
-        said.contains("refused this machine's access token")
-            && said.contains(&client_token.display().to_string()),
+        said.ends_with(&format!(
+            "refused this machine's access token ({}); the call was not run. Tell the user the token in that file needs replacing (user-memory doctor shows it); don't open the file. Memory tries again on the next call.",
+            client_token.display()
+        )),
         "{said}"
     );
     assert!(!unauthorized.to_string().contains(TOKEN));

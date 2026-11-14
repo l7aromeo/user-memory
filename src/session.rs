@@ -102,6 +102,11 @@ const NO_PROJECT_SEVERAL: &str = "If it holds several repositories, link each on
 /// After the repositories session start found inside the folder.
 const NO_PROJECT_LISTED: &str = "Link the ones you work in; to load some in every session here, run `user-memory project-id --include <folder>` when the user asks for that, or propose it first.";
 const NO_PROJECT_NEW: &str = "If it is one new project, run `user-memory project-id --set <key>` here when the user names its key, or propose one (such as its planned remote, github.com/<owner>/<name>) and run it after their yes. Record nothing about this work as global without the user's yes.";
+/// Said after every reason memory is unavailable at session start: the
+/// agent can't check the endpoint or the token, and must not open the token
+/// file, so it goes on with the task and leaves the checks to the user.
+const UNAVAILABLE_NEXT: &str =
+    "Work without memory for now; tell the user once, and suggest they run user-memory doctor.";
 /// The most repositories the No-project line names; the rest are counted,
 /// so a folder of many checkouts keeps the header short.
 const REPOSITORIES_LISTED: usize = 20;
@@ -140,9 +145,13 @@ pub async fn start(path: PathBuf, client: Option<HookClient>) -> String {
         Ok(Err(err)) => {
             let reason = err.to_string();
             let reason = reason.lines().next().unwrap_or_default();
-            format!("User memory unavailable: {}", memory::clean(reason, 600))
+            let reason = memory::clean(reason, 600);
+            format!(
+                "User memory unavailable: {}. {UNAVAILABLE_NEXT}",
+                reason.trim_end_matches('.')
+            )
         }
-        Err(_) => "User memory unavailable: timed out".into(),
+        Err(_) => format!("User memory unavailable: timed out. {UNAVAILABLE_NEXT}"),
     };
     match origin {
         Some(origin) => format!(
