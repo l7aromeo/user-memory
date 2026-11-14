@@ -231,11 +231,12 @@ pub fn connect(db: &Path) -> Result<Connection> {
 /// waits for a store older than its code to be migrated. `user-memory
 /// upgrade` replaces the binary first, then setup backs the store up and
 /// migrates it, which a call meeting the store then waits for instead of
-/// being refused. 30 s is about twice the slowest migration measured (0.9's
-/// keyword index took up to 16 s on 100,000 memories, docs/upgrade.md),
-/// and well under the minutes an agent app gives a tool call. Past it the
-/// call is refused as before: the store is not being migrated.
-const MIGRATION_WAIT: Duration = Duration::from_secs(30);
+/// being refused. 50 s covers the 45 s budget for v0.10.0's whole upgrade
+/// of 100,000 memories (evals/scale/upgrade.py), and stays under the 60 s
+/// Codex gives an MCP tool call by default, so the call is answered rather
+/// than timed out. Past it the call is refused as before: the store is not
+/// being migrated.
+const MIGRATION_WAIT: Duration = Duration::from_secs(50);
 /// How often the waiting `serve` reads the store's version again.
 const MIGRATION_POLL: Duration = Duration::from_millis(100);
 /// Until when this process waits for a migration: set by a `serve` that
