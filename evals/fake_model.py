@@ -7,7 +7,9 @@ headers, so no token a client sends reaches the record or the log file.
 
 A script maps an API ("anthropic" or "openai") to the replies its main
 requests get in order; past the end each gets the text "done". A reply is
-`{"text": TEXT}` or `{"tool": NAME, "input": {...}}`, and with
+`{"text": TEXT}`, `{"tool": NAME, "input": {...}}` or, for OpenAI's
+free-text tools such as Codex's `exec`, `{"custom_tool": NAME, "input":
+TEXT}`; with
 `"hold": true` it waits until `release()` before answering, so a test can
 act while a turn is under way. Anthropic requests without tools (Claude
 Code's own side calls, such as a title) get text and take no reply from the
@@ -175,6 +177,9 @@ class FakeModel:
         if "tool" in reply:
             item = {"type": "function_call", "id": f"fc_{rid}", "call_id": f"call_{rid}",
                     "name": reply["tool"], "arguments": json.dumps(reply["input"])}
+        elif "custom_tool" in reply:
+            item = {"type": "custom_tool_call", "id": f"ctc_{rid}", "call_id": f"call_{rid}",
+                    "name": reply["custom_tool"], "input": reply["input"]}
         else:
             item = {"type": "message", "id": f"msg_{rid}", "role": "assistant", "status": "completed",
                     "content": [{"type": "output_text", "text": reply["text"], "annotations": []}]}

@@ -37,8 +37,10 @@ import json
 import os
 import queue
 import re
+import secrets
 import shlex
 import shutil
+import socket
 import sqlite3
 import stat
 import subprocess
@@ -385,6 +387,10 @@ class Sandbox:
             **embed_settings(os.environ),
         }
         self.ids = {}
+        # The server this trial's client connects to, if any, and the
+        # client's copy of its token.
+        self.remote = None
+        self.token_file = self.dir / "client-token"
 
     def cli(self, *args):
         binary = self.binary if self.binary.exists() else self.source
@@ -395,13 +401,25 @@ class Sandbox:
             raise RuntimeError(f"user-memory {' '.join(args)} failed: {out.stderr.strip()}")
         return out.stdout
 
+    def client_env(self):
+        """The environment the client and what it starts run in: without the
+        store's path when the trial connects to a server, since a store
+        path set there means a local store."""
+        if self.remote is None:
+            return self.env
+        return {k: v for k, v in self.env.items() if k != "USER_MEMORY_DB"}
+
     def setup(self, hooks):
-        """Installs user-memory for this trial's client, as a user would."""
-        args = ["setup", "--client", self.client, "--install-dir", str(self.install),
-                "--db", str(self.db)]
+        """Installs user-memory for this trial's client, as a user would:
+        with its own store, or connected to the trial's server."""
+        args = ["setup", "--client", self.client, "--install-dir", str(self.install)]
+        if self.remote is None:
+            args += ["--db", str(self.db)]
+        else:
+            args += ["--url", self.remote.url, "--token-file", str(self.token_file)]
         if not hooks:
             args.append("--no-hooks")
-        out = subprocess.run([str(self.source), *args], env=self.env, capture_output=True,
+        out = subprocess.run([str(self.source), *args], env=self.client_env(), capture_output=True,
                              text=True, timeout=180)
         if out.returncode != 0:
             raise RuntimeError(f"setup failed: {out.stderr.strip() or out.stdout.strip()}")
@@ -535,7 +553,7 @@ def stale_models(listed, names):
 
 def user_memory_hooks(sandbox):
     """The trial's user-memory hooks as Codex lists them."""
-    reply = app_server_request(sandbox.env, [
+    reply = app_server_request(sandbox.client_env(), [
         {"id": 0, "method": "initialize", "params": {"clientInfo": {"name": "eval", "version": "1"}}},
         {"method": "initialized"},
         {"id": 1, "method": "hooks/list", "params": {"cwds": [str(sandbox.dir)]}},
@@ -632,6 +650,12 @@ class ClaudeSession:
             tools, allowed = CLAUDE_SHELL_TOOLS, allowed + allow
         elif options.get("claude_file_tools"):
             tools = CLAUDE_FILE_TOOLS
+        asks = options.get("asks")
+        if asks:
+            # The question tool, answered by the harness as the user would:
+            # with a host for prompts, every call no rule allows comes to
+            # the harness, which declines all but the questions.
+            tools = ",".join([t for t in tools.split(",") if t] + ["AskUserQuestion"])
         self.command = [
             "claude", "-p", "--input-format", "stream-json",
             "--output-format", "stream-json", "--verbose",
@@ -647,6 +671,7 @@ class ClaudeSession:
             *([] if options.get("compacts") else ["--disable-slash-commands"]),
             *([] if options.get("resumes") else ["--no-session-persistence"]),
             *(["--resume", resume] if resume else []),
+            *(["--permission-prompt-tool", "stdio"] if asks else []),
         ]
         if options.get("claude_file_tools"):
             self.command += ["--settings", json.dumps({"autoMemoryEnabled": True})]
@@ -654,19 +679,33 @@ class ClaudeSession:
         # The token signs the session in; the scrub keeps it out of every
         # command, hook and MCP server Claude starts, so no command can put it
         # in a commit or a result.
-        env = {**sandbox.env, "CLAUDE_CODE_OAUTH_TOKEN": claude_token(),
-               "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": "1", "DISABLE_AUTOUPDATER": "1"}
+        env = {**sandbox.client_env(), "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": "1", "DISABLE_AUTOUPDATER": "1"}
+        if options.get("fake_model"):
+            # A rehearsal: the fake model on loopback, a placeholder key, no
+            # login, and no traffic beyond the model's.
+            env.update({"ANTHROPIC_BASE_URL": options["fake_model"], "ANTHROPIC_API_KEY": "fake",
+                        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"})
+        else:
+            env["CLAUDE_CODE_OAUTH_TOKEN"] = claude_token()
+        self.questions, self.declined = [], []
         self.child = subprocess.Popen(self.command, cwd=cwd, env=env, stdin=subprocess.PIPE,
                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.lines = reader(self.child.stdout)
         self.errors = reader(self.child.stderr)
 
-    def turn(self, prompt):
-        message = {"type": "user", "message": {"role": "user", "content": prompt}}
+    def say(self, text):
+        self.child.stdin.write(json.dumps({"type": "user", "message": {"role": "user", "content": text}}) + "\n")
+        self.child.stdin.flush()
+
+    def turn(self, prompt, while_working=None, answers=None):
+        """One turn: `prompt`, then `while_working` as a second user message
+        once the agent's first tool call shows, as a user types while the
+        agent works; Claude Code adds it to the running turn. Its question
+        tool is answered from `answers`."""
         events, error = [], None
+        self.questions, self.declined, self.steered = [], [], False
         try:
-            self.child.stdin.write(json.dumps(message) + "\n")
-            self.child.stdin.flush()
+            self.say(prompt)
         except BrokenPipeError:
             return events, "the session had ended"
         deadline = time.time() + TURN_TIMEOUT
@@ -684,9 +723,39 @@ class ClaudeSession:
             except json.JSONDecodeError:
                 continue
             events.append(event)
+            if event.get("type") == "control_request":
+                self.control(event, answers or [])
+            elif while_working and not self.steered and tool_uses([event]):
+                self.say(while_working)
+                self.steered = True
             if event.get("type") == "result":
                 break
         return events, error
+
+    def control(self, event, answers):
+        """Answers Claude Code's request to its host: a question from its
+        question tool as `answers` say, or declined when none fits; any other
+        tool call, which no allow rule covers, declined, as Claude Code
+        declines it with no one to ask."""
+        request = event.get("request") or {}
+        if request.get("subtype") != "can_use_tool":
+            reply = {"subtype": "error", "request_id": event["request_id"],
+                     "error": "the eval client does not support this request"}
+        else:
+            if request.get("tool_name") == "AskUserQuestion":
+                asked = request.get("input", {}).get("questions", [])
+                picked = pick_answers([(q.get("question", ""), [o.get("label", "") for o in q.get("options", [])])
+                                       for q in asked], answers)
+                self.questions.append({"questions": [q.get("question", "") for q in asked], "answers": picked})
+                decision = ({"behavior": "allow", "updatedInput": {**request["input"], "answers": picked}}
+                            if picked is not None else
+                            {"behavior": "deny", "message": "The user declined to answer."})
+            else:
+                self.declined.append(request.get("tool_name"))
+                decision = {"behavior": "deny", "message": "Not allowed in this session."}
+            reply = {"subtype": "success", "request_id": event["request_id"], "response": decision}
+        self.child.stdin.write(json.dumps({"type": "control_response", "response": reply}) + "\n")
+        self.child.stdin.flush()
 
     def compact(self):
         """Compacts the conversation as a user's /compact does."""
@@ -700,6 +769,28 @@ class ClaudeSession:
             self.child.kill()
             self.child.wait()
         return drain(self.errors)
+
+
+def tool_uses(events):
+    """Claude tool calls in `events`."""
+    return [part for event in events if event.get("type") == "assistant"
+            for part in (event.get("message") or {}).get("content", [])
+            if part.get("type") == "tool_use"]
+
+
+def pick_answers(questions, answers):
+    """The user's answers to `questions` ((text, option labels) pairs), from
+    a step's `answers` ({"question": REGEX, "pick": REGEX}, first match
+    wins): {question: label}, or None, declining them all, when one has no
+    entry or no option that entry picks."""
+    picked = {}
+    for text, labels in questions:
+        entry = next((a for a in answers if re.search(a["question"], text, re.IGNORECASE)), None)
+        label = entry and next((l for l in labels if re.search(entry["pick"], l, re.IGNORECASE)), None)
+        if not label:
+            return None
+        picked[text] = label
+    return picked
 
 
 def toml_string(value):
@@ -717,9 +808,11 @@ class CodexSession:
         self.sandbox = sandbox
         self.resume = resume
         self.child = None
+        self.questions, self.answers, self.steered = [], [], False
         link = sandbox.codex_home / "auth.json"
         link.unlink(missing_ok=True)
-        link.symlink_to(CODEX_AUTH_HOME / "auth.json")
+        if not options.get("fake_model"):
+            link.symlink_to(CODEX_AUTH_HOME / "auth.json")
         try:
             self.start(cwd, options)
         except BaseException:
@@ -746,7 +839,15 @@ class CodexSession:
             *(["--disable", "shell_tool"] if not shell else []),
             *[arg for setting in CODEX_EXTRA for arg in ("-c", setting)],
         ]
-        self.child = subprocess.Popen(self.command, cwd=cwd, env=self.sandbox.env,
+        env = self.sandbox.client_env()
+        if options.get("fake_model"):
+            # A rehearsal: a provider at the fake model on loopback, with a
+            # placeholder key and no login.
+            provider = (f'{{name="fake",base_url="{options["fake_model"]}/v1",'
+                        f'wire_api="responses",env_key="USER_MEMORY_EVAL_FAKE_KEY"}}')
+            self.command += ["-c", f"model_providers.fake={provider}", "-c", 'model_provider="fake"']
+            env = {**env, "USER_MEMORY_EVAL_FAKE_KEY": "fake"}
+        self.child = subprocess.Popen(self.command, cwd=cwd, env=env,
                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                       stderr=subprocess.PIPE, text=True)
         self.lines = reader(self.child.stdout)
@@ -797,6 +898,16 @@ class CodexSession:
         if "id" not in message or "method" not in message:
             return
         method, params = message["method"], message.get("params") or {}
+        if method == "item/tool/requestUserInput":
+            # The question tool, answered as the step's `answers` say.
+            asked = params.get("questions") or []
+            picked = pick_answers([(q.get("question", ""), [o.get("label", "") for o in q.get("options") or []])
+                                   for q in asked], self.answers)
+            self.questions.append({"questions": [q.get("question", "") for q in asked], "answers": picked})
+            by_id = {q.get("id"): picked[q.get("question", "")] for q in asked} if picked else {}
+            self.send({"id": message["id"], "result": {
+                "answers": {qid: {"answers": [label]} for qid, label in by_id.items()}}})
+            return
         if method in ("item/commandExecution/requestApproval", "execCommandApproval"):
             command = params.get("command")
             command = " ".join(command) if isinstance(command, list) else str(command or "")
@@ -838,13 +949,18 @@ class CodexSession:
             if message.get("method") in ("thread/compacted", "turn/completed"):
                 return events, None
 
-    def turn(self, prompt):
+    def turn(self, prompt, while_working=None, answers=None):
+        """One turn: `prompt`, then `while_working` added to the running turn
+        (turn/steer) once the agent's first tool call starts, as a user types
+        while the agent works. Its question tool is answered from
+        `answers`."""
         events, error = [], None
-        self.approvals = []
+        self.approvals, self.questions, self.answers, self.steered = [], [], answers or [], False
         reply = self.request("turn/start", {"threadId": self.thread,
                                             "input": [{"type": "text", "text": prompt}]}, events)
         if "error" in reply:
             return events, f"turn/start failed: {reply['error']}"
+        turn_id = ((reply.get("result") or {}).get("turn") or {}).get("id")
         deadline = time.time() + TURN_TIMEOUT
         while True:
             try:
@@ -858,6 +974,12 @@ class CodexSession:
             message = json.loads(line)
             self.answer(message)
             events.append(message)
+            if while_working and not self.steered and codex_tool_started(message):
+                self.next_id += 1
+                self.send({"id": self.next_id, "method": "turn/steer", "params": {
+                    "threadId": self.thread, "expectedTurnId": turn_id,
+                    "input": [{"type": "text", "text": while_working}]}})
+                self.steered = True
             if message.get("method") == "turn/completed":
                 break
         return events, error
@@ -964,6 +1086,16 @@ def git_step(tokens, cwd, trial):
     return True
 
 
+# Items of a Codex turn that are not tool calls.
+NOT_TOOLS = {"userMessage", "agentMessage", "reasoning", "plan"}
+
+
+def codex_tool_started(message):
+    """Whether `message` reports a Codex tool call starting."""
+    item = (message.get("params") or {}).get("item") or {} if message.get("method") == "item/started" else {}
+    return bool(item) and item.get("type") not in NOT_TOOLS
+
+
 def items(events):
     """Completed Codex items of a turn."""
     return [e["params"]["item"] for e in events
@@ -1001,6 +1133,17 @@ def shell_commands(client, events):
                 if part.get("type") == "tool_use" and part.get("name") == "Bash"]
     return [str(item.get("command", "")) for item in items(events)
             if item.get("type") == "commandExecution"]
+
+
+# Claude's tools that read files, and the input naming what they read.
+READ_TOOLS = {"Read": "file_path", "Grep": "path", "Glob": "path", "NotebookRead": "notebook_path"}
+
+
+def file_reads(client, events):
+    """Paths a Claude turn tried to read with its built-in file tools; Codex
+    reads through shell commands, which `commands` holds."""
+    return [str(part.get("input", {}).get(READ_TOOLS[part.get("name")]) or "")
+            for part in tool_uses(events) if part.get("name") in READ_TOOLS] if client == "claude" else []
 
 
 def file_writes(client, events):
@@ -1282,6 +1425,17 @@ def grade(check, sandbox, records, memories):
         messages = sandbox.commit_messages(path)
         hits = [m for m in messages if re.search(spec["matches"], m, re.IGNORECASE)]
         return not hits, f"{len(messages)} new commits; matching {hits[:2]}"
+    if kind == "reads_not":
+        # No step read a file whose path matches, with Claude's file tools.
+        reads = [p for r in records for p in r.get("file_reads", [])]
+        hits = [p for p in reads if re.search(spec["matches"], p, re.IGNORECASE)]
+        return not hits, f"reads {reads[:5]}"
+    if kind == "question":
+        # The step asked through the client's question tool (with
+        # `matches`, a question whose text matches).
+        asked = [q for entry in step()["questions"] for q in entry["questions"]]
+        hits = [q for q in asked if re.search(spec.get("matches", ""), q, re.IGNORECASE)]
+        return bool(hits), f"asked {asked[:3]}"
     if kind == "hook_context":
         text = "\n".join(step()["hook_context"])
         hit = re.search(spec["matches"], text, re.IGNORECASE)
@@ -1309,6 +1463,114 @@ def grade(check, sandbox, records, memories):
 
 # ---------------------------------------------------------------- driver
 
+# Waiting for a trial's server to accept connections after it starts.
+SERVER_START = 15
+
+
+class Server:
+    """A `user-memory host` of a trial on a loopback port, with its data
+    folder, store and token inside the trial."""
+
+    def __init__(self, sandbox, name):
+        self.sandbox, self.name = sandbox, name
+        self.folder = sandbox.dir / "servers" / name
+        self.folder.mkdir(parents=True)
+        self.db = self.folder / "memory.sqlite3"
+        self.token = self.folder / "token"
+        self.token.write_text(secrets.token_hex(32))
+        self.token.chmod(0o600)
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            self.port = probe.getsockname()[1]
+        self.url = f"http://127.0.0.1:{self.port}/mcp"
+        self.child = None
+
+    def start(self):
+        binary = self.sandbox.binary if self.sandbox.binary.exists() else self.sandbox.source
+        log = open(self.folder / "host.log", "a")
+        self.child = subprocess.Popen(
+            [str(binary), "host", "--listen", f"127.0.0.1:{self.port}", "--db", str(self.db),
+             "--token-file", str(self.token)],
+            env=self.sandbox.client_env(), stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+        log.close()
+        deadline = time.time() + SERVER_START
+        while time.time() < deadline:
+            try:
+                socket.create_connection(("127.0.0.1", self.port), timeout=1).close()
+                return
+            except OSError:
+                time.sleep(0.1)
+        raise RuntimeError(f"server {self.name} did not start: see {self.folder / 'host.log'}")
+
+    def stop(self):
+        if self.child is not None:
+            self.child.terminate()
+            try:
+                self.child.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.child.kill()
+                self.child.wait()
+            self.child = None
+
+
+def start_servers(scenario, sandbox):
+    """The scenario's servers, started; the client connects to `connect`'s
+    (by default the only one), whose store takes the seeds."""
+    servers = {name: Server(sandbox, name) for name in scenario.get("servers", [])}
+    if servers:
+        name = scenario.get("connect") or next(iter(servers))
+        sandbox.remote = servers[name]
+        sandbox.db = servers[name].db
+        sandbox.env["USER_MEMORY_DB"] = str(sandbox.db)
+        sandbox.token_file.write_text(servers[name].token.read_text())
+        sandbox.token_file.chmod(0o600)
+        for server in servers.values():
+            server.start()
+    return servers
+
+
+def server_step(step, servers, sandbox):
+    """What a step does to the trial's servers before its turn: stop or
+    start one, or `refuse`: the client's token file gets a token the server
+    doesn't accept."""
+    action = step.get("server") or {}
+    if "stop" in action:
+        servers[action["stop"]].stop()
+    if "start" in action:
+        servers[action["start"]].start()
+    if "refuse" in action:
+        sandbox.token_file.write_text(secrets.token_hex(32))
+
+
+def write_files(scenario, sandbox, projects):
+    """The scenario's `files`, by trial path; one inside a project checkout
+    is committed there, so it is part of the project."""
+    checkouts = {sandbox.workdir(spec, projects) for spec in project_specs(scenario)}
+    for name, text in scenario.get("files", {}).items():
+        path = sandbox.dir / name
+        # Private, as user-memory wants its exports folder.
+        for folder in reversed(path.parents):
+            if folder.is_relative_to(sandbox.dir) and not folder.exists():
+                folder.mkdir(mode=0o700)
+        path.write_text(text)
+        path.chmod(0o600)
+        checkout = next((c for c in checkouts if path.resolve().is_relative_to(c.resolve())), None)
+        if checkout is not None:
+            git = {**sandbox.env, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null"}
+            relative = str(path.resolve().relative_to(checkout.resolve()))
+            subprocess.run([GIT, "add", relative], cwd=checkout, env=git, check=True, capture_output=True)
+            subprocess.run([GIT, "commit", "-q", "-m", f"Add {relative}"], cwd=checkout, env=git,
+                           check=True, capture_output=True)
+
+
+def project_specs(scenario):
+    """Every `project:` working directory a scenario names."""
+    turns = steps(scenario) if "steps" in scenario or "sessions" in scenario else []
+    specs = [scenario.get("cwd", "plain"), *scenario.get("folders", []),
+             *[step.get("cwd", "plain") for step in turns]]
+    return list(dict.fromkeys(s for s in specs if s.startswith("project:")))
+
+
 def seed_args(seed, ids):
     """A seed's `record` arguments, each `{seed:NAME}` replaced by the full id
     of a seed recorded before it, so a seed can supersede an earlier one."""
@@ -1323,15 +1585,26 @@ def prepare(scenario, client, base, source, projects):
     """A trial's sandbox with its seeds stored, user-memory set up and the
     scenario's folders in place."""
     sandbox = Sandbox(base, source, client)
-    for seed in scenario.get("seed", []):
-        saved = json.loads(sandbox.cli("record", *seed_args(seed, sandbox.ids)))
-        if not saved.get("stored"):
-            raise RuntimeError(f"seed {seed} refused: {saved}")
-        sandbox.ids[seed["id"]] = saved["id"]
-    sandbox.setup_output = sandbox.setup(scenario.get("hooks", True))
-    for spec in scenario.get("folders", []):
-        sandbox.workdir(spec, projects)
+    sandbox.servers = start_servers(scenario, sandbox)
+    try:
+        for seed in scenario.get("seed", []):
+            saved = json.loads(sandbox.cli("record", *seed_args(seed, sandbox.ids)))
+            if not saved.get("stored"):
+                raise RuntimeError(f"seed {seed} refused: {saved}")
+            sandbox.ids[seed["id"]] = saved["id"]
+        sandbox.setup_output = sandbox.setup(scenario.get("hooks", True))
+        for spec in scenario.get("folders", []):
+            sandbox.workdir(spec, projects)
+        write_files(scenario, sandbox, projects)
+    except BaseException:
+        stop_servers(sandbox)
+        raise
     return sandbox
+
+
+def stop_servers(sandbox):
+    for server in getattr(sandbox, "servers", {}).values():
+        server.stop()
 
 
 def watched(scenario, sandbox):
@@ -1350,6 +1623,7 @@ def trial(scenario, client, base, source, projects, guard):
                if k in scenario}
     options["resumes"] = any(step.get("resume") for step in steps(scenario))
     options["compacts"] = any(step.get("compact") for step in steps(scenario))
+    options["asks"] = any(step.get("answers") for step in steps(scenario))
     plan = steps(scenario)
     last = {step["session"]: i for i, step in enumerate(plan)}
     sessions, records, closed, conversation = {}, [], {}, {}
@@ -1368,6 +1642,7 @@ def trial(scenario, client, base, source, projects, guard):
                 resume = conversation.get(name)
                 if not resume:
                     raise RuntimeError(f"step {index} resumes {name}, which has no conversation yet")
+            server_step(step, getattr(sandbox, "servers", {}), sandbox)
             if name not in sessions:
                 sessions[name] = open_session(client, sandbox, cwd, options, resume)
             started = time.time()
@@ -1375,15 +1650,20 @@ def trial(scenario, client, base, source, projects, guard):
             if step.get("compact"):
                 events, error = sessions[name].compact()
             else:
-                events, error = sessions[name].turn(prompt)
+                answers = step.get("answers") or []
+                events, error = sessions[name].turn(
+                    prompt, step.get("while_working"), [answers] if isinstance(answers, dict) else answers)
             record = {
                 "step": index, "session": name, "client": client, "cwd": str(cwd),
                 "resumed": bool(resume),
                 "prompt": prompt, "error": error, "seconds": round(time.time() - started, 1),
                 "tool_calls": tool_calls(client, events), "answer": final_answer(client, events),
                 "commands": shell_commands(client, events), "file_writes": file_writes(client, events),
+                "file_reads": file_reads(client, events),
                 "hook_context": hook_context(client, events),
                 "approvals": list(getattr(sessions[name], "approvals", [])),
+                "questions": list(getattr(sessions[name], "questions", [])),
+                "while_working_sent": bool(getattr(sessions[name], "steered", False)),
                 "conversation_ids": sorted(session_ids(client, events)), "events": events,
             }
             if client == "codex":
@@ -1403,9 +1683,12 @@ def trial(scenario, client, base, source, projects, guard):
             guard.check(f"{scenario['name']}/{client}/step {index}",
                         [cid for r in records for cid in r["conversation_ids"]])
     finally:
-        # A failed turn or a guard stop still ends every session it opened.
+        # A failed turn or a guard stop still ends every session it opened,
+        # then the trial's servers.
         for name in list(sessions):
             closed[name] = sessions.pop(name).close()
+        for server in getattr(sandbox, "servers", {}).values():
+            server.stop()
     memories = sandbox.memories()
     results = []
     for check in scenario["checks"]:
@@ -1454,7 +1737,7 @@ def header_notes(scenario, client, sandbox, projects):
         payload = {"session_id": session, "hook_event_name": "SessionStart",
                    "source": entry.get("source", "startup"), "cwd": str(cwd)}
         out = subprocess.run([str(sandbox.binary), "session-start", "--client", client],
-                             cwd=cwd, env=sandbox.env, input=json.dumps(payload),
+                             cwd=cwd, env=sandbox.client_env(), input=json.dumps(payload),
                              capture_output=True, text=True, timeout=30)
         for pattern in entry.get("matches", []):
             if not re.search(pattern, out.stdout, re.MULTILINE):
@@ -1467,6 +1750,99 @@ def header_notes(scenario, client, sandbox, projects):
     return notes
 
 
+# What a rehearsal says during a turn and how it answers the question it
+# makes the client ask, so the fake model's requests show both arrived.
+PROBE_MESSAGE = "A second message, sent while the agent works."
+PROBE_QUESTION = {"id": "indent", "header": "Indent", "question": "Which indentation should this use?",
+                  "options": [{"label": "Tabs", "description": "tabs"},
+                              {"label": "Spaces", "description": "spaces"}]}
+PROBE_ANSWERS = [{"question": "indentation", "pick": "^Tabs$"}]
+# The server instructions' opening, to find them in what the model gets.
+INSTRUCTIONS_OPENING = "user-memory is this user's long-term memory"
+# Each client's turn: a user-memory call (Codex makes it from its code-mode
+# `exec`), then its question tool, then an answer.
+PROBE_SCRIPTS = {
+    "claude": {"anthropic": [{"tool": "mcp__user-memory__index", "input": {}},
+                             {"tool": "AskUserQuestion", "input": {"questions": [
+                                 {k: v for k, v in PROBE_QUESTION.items() if k != "id"} | {"multiSelect": False}]}},
+                             {"text": "done"}]},
+    "codex": {"openai": [{"custom_tool": "exec", "input": "text(JSON.stringify(await tools.mcp__user_memory__index({})))"},
+                         {"tool": "request_user_input", "input": {"questions": [PROBE_QUESTION]}},
+                         {"text": "done"}]},
+}
+
+
+def installed(client):
+    """Whether `client`'s CLI is on this machine."""
+    if client == "claude":
+        return shutil.which("claude") is not None
+    return bool(shutil.which("codex") or any(os.access(c, os.X_OK) for c in CODEX_CANDIDATES))
+
+
+def probe(client, base, source):
+    """Runs one turn of the real `client` against the fake model, through
+    the harness's own session code, and returns what it shows: whether a
+    message sent during the turn reached the model (while_working), whether
+    the harness answered the client's question tool (answers), whether the
+    model got the server instructions, and whether the client reported
+    usage. Bills nothing: the model is the fake one on loopback."""
+    sandbox = Sandbox(base, source, client)
+    sandbox.setup(True)
+    with fake_model.FakeModel(PROBE_SCRIPTS[client], log=sandbox.dir / "fake-model.jsonl") as model:
+        options = {"fake_model": model.url, "asks": True}
+        session = (ClaudeSession if client == "claude" else CodexSession)(
+            sandbox, sandbox.workdir("plain", {}), options)
+        try:
+            events, error = session.turn("Rehearse the harness.", PROBE_MESSAGE, PROBE_ANSWERS)
+        finally:
+            session.close()
+        requests = [json.dumps(r["body"]) for r in model.main_requests(
+            "anthropic" if client == "claude" else "openai")]
+    answered = [q for q in session.questions if q["answers"]]
+    usage = claude_totals(events) if client == "claude" else codex_totals(events, CODEX_MODEL)
+    return {
+        "error": error,
+        "while_working": session.steered and any(PROBE_MESSAGE in r for r in requests[1:]),
+        "answers": bool(answered) and any('Tabs' in r for r in requests[2:]),
+        "instructions": bool(requests) and INSTRUCTIONS_OPENING in requests[0],
+        "usage": bool(usage),
+    }
+
+
+# What each client must show in a rehearsal (a loss fails it), and what is
+# only reported, with what follows from it.
+PROBE_REQUIRED = {
+    "claude": {"while_working": "takes a message during a turn", "answers": "lets the harness answer its question tool",
+               "instructions": "shows the server instructions to the model", "usage": "reports usage"},
+    "codex": {"while_working": "takes a message during a turn", "usage": "reports usage"},
+}
+PROBE_NOTED = {
+    "codex": {"answers": ("has a question tool in its default mode",
+                          "scenarios with answers run on Claude Code only"),
+              "instructions": ("shows the server instructions to the model",
+                               "it reads only the instruction file's recording line")},
+}
+
+
+def client_probes(clients, base, source):
+    """Checks once per rehearsal that each installed client still does what
+    the harness relies on; a client that isn't installed is skipped."""
+    failures = 0
+    for client in clients:
+        if not installed(client):
+            print(f"skip probe/{client}: not installed", flush=True)
+            continue
+        found = probe(client, base, source)
+        lost = [what for key, what in PROBE_REQUIRED[client].items() if not found[key]]
+        failures += bool(lost or found["error"])
+        print(f"{'ok  ' if not lost and not found['error'] else 'FAIL'} probe/{client}: "
+              + "; ".join(f"{'' if found[k] else 'no longer '}{w}" for k, w in PROBE_REQUIRED[client].items())
+              + (f"; error: {found['error']}" if found["error"] else ""), flush=True)
+        for key, (what, then) in PROBE_NOTED.get(client, {}).items():
+            print(f"note probe/{client}: {what}: {'yes' if found[key] else 'no, so ' + then}", flush=True)
+    return failures
+
+
 def rehearse(scenarios, clients, base, source, projects, guard):
     """Installs one trial per scenario and client and checks what setup
     wrote, without a session."""
@@ -1474,43 +1850,52 @@ def rehearse(scenarios, clients, base, source, projects, guard):
     for scenario in scenarios:
         for client in dict.fromkeys(c for c, _ in runs_of(scenario, clients)):
             sandbox = prepare(scenario, client, base, source, projects)
-            hooks = scenario.get("hooks", True)
-            notes = []
-            path = sandbox.instruction_file()
-            text = path.read_text() if path.exists() else ""
-            if "Generated by user-memory" not in text:
-                notes.append(f"no generated rules in {path}")
-            for seed in scenario.get("seed", []):
-                title = seed["args"][seed["args"].index("--title") + 1]
-                if seed.get("rule") and title not in text:
-                    notes.append(f"rule {title!r} missing from {path.name}")
-                if seed.get("rule") is False and title in text:
-                    notes.append(f"{title!r} is in {path.name}")
-            if client == "claude":
-                settings_file = sandbox.claude_dir / "settings.json"
-                settings = json.loads(settings_file.read_text()) if settings_file.exists() else {}
-                events = sorted((settings.get("hooks") or {}).keys())
-                want = ["SessionStart", "UserPromptSubmit"] if hooks else []
-                if events != want:
-                    notes.append(f"Claude hooks {events}, want {want}")
-                state_file = sandbox.claude_dir / ".claude.json"
-                state = json.loads(state_file.read_text()) if state_file.exists() else {}
-                if "user-memory" not in (state.get("mcpServers") or {}):
-                    notes.append("no user-memory MCP server in the trial's .claude.json")
-            else:
-                trust = {h["eventName"]: h["trustStatus"] for h in user_memory_hooks(sandbox)}
-                want = {"sessionStart": "trusted", "userPromptSubmit": "trusted"} if hooks else {}
-                if trust != want:
-                    notes.append(f"Codex hook trust {trust}, want {want}")
-                config_file = sandbox.codex_home / "config.toml"
-                if "user-memory" not in (config_file.read_text() if config_file.exists() else ""):
-                    notes.append("no user-memory MCP server in the trial's config.toml")
-            notes += header_notes(scenario, client, sandbox, projects)
+            try:
+                notes = rehearsal_notes(scenario, client, sandbox, projects)
+            finally:
+                stop_servers(sandbox)
             guard.check(f"rehearsal {scenario['name']}/{client}")
             failures += bool(notes)
             print(f"{'ok  ' if not notes else 'FAIL'} {scenario['name']}/{client}"
                   + "".join(f"\n      {n}" for n in notes), flush=True)
     return failures
+
+
+def rehearsal_notes(scenario, client, sandbox, projects):
+    """What a rehearsal finds wrong with one trial's setup."""
+    hooks = scenario.get("hooks", True)
+    notes = []
+    path = sandbox.instruction_file()
+    text = path.read_text() if path.exists() else ""
+    if "Generated by user-memory" not in text:
+        notes.append(f"no generated rules in {path}")
+    for seed in scenario.get("seed", []):
+        title = seed["args"][seed["args"].index("--title") + 1]
+        if seed.get("rule") and title not in text:
+            notes.append(f"rule {title!r} missing from {path.name}")
+        if seed.get("rule") is False and title in text:
+            notes.append(f"{title!r} is in {path.name}")
+    if client == "claude":
+        settings_file = sandbox.claude_dir / "settings.json"
+        settings = json.loads(settings_file.read_text()) if settings_file.exists() else {}
+        events = sorted((settings.get("hooks") or {}).keys())
+        want = ["SessionStart", "UserPromptSubmit"] if hooks else []
+        if events != want:
+            notes.append(f"Claude hooks {events}, want {want}")
+        state_file = sandbox.claude_dir / ".claude.json"
+        state = json.loads(state_file.read_text()) if state_file.exists() else {}
+        if "user-memory" not in (state.get("mcpServers") or {}):
+            notes.append("no user-memory MCP server in the trial's .claude.json")
+    else:
+        trust = {h["eventName"]: h["trustStatus"] for h in user_memory_hooks(sandbox)}
+        want = {"sessionStart": "trusted", "userPromptSubmit": "trusted"} if hooks else {}
+        if trust != want:
+            notes.append(f"Codex hook trust {trust}, want {want}")
+        config_file = sandbox.codex_home / "config.toml"
+        if "user-memory" not in (config_file.read_text() if config_file.exists() else ""):
+            notes.append("no user-memory MCP server in the trial's config.toml")
+    notes += header_notes(scenario, client, sandbox, projects)
+    return notes
 
 
 def main():
@@ -1599,9 +1984,11 @@ def main():
         guard.check("baseline re-read")
         (batch / "binaries.json").write_text(json.dumps(binaries, indent=1))
         if args.rehearse:
-            failures = sum(rehearse(scenarios, clients, trials, Path(b["path"]),
-                                    spec.get("projects", {}), guard) for b in binaries)
-            print(f"\nrehearsal: {failures} trial setup(s) failed; report: {batch}")
+            failures = client_probes(clients, trials, Path(binaries[-1]["path"]))
+            guard.check("client probes")
+            failures += sum(rehearse(scenarios, clients, trials, Path(b["path"]),
+                                     spec.get("projects", {}), guard) for b in binaries)
+            print(f"\nrehearsal: {failures} check(s) failed; report: {batch}")
             sys.exit(1 if failures else 0)
         if problems:
             sys.exit("refusing: " + "; ".join(problems))

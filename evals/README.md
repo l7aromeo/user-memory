@@ -235,6 +235,40 @@ user agrees, so checks on the turn before it tell asking apart from doing.
 `watch` names trial files (relative to the trial folder) whose contents are
 kept after every step, for `file` checks on one step.
 
+`files` maps trial paths to text written before the first session, in
+private folders; a file inside a project checkout is committed there, and
+one in `exports/` is in the trial store's exports folder. `servers` names
+`user-memory host` servers, each on a loopback port with its store, token
+and log in the trial's `servers/<name>/`; they start before the first
+session and stop after the last. The client connects to the one `connect`
+names (by default the only one), whose store takes the seeds, with its own
+copy of the token. A step's `server` acts on them before its turn: `stop`
+or `start` a server, or `refuse`, which puts a token the server doesn't
+accept in the client's token file.
+
+A step's `while_working` is a second user message, sent once the agent's
+first tool call in the turn shows, as a user types while the agent works:
+Claude Code adds it to the running turn, and Codex gets it through
+`turn/steer`. A step's `answers` (`{"question": REGEX, "pick": REGEX}`, or
+a list of them) say how the user answers the client's question tool: each
+question takes the first entry whose `question` matches, and the option
+whose label `pick` matches; a question with no such entry or option is
+declined. A scenario with `answers` gives Claude Code its question tool
+(`AskUserQuestion`), answered by the harness as host for its prompts
+(`--permission-prompt-tool stdio`); every other call no allow rule covers
+is declined there, as Claude Code declines it with no one to ask. Codex has
+no question tool in its default mode, so such scenarios run on Claude Code
+only.
+
+`--rehearse` first runs one turn of each installed client against the
+[fake model](#the-fake-model), through the harness's own session code, and
+fails if a client no longer does what the harness relies on: take a message
+during a turn (`while_working`), report usage, and for Claude Code also let
+the harness answer its question tool and show the server instructions to
+the model. Whether Codex has a question tool in its default mode, and
+whether it shows the server instructions, is reported, not required. A
+client that isn't installed is skipped with one line.
+
 `rehearse` entries add checks to `--rehearse` that need no agent: each runs
 the trial's installed session-start hook in its `cwd` with a made-up payload
 (`source` defaults to `startup`), after linking `links` to that made-up
@@ -263,6 +297,10 @@ memory whose title or content matches.
 - `file`: a trial file (`path` relative to the trial folder) matches, or is
   `absent`; after a step's turn (`"step": N`, from `watch`) or at the end.
 - `instructions`: the client's instruction file matches.
+- `question`: the step asked through the client's question tool (with
+  `matches`, a question whose text matches).
+- `reads_not`: no step read a file whose path matches with Claude's file
+  tools; Codex reads through shell commands, which `commands_not` checks.
 - `hook_context`: what hooks added to the context during the step matches
   (Codex reports it with each hook run).
 - `no_client_memory`: no step tried to write a file with Claude's own file

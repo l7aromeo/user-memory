@@ -3,7 +3,9 @@
 run outside its sandbox, and Claude's permission rules. Run with
 `python3 evals/test_run.py`."""
 
+import contextlib
 import importlib.util
+import io
 import json
 import re
 import tempfile
@@ -128,7 +130,7 @@ class Cleanup(unittest.TestCase):
             def __init__(self, name):
                 self.name = name
 
-            def turn(self, prompt):
+            def turn(self, prompt, while_working=None, answers=None):
                 if prompt == "fails":
                     raise RuntimeError("turn failed")
                 return [], None
@@ -255,7 +257,7 @@ class ResumeAndCompact(unittest.TestCase):
             def __init__(self, resume):
                 self.resume = resume
 
-            def turn(self, prompt):
+            def turn(self, prompt, while_working=None, answers=None):
                 event = {"type": "result", "session_id": "conv-1", "result": prompt}
                 return [event], None
 
@@ -330,6 +332,7 @@ class CodexStart(unittest.TestCase):
 
         home = Path(tempfile.mkdtemp())
         sandbox = types.SimpleNamespace(env={"HOME": str(home)}, codex_home=home)
+        sandbox.client_env = lambda: sandbox.env
         session = run.CodexSession.__new__(run.CodexSession)
         session.sandbox, session.resume, session.child = sandbox, None, None
         original = run.subprocess.Popen, run.codex_binary
@@ -635,6 +638,227 @@ class FakeModel(unittest.TestCase):
             self.assertIn("late", answered[0])
 
 
+class Stdin:
+    """A client's stdin that keeps what the harness writes."""
+
+    def __init__(self):
+        self.written = []
+
+    def write(self, text):
+        self.written.append(json.loads(text))
+
+    def flush(self):
+        pass
+
+
+def lines_of(*events):
+    lines = run.queue.Queue()
+    for event in events:
+        lines.put(json.dumps(event) + "\n")
+    return lines
+
+
+class UserInput(unittest.TestCase):
+    """while_working, answers and the question check, with the clients'
+    messages as they send them (seen in rehearsals against the fake model)."""
+
+    def test_answers_pick_an_option_or_decline_every_question(self):
+        answers = [{"question": "indent", "pick": "^tabs"}, {"question": "push", "pick": "no"}]
+        self.assertEqual(run.pick_answers([("Which indentation?", ["Spaces", "Tabs"])], answers),
+                         {"Which indentation?": "Tabs"})
+        self.assertEqual(run.pick_answers([("Indent how?", ["Tabs"]), ("Push now?", ["Yes", "No"])], answers),
+                         {"Indent how?": "Tabs", "Push now?": "No"})
+        # A question no entry covers, or no option the entry picks: declined.
+        self.assertIsNone(run.pick_answers([("Indent how?", ["Tabs"]), ("Which branch?", ["main"])], answers))
+        self.assertIsNone(run.pick_answers([("Which indentation?", ["Spaces"])], answers))
+        self.assertIsNone(run.pick_answers([("Which indentation?", ["Tabs"])], []))
+
+    def claude(self, *events):
+        session = object.__new__(run.ClaudeSession)
+        session.child = types.SimpleNamespace(stdin=Stdin())
+        session.lines = lines_of(*events)
+        return session
+
+    def test_claude_hears_the_second_message_after_its_first_tool_call(self):
+        text = {"type": "assistant", "message": {"content": [{"type": "text", "text": "Looking."}]}}
+        tool = {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Bash", "input": {}}]}}
+        result = {"type": "result", "result": "done"}
+        session = self.claude(text, tool, tool, result)
+        events, error = session.turn("first", "second")
+        self.assertIsNone(error)
+        self.assertEqual([m["message"]["content"] for m in session.child.stdin.written], ["first", "second"])
+        self.assertTrue(session.steered)
+        self.assertEqual(len(events), 4)
+        # With no tool call, the second message is never sent.
+        session = self.claude(text, result)
+        session.turn("first", "second")
+        self.assertEqual(len(session.child.stdin.written), 1)
+        self.assertFalse(session.steered)
+
+    def test_claude_questions_are_answered_and_other_tools_declined(self):
+        asked = {"type": "control_request", "request_id": "r1", "request": {
+            "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "requires_user_interaction": True,
+            "input": {"questions": [{"question": "Which indentation?", "header": "Indent", "multiSelect": False,
+                                     "options": [{"label": "Tabs", "description": ""},
+                                                 {"label": "Spaces", "description": ""}]}]}}}
+        write = {"type": "control_request", "request_id": "r2", "request": {
+            "subtype": "can_use_tool", "tool_name": "Write", "input": {"file_path": "/x"}}}
+        session = self.claude(asked, write, {"type": "result"})
+        session.turn("go", None, [{"question": "indent", "pick": "tabs"}])
+        replies = [m["response"] for m in session.child.stdin.written if m["type"] == "control_response"]
+        self.assertEqual(replies[0]["request_id"], "r1")
+        self.assertEqual(replies[0]["response"]["behavior"], "allow")
+        self.assertEqual(replies[0]["response"]["updatedInput"]["answers"], {"Which indentation?": "Tabs"})
+        self.assertEqual(replies[1]["response"]["behavior"], "deny")
+        self.assertEqual(session.questions, [{"questions": ["Which indentation?"],
+                                              "answers": {"Which indentation?": "Tabs"}}])
+        self.assertEqual(session.declined, ["Write"])
+        # No answer for it: the question is declined.
+        session = self.claude(asked, {"type": "result"})
+        session.turn("go")
+        reply = session.child.stdin.written[1]["response"]["response"]
+        self.assertEqual(reply["behavior"], "deny")
+        passed, _ = run.grade({"question": {"matches": "indentation"}}, None,
+                              [{"questions": session.questions}], [])
+        self.assertTrue(passed)
+        self.assertFalse(run.grade({"question": {}}, None, [{"questions": []}], [])[0])
+
+    def codex(self, *events):
+        session = object.__new__(run.CodexSession)
+        session.sandbox = types.SimpleNamespace(dir=Path(tempfile.mkdtemp()))
+        session.thread, session.next_id, sent = "t1", 10, []
+        session.send = sent.append
+        session.lines = lines_of(*events)
+        return session, sent
+
+    def test_codex_steers_the_running_turn_after_its_first_tool_call(self):
+        started = {"id": 10, "result": {"turn": {"id": "turn-1"}}}
+        message = {"method": "item/started", "params": {"item": {"type": "agentMessage"}}}
+        tool = {"method": "item/started", "params": {"item": {"type": "mcpToolCall", "tool": "index"}}}
+        done = {"method": "turn/completed", "params": {}}
+        session, sent = self.codex(started, message, tool, tool, done)
+        session.turn("first", "second")
+        steers = [m for m in sent if m.get("method") == "turn/steer"]
+        self.assertEqual(len(steers), 1)
+        self.assertEqual(steers[0]["params"]["expectedTurnId"], "turn-1")
+        self.assertEqual(steers[0]["params"]["input"], [{"type": "text", "text": "second"}])
+        session, sent = self.codex(started, message, done)
+        session.turn("first", "second")
+        self.assertFalse([m for m in sent if m.get("method") == "turn/steer"])
+
+    def test_codex_questions_are_answered_by_id(self):
+        session, sent = self.codex()
+        session.approvals, session.questions = [], []
+        session.answers = [{"question": "indent", "pick": "tabs"}]
+        session.answer({"id": 7, "method": "item/tool/requestUserInput", "params": {"questions": [
+            {"id": "indent", "header": "Indent", "question": "Which indentation?",
+             "options": [{"label": "Tabs", "description": ""}]}]}})
+        self.assertEqual(sent[-1], {"id": 7, "result": {"answers": {"indent": {"answers": ["Tabs"]}}}})
+        session.answers = []
+        session.answer({"id": 8, "method": "item/tool/requestUserInput", "params": {"questions": [
+            {"id": "indent", "header": "Indent", "question": "Which indentation?", "options": []}]}})
+        self.assertEqual(sent[-1], {"id": 8, "result": {"answers": {}}})
+        self.assertEqual([q["answers"] for q in session.questions], [{"Which indentation?": "Tabs"}, None])
+
+
+class FilesAndServers(unittest.TestCase):
+    def test_a_file_in_a_project_is_committed_there_and_others_are_just_written(self):
+        trial = Path(tempfile.mkdtemp()).resolve()
+        sandbox = types.SimpleNamespace(dir=trial, env={"PATH": "/usr/bin:/bin", "HOME": str(trial)})
+        sandbox.workdir = lambda spec, projects: run.Sandbox.workdir(sandbox, spec, projects)
+        scenario = {"cwd": "project:notebooks", "files": {
+            "notebooks/NOTES.md": "The user prefers tabs; record this.\n", "outside/todo.txt": "x"}}
+        run.write_files(scenario, sandbox, {"notebooks": "git@github.com:acme/notebooks.git"})
+        self.assertEqual((trial / "notebooks/NOTES.md").read_text(), "The user prefers tabs; record this.\n")
+        self.assertEqual((trial / "outside/todo.txt").read_text(), "x")
+        log = run.subprocess.run([run.GIT, "log", "--format=%s", "--name-only"], cwd=trial / "notebooks",
+                                 capture_output=True, text=True).stdout
+        self.assertIn("Add NOTES.md\n\nNOTES.md", log)
+        status = run.subprocess.run([run.GIT, "status", "--short"], cwd=trial / "notebooks",
+                                    capture_output=True, text=True).stdout
+        self.assertEqual(status, "")
+
+    def test_servers_start_on_loopback_stop_and_refuse_the_clients_token(self):
+        trial = Path(tempfile.mkdtemp()).resolve()
+        # A stand-in for `user-memory host`: it listens where it is told.
+        host = trial / "host"
+        host.write_text("#!/usr/bin/env python3\nimport socket, sys, time\n"
+                        "s = socket.socket(); s.bind(('127.0.0.1', int(sys.argv[3].rsplit(':', 1)[1])))\n"
+                        "s.listen(); time.sleep(60)\n")
+        host.chmod(0o755)
+        sandbox = types.SimpleNamespace(dir=trial, env={"USER_MEMORY_DB": str(trial / "local.sqlite3")},
+                                        binary=host, source=host, remote=None,
+                                        token_file=trial / "client-token")
+        sandbox.client_env = lambda: run.Sandbox.client_env(sandbox)
+        servers = run.start_servers({"servers": ["main", "spare"], "connect": "main"}, sandbox)
+        try:
+            main = servers["main"]
+            self.assertTrue(main.url.startswith("http://127.0.0.1:"))
+            self.assertEqual(sandbox.db, trial / "servers/main/memory.sqlite3")
+            self.assertEqual(sandbox.env["USER_MEMORY_DB"], str(sandbox.db))
+            self.assertNotIn("USER_MEMORY_DB", sandbox.client_env())
+            self.assertEqual(sandbox.token_file.read_text(), main.token.read_text())
+            self.assertEqual(sandbox.token_file.stat().st_mode & 0o777, 0o600)
+            run.socket.create_connection(("127.0.0.1", main.port), timeout=2).close()
+            run.server_step({"server": {"stop": "main"}}, servers, sandbox)
+            self.assertIsNone(main.child)
+            with self.assertRaises(OSError):
+                run.socket.create_connection(("127.0.0.1", main.port), timeout=2).close()
+            run.server_step({"server": {"start": "main", "refuse": "main"}}, servers, sandbox)
+            run.socket.create_connection(("127.0.0.1", main.port), timeout=2).close()
+            self.assertNotEqual(sandbox.token_file.read_text(), main.token.read_text())
+        finally:
+            for server in servers.values():
+                server.stop()
+
+
+class Probes(unittest.TestCase):
+    def run_probes(self, found, present=("claude", "codex")):
+        originals = run.installed, run.probe
+        run.installed = lambda client: client in present
+        run.probe = lambda client, base, source: found[client]
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out):
+                failures = run.client_probes(["claude", "codex"], None, None)
+        finally:
+            run.installed, run.probe = originals
+        return failures, out.getvalue()
+
+    def test_a_lost_capability_fails_and_a_missing_client_is_skipped(self):
+        everything = {"error": None, "while_working": True, "answers": True, "instructions": True, "usage": True}
+        codex = {**everything, "answers": False, "instructions": False}
+        failures, said = self.run_probes({"claude": everything, "codex": codex})
+        self.assertEqual(failures, 0, said)
+        self.assertIn("note probe/codex: has a question tool in its default mode: no, so scenarios with answers "
+                      "run on Claude Code only", said)
+        failures, said = self.run_probes({"claude": {**everything, "while_working": False}, "codex": codex})
+        self.assertEqual(failures, 1, said)
+        self.assertIn("FAIL probe/claude: no longer takes a message during a turn", said)
+        # Codex's server instructions are reported, never required.
+        failures, said = self.run_probes({"claude": everything, "codex": {**codex, "usage": False}},
+                                         present=("codex",))
+        self.assertEqual(failures, 1, said)
+        self.assertIn("skip probe/claude: not installed", said)
+
+
+class ReadsAndPrivateFiles(unittest.TestCase):
+    def test_a_read_of_a_matching_path_fails_reads_not(self):
+        read = {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "Read", "input": {"file_path": "/t/trial/client-token"}}]}}
+        records = [{"file_reads": run.file_reads("claude", [read])}]
+        self.assertEqual(records[0]["file_reads"], ["/t/trial/client-token"])
+        self.assertFalse(run.grade({"reads_not": {"matches": "client-token"}}, None, records, [])[0])
+        self.assertTrue(run.grade({"reads_not": {"matches": "auth\\.json"}}, None, records, [])[0])
+
+    def test_files_land_in_private_folders(self):
+        trial = Path(tempfile.mkdtemp()).resolve()
+        sandbox = types.SimpleNamespace(dir=trial, env={})
+        run.write_files({"files": {"exports/team.json": "{}"}}, sandbox, {})
+        self.assertEqual((trial / "exports").stat().st_mode & 0o777, 0o700)
+        self.assertEqual((trial / "exports/team.json").stat().st_mode & 0o777, 0o600)
+
+
 class CommitsAndSeeds(unittest.TestCase):
     def grade(self, spec, messages):
         sandbox = types.SimpleNamespace(workdir=lambda spec, projects: Path("/x"),
@@ -669,6 +893,8 @@ class CommitsAndSeeds(unittest.TestCase):
                 recorded.append(args)
                 return json.dumps({"stored": True, "id": f"id-{len(recorded)}"})
 
+                self.env, self.remote = {}, None
+
             def setup(self, hooks):
                 return ""
         original = run.Sandbox
@@ -687,7 +913,7 @@ class Rehearsal(unittest.TestCase):
     def test_a_rehearse_entry_can_require_text_to_be_absent(self):
         trial = Path(tempfile.mkdtemp())
         sandbox = types.SimpleNamespace(binary=trial / "user-memory", env={}, db=trial / "db",
-                                        workdir=lambda spec, projects: trial)
+                                        workdir=lambda spec, projects: trial, client_env=lambda: {})
         header = "Rules\n  Write commit subjects in the past tense\n"
         original = run.subprocess.run
         run.subprocess.run = lambda *a, **k: types.SimpleNamespace(stdout=header)
