@@ -20,7 +20,7 @@ Agents read and write only inside the exports directory beside the memory store,
 Back up:
 1. Call `export` with a `name` such as `backup-2026-10-15.json`. It refuses an existing name; pass `overwrite: true` only if the user wants that file replaced. To export part of the memories, add read's filters (`projects`, `scope`, `category`, `type`, `source`, `status`, `origin`).
 2. Report the summary: file name and memory counts. Never read the file into the chat.
-3. Tell the user where the file is, since the summary gives only its name:
+3. Tell the user where the file is. The summary's `next` says it in words, without a path: beside the store on this machine, or on the memory server. In more detail:
    - Local install: in the exports folder beside the store, by default `~/.local/share/user-memory/exports/<name>` (`%LOCALAPPDATA%\user-memory\exports\<name>` on Windows).
    - Docker or other server: on the server, not on this machine. For a copy on the user's own machine, the simplest is for them to run `user-memory export FILE` there instead, which writes the file on their machine. Otherwise, in the Docker server it is `/data/exports/<name>` inside the container; the user copies it out from the server's compose folder with `docker compose cp memory:/data/exports/<name> .`.
    - If unsure which: `user-memory endpoint` prints the server's address on a client connected to one, and fails on a local install.

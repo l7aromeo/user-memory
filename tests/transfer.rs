@@ -272,6 +272,11 @@ fn agents_export_and_import_by_name_and_see_only_summaries() {
     assert_eq!(replies[4], json!({"groups":[]}));
     assert_eq!(replies[0]["exported"], true, "{}", replies[0]);
     assert_eq!(replies[0]["file"], "backup.json");
+    // Where the file is, in words: the local store's folder, never its path.
+    assert_eq!(
+        replies[0]["next"],
+        "The file is in user-memory's exports folder beside the memory store on this machine. For a copy somewhere else, the user runs `user-memory export FILE`."
+    );
     assert!(
         replies[1]["error"]
             .as_str()

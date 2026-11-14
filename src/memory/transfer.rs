@@ -1390,6 +1390,24 @@ pub fn import_named(db: &Path, input: &ImportMemories) -> Result<Value> {
     Ok(summary)
 }
 
+/// Where an export's file is, in words: a reply never names a path, so the
+/// store's location stays out of transcripts and a server's folders stay on
+/// the server. The command line prints the path, to the user at a terminal.
+pub fn export_next(on_server: bool) -> &'static str {
+    if on_server {
+        EXPORTED_ON_SERVER
+    } else {
+        EXPORTED_HERE
+    }
+}
+
+/// export's next for a store on the agent's machine.
+const EXPORTED_HERE: &str = "The file is in user-memory's exports folder beside the memory store on this machine. For a copy somewhere else, the user runs `user-memory export FILE`.";
+/// export's next from a memory server, which may also run on the agent's
+/// machine, as the installer's Docker server does: its folders are still
+/// the server's.
+const EXPORTED_ON_SERVER: &str = "The file is in the memory server's exports folder, on the server, not among this machine's files. For a copy here, the user runs `user-memory export FILE`.";
+
 /// Said by an import asked to apply without user_confirmed.
 const NOT_APPLIED: &str =
     "Not applied: pass user_confirmed with apply once the user approves the import.";

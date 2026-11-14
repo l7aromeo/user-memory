@@ -51,7 +51,8 @@ pub use stamps::{Stamp, Stamps, parse_stamps};
 pub use titles::{Titles, parse_titles};
 pub use transfer::{
     ExportFile, ExportMemories, ImportMemories, ImportRequest, MAX_BYTES, OnConflict,
-    export_document, export_named, import_document, import_named, import_next, write_export,
+    export_document, export_named, export_next, import_document, import_named, import_next,
+    write_export,
 };
 pub use write::{Forget, Record, Update, forget, record, update};
 
