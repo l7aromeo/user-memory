@@ -40,7 +40,7 @@ Restore or import:
 3. Warn that restoring an older backup brings back memories the user has forgotten since it was made.
    A backup from before titles existed (export format version 1) imports only with a title for each memory the store does not already hold (those keep their titles), and the preview lists the ids without one. Ask the user to run `user-memory import FILE` on the command line, which lists each with its content; propose a title for each as "Titles for the upgrade" in [upgrade.md](upgrade.md) describes, get the user's approval, and pass the approved map as `titles` (CLI: `--titles FILE`).
 4. If there are conflicts, offer the `on_conflict` choices: `abort` (default, writes nothing), `keep-store` (keep the store's version, still add the file's conversations) or `use-file` (take the file's version).
-5. Only after the user approves the preview, call `import` again with `apply: true`, `user_confirmed: true` and the chosen `on_conflict`.
+5. Only after the user approves the preview, call `import` again with `apply: true`, `user_confirmed: true` and the chosen `on_conflict`. A reply with `"applied": false` and a `reason` was only a preview: nothing was written, so never report it as imported.
 6. Report `added`, `unchanged` and `staled`, and the summary's `next`, if any: `review` when imported memories resemble stored ones, and optionally `reindex`, which embeds the new memories at once; search embeds them as it goes otherwise. Reindex runs where the store lives:
    - Local install: `user-memory reindex`.
    - Docker or other server: on the server, not on a client, which refuses it. For the Docker server: `docker compose exec memory user-memory reindex` in the server's compose folder.

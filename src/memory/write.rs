@@ -895,9 +895,25 @@ pub fn forget(db: &Path, input: Forget) -> Result<Value> {
             .difference(&orphaned)
             .collect::<Vec<_>>()
     );
+    // The next step for each list with entries, one line each, for an agent
+    // that never loaded the skill's forget playbook. A string, as import's
+    // next is.
+    let next: Vec<&str> = [("staled", STALED_NEXT), ("left_superseded", ORPHANED_NEXT)]
+        .into_iter()
+        .filter(|(list, _)| result[list].as_array().is_some_and(|ids| !ids.is_empty()))
+        .map(|(_, line)| line)
+        .collect();
+    if !next.is_empty() {
+        result["next"] = json!(next.join("\n"));
+    }
     tx.commit_removing()?;
     Ok(result)
 }
+
+/// Forget's next step when patterns lost a supporting memory.
+const STALED_NEXT: &str = "Patterns in staled lost a supporting memory: re-derive or forget them with the user (user-memory skill, review).";
+/// Forget's next step when memories lost their replacement.
+const ORPHANED_NEXT: &str = "Memories in left_superseded have no replacement now: ask whether the user wants any back (update with user_confirmed).";
 
 /// The ids of the memories matching `condition`, in id order.
 fn ids_where(conn: &Connection, condition: &str) -> Result<BTreeSet<String>> {

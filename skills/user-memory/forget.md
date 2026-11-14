@@ -12,6 +12,7 @@ Forget only on the user's explicit request, and say what will be lost before doi
    - `unlinked`: how many projects the conversation had linked. They stop loading for it; their memories stay.
    - `staled`: patterns that relied on deleted or changed memories and went stale. They stop appearing in ordinary search; `review` lists them for forgetting or re-deriving.
    - `left_superseded`: memories a deleted memory had replaced. They stay hidden, with no active memory in their place. If the user wants one back, `update` it with `user_confirmed: true` to make it active again.
+   - `next`: present when either list has entries, with the next step for each, one line each.
 
 ## A single memory
 

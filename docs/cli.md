@@ -132,7 +132,8 @@ one conversation recorded, and the projects it linked, reported as
 listed as `kept`. Patterns built
 on a forgotten memory become stale, listed as `staled`. A memory the forgotten
 one had replaced is listed as `left_superseded`: it stays hidden until
-`user-memory update ID` makes it active again. Forgetting cannot be undone,
+`user-memory update ID` makes it active again. When either list has entries,
+`next` says what to do about each, one line each. Forgetting cannot be undone,
 except from a backup. Nothing is ever deleted automatically, so write a
 memory's content, context and reason to read well without the chat it came
 from.

@@ -1372,7 +1372,7 @@ pub fn import_named(db: &Path, input: &ImportMemories) -> Result<Value> {
         bail!("{name}: no such export; {}", newest_exports(&dir));
     }
     let document = read_regular(&dir.join(name)).map_err(|err| anyhow!("{name}: {err}"))?;
-    import(
+    let mut summary = import(
         db,
         &document,
         input.apply && input.user_confirmed,
@@ -1380,8 +1380,19 @@ pub fn import_named(db: &Path, input: &ImportMemories) -> Result<Value> {
         input.titles.as_ref(),
         &input.subset,
         Untitled::IdsOnly,
-    )
+    )?;
+    // An apply without the user's yes runs as a preview; without this its
+    // reply looks like one, and an agent that asked to apply can report the
+    // import as done.
+    if input.apply && !input.user_confirmed {
+        summary["reason"] = json!(NOT_APPLIED);
+    }
+    Ok(summary)
 }
+
+/// Said by an import asked to apply without user_confirmed.
+const NOT_APPLIED: &str =
+    "Not applied: pass user_confirmed with apply once the user approves the import.";
 
 /// How many export names a missing name's refusal lists.
 const NEWEST_LISTED: usize = 5;

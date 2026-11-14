@@ -320,11 +320,21 @@ fn agents_export_and_import_by_name_and_see_only_summaries() {
         ],
     );
     assert_eq!(replies[0]["applied"], false, "apply alone is a preview");
+    // An apply without the user's yes says it wasn't applied, so it can't
+    // be reported as done; a preview or an applied import says nothing.
+    assert_eq!(
+        replies[0]["reason"],
+        "Not applied: pass user_confirmed with apply once the user approves the import.",
+        "{}",
+        replies[0]
+    );
     assert_eq!(
         replies[1]["applied"], false,
         "confirmation alone is a preview"
     );
+    assert!(replies[1].get("reason").is_none(), "{}", replies[1]);
     assert_eq!(replies[2]["applied"], true, "{}", replies[2]);
+    assert!(replies[2].get("reason").is_none(), "{}", replies[2]);
     for reply in &replies {
         assert!(!reply.to_string().contains("Prefer Rust"), "{reply}");
     }

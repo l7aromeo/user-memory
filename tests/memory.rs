@@ -2237,9 +2237,12 @@ fn forgetting_names_what_it_stales_and_what_it_leaves_superseded() {
     assert_eq!(out["deleted"], true, "{out}");
     assert_eq!(out["left_superseded"], json!([old]), "{out}");
     assert_eq!(out["staled"], json!([]), "{out}");
+    // Each list with entries comes with its next step, one line each.
+    assert_eq!(out["next"], LEFT_SUPERSEDED_NEXT, "{out}");
     let out = s.value(&["forget", &a]);
     assert_eq!(out["staled"], json!([pattern]), "{out}");
     assert_eq!(out["left_superseded"], json!([]), "{out}");
+    assert_eq!(out["next"], STALED_NEXT, "{out}");
     // Its replacement gone, the user's yes makes the old memory active again.
     let out = s.value(&["update", &old]);
     assert_eq!(out["updated"], true, "{out}");
@@ -2312,7 +2315,17 @@ fn forgetting_names_what_it_stales_and_what_it_leaves_superseded() {
     let out = s.value(&["forget", "--origin", "chat/x"]);
     assert_eq!(out["staled"], json!([on_d]), "{out}");
     assert_eq!(out["left_superseded"], json!([older]), "{out}");
+    assert_eq!(
+        out["next"],
+        format!("{STALED_NEXT}\n{LEFT_SUPERSEDED_NEXT}"),
+        "{out}"
+    );
 }
+
+/// Forget's next step for patterns it staled.
+const STALED_NEXT: &str = "Patterns in staled lost a supporting memory: re-derive or forget them with the user (user-memory skill, review).";
+/// Forget's next step for memories it left without a replacement.
+const LEFT_SUPERSEDED_NEXT: &str = "Memories in left_superseded have no replacement now: ask whether the user wants any back (update with user_confirmed).";
 
 #[test]
 fn losing_a_conversation_stales_inferences_even_when_their_support_survives() {
