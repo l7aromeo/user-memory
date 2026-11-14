@@ -54,6 +54,17 @@ const READ_CHUNK: usize = 64 * 1024;
 /// Unix too, so the Windows path runs in every test run.
 #[cfg(debug_assertions)]
 const TEST_RELAY: &str = "USER_MEMORY_TEST_RELAY";
+/// In debug builds, set to 1, it makes the `exec` or the relay's start
+/// fail after a replacement passed its checks, for the tests of a failed
+/// hand-over.
+#[cfg(debug_assertions)]
+const TEST_EXEC_FAIL: &str = "USER_MEMORY_TEST_EXEC_FAIL";
+/// How many times a replacement whose check was ended by a signal is
+/// checked again, at later messages, before it is refused. macOS can kill a
+/// new executable while it assesses it on a loaded machine
+/// (docs/dev/development.md); the next start runs. After an `exec` there is
+/// no old process to fall back to, so only a check that ran counts.
+const KILLED_CHECKS: u32 = 3;
 
 /// The server behind the front.
 #[derive(Clone)]
@@ -135,6 +146,7 @@ fn identity(path: &Path) -> io::Result<Identity> {
 struct Reader {
     /// What each read took; an empty chunk is the end of the input.
     chunks: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    #[cfg_attr(not(unix), allow(dead_code, reason = "only exec takes the gate"))]
     gate: Arc<Mutex<()>>,
 }
 
@@ -313,7 +325,7 @@ fn refusal(why: &Refused) -> String {
         Refused::Protocol(new, protocol) => format!(
             "user-memory {new} replaced the binary this session runs ({running}), but it can't continue this session's protocol ({protocol}), so this session keeps {running}; restart your client to run {new}."
         ),
-        Refused::Broken(err) => format!(
+        Refused::Broken(err) | Refused::Killed(err) => format!(
             "user-memory was replaced on disk, but the new binary can't take over this session ({err}), so this session keeps {running}; run user-memory doctor, then restart your client."
         ),
     }
@@ -325,11 +337,15 @@ enum Refused {
     Older(Version),
     Protocol(Version, String),
     Broken(String),
+    /// Its check was ended by a signal: perhaps the system refusing a new
+    /// executable once, so it is checked again before it is refused.
+    #[cfg_attr(not(unix), allow(dead_code, reason = "only Unix has signals"))]
+    Killed(String),
 }
 
 /// What `binary` prints for `args`, run with `handover` as [`ENV`] or
 /// without it.
-async fn ask(binary: &Path, args: &[&str], handover: Option<&str>) -> Result<String, String> {
+async fn ask(binary: &Path, args: &[&str], handover: Option<&str>) -> Result<String, Refused> {
     let mut command = tokio::process::Command::new(binary);
     command
         .args(args)
@@ -343,29 +359,32 @@ async fn ask(binary: &Path, args: &[&str], handover: Option<&str>) -> Result<Str
     };
     let output = tokio::time::timeout(PROBE_TIMEOUT, command.output())
         .await
-        .map_err(|_| "it did not answer".to_owned())?
-        .map_err(|err| format!("it did not start: {err}"))?;
+        .map_err(|_| Refused::Broken("it did not answer".to_owned()))?
+        .map_err(|err| Refused::Broken(format!("it did not start: {err}")))?;
     if !output.status.success() {
-        return Err(format!("it ended with {}", output.status));
+        let said = format!("it ended with {}", output.status);
+        #[cfg(unix)]
+        if std::os::unix::process::ExitStatusExt::signal(&output.status).is_some() {
+            return Err(Refused::Killed(said));
+        }
+        return Err(Refused::Broken(said));
     }
-    String::from_utf8(output.stdout).map_err(|_| "its answer isn't text".to_owned())
+    String::from_utf8(output.stdout)
+        .map_err(|_| Refused::Broken("its answer isn't text".to_owned()))
 }
 
 /// Checks that `binary` can take over a session agreed on `protocol`: it
 /// runs, is not older than this one, reads this state format and speaks
-/// the protocol.
+/// the protocol. The same version in another file, such as a rebuild,
+/// takes over; only a lower version is refused.
 async fn check(binary: &Path, protocol: Option<&str>) -> Result<(), Refused> {
-    let printed = ask(binary, &["--version"], None)
-        .await
-        .map_err(Refused::Broken)?;
+    let printed = ask(binary, &["--version"], None).await?;
     let new = versions::of_binary(&printed)
         .ok_or_else(|| Refused::Broken("it doesn't say its version".into()))?;
     if Version::parse(versions::running()).is_some_and(|running| new < running) {
         return Err(Refused::Older(new));
     }
-    let answer = ask(binary, &["serve"], Some(PROBE))
-        .await
-        .map_err(Refused::Broken)?;
+    let answer = ask(binary, &["serve"], Some(PROBE)).await?;
     judge(new, &answer, protocol)
 }
 
@@ -457,6 +476,16 @@ fn relays() -> bool {
     cfg!(windows)
 }
 
+/// The binary to start in this one's place: `binary`, or in a debug build
+/// told to by [`TEST_EXEC_FAIL`], one that isn't there.
+fn target(binary: &Path) -> PathBuf {
+    #[cfg(debug_assertions)]
+    if env::var(TEST_EXEC_FAIL).is_ok_and(|value| value == "1") {
+        return binary.with_file_name("missing-user-memory");
+    }
+    binary.to_path_buf()
+}
+
 /// What the front does with a message from the app.
 enum Step {
     /// Passed to the server.
@@ -496,6 +525,7 @@ pub async fn serve(inner: Inner) -> Result<()> {
         session,
         refused: None,
         wanted: None,
+        killed: None,
         in_flight: HashMap::new(),
         notices: Vec::new(),
         buffer: Vec::new(),
@@ -561,6 +591,8 @@ struct Front {
     refused: Option<Identity>,
     /// A checked replacement waiting for the requests in flight.
     wanted: Option<Identity>,
+    /// A replacement whose checks a signal ended, and how many.
+    killed: Option<(Identity, u32)>,
     /// The app's requests the server has not answered, by id, with their
     /// method.
     in_flight: HashMap<String, String>,
@@ -614,6 +646,21 @@ impl Front {
         Ok(Step::Passed)
     }
 
+    /// How many checks of the replacement `now` a signal ended, this one
+    /// included.
+    fn killed_checks(&mut self, now: Identity) -> u32 {
+        match &mut self.killed {
+            Some((identity, count)) if *identity == now => {
+                *count += 1;
+                *count
+            }
+            _ => {
+                self.killed = Some((now, 1));
+                1
+            }
+        }
+    }
+
     /// Whether the binary was replaced by one that can take over: checked
     /// once per replacement, a refusal said in the next tool reply.
     async fn replaced(&mut self) -> bool {
@@ -631,6 +678,10 @@ impl Front {
             Ok(()) => {
                 self.wanted = Some(now);
                 true
+            }
+            Err(Refused::Killed(_)) if self.killed_checks(now) < KILLED_CHECKS => {
+                // Checked again at a later message, saying nothing yet.
+                false
             }
             Err(why) => {
                 self.refused = Some(now);
@@ -844,7 +895,7 @@ impl Front {
                 ..self.session.clone()
             };
             let started = write_state(&session, &pending).and_then(|state| {
-                start_child(&self.session.binary, &state).map_err(|err| {
+                start_child(&target(&self.session.binary), &state).map_err(|err| {
                     let _ = fs::remove_file(&state);
                     anyhow::Error::from(err)
                 })
@@ -881,7 +932,7 @@ impl Front {
             Ok(state) => state,
             Err(err) => return format!("{err:#}"),
         };
-        let err = std::process::Command::new(&self.session.binary)
+        let err = std::process::Command::new(target(&self.session.binary))
             .arg("serve")
             .env(ENV, &state)
             .exec();

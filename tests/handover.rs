@@ -73,6 +73,20 @@ impl Place {
     fn db(&self) -> PathBuf {
         self.dir.path().join("memories.sqlite3")
     }
+    /// The hand-over state files left in the sandbox's state folder: none,
+    /// once each hand-over is over, whatever its outcome.
+    fn state_files(&self) -> Vec<String> {
+        let state = sandbox::folder(self.dir.path(), "state");
+        fs::read_dir(state)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .filter(|name| name.starts_with("handover-"))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
     /// Replaces the binary with `new` as an upgrade does: in one rename, the
     /// running one renamed aside first on Windows, which can't replace a
     /// running program.
@@ -83,9 +97,12 @@ impl Place {
         let _ = fs::remove_file(&staged);
         fs::copy(new, &staged).unwrap();
         if cfg!(windows) {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
             let aside = self.bin().join(format!(
-                ".user-memory-old-{}{}",
-                Instant::now().elapsed().as_nanos(),
+                ".user-memory-old-{nanos}{}",
                 std::env::consts::EXE_SUFFIX
             ));
             fs::rename(self.binary(), aside).unwrap();
@@ -279,6 +296,7 @@ fn a_replaced_binary_answers_the_next_calls_on_the_same_connection() {
         );
         assert_eq!(session.version("after"), Some(NEWER.into()), "{way:?}");
         assert_eq!(session.child.id(), pid);
+        assert_eq!(place.state_files(), Vec::<String>::new(), "{way:?}");
         let stderr = session.close();
         assert!(
             stderr.contains(&format!(
@@ -450,6 +468,11 @@ fn an_older_or_broken_replacement_keeps_the_session_and_says_so_once() {
         );
         let again = session.call("again", "index");
         assert_eq!(texts(&again).len(), 1, "{way:?}: said twice: {again}");
+        // The notice is one more text item: the call's own reply, which a
+        // client reads from the first item, is unchanged.
+        let mut own = told["result"].clone();
+        own["content"].as_array_mut().unwrap().pop();
+        assert_eq!(own, again["result"], "{way:?}");
         assert_eq!(session.version("serving"), None, "{way:?}");
 
         place.break_binary();
@@ -460,6 +483,7 @@ fn an_older_or_broken_replacement_keeps_the_session_and_says_so_once() {
             "{way:?}: {broken}"
         );
         assert_eq!(texts(&session.call("quiet", "index")).len(), 1, "{way:?}");
+        assert_eq!(place.state_files(), Vec::<String>::new(), "{way:?}");
         let stderr = session.close();
         assert!(!stderr.contains("took over"), "{way:?}: {stderr}");
     }
@@ -554,5 +578,46 @@ fn running(pid: u64) -> bool {
             .stderr(Stdio::null())
             .status()
             .is_ok_and(|status| status.success())
+    }
+}
+
+/// A replacement that passed its checks but couldn't be started leaves the
+/// session on its code, says so once, and leaves no state file behind.
+#[test]
+fn a_failed_hand_over_keeps_the_session_and_its_state_file_goes() {
+    for way in ways() {
+        let place = Place::new();
+        let mut session = place.serve(way, &[("USER_MEMORY_TEST_EXEC_FAIL", "1")]);
+        place.upgrade();
+        let told = session.call("told", "index");
+        assert_eq!(told["result"]["isError"], false, "{way:?}: {told}");
+        let notice = texts(&told).last().cloned().unwrap_or_default();
+        assert!(
+            notice.starts_with("user-memory was replaced on disk, but the new binary can't take over this session ("),
+            "{way:?}: {told}"
+        );
+        assert_eq!(place.state_files(), Vec::<String>::new(), "{way:?}");
+        assert_eq!(session.version("serving"), None, "{way:?}");
+        assert_eq!(texts(&session.call("quiet", "index")).len(), 1, "{way:?}");
+        session.close();
+    }
+}
+
+/// macOS can kill a new program while it assesses it: a check ended by a
+/// signal is tried again at the next message, without a notice, and the
+/// hand-over happens once the program runs.
+#[cfg(unix)]
+#[test]
+fn a_check_ended_by_a_signal_is_tried_again_without_a_notice() {
+    for way in ways() {
+        let place = Place::new();
+        let mut session = place.serve(way, &[]);
+        place.upgrade();
+        fs::write(place.bin().join("user-memory.killed-once"), "").unwrap();
+        let first = session.call("first", "index");
+        assert_eq!(texts(&first).len(), 1, "{way:?}: {first}");
+        assert!(!place.bin().join("user-memory.killed-once").exists());
+        assert_eq!(session.version("second"), Some(NEWER.into()), "{way:?}");
+        session.close();
     }
 }

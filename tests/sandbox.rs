@@ -13,7 +13,11 @@ mod sandbox;
 use sandbox::Sandboxed;
 
 use serde_json::Value;
-use std::{fs, path::Path, process::Command};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 // Every folder user-memory resolves, and its default store, lie inside the
 // sandbox: HOME and XDG on Unix, USERPROFILE and LOCALAPPDATA on Windows.
@@ -69,5 +73,97 @@ fn only_debug_builds_have_the_paths_command() {
             })
             .any(|line| line.trim() == "#[cfg(debug_assertions)]");
         assert!(above, "line {} lacks #[cfg(debug_assertions)]", at + 1);
+    }
+}
+
+/// Every `.rs` file under `src`, with its text.
+fn sources() -> Vec<(PathBuf, String)> {
+    let mut found = Vec::new();
+    let mut folders = vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
+    while let Some(folder) = folders.pop() {
+        for entry in fs::read_dir(folder).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                folders.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                let text = fs::read_to_string(&path).unwrap();
+                found.push((path, text));
+            }
+        }
+    }
+    found
+}
+
+/// Whether the attributes and doc lines right above line `at` include
+/// `#[cfg(debug_assertions)]`.
+fn debug_only(lines: &[&str], at: usize) -> bool {
+    lines[..at]
+        .iter()
+        .rev()
+        .take_while(|line| {
+            let line = line.trim_start();
+            line.starts_with("#[") || line.starts_with("///")
+        })
+        .any(|line| line.trim() == "#[cfg(debug_assertions)]")
+}
+
+// The tests' seams change what a build reports or does, so a release build
+// must have none: each environment variable is named once, by a constant
+// declared only under cfg(debug_assertions), and the test-only tool and
+// its router likewise.
+#[test]
+fn only_debug_builds_have_the_test_seams() {
+    let sources = sources();
+    for seam in [
+        "USER_MEMORY_TEST_VERSION",
+        "USER_MEMORY_TEST_SCHEMA_VERSION",
+        "USER_MEMORY_TEST_RELAY",
+        "USER_MEMORY_TEST_EXEC_FAIL",
+    ] {
+        let quoted = format!("\"{seam}\"");
+        let uses: Vec<(&PathBuf, usize)> = sources
+            .iter()
+            .flat_map(|(path, text)| {
+                text.lines()
+                    .enumerate()
+                    .filter(|(_, line)| line.contains(&quoted))
+                    .map(move |(at, _)| (path, at))
+            })
+            .collect();
+        assert_eq!(uses.len(), 1, "{seam} is named in {uses:?}");
+        let (path, at) = uses[0];
+        let text = &sources.iter().find(|(p, _)| p == path).unwrap().1;
+        let lines: Vec<&str> = text.lines().collect();
+        let declared = lines[at].trim_start().starts_with("const ")
+            || lines[at].trim_start().starts_with("pub(crate) const ");
+        assert!(
+            debug_only(&lines, at) && declared,
+            "{seam} at {}:{} is not a constant under #[cfg(debug_assertions)]",
+            path.display(),
+            at + 1
+        );
+    }
+    for (marker, count) in [("debug_router", 2)] {
+        let mut seen = 0;
+        for (path, text) in &sources {
+            let lines: Vec<&str> = text.lines().collect();
+            for (at, line) in lines.iter().enumerate() {
+                if line.contains(marker) && !line.trim_start().starts_with("//") {
+                    seen += 1;
+                    // The attribute, or the statement holding the call.
+                    let guarded = debug_only(&lines, at)
+                        || lines[at.saturating_sub(2)..at]
+                            .iter()
+                            .any(|line| line.trim() == "#[cfg(debug_assertions)]");
+                    assert!(
+                        guarded,
+                        "{marker} at {}:{} is not under #[cfg(debug_assertions)]",
+                        path.display(),
+                        at + 1
+                    );
+                }
+            }
+        }
+        assert_eq!(seen, count, "{marker}");
     }
 }

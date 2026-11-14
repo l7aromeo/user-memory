@@ -193,7 +193,7 @@ pub fn connect(db: &Path) -> Result<Connection> {
             tx.execute_batch(super::history::EVENTS)?;
             super::index::create(&tx)?;
             super::index::start(&tx)?;
-            tx.pragma_update(None, "user_version", current)?;
+            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         tx.commit()?;
     }
@@ -228,11 +228,13 @@ pub fn connect(db: &Path) -> Result<Connection> {
 }
 
 /// How long a `serve` that took over a session from a replaced binary
-/// waits for a store older than its code to be migrated. Setup replaces
-/// the binary first, then backs the store up and migrates it; on a large
-/// store that takes seconds, which a call then waits instead of being
-/// refused. Past it the call is refused as before: the store was not being
-/// migrated.
+/// waits for a store older than its code to be migrated. `user-memory
+/// upgrade` replaces the binary first, then setup backs the store up and
+/// migrates it, which a call meeting the store then waits for instead of
+/// being refused. 30 s is about twice the slowest migration measured (0.9's
+/// keyword index took up to 16 s on 100,000 memories, docs/upgrade.md),
+/// and well under the minutes an agent app gives a tool call. Past it the
+/// call is refused as before: the store is not being migrated.
 const MIGRATION_WAIT: Duration = Duration::from_secs(30);
 /// How often the waiting `serve` reads the store's version again.
 const MIGRATION_POLL: Duration = Duration::from_millis(100);
@@ -271,12 +273,18 @@ fn wait_for_migration(conn: &Connection, mut found: i64, current: i64) -> Result
     Ok(found)
 }
 
-/// The schema version this build uses: [`SCHEMA_VERSION`], or in a debug
-/// build the one `USER_MEMORY_TEST_SCHEMA_VERSION` names, for the tests of
-/// a binary that meets a store migrated to a later version.
+/// Names, in debug builds only, the schema version `connect` compares a
+/// store against in place of [`SCHEMA_VERSION`]: the tests' newer build
+/// meets a store migrated past this one. A new store still gets
+/// [`SCHEMA_VERSION`], and no migration reads it.
+#[cfg(debug_assertions)]
+const TEST_SCHEMA_VERSION: &str = "USER_MEMORY_TEST_SCHEMA_VERSION";
+
+/// The schema version `connect` compares a store against: [`SCHEMA_VERSION`],
+/// or in a debug build the one [`TEST_SCHEMA_VERSION`] names.
 fn schema_version() -> i64 {
     #[cfg(debug_assertions)]
-    if let Some(version) = std::env::var("USER_MEMORY_TEST_SCHEMA_VERSION")
+    if let Some(version) = std::env::var(TEST_SCHEMA_VERSION)
         .ok()
         .and_then(|version| version.parse().ok())
     {
