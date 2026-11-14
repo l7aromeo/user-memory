@@ -229,10 +229,19 @@ enum ProjectCommand {
 #[derive(Clone)]
 struct UserMemoryServer {
     db: PathBuf,
-    /// Whether the server runs in the client's folder, as `serve` does with
-    /// a store on the client's machine; a host serves clients in many
-    /// folders, which tell it theirs, from its own machine.
+    /// Whether the server runs in the client's folder, as `serve` does; a
+    /// host serves clients in many folders, which tell it theirs.
     in_client_folder: bool,
+}
+
+impl UserMemoryServer {
+    /// Whether the store, and the exports folder beside it, is on another
+    /// machine than the client's, as a host's is; a `serve` opens its store
+    /// on the client's machine. Only a `serve` runs in the client's folder,
+    /// so the two answers go together today; this one has its own name.
+    fn store_on_server(&self) -> bool {
+        !self.in_client_folder
+    }
 }
 
 #[tool_router]
@@ -288,7 +297,7 @@ impl UserMemoryServer {
     )]
     async fn export(&self, Parameters(input): Parameters<memory::ExportMemories>) -> Reply {
         let db = self.db.clone();
-        let on_server = !self.in_client_folder;
+        let on_server = self.store_on_server();
         blocking(None, move || match memory::export_named(&db, &input) {
             Ok(mut summary) => {
                 summary["next"] = json!(memory::export_next(on_server));
