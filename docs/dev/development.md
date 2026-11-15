@@ -648,7 +648,9 @@ bars on the store's score and on quantities free of the store's size, such
 as each term's worth by how many memories hold it alone. `--bars` reports at
 other bars, on any of those quantities with `scale=NAME` (repeat it to
 compare several on the same stores), `--credit` with credit for a memory's
-other passages, `--prompt-curve` at several prompt bars on stems alone,
+other passages, `--subcommand` with another rule for which word of a
+command names its subcommand, `--prompt-curve` at several prompt bars on
+stems alone,
 `--failure-curve` at several failure bars with and without an anchor, and
 `--keep DIR` keeps the built stores. `--presence` adds how often session
 start already lists what the tasks need: today's, from `user-memory
