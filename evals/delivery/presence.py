@@ -32,12 +32,17 @@ from pathlib import Path
 import metrics
 import world
 
-# The constants of #120's and #123's session start, set here by this
-# model; each says which issue owns it and what was measured.
+# The constants of #120's and #123's session start that this model sets;
+# each says which issue owns it and what was measured. Measured: #123's
+# use window, the share to be printed and how many are printed, and #120's
+# ceiling for the most-used part. Not measured here: #120's floor for that
+# part, the project rules' floor and ceiling, the working set and the list
+# of new rules, which these worlds do not model.
 
-# #120: session start's whole room, as `CHARS` in src/session.rs.
+# Session start's whole room as src/session.rs sets it today:
+# `CLAUDE_LIMIT` less `ADDED_ROOM`.
 CHARS = 9500
-# #120: the index's share of `CHARS`, as `INDEX_CHARS` in src/session.rs.
+# The index's share of it: `CHARS` less `INDEX_MARGIN` in src/session.rs.
 INDEX_CHARS = 9000
 # #123: how many of a project's last sessions use is counted over. With
 # reads counted at 10,000 memories, windows of 20, 40 and 80 list 0.93,
