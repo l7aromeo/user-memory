@@ -594,6 +594,16 @@ fn a_read_only_token_reads_and_searches_but_changes_nothing() {
         assert!(failed, "{tool} was let through: {text}");
         assert_eq!(text, refusal, "{tool}");
     }
+    // A read-only token on a session a write token opened is refused too:
+    // each request is scoped by its own token, not by the session's.
+    let borrowed = Session {
+        host: &host,
+        token: reader_token.clone(),
+        id: writer.id.clone(),
+    };
+    let (failed, text) = borrowed.call("record", record_args("Prefer spaces"));
+    assert!(failed, "a borrowed session let a write through: {text}");
+    assert_eq!(text, refusal);
     for (tool, arguments) in [
         ("index", json!({})),
         // The connector's poll for changes.
