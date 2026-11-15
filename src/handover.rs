@@ -758,6 +758,13 @@ impl Front {
                 }
                 Some("notifications/cancelled") => {
                     let cancelled = message.pointer("/params/requestId");
+                    // A cancelled request gets no answer (specification
+                    // 2026-07-28, basic/patterns/cancellation), so it no
+                    // longer holds a hand-over back; a late answer still
+                    // reaches the app.
+                    if let Some(id) = cancelled {
+                        self.in_flight.remove(&key(id));
+                    }
                     let before = self.session.listens.len();
                     self.session.listens.retain(|id| Some(id) != cancelled);
                     if self.session.listens.len() != before {
