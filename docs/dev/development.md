@@ -43,6 +43,14 @@ least 5 minutes; the workflow files give the numbers. The crate has no
 doctests: it is a binary without a library, and rustdoc tests only
 libraries.
 
+`just check-release` runs clippy again in the release profile, the build
+users get. Code compiled only in debug builds, the seams the tests steer
+it through (`USER_MEMORY_TEST_VERSION`, the relay, the pauses and stalls),
+can leave a variable, import or function unused there, which the debug
+lints cannot see. CI runs it after `just check` on Linux, macOS and Windows; `just check`
+leaves it out because it checks every crate again. Run it before a change
+that adds or moves a `#[cfg(debug_assertions)]` line.
+
 The tests drive the real binary with throwaway stores and fake clients; none
 touch your real `~/.claude`, `~/.codex`, skills folders or memory store.
 
@@ -167,7 +175,7 @@ change code, tests, the build, scripts, workflows or the PowerShell
 installers; a docs-only change skips it. There the recipes run in Windows
 PowerShell (the justfile's `windows-shell`), the install.ps1 tests are
 required (`REQUIRE_PWSH`), and x64 uses aws-lc-sys's prebuilt NASM, which
-the image lacks. After `just check`, the install.ps1 tests run again under
+the image lacks. After `just check` and `just check-release`, the install.ps1 tests run again under
 Windows PowerShell 5.1 (`USER_MEMORY_TEST_POWERSHELL=powershell`), which
 keeps its own PSScriptAnalyzer, installed at the same pin. A `.gitattributes` keeps every checkout's line endings LF,
 so the binary embeds the same skill files on every platform.

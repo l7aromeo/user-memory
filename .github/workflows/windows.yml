@@ -75,6 +75,9 @@ jobs:
           key: cargo-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-${{ matrix.arch }}-
       - run: just check
+      # The release profile's lints, which debug-only code can change
+      # (justfile `check-release`).
+      - run: just check-release
       # The install.ps1 tests again under Windows PowerShell 5.1, which every
       # Windows has and the installer supports. It keeps its own modules, so
       # it gets its own PSScriptAnalyzer, pinned as above; its PowerShellGet

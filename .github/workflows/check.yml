@@ -61,4 +61,7 @@ jobs:
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-
       - run: just check
+      # The release profile's lints, which debug-only code can change
+      # (justfile `check-release`).
+      - run: just check-release
       - run: python3 -I evals/test_run.py
