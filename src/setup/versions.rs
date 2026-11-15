@@ -151,11 +151,24 @@ pub(crate) fn server_step(this: &str, url: &str, result: &serde_json::Value) -> 
     }
 }
 
-/// The server's version as it names it, as a release when it is one, and
-/// the oldest client it supports, from its `initialize` result.
-fn said(result: &serde_json::Value) -> (String, Option<Version>, Option<Version>) {
-    let shown = result
+/// Where a `server/discover` result names the server: in `_meta`, as a JSON
+/// pointer (specification 2026-07-28, server/discover). An `initialize`
+/// result has it as `serverInfo`.
+const DISCOVER_SERVER_INFO: &str = "/_meta/io.modelcontextprotocol~1serverInfo";
+
+/// The version a handshake result names its server by: an `initialize`
+/// result's, or a `server/discover` result's.
+pub(crate) fn server_version(result: &serde_json::Value) -> Option<&serde_json::Value> {
+    result
         .pointer("/serverInfo/version")
+        .or_else(|| result.pointer(&format!("{DISCOVER_SERVER_INFO}/version")))
+}
+
+/// The server's version as it names it, as a release when it is one, and
+/// the oldest client it supports, from its `initialize` or
+/// `server/discover` result.
+fn said(result: &serde_json::Value) -> (String, Option<Version>, Option<Version>) {
+    let shown = server_version(result)
         .and_then(serde_json::Value::as_str)
         .unwrap_or("an unknown version")
         .to_owned();

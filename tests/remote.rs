@@ -157,7 +157,16 @@ impl Host {
         (status, body)
     }
     fn restart(&mut self) {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_user-memory"))
+        self.restart_as(None);
+    }
+    /// Restarts the host on its address, as the debug build of `version`
+    /// when given: a server upgraded while down.
+    fn restart_as(&mut self, version: Option<&str>) {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_user-memory"));
+        if let Some(version) = version {
+            command.env("USER_MEMORY_TEST_VERSION", version);
+        }
+        let mut child = command
             .args(["host", "--listen", &self.address, "--db"])
             .arg(self.root.path().join("shared.sqlite3"))
             .arg("--token-file")
@@ -1955,94 +1964,123 @@ struct Said {
     version: String,
     min_client: Option<String>,
     fail_next: bool,
+    /// The tools it lists; none when unset.
+    tools: Option<Value>,
+    /// Answers `tools/list` only after [`SLOW_TOOLS`], as a server under
+    /// load may, while it answers other requests at once.
+    slow_tools: bool,
 }
 
 type Shared = std::sync::Arc<std::sync::Mutex<Said>>;
 
+/// How long a slow fake server takes to list its tools: long enough that a
+/// call sent after the request is answered first, when nothing waits for
+/// the list.
+const SLOW_TOOLS: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// A memory server that answers its handshake as `said` holds at the time,
-/// lists no tools and answers every tool call with "served"; its endpoint.
+/// lists the tools it holds and answers every tool call with "served"; its
+/// endpoint. Each connection is served on its own thread.
 fn versioned_endpoint(said: &Shared) -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap().to_string();
     let said = said.clone();
     std::thread::spawn(move || {
         for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { continue };
-            let mut reader = BufReader::new(stream.try_clone().unwrap());
-            let mut request = String::new();
-            let mut length = 0;
-            if reader.read_line(&mut request).is_err() {
-                continue;
-            }
-            loop {
-                let mut line = String::new();
-                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
-                    break;
-                }
-                if let Some((key, value)) = line.split_once(':')
-                    && key.eq_ignore_ascii_case("content-length")
-                {
-                    length = value.trim().parse().unwrap();
-                }
-            }
-            let mut body = vec![0; length];
-            if reader.read_exact(&mut body).is_err() {
-                continue;
-            }
-            let message: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-            let mut said = said.lock().unwrap();
-            let (status, reply) = if !request.starts_with("POST") {
-                (405, Value::Null)
-            } else if said.fail_next && message["method"] == "tools/call" {
-                said.fail_next = false;
-                drop(said);
-                // The connection ends with no answer, as a server stopping.
-                continue;
-            } else if message.get("id").is_none() {
-                (202, Value::Null)
-            } else {
-                let result = match message["method"].as_str() {
-                    Some("initialize") => {
-                        let mut capabilities = json!({"tools":{}});
-                        if let Some(min) = &said.min_client {
-                            capabilities["experimental"] =
-                                json!({"user-memory": {"min_client": min}});
-                        }
-                        json!({"result":{"protocolVersion":message["params"]["protocolVersion"],"capabilities":capabilities,"serverInfo":{"name":"user-memory","version":said.version}}})
-                    }
-                    Some("tools/list") => json!({"result":{"tools":[]}}),
-                    Some("tools/call") => {
-                        json!({"result":{"content":[{"type":"text","text":"served"}],"isError":false}})
-                    }
-                    _ => json!({"error":{"code":-32601,"message":"Method not found"}}),
-                };
-                let mut reply = json!({"jsonrpc":"2.0","id":message["id"]});
-                reply
-                    .as_object_mut()
-                    .unwrap()
-                    .extend(result.as_object().unwrap().clone());
-                (200, reply)
-            };
-            let body = if reply.is_null() {
-                String::new()
-            } else {
-                reply.to_string()
-            };
-            let _ = write!(
-                stream,
-                "HTTP/1.1 {status} Reply\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
+            let Ok(stream) = stream else { continue };
+            let said = said.clone();
+            std::thread::spawn(move || answer_fake(stream, &said));
         }
     });
     format!("http://{address}/mcp")
+}
+
+/// Answers one request to the fake server of [`versioned_endpoint`].
+fn answer_fake(mut stream: std::net::TcpStream, said: &Shared) {
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut request = String::new();
+    let mut length = 0;
+    if reader.read_line(&mut request).is_err() {
+        return;
+    }
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+            break;
+        }
+        if let Some((key, value)) = line.split_once(':')
+            && key.eq_ignore_ascii_case("content-length")
+        {
+            length = value.trim().parse().unwrap();
+        }
+    }
+    let mut body = vec![0; length];
+    if reader.read_exact(&mut body).is_err() {
+        return;
+    }
+    let message: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let mut said = said.lock().unwrap();
+    let slow = said.slow_tools && message["method"] == "tools/list";
+    let (status, reply) = if !request.starts_with("POST") {
+        (405, Value::Null)
+    } else if said.fail_next && message["method"] == "tools/call" {
+        said.fail_next = false;
+        // The connection ends with no answer, as a server stopping.
+        return;
+    } else if message.get("id").is_none() {
+        (202, Value::Null)
+    } else {
+        let result = match message["method"].as_str() {
+            Some("server/discover") => {
+                let mut capabilities = json!({"tools":{}});
+                if let Some(min) = &said.min_client {
+                    capabilities["experimental"] = json!({"user-memory": {"min_client": min}});
+                }
+                json!({"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":capabilities,"ttlMs":0,"cacheScope":"private","_meta":{"io.modelcontextprotocol/serverInfo":{"name":"user-memory","version":said.version}}}})
+            }
+            Some("initialize") => {
+                let mut capabilities = json!({"tools":{}});
+                if let Some(min) = &said.min_client {
+                    capabilities["experimental"] = json!({"user-memory": {"min_client": min}});
+                }
+                json!({"result":{"protocolVersion":message["params"]["protocolVersion"],"capabilities":capabilities,"serverInfo":{"name":"user-memory","version":said.version}}})
+            }
+            Some("tools/list") => {
+                json!({"result":{"tools":said.tools.clone().unwrap_or_else(|| json!([]))}})
+            }
+            Some("tools/call") => {
+                json!({"result":{"content":[{"type":"text","text":"served"}],"isError":false}})
+            }
+            _ => json!({"error":{"code":-32601,"message":"Method not found"}}),
+        };
+        let mut reply = json!({"jsonrpc":"2.0","id":message["id"]});
+        reply
+            .as_object_mut()
+            .unwrap()
+            .extend(result.as_object().unwrap().clone());
+        (200, reply)
+    };
+    drop(said);
+    if slow {
+        std::thread::sleep(SLOW_TOOLS);
+    }
+    let body = if reply.is_null() {
+        String::new()
+    } else {
+        reply.to_string()
+    };
+    let _ = write!(
+        stream,
+        "HTTP/1.1 {status} Reply\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
 }
 
 fn said(version: &str, min_client: Option<&str>) -> Shared {
     std::sync::Arc::new(std::sync::Mutex::new(Said {
         version: version.into(),
         min_client: min_client.map(str::to_owned),
-        fail_next: false,
+        ..Said::default()
     }))
 }
 
@@ -2405,6 +2443,210 @@ fn a_2026_session_without_discover_reconnects_after_an_outage() {
         replies.last().unwrap()["result"]["isError"],
         true,
         "never reconnected: {replies:?}"
+    );
+    app.close();
+}
+
+/// A 2026-07-28 app, as Claude Code opens its session: `server/discover`,
+/// then a `subscriptions/listen` stream for tool changes. After the server
+/// was away, a change in its tools is told once on that stream, tagged
+/// with its id, as the front does after a hand-over; the same tools are
+/// told nothing.
+#[test]
+fn a_2026_session_is_told_on_its_stream_when_a_reconnect_changes_the_tools() {
+    // A debug build reporting a test version lists one more tool.
+    for (upgraded, told) in [(None, 0), (Some("9.9.9"), 1)] {
+        let mut host = Host::start(root());
+        let home = tempdir().unwrap();
+        let token = home.path().join("token");
+        fs::write(&token, TOKEN).unwrap();
+        let url = format!("http://{}/mcp", host.address);
+        let mut app = App::start(home.path(), &url, &token, &[]);
+        let discover = app.ask(&on_2026(
+            json!({"jsonrpc":"2.0","id":1,"method":"server/discover","params":{}}),
+        ));
+        assert!(discover.get("result").is_some(), "{discover}");
+        app.send(&on_2026(
+            json!({"jsonrpc":"2.0","id":"tools-stream","method":"subscriptions/listen","params":{"notifications":{"toolsListChanged":true}}}),
+        ));
+        let tools = app.ask(&on_2026(
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}),
+        ));
+        assert!(tools.get("result").is_some(), "{tools}");
+        let before = app.ask(&on_2026(call(3, "index", json!({}))));
+        assert_ne!(before["result"]["isError"], true, "{before}");
+        host.child.kill().unwrap();
+        host.child.wait().unwrap();
+        let failed = app.ask(&on_2026(call(4, "index", json!({}))));
+        assert_eq!(texts(&failed), [unanswered(&url)]);
+        host.restart_as(upgraded);
+        let served = app.ask(&on_2026(call(5, "index", json!({}))));
+        assert_ne!(served["result"]["isError"], true, "{served}");
+        // Told before the reply to the call that reconnected.
+        let changes: Vec<&Value> = app
+            .others
+            .iter()
+            .filter(|message| message["method"] == "notifications/tools/list_changed")
+            .collect();
+        let tagged = json!({"jsonrpc":"2.0","method":"notifications/tools/list_changed","params":{"_meta":{"io.modelcontextprotocol/subscriptionId":"tools-stream"}}});
+        assert_eq!(
+            changes,
+            vec![&tagged; told],
+            "upgraded {upgraded:?}: {:?}",
+            app.others
+        );
+        app.close();
+    }
+}
+
+/// #100's line after a reconnect reaches a 2026-07-28 session too, whose
+/// server names itself in `server/discover`'s `_meta`: once, after the
+/// reply's own content.
+#[test]
+fn a_risen_minimum_is_said_to_a_2026_session_after_a_reconnect() {
+    let home = tempdir().unwrap();
+    let token = home.path().join("token");
+    fs::write(&token, TOKEN).unwrap();
+    let state = said("0.10.0", Some("0.8.0"));
+    let url = versioned_endpoint(&state);
+    let mut app = App::start(
+        home.path(),
+        &url,
+        &token,
+        &[("USER_MEMORY_TEST_VERSION", "0.10.0")],
+    );
+    let discover = app.ask(&on_2026(
+        json!({"jsonrpc":"2.0","id":1,"method":"server/discover","params":{}}),
+    ));
+    assert!(discover.get("result").is_some(), "{discover}");
+    assert_eq!(
+        texts(&app.ask(&on_2026(call(2, "index", json!({}))))),
+        ["served"]
+    );
+    {
+        let mut state = state.lock().unwrap();
+        state.min_client = Some("0.11.0".into());
+        state.fail_next = true;
+    }
+    let failed = app.ask(&on_2026(call(3, "index", json!({}))));
+    assert_eq!(failed["result"]["isError"], true, "{failed}");
+    assert_eq!(
+        texts(&app.ask(&on_2026(call(4, "index", json!({}))))),
+        [
+            "served".to_owned(),
+            format!(
+                "The memory server at {url} runs user-memory 0.10.0 and needs 0.11.0 or newer on this machine (0.10.0). Upgrade: user-memory upgrade"
+            )
+        ]
+    );
+    assert_eq!(
+        texts(&app.ask(&on_2026(call(5, "index", json!({}))))),
+        ["served"]
+    );
+    app.close();
+}
+
+/// A server that comes back as another version with the same tools: the
+/// app is told nothing, whichever protocol it speaks; its list is still
+/// right.
+#[test]
+fn a_reconnect_to_the_same_tools_tells_nothing() {
+    let home = tempdir().unwrap();
+    let token = home.path().join("token");
+    fs::write(&token, TOKEN).unwrap();
+    for on_2026_protocol in [false, true] {
+        let ask = |message: Value| {
+            if on_2026_protocol {
+                on_2026(message)
+            } else {
+                message
+            }
+        };
+        let state = said("0.10.0", None);
+        let url = versioned_endpoint(&state);
+        let mut app = App::start(home.path(), &url, &token, &[]);
+        let opened = if on_2026_protocol {
+            let discover = app.ask(&ask(
+                json!({"jsonrpc":"2.0","id":1,"method":"server/discover","params":{}}),
+            ));
+            app.send(&ask(
+                json!({"jsonrpc":"2.0","id":"tools-stream","method":"subscriptions/listen","params":{"notifications":{"toolsListChanged":true}}}),
+            ));
+            discover
+        } else {
+            let handshake = app.ask(&initialize(1));
+            app.send(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+            handshake
+        };
+        assert!(opened.get("result").is_some(), "{opened}");
+        let tools = app.ask(&ask(
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}),
+        ));
+        assert!(tools.get("result").is_some(), "{tools}");
+        {
+            let mut state = state.lock().unwrap();
+            state.version = "0.10.1".into();
+            state.fail_next = true;
+        }
+        let failed = app.ask(&ask(call(3, "index", json!({}))));
+        assert_eq!(failed["result"]["isError"], true, "{failed}");
+        assert_eq!(
+            texts(&app.ask(&ask(call(4, "index", json!({}))))),
+            ["served"]
+        );
+        app.ask(&ask(call(5, "index", json!({}))));
+        assert!(
+            app.others
+                .iter()
+                .all(|message| message["method"] != "notifications/tools/list_changed"),
+            "2026 {on_2026_protocol}: {:?}",
+            app.others
+        );
+        app.close();
+    }
+}
+
+/// A change in the tools after a reconnect is told before the reply to the
+/// call that reconnected, even when the server lists its tools slowly: an
+/// app that ends the session after that reply has heard it.
+#[test]
+fn a_change_is_told_before_the_reply_to_the_call_that_reconnected() {
+    let home = tempdir().unwrap();
+    let token = home.path().join("token");
+    fs::write(&token, TOKEN).unwrap();
+    let state = said("0.10.0", None);
+    let url = versioned_endpoint(&state);
+    let mut app = App::start(home.path(), &url, &token, &[]);
+    let discover = app.ask(&on_2026(
+        json!({"jsonrpc":"2.0","id":1,"method":"server/discover","params":{}}),
+    ));
+    assert!(discover.get("result").is_some(), "{discover}");
+    app.send(&on_2026(
+        json!({"jsonrpc":"2.0","id":"tools-stream","method":"subscriptions/listen","params":{"notifications":{"toolsListChanged":true}}}),
+    ));
+    app.ask(&on_2026(
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}),
+    ));
+    {
+        let mut state = state.lock().unwrap();
+        state.tools = Some(json!([{"name":"added","inputSchema":{"type":"object"}}]));
+        state.slow_tools = true;
+        state.fail_next = true;
+    }
+    let failed = app.ask(&on_2026(call(3, "index", json!({}))));
+    assert_eq!(failed["result"]["isError"], true, "{failed}");
+    assert_eq!(
+        texts(&app.ask(&on_2026(call(4, "index", json!({}))))),
+        ["served"]
+    );
+    assert_eq!(
+        app.others
+            .iter()
+            .filter(|message| message["method"] == "notifications/tools/list_changed")
+            .count(),
+        1,
+        "{:?}",
+        app.others
     );
     app.close();
 }

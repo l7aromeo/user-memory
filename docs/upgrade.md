@@ -144,7 +144,9 @@ While the server restarts, a client's call gets
 ``The memory server at … did not answer; the call may not have completed``
 and the next call reconnects ([troubleshooting](troubleshooting.md#from-doctor)).
 Clients don't restart for a server restart or upgrade, only when their own
-client is upgraded.
+client is upgraded. When the server comes back with other tools, the client
+tells the agent app as it does when its own binary is replaced
+([open sessions](#open-sessions)).
 
 ### Client and server versions
 
