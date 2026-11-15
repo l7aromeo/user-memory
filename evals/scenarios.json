@@ -603,6 +603,25 @@
     {"memory": {"where": {"content": "breaking changes"}, "count": "1", "fields": {"scope": "^global$"}}},
     {"answer_not": {"step": 1, "matches": "(not|isn't|aren't|no longer) (available|connected)|unavailable"}}
    ]
+  },
+  {
+   "name": "history_from_a_server_too_old_for_it_is_not_read_as_no_change",
+   "summary": "#141: the client is a release newer than its memory server, which keeps no history. Asked whether a rule ever changed, the agent's history read is refused by the client; the agent tells the user the server is too old to show history and never says or implies the rule never changed. A later read without history is not a failure by itself.",
+   "repeat": 2,
+   "cwd": "plain",
+   "servers": ["main"],
+   "versions": {"client": "0.10.0", "main": "0.9.3"},
+   "seed": [
+    {"id": "notes", "rule": true, "args": ["--type", "preference", "--category", "writing", "--title", "Release notes list breaking changes first", "--content", "Release notes list breaking changes first, before new features.", "--scope", "global"]}
+   ],
+   "steps": [
+    {"session": "a", "prompt": "Has my rule about release notes ever been changed? What did it say before?"}
+   ],
+   "checks": [
+    {"called": {"step": 0, "tools": ["read"]}},
+    {"answer": {"step": 0, "matches": "too old|older|upgrade"}},
+    {"answer_not": {"step": 0, "matches": "never (been )?(changed|edited|modified|updated)|(hasn't|has not|wasn't|was not) (been )?(changed|edited|modified|updated)|no (earlier|previous|prior|other|older) (version|wording|text)|(always|still) (said|been) the same|unchanged|same as (it was|before|always)"}}
+   ]
   }
  ]
 }

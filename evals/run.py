@@ -93,6 +93,9 @@ def models(top, environ):
 CLAUDE_MODEL, CODEX_MODEL = models(False, {})
 # One agent turn; a turn that takes longer is cut off and graded as is.
 TURN_TIMEOUT = 600
+# What makes a debug build of user-memory report another release: a
+# scenario's `versions` sets it for the client and each server.
+TEST_VERSION = "USER_MEMORY_TEST_VERSION"
 # Starting a Codex app-server and answering one request.
 CODEX_REQUEST_TIMEOUT = 60
 
@@ -1517,14 +1520,20 @@ class Server:
             self.port = probe.getsockname()[1]
         self.url = f"http://127.0.0.1:{self.port}/mcp"
         self.child = None
+        # The release this debug build reports, from the scenario's
+        # `versions`; None for its own, whatever the client reports.
+        self.version = None
 
     def start(self):
         binary = self.sandbox.binary if self.sandbox.binary.exists() else self.sandbox.source
         log = open(self.folder / "host.log", "a")
+        env = {k: v for k, v in self.sandbox.client_env().items() if k != TEST_VERSION}
+        if self.version:
+            env[TEST_VERSION] = self.version
         self.child = subprocess.Popen(
             [str(binary), "host", "--listen", f"127.0.0.1:{self.port}", "--db", str(self.db),
              "--token-file", str(self.token)],
-            env=self.sandbox.client_env(), stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+            env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log)
         log.close()
         deadline = time.time() + SERVER_START
         while time.time() < deadline:
@@ -1562,8 +1571,14 @@ class Server:
 
 def start_servers(scenario, sandbox):
     """The scenario's servers, started; the client connects to `connect`'s
-    (by default the only one), whose store takes the seeds."""
+    (by default the only one), whose store takes the seeds. `versions`
+    names the release the client and each server report, in a debug build."""
     servers = {name: Server(sandbox, name) for name in scenario.get("servers", [])}
+    versions = scenario.get("versions", {})
+    if versions.get("client"):
+        sandbox.env[TEST_VERSION] = versions["client"]
+    for name, server in servers.items():
+        server.version = versions.get(name)
     if servers:
         name = scenario.get("connect") or next(iter(servers))
         sandbox.remote = servers[name]
