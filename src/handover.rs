@@ -62,6 +62,11 @@ const TEST_RELAY: &str = "USER_MEMORY_TEST_RELAY";
 /// hand-over.
 #[cfg(debug_assertions)]
 const TEST_EXEC_FAIL: &str = "USER_MEMORY_TEST_EXEC_FAIL";
+/// In debug builds, set, it makes `serve` write to stderr, at each
+/// hand-over decision, the build serving, the file on disk and the
+/// requests in flight, so a test that sees no hand-over says why.
+#[cfg(debug_assertions)]
+const TEST_TRACE: &str = "USER_MEMORY_TEST_TRACE";
 /// How many times a replacement whose check was ended by a signal is
 /// checked again, at later messages, before it is refused. macOS can kill a
 /// new executable while it assesses it on a loaded machine
@@ -127,6 +132,11 @@ struct Session {
     /// server process across a hand-over.
     #[serde(default)]
     listens: Vec<Value>,
+    /// The identity of the binary the old process checked and started, so
+    /// the new code's baseline is that build even when another upgrade
+    /// replaced the file before the new code first looked at it.
+    #[serde(default)]
+    identity: Option<Identity>,
 }
 
 /// What a binary's probe answers: its version, the state formats it reads
@@ -156,7 +166,7 @@ pub fn probing() -> bool {
 /// file index on Windows) and size. An upgrade replaces the binary by
 /// rename, which changes the id whatever the clock says, so the modified
 /// time is never compared.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct Identity {
     file: (u64, u64),
     size: u64,
@@ -582,6 +592,7 @@ pub async fn serve(inner: Inner) -> Result<()> {
                 server_line: None,
                 tools_params: None,
                 listens: Vec::new(),
+                identity: None,
             },
             Vec::new(),
         )
@@ -590,8 +601,13 @@ pub async fn serve(inner: Inner) -> Result<()> {
         // Setup replaces the binary before it migrates the store.
         crate::memory::expect_migration();
     }
+    // A handed-over session names the build that was checked and started.
+    // A plain start can only look at the file: a replacement between the
+    // app starting `serve` and this look, a few milliseconds, goes unseen
+    // until the next one.
+    let own = session.identity.or_else(|| identity(&session.binary).ok());
     let mut front = Front {
-        identity: identity(&session.binary).ok(),
+        identity: own,
         session,
         refused: None,
         wanted: None,
@@ -630,7 +646,7 @@ pub async fn serve(inner: Inner) -> Result<()> {
             line = front.backend.output.next_line() => match line {
                 Ok(Some(line)) => {
                     front.on_output(line).await?;
-                    if front.wanted.is_some() && front.in_flight.is_empty() && !front.eof {
+                    if front.wanted.is_some() && !front.app_in_flight() && !front.eof {
                         let pending = std::mem::take(&mut front.buffer);
                         front.hand_over(&mut reader, pending).await?;
                         front.handle_input(&mut reader).await?;
@@ -656,7 +672,7 @@ pub async fn serve(inner: Inner) -> Result<()> {
 
 struct Front {
     session: Session,
-    /// The binary's identity when the code serving now started.
+    /// The identity of the build whose code serves the session now.
     identity: Option<Identity>,
     /// A replacement already refused, so it is checked and reported once.
     refused: Option<Identity>,
@@ -696,7 +712,17 @@ impl Front {
     }
 
     async fn on_input(&mut self, line: Vec<u8>) -> Result<Step> {
-        if !self.session.relayed && self.replaced().await && self.in_flight.is_empty() {
+        let replaced = !self.session.relayed && self.replaced().await;
+        #[cfg(debug_assertions)]
+        if env::var_os(TEST_TRACE).is_some() {
+            eprintln!(
+                "user-memory trace: serving {:?}, on disk {:?}, replaced {replaced}, in flight {:?}",
+                self.identity,
+                identity(&self.session.binary).ok(),
+                self.in_flight.keys().collect::<Vec<_>>()
+            );
+        }
+        if replaced && !self.app_in_flight() {
             return Ok(Step::HandOver(line));
         }
         if let Ok(message) = serde_json::from_slice::<Value>(&line) {
@@ -743,6 +769,14 @@ impl Front {
         }
         self.send(&line);
         Ok(Step::Passed)
+    }
+
+    /// Whether a request of the app's is in flight. The front's own replayed
+    /// handshake and tool list don't hold a hand-over back: stopping the
+    /// server answers them first, and the new code asks again.
+    fn app_in_flight(&self) -> bool {
+        let own = [key(&json!(REPLAY_ID)), key(&json!(TOOLS_ID))];
+        self.in_flight.keys().any(|id| !own.contains(id))
     }
 
     /// Whether the app opened the session with an `initialize` handshake,
@@ -821,8 +855,12 @@ impl Front {
                 self.wanted = Some(now);
                 true
             }
-            Err(Refused::Killed(_)) if self.killed_checks(now) < KILLED_CHECKS => {
-                // Checked again at a later message, saying nothing yet.
+            Err(Refused::Killed(why)) if self.killed_checks(now) < KILLED_CHECKS => {
+                // Checked again at a later message, saying nothing to the
+                // app yet; the app's log of serve's stderr says why.
+                eprintln!(
+                    "user-memory: a check of the replaced binary failed ({why}); trying again at the next message"
+                );
                 false
             }
             Err(why) => {
@@ -1073,6 +1111,7 @@ impl Front {
         }
         self.stdout.flush().await?;
         self.stop().await;
+        self.session.identity = wanted;
         if relays() {
             let session = Session {
                 relayed: true,
