@@ -32,7 +32,7 @@ settings and the embedding setting. For the installer's options, see
 |---|---|
 | `--listen ADDR` | HTTP bind address (default `127.0.0.1:8765`); put a TLS proxy in front for off-machine access |
 | `--db PATH` | Absolute store path |
-| `--token-file PATH` | Access-token file; a private random token is created if absent |
+| `--token-file PATH` | The shared access-token file; a private random token is created if absent. Each machine can have its own token instead ([access tokens](server.md#access-tokens)) |
 | `--allowed-host NAME` | Hostname accepted through a reverse proxy (repeatable) |
 
 Every path but `/` needs a token. `GET /` needs none: for health checks, it

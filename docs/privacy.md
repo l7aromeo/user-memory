@@ -96,8 +96,11 @@ To remove every copy, see [forget](cli.md#forget).
 
 ## Where the token lives
 
-- On the server: a file next to the store (`/data/access-token` in Docker),
-  created on first start, readable only by the server, never printed.
+- On the server: the shared token file next to the store
+  (`/data/access-token` in Docker), created on first start, readable only by
+  the server, never printed; and for each machine's own token only its
+  SHA-256, in `accounts.sqlite3` beside the store, with its name, scope,
+  creation, last use (to the hour) and expiry.
 - On each client: `~/.config/user-memory/client-token`
   (`%LOCALAPPDATA%\user-memory\config\client-token` on Windows). The installer never
   prints it, reads it with hidden input, and sends it over plain `http://`
@@ -105,8 +108,10 @@ To remove every copy, see [forget](cli.md#forget).
 - On the wire: the client sends it to the server with every request, over
   HTTPS for any other machine.
 
-Anyone with the token can read and change every memory. To replace it, see
-[the access token](server.md#the-access-token).
+Anyone with a token that can write can read and change every memory; a
+read-only token can read every memory. To give each machine its own token,
+revoke one or replace the shared one, see
+[access tokens](server.md#access-tokens).
 
 ## What leaves your machine
 

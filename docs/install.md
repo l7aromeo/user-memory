@@ -27,7 +27,7 @@ curl -fsSL https://github.com/l7aromeo/user-memory/releases/latest/download/inst
 
 To join an existing server you need its address, such as
 `https://memory.example.com`, and its access token
-([where it comes from](server.md#the-access-token)). Treat the token like a
+([where it comes from](server.md#access-tokens)). Treat the token like a
 password: anyone with it can read and change your memories. Without a
 server, the installer can set one up on this machine.
 

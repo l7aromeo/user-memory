@@ -228,6 +228,7 @@ Setup registers these with your agents; you rarely run them yourself.
 |---|---|
 | `user-memory serve` | The stdio MCP server an agent starts. |
 | `user-memory host` | The authenticated HTTP server ([server options](configuration.md#server-options)). |
+| `user-memory host token add NAME --out FILE` | Issues a machine its own token on the server's machine; `--read-only`, `--expires DAYS`. `list`, `revoke NAME` and `retire-shared` manage them ([access tokens](server.md#access-tokens)). |
 | `user-memory connect` | The stdio connector an agent starts for a remote server. |
 | `user-memory session-start --client claude` | The session-start hook (`--client codex` for Codex); see [session hooks](clients.md#session-hooks). |
 | `user-memory prompt-submit --client claude` | The hook before each prompt. |
