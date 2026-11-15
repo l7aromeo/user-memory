@@ -7,6 +7,7 @@
 //! session continues normally.
 
 mod live;
+mod seen;
 
 use crate::{db_path, memory, memory::FitUnit, project, setup};
 use anyhow::Context;
@@ -14,7 +15,7 @@ use clap::ValueEnum;
 use live::{LINKED, LISTED, PENDING, THIS_FOLDER};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     io::{IsTerminal, Read},
     path::{Path, PathBuf},
     time::Duration,
@@ -193,17 +194,18 @@ pub async fn start(path: PathBuf, client: Option<HookClient>) -> String {
     }
     let checkout = path.clone();
     let snapshot = async {
-        if let (Some(client), Some(payload)) = (client, &payload) {
-            // The session's first snapshot: its first prompt then reports
-            // only what changed after this.
-            let _ = tokio::time::timeout(
-                hook_time(SNAPSHOT_SHARE),
-                remember(client, payload, checkout, origin.clone()),
-            )
-            .await;
-        }
+        let (client, payload) = client.zip(payload.as_deref())?;
+        // The session's first snapshot: its first prompt then reports
+        // only what changed after this.
+        tokio::time::timeout(
+            hook_time(SNAPSHOT_SHARE),
+            remember(client, payload, checkout, origin.clone()),
+        )
+        .await
+        .ok()
+        .flatten()
     };
-    let (_, index, versions) = tokio::join!(
+    let (seen, index, versions) = tokio::join!(
         tokio::time::timeout_at(deadline, snapshot),
         tokio::time::timeout_at(deadline, start_index(path, client, origin.clone())),
         tokio::time::timeout_at(deadline, version_line())
@@ -213,12 +215,31 @@ pub async fn start(path: PathBuf, client: Option<HookClient>) -> String {
         let until = (tokio::time::Instant::now() + hook_time(RECONCILE_GRACE)).min(deadline);
         let _ = tokio::time::timeout_at(until, reconcile).await;
     }
+    let (limit, unit) = hook_limit(client);
+    let block = match (seen.ok().flatten(), &index) {
+        // Only beside an index: a start without one says nothing is new.
+        (Some((snapshot, reply)), Ok(Ok(_))) => {
+            new_rules(&snapshot, &reply, startup(payload.as_deref()), deadline)
+                .await
+                .and_then(|found| new_rules_block(&found, &snapshot, &reply, unit))
+        }
+        _ => None,
+    };
     let index = match index {
-        Ok(Ok(text)) => {
+        Ok(Ok((lines, index))) => {
             if let Some(missed) = &missed {
                 let _ = std::fs::remove_file(missed);
             }
-            let (limit, unit) = hook_limit(client);
+            let text = match &block {
+                // The block's room comes out of the index's, only when it
+                // has lines: otherwise the index is as it always was.
+                Some(block) => {
+                    let room = (limit - ADDED_ROOM - INDEX_MARGIN)
+                        .saturating_sub(unit.len(&lines) + unit.len(block) + 2);
+                    format!("{lines}\n{block}\n{}", memory::shorten(&index, room, unit))
+                }
+                None => format!("{lines}\n{index}"),
+            };
             capped(text, limit - ADDED_ROOM, unit, INDEX_CUT)
         }
         Ok(Err(err)) => {
@@ -244,6 +265,122 @@ pub async fn start(path: PathBuf, client: Option<HookClient>) -> String {
     }
 }
 
+/// Opens the list of rules added or changed since the last session.
+const NEW_RULES: &str = "New rules since your last session:";
+/// Closes it: how a rule the user did not give is removed.
+const NEW_RULES_REMOVE: &str = "If one isn't the user's, remove it with forget on their yes, or forget with its origin to remove everything that conversation recorded.";
+/// The most room the list of new rules takes, in the client's unit, out of
+/// the index's: about a dozen rule lines, a fifth of the smaller client's
+/// limit. Rules past it are counted, and `review` lists them.
+const NEW_RULES_CHARS: usize = 2_000;
+
+/// Whether the hook payload says the session is a new one, as both clients
+/// name it, rather than one resumed, cleared or compacted.
+fn startup(payload: Option<&[u8]>) -> bool {
+    payload
+        .and_then(|payload| serde_json::from_slice::<Value>(payload).ok())
+        .is_some_and(|payload| payload["source"] == "startup")
+}
+
+/// The rules this store's file of rules last shown on this machine lacks,
+/// from the session's first `snapshot` and the store's `reply`, saving what
+/// the file then holds; `None` from a server that sent no prints, without a
+/// state folder, or when the file's turn and the work don't come before
+/// `deadline`. Only a full reply is compared: one of the changes alone
+/// lacks the unchanged rules, which the file would then drop and list again
+/// at a later start.
+async fn new_rules(
+    snapshot: &live::Snapshot,
+    reply: &memory::StampsReply,
+    startup: bool,
+    deadline: tokio::time::Instant,
+) -> Option<seen::Found> {
+    if !reply.prints || reply.delta {
+        return None;
+    }
+    let path = seen::path(&store_identity()?)?;
+    let projects: Vec<String> = snapshot
+        .projects
+        .iter()
+        .flatten()
+        .map(|p| p.key.clone())
+        .collect();
+    let reply = memory::StampsReply {
+        rules: reply.rules.clone(),
+        agents: reply.agents.clone(),
+        prints: true,
+        ..memory::StampsReply::default()
+    };
+    let until =
+        std::time::Instant::now() + deadline.saturating_duration_since(tokio::time::Instant::now());
+    let found = tokio::task::spawn_blocking(move || {
+        let view = seen::View {
+            reply: &reply,
+            projects: &projects,
+        };
+        seen::update(&path, &view, startup, until)
+    });
+    tokio::time::timeout_at(deadline, found).await.ok()?.ok()
+}
+
+/// The list of the rules `found` names, global ones first, then by project
+/// and title, each with its id, title and where its latest change came
+/// from, within [`NEW_RULES_CHARS`] in `unit`; `None` when there are none.
+fn new_rules_block(
+    found: &seen::Found,
+    snapshot: &live::Snapshot,
+    reply: &memory::StampsReply,
+    unit: FitUnit,
+) -> Option<String> {
+    if found.rules.is_empty() {
+        return None;
+    }
+    let mut rules: Vec<(&str, &str, &str)> = found
+        .rules
+        .iter()
+        .filter_map(|id| {
+            let rule = reply.rules.get(id)?;
+            let title = snapshot.stamps.get(id).map_or("", |s| s.title.as_str());
+            Some((rule.project.as_str(), title, id.as_str()))
+        })
+        .collect();
+    rules.sort_unstable();
+    let line = |(_, title, id): (&str, &str, &str)| {
+        let by: Vec<&str> = [
+            reply.rules.get(id).map_or("", |r| r.origin.as_str()),
+            reply.rules.get(id).map_or("", |r| r.client.as_str()),
+        ]
+        .into_iter()
+        .filter(|by| !by.is_empty())
+        .collect();
+        let short = id.get(..8).unwrap_or(id);
+        match by.is_empty() {
+            true => format!("  {short} {title}"),
+            false => format!("  {short} {title} (from {})", by.join(", ")),
+        }
+    };
+    let more = |n: usize| format!("  ...and {n} more: review lists them.");
+    let mut lines = vec![NEW_RULES.to_owned()];
+    let mut used = unit.len(NEW_RULES) + unit.len(NEW_RULES_REMOVE) + 2;
+    for (at, rule) in rules.iter().enumerate() {
+        let next = line(*rule);
+        let left = rules.len() - at - 1;
+        let reserve = if left > 0 {
+            unit.len(&more(left)) + 1
+        } else {
+            0
+        };
+        if used + unit.len(&next) + 1 + reserve > NEW_RULES_CHARS {
+            lines.push(more(rules.len() - at));
+            break;
+        }
+        used += unit.len(&next) + 1;
+        lines.push(next);
+    }
+    lines.push(NEW_RULES_REMOVE.to_owned());
+    Some(lines.join("\n"))
+}
+
 /// What a client of a memory server says at session start when it or its
 /// server is below the other's oldest supported version; nothing otherwise,
 /// for a store on this machine, or when the server doesn't answer.
@@ -263,21 +400,26 @@ async fn payload() -> Option<Vec<u8>> {
         .ok()
 }
 
-/// Saves what the session named in `payload` sees of memory at its start.
+/// Saves what the session named in `payload` sees of memory at its start,
+/// and gives it back with the rest of the store's reply.
 async fn remember(
     client: HookClient,
     payload: &[u8],
     checkout: PathBuf,
     origin: Option<String>,
-) -> Option<()> {
+) -> Option<(live::Snapshot, memory::StampsReply)> {
     let path = session_file(client, payload)?;
-    let (snapshot, _) = snapshot(checkout, origin, None).await.ok()?;
+    let (snapshot, reply) = snapshot(checkout, origin, None, true).await.ok()?;
     // On a blocking thread, so the snapshot's share of the limit bounds the
     // save too.
-    tokio::task::spawn_blocking(move || live::save(&path, &snapshot, &live::Landing::default()))
-        .await
-        .ok()?
-        .ok()
+    let (saved, snapshot) = tokio::task::spawn_blocking(move || {
+        let saved = live::save(&path, &snapshot, &live::Landing::default());
+        (saved, snapshot)
+    })
+    .await
+    .ok()?;
+    saved.ok()?;
+    Some((snapshot, reply))
 }
 
 /// The snapshot file of the session the hook payload `payload` names.
@@ -398,7 +540,9 @@ async fn changes(
                 tokio::task::spawn_blocking(|| live::hold_for_tests(live::HOLD_LATE_INDEX)).await;
             // The global rules come too: a session that started without
             // memory may hold none, or an old copy, in its instruction files.
-            index(checkout.clone(), Some(client), origin.clone(), false).await
+            index(checkout.clone(), Some(client), origin.clone(), false)
+                .await
+                .map(|(lines, index)| format!("{lines}\n{index}"))
         };
         tokio::time::timeout_at(deadline - hook_time(LATE_INDEX_MARGIN), index)
             .await
@@ -406,12 +550,13 @@ async fn changes(
             .ok()
     };
     let (seen, late_index) = tokio::join!(
-        snapshot(checkout.clone(), origin.clone(), before.as_ref()),
+        snapshot(checkout.clone(), origin.clone(), before.as_ref(), false),
         late_index
     );
-    let (now, origins) = seen.ok()?;
+    let (now, reply) = seen.ok()?;
     // What this conversation changed last, it knows already.
-    let own: BTreeSet<String> = origins
+    let own: BTreeSet<String> = reply
+        .origins
         .into_iter()
         .filter(|(_, by)| origin.as_ref() == Some(by))
         .map(|(id, _)| id)
@@ -452,7 +597,7 @@ async fn told(
         BTreeSet::new()
     } else {
         let remote = setup::configured_remote().ok()?;
-        stamps(remote.as_ref(), &gone, None, None)
+        stamps(remote.as_ref(), &gone, None, None, false)
             .await
             .ok()?
             .stamps
@@ -465,13 +610,15 @@ async fn told(
 /// What the session in `checkout` sees: its projects, read fresh and kept
 /// from what it saw `before` in other folders, and, from the shared server
 /// or the local store, every active global memory and those of its projects;
-/// with the conversation origin of each memory's latest change, where the
-/// store gave one.
+/// with the rest of the store's reply: the conversation origin of each
+/// memory's latest change, where the store gave one, and with `prints`, the
+/// rules and agents' memories among them.
 async fn snapshot(
     checkout: PathBuf,
     origin: Option<String>,
     before: Option<&live::Snapshot>,
-) -> anyhow::Result<(live::Snapshot, BTreeMap<String, String>)> {
+    prints: bool,
+) -> anyhow::Result<(live::Snapshot, memory::StampsReply)> {
     let remote = setup::configured_remote()?;
     // One spelling per folder, however the client or the command line gives
     // it, so a project seen there is matched on the next prompt.
@@ -535,8 +682,9 @@ async fn snapshot(
             ..memory::StampsReply::default()
         }
     } else {
-        stamps(remote.as_ref(), &keys, origin.as_deref(), since).await?
+        stamps(remote.as_ref(), &keys, origin.as_deref(), since, prints).await?
     };
+    let mut reply = reply;
     // Says, in debug builds, what the hook read, so tests can tell a read
     // of the changed memories from a read of every one.
     #[cfg(debug_assertions)]
@@ -549,23 +697,24 @@ async fn snapshot(
             (false, false) => "every",
         }
     );
+    let read = std::mem::take(&mut reply.stamps);
     let stamps = match (reply.delta, before) {
         (true, Some(before)) => {
             let mut stamps = before.stamps.clone();
             for id in &reply.gone {
                 stamps.remove(id);
             }
-            stamps.extend(reply.stamps);
+            stamps.extend(read);
             stamps
         }
-        _ => reply.stamps,
+        _ => read,
     };
     let snapshot = live::Snapshot {
         stamps,
         projects: Some(projects),
-        changes: reply.since,
+        changes: reply.since.clone(),
     };
-    Ok((snapshot, reply.origins))
+    Ok((snapshot, reply))
 }
 
 /// The stamps of every active global memory and those of `projects` (and
@@ -576,13 +725,17 @@ async fn stamps(
     projects: &[String],
     origin: Option<&str>,
     since: Option<memory::Position>,
+    prints: bool,
 ) -> anyhow::Result<memory::StampsReply> {
-    let input = json!({
+    let mut input = json!({
         "projects": projects,
         "origin_links": origin,
         "stamps": true,
         "stamps_since": since.unwrap_or_default(),
     });
+    if prints {
+        input["rule_prints"] = json!(true);
+    }
     let reply = match remote {
         Some(connection) => connection.call("index", input).await?,
         None => {
@@ -601,7 +754,7 @@ async fn start_index(
     path: PathBuf,
     client: Option<HookClient>,
     origin: Option<String>,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<(String, String)> {
     // Changes made from other machines reach the instruction files here,
     // before the client reads them at its next launch.
     let current = tokio::time::timeout(hook_time(SYNC_SHARE), setup::sync_instructions())
@@ -613,7 +766,7 @@ async fn start_index(
     index(path, client, origin, rules_elsewhere).await
 }
 
-/// The lines naming the projects the session in `path` sees, then the index
+/// The lines naming the projects the session in `path` sees, and the index
 /// of them, from the shared server or the local store, shortened to the
 /// hook's share of the output so that it still lists or counts each memory;
 /// without the global rules when `rules_elsewhere`.
@@ -622,7 +775,7 @@ async fn index(
     client: Option<HookClient>,
     origin: Option<String>,
     rules_elsewhere: bool,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<(String, String)> {
     let remote = setup::configured_remote()?;
     let here = path.clone();
     // Links the store cannot list leave the folder's projects to show.
@@ -669,7 +822,7 @@ async fn index(
         unit,
     )
     .await?;
-    Ok(format!("{line}\n{index}"))
+    Ok((line, index))
 }
 
 /// The index of what the session sees within `room` in `unit`, asked of
@@ -1112,6 +1265,30 @@ mod tests {
                 )
                 .unwrap();
             }
+        }
+    }
+
+    /// A reply of the changes alone, or one without prints, lists nothing:
+    /// it lacks the unchanged rules, which would otherwise leave the file
+    /// and be listed again later.
+    #[tokio::test]
+    async fn only_a_full_reply_with_prints_is_compared() {
+        let snapshot = live::Snapshot {
+            projects: Some(Vec::new()),
+            stamps: memory::Stamps::new(),
+            changes: None,
+        };
+        let deadline = tokio::time::Instant::now() + LIMIT;
+        for (prints, delta) in [(true, true), (false, false)] {
+            let reply = memory::StampsReply {
+                prints,
+                delta,
+                ..memory::StampsReply::default()
+            };
+            assert!(
+                new_rules(&snapshot, &reply, true, deadline).await.is_none(),
+                "prints {prints}, delta {delta}"
+            );
         }
     }
 

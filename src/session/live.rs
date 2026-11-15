@@ -132,16 +132,27 @@ fn file_name(client: &str, session_id: &str, store: &str) -> Option<String> {
         && session_id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
-    let key = &crate::setup::sha256(store.as_bytes())[..STORE_KEY_CHARS];
+    let key = store_key(store);
     safe.then(|| format!("{client}-{session_id}-{key}.json"))
+}
+
+/// The key that names the files of the store named `store` in the state
+/// folder: its session snapshots and the rules it last showed.
+pub(super) fn store_key(store: &str) -> String {
+    crate::setup::sha256(store.as_bytes())[..STORE_KEY_CHARS].to_owned()
+}
+
+/// The folder of the session snapshots and the rules each store last
+/// showed.
+pub(super) fn sessions_dir() -> Option<PathBuf> {
+    Some(paths::state_dir()?.join("sessions"))
 }
 
 /// The snapshot file of `client`'s session `session_id` of the store named
 /// `store`. A session's snapshot of another store, such as a build run
 /// against a store of its own, is another file, never compared with it.
 pub(super) fn snapshot_path(client: &str, session_id: &str, store: &str) -> Option<PathBuf> {
-    let dir = paths::state_dir()?.join("sessions");
-    Some(dir.join(file_name(client, session_id, store)?))
+    Some(sessions_dir()?.join(file_name(client, session_id, store)?))
 }
 
 /// The snapshot saved at `path`, if one is there and readable. Snapshots
@@ -282,7 +293,9 @@ pub(super) fn hold_for_tests(var: &str) {
 
 /// Removes the snapshots and [`MISSED`] marks in `dir` last written over
 /// [`SNAPSHOT_AGE`] before `now`, and the temporary files of saves cut off
-/// over [`LEFTOVER_AGE`] before it.
+/// over [`LEFTOVER_AGE`] before it. The rules each store last showed are
+/// left to session start's own clean-up ([`super::seen::update`]), which
+/// never removes the file of the store it is starting.
 fn remove_old(dir: &Path, now: SystemTime) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
@@ -299,6 +312,8 @@ fn remove_old(dir: &Path, now: SystemTime) {
         let name = name.to_string_lossy();
         let old = if name.starts_with('.') && name.ends_with(TEMPORARY) {
             age > LEFTOVER_AGE
+        } else if super::seen::is_seen_file(&name) {
+            false
         } else {
             age > SNAPSHOT_AGE && path.extension().is_some_and(|e| e == "json" || e == MISSED)
         };
