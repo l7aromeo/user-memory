@@ -418,18 +418,34 @@ fn a_write_that_names_no_client_still_writes_an_event() {
     assert_eq!(rows, 0);
 }
 
-// An agent's write names its client from the MCP handshake.
+/// Longest client name an event holds (`NAME_LIMIT` in history.rs).
+const NAME_LIMIT: usize = 240;
+
+// An agent's write names its client from the MCP handshake, cleaned to one
+// line and cut to the longest name an event holds: a client sends what it
+// likes, and history shows it to agents.
 #[test]
 fn a_server_names_the_client_of_each_write() {
-    let store = Store::new();
-    let mut serve = Serve::spawn(store.command(&["serve"]));
-    let reply = serve.call(
-        "record",
-        json!({"category":"maps","title":"Uses offline maps","content":"Uses offline maps","scope":"global","user_confirmed":true}),
-    );
-    serve.close();
-    let id = reply["id"].as_str().unwrap();
-    assert_eq!(last(&store, id)["client"], "test");
+    let long = "x".repeat(NAME_LIMIT + 60);
+    for (n, (sent, recorded)) in [
+        ("test", "test".to_owned()),
+        ("Claude\nCode   app\t", "Claude Code app".to_owned()),
+        (long.as_str(), "x".repeat(NAME_LIMIT)),
+        ("  ", "unknown".to_owned()),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let store = Store::new();
+        let mut serve = Serve::spawn_as(store.command(&["serve"]), sent);
+        let reply = serve.call(
+            "record",
+            json!({"category":"maps","title":format!("Uses offline maps {n}"),"content":"Uses offline maps","scope":"global","user_confirmed":true}),
+        );
+        serve.close();
+        let id = reply["id"].as_str().unwrap();
+        assert_eq!(last(&store, id)["client"], recorded.as_str(), "{sent:?}");
+    }
 }
 
 // An import that brings only a later confirmation records an import event

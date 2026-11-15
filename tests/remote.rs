@@ -508,6 +508,53 @@ fn assert_no_token(mut errors: impl Read) {
     );
 }
 
+// A write through the bridge names the app, not the bridge: the connector
+// relays the app's own `initialize`, and the shared server records its
+// name as `host:<name>`.
+#[test]
+fn a_write_through_the_bridge_names_the_app_on_the_shared_server() {
+    let host = Host::start(root());
+    let client = tempdir().unwrap();
+    let client_token = client.path().join("token");
+    fs::write(&client_token, TOKEN).unwrap();
+    let mut child = connector(&host, client.path(), &client_token);
+    let mut input = child.0.stdin.take().unwrap();
+    let output = lines(child.0.stdout.take().unwrap());
+    writeln!(input, "{}", initialize(1)).unwrap();
+    input.flush().unwrap();
+    assert!(reply(&output).get("result").is_some());
+    writeln!(
+        input,
+        "{}",
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"})
+    )
+    .unwrap();
+    writeln!(
+        input,
+        "{}",
+        call(
+            2,
+            "record",
+            json!({"category":"maps","title":"Uses offline maps","content":"Uses offline maps","scope":"global","user_confirmed":true})
+        )
+    )
+    .unwrap();
+    input.flush().unwrap();
+    let stored = reply(&output);
+    let text = stored["result"]["content"][0]["text"].as_str().unwrap();
+    let id = serde_json::from_str::<Value>(text).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    drop(input);
+    assert!(child.0.wait().unwrap().success());
+    let history = succeeded(&on_host(&host, &["history", &id], b""));
+    assert_eq!(
+        history["memories"][0]["history"][0]["client"], "host:test-device",
+        "{history}"
+    );
+}
+
 // A server restarted between two calls keeps serving the same connector:
 // the next call is answered by the restarted server, as rmcp re-initializes
 // the expired session. Guards what already worked before the relay could

@@ -407,9 +407,29 @@ pub(super) struct Imported {
     before: Option<String>,
 }
 
-/// Longest origin or client name an imported event may carry, as a stored
-/// origin may.
+/// Longest origin or client name an event carries, as a stored origin may:
+/// an imported event's longer one is refused, and an MCP client's name is
+/// cut to it.
 const NAME_LIMIT: usize = 240;
+
+/// The client name for an MCP client that sent none in `initialize`.
+const UNNAMED_CLIENT: &str = "unknown";
+
+/// The client name an MCP client's writes record, from the `name` it sent
+/// in `initialize`: cleaned as stored text is (one line, single spaces),
+/// prefixed `host:` on a server shared by several machines, and cut to
+/// [`NAME_LIMIT`]. A client sends what it likes, and `history` shows it to
+/// agents.
+pub fn client_name(name: &str, shared: bool) -> String {
+    let name = super::clean(name, usize::MAX);
+    let name = if name.is_empty() {
+        UNNAMED_CLIENT.to_owned()
+    } else {
+        name
+    };
+    let name = if shared { format!("host:{name}") } else { name };
+    name.chars().take(NAME_LIMIT).collect()
+}
 
 /// The event `value` of an export's history, or `None` when it is not one
 /// this store could have written: imported events are untrusted, since a
@@ -430,7 +450,9 @@ pub(super) fn parse(value: &Value, timestamp: impl Fn(&str) -> Option<String>) -
     };
     let name = |field: &str| match value.get(field) {
         None | Some(Value::Null) => Some(String::new()),
-        Some(Value::String(s)) if s.chars().count() <= NAME_LIMIT => Some(s.clone()),
+        Some(Value::String(s)) if s.chars().count() <= NAME_LIMIT => {
+            Some(super::clean(s, usize::MAX))
+        }
         Some(_) => None,
     };
     let before = match value.get("before") {

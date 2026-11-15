@@ -451,25 +451,17 @@ impl rmcp::ServerHandler for UserMemoryServer {
 
 impl UserMemoryServer {
     /// The client a call's writes name in the memories' history: the MCP
-    /// client's name from its `initialize`, or [`UNNAMED_CLIENT`]. A shared
+    /// client's name from its `initialize` (see `memory::client_name`). A shared
     /// server serves many machines, so its events say so as `host:<name>`;
     /// that is where an access token's own name goes once tokens carry one.
     fn caller(&self, peer: &Peer<RoleServer>) -> String {
         let name = peer
             .peer_info()
-            .map(|info| info.client_info.name.trim().to_owned())
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| UNNAMED_CLIENT.to_owned());
-        if self.in_client_folder {
-            name
-        } else {
-            format!("host:{name}")
-        }
+            .map(|info| info.client_info.name.clone())
+            .unwrap_or_default();
+        memory::client_name(&name, self.store_on_server())
     }
 }
-
-/// The client name for an MCP client that sent none in `initialize`.
-const UNNAMED_CLIENT: &str = "unknown";
 
 /// A tool's reply: `Ok` text, or `Err` text the client receives with
 /// `isError: true`. A refusal the agent resolves, a `reason` beside a false
