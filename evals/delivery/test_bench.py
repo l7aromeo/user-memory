@@ -317,12 +317,13 @@ class Classes(unittest.TestCase):
         tag = ["command", "git", "tag"]
         memories = {"lesson": {"shape": "lesson", "points": [{"start": 0, "end": 10, "about": tag}]}}
         oracle = {**BARS, "lesson oracle": True}
-        for failed, way, shown in ((False, "push", 0), (True, "push", 1), (True, "hold", 0)):
+        # A lesson that would hold the failing command is pushed after it.
+        for failed, way, shown in ((False, "push", 0), (True, "push", 1), (True, "hold", 1), (False, "hold", 0)):
             task = {"kind": "release", "actions": [{"kind": "command", "about": tag, "failed": failed}],
                     "needs": []}
             score = 2.5 if way == "push" else 3.5
             c = metrics.evaluate(task, [[candidate("lesson", score, command=True)]], memories, oracle)
-            self.assertEqual(c["delivered|all"], shown, (failed, way))
+            self.assertEqual((c["delivered|all"], c["delivered|way:hold"]), (shown, 0), (failed, way))
 
     def test_deliveries_and_needs_are_banded_by_their_anchors_holders(self):
         memories = {m: {"shape": "note", "points": [{"start": 0, "end": 10, "anchored": True}]}
