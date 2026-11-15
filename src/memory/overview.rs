@@ -9,7 +9,7 @@ use super::{
     read::{SHORT_ID, group_order, rank, standing_rule},
     schema::connect,
     selection::{Filter, ScopeFilter, Selection, candidates},
-    similar::tokenize,
+    words::tokenize,
 };
 use anyhow::Result;
 use clap::Args;

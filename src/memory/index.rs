@@ -24,7 +24,7 @@ pub(super) mod passages;
 pub(super) mod stems;
 pub(super) mod vectors;
 
-use super::similar::{category_group, tokenize};
+use super::{similar::category_group, words::tokenize};
 use stems::{Field, Stems, Text, stamp, token};
 
 /// The keyword index and the vectors, created with every store and by the
