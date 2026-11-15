@@ -278,8 +278,9 @@ shared token.
 The server keeps each token's SHA-256, never the token, in
 `accounts.sqlite3` beside the store, which the first `add` creates. Neither
 automatic backups nor exports include it: after restoring a server
-elsewhere, issue its machines new tokens. A damaged registry stops the
-server answering until it is moved aside
+elsewhere, issue its machines new tokens. While the registry cannot be
+read, the server answers every request that needs a token with 503 and a
+sentence that names no file; its log says why and what to do
 ([troubleshooting](troubleshooting.md)).
 
 To change the shared token: delete the server's token file

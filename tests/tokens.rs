@@ -25,6 +25,10 @@ use std::{
 };
 use tempfile::{TempDir, tempdir};
 
+/// What every request is answered while the registry cannot be read.
+const UNREADABLE: &str =
+    "The server's token registry cannot be read; the server's log says why and what to do.";
+
 /// The shared token file's token.
 const SHARED: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -374,6 +378,14 @@ fn the_servers_own_last_use_write_causes_no_reload() {
 #[test]
 fn a_damaged_or_newer_registry_refuses_every_request_until_moved_aside() {
     let mut host = Host::start();
+    let shared = host.root.path().join("shared.token");
+    fs::write(&shared, SHARED).unwrap();
+    let mut bridge = Bridge::start(&host, &shared);
+    bridge.send(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"app","version":"1"}}}));
+    assert!(bridge.reply().get("result").is_some());
+    bridge.send(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+    let (failed, text) = bridge.call(2, "index");
+    assert!(!failed, "{text}");
     fs::write(
         host.registry(),
         "not a database, though long enough to be read as one by SQLite's header check",
@@ -383,12 +395,34 @@ fn a_damaged_or_newer_registry_refuses_every_request_until_moved_aside() {
         "The server's token registry {} cannot be read (file is not a database). Move it aside and issue each client a new token with `user-memory host token add`.",
         host.registry().display()
     );
+    // The agent's session is told the server answered, and goes on.
+    let (failed, text) = bridge.call(3, "index");
+    assert!(failed, "{text}");
+    assert!(
+        text.contains("answered but cannot serve requests now"),
+        "{text}"
+    );
+    drop(bridge);
     for _ in 0..2 {
         // The shared file too: a retired one could otherwise come back.
         let answer = host.initialize(SHARED);
         assert_eq!(answer.status, 503);
-        assert_eq!(answer.body, message);
+        // Any caller gets it, so it names neither the file nor the cause.
+        assert_eq!(answer.body, UNREADABLE);
+        let own = host.send("DELETE", "/auth/token", "umt_anything", "");
+        assert_eq!((own.status, own.body.as_str()), (503, UNREADABLE));
     }
+    // A client is told its server answered and where the reason is.
+    let out = client(&host, &shared, &["index"], b"");
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        said.contains(&format!(
+            "The memory server at http://{}/mcp answered but cannot serve requests now; its operator should read the server's log.",
+            host.address
+        )),
+        "{said}"
+    );
+    assert!(!said.contains(host.root.path().to_str().unwrap()), "{said}");
     fs::rename(host.registry(), host.root.path().join("accounts.damaged")).unwrap();
     assert_eq!(host.initialize(SHARED).status, 200);
 
@@ -400,16 +434,15 @@ fn a_damaged_or_newer_registry_refuses_every_request_until_moved_aside() {
         .pragma_update(None, "user_version", 2)
         .unwrap();
     let answer = host.initialize(&laptop);
-    assert_eq!(answer.status, 503);
-    assert!(
-        answer
-            .body
-            .contains("has schema version 2, but this user-memory is older than it"),
-        "{}",
-        answer.body
-    );
+    assert_eq!((answer.status, answer.body.as_str()), (503, UNREADABLE));
     let log = host.stop();
     assert_eq!(log.matches(&message).count(), 1, "said once:\n{log}");
+    assert_eq!(
+        log.matches("has schema version 2, but this user-memory is older than it")
+            .count(),
+        1,
+        "said once:\n{log}"
+    );
 }
 
 /// An MCP session with the server over HTTP, as a client with `token`.

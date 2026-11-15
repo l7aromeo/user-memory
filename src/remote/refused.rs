@@ -6,8 +6,51 @@
 
 use rmcp::{
     service::{ClientInitializeError, ServiceError},
-    transport::streamable_http_client::AuthRequiredError,
+    transport::streamable_http_client::{AuthRequiredError, StreamableHttpError},
 };
+
+/// How rmcp's HTTP client begins the text of an answer it did not expect
+/// when the server answered 503.
+const UNAVAILABLE_STATUS: &str = "HTTP 503";
+
+/// What the user is told when the server at `url` answered 503, as it does
+/// while its token registry cannot be read: it is up, and its log says why.
+/// The answer's own text is not repeated, since a proxy's 503 could say
+/// anything.
+pub fn unavailable_sentence(url: &str) -> String {
+    format!(
+        "The memory server at {url} answered but cannot serve requests now; its operator should read the server's log."
+    )
+}
+
+/// `cause` and what it wraps: rmcp's handshake and call errors do not give
+/// their transport error as their source, so the walk steps into it.
+fn wrapped<'a>(
+    cause: &'a (dyn std::error::Error + 'static),
+) -> impl Iterator<Item = &'a (dyn std::error::Error + 'static)> {
+    let start: &(dyn std::error::Error + 'static) =
+        match (cause.downcast_ref(), cause.downcast_ref()) {
+            (Some(ClientInitializeError::TransportError { error, .. }), _) => error,
+            // rmcp has no accessor for a call's challenge, as `auth_challenge`
+            // is for the handshake's; use one if added.
+            (_, Some(ServiceError::TransportSend(error))) => error,
+            _ => cause,
+        };
+    std::iter::successors(Some(start), |cause| cause.source())
+}
+
+/// Whether the server answered `err`'s request with 503.
+pub fn unavailable(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        wrapped(cause).any(|cause| {
+            matches!(
+                cause.downcast_ref::<StreamableHttpError<reqwest::Error>>(),
+                Some(StreamableHttpError::UnexpectedServerResponse(said))
+                    if said.starts_with(UNAVAILABLE_STATUS)
+            )
+        })
+    })
+}
 
 /// Why the server refused the token, from its 401's `error_description`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,23 +82,14 @@ impl Reason {
         err.chain().find_map(Self::in_chain)
     }
 
-    /// The reason in `cause` or what it wraps. A failed handshake or call
-    /// does not give its transport error as its source: a handshake's
-    /// challenge comes from rmcp's own accessor, and a call's (which has
-    /// none) from the transport error it wraps.
+    /// The reason in `cause` or what it wraps; a handshake's challenge comes
+    /// from rmcp's own accessor.
     fn in_chain(cause: &(dyn std::error::Error + 'static)) -> Option<Self> {
-        let challenge = if let Some(handshake) = cause.downcast_ref::<ClientInitializeError>() {
-            handshake.auth_challenge()
-        } else {
-            let start: &(dyn std::error::Error + 'static) = match cause.downcast_ref() {
-                // rmcp has no accessor for a call's challenge, as
-                // `auth_challenge` is for the handshake's; use one if added.
-                Some(ServiceError::TransportSend(error)) => error,
-                _ => cause,
-            };
-            std::iter::successors(Some(start), |cause| cause.source())
+        let challenge = match cause.downcast_ref::<ClientInitializeError>() {
+            Some(handshake) => handshake.auth_challenge(),
+            None => wrapped(cause)
                 .find_map(|cause| cause.downcast_ref::<AuthRequiredError>())
-                .map(|refused| refused.www_authenticate_header.as_str())
+                .map(|refused| refused.www_authenticate_header.as_str()),
         };
         challenge.and_then(Self::from_challenge)
     }
@@ -80,8 +114,8 @@ impl Reason {
 }
 
 /// `err`, as the client tells it: the sentence for a token the server
-/// refused with a known reason, else `err` as before, with `context` when
-/// given.
+/// refused with a known reason, or for a server that answered 503, else
+/// `err` as before, with `context` when given.
 pub fn told(
     err: impl Into<anyhow::Error>,
     url: &str,
@@ -90,6 +124,7 @@ pub fn told(
     let err = err.into();
     match (Reason::of(&err), context) {
         (Some(reason), _) => anyhow::anyhow!(reason.sentence(url)),
+        (None, _) if unavailable(&err) => anyhow::anyhow!(unavailable_sentence(url)),
         (None, Some(context)) => err.context(context),
         (None, None) => err,
     }
