@@ -335,9 +335,10 @@ on Windows), each private to you:
   in on this machine: `<store key>-<scope key>.index`, a copy of the
   keyword index's rows for the global memories and the scope's projects
   (every word's stem in hex and every literal anchor, with each passage's
-  place, no sentence), built at session start; `<store key>-<scope
-  key>.overlay`, the memories changed since, which the tool hooks keep
-  current; `<store key>.lock`, which every writer of the store's files
+  place, no sentence), built at session start, and at the next prompt when
+  the session's scope has none it can use, as after a `link`;
+  `<store key>-<scope key>.overlay`, the memories changed since, which the
+  tool hooks keep current; `<store key>.lock`, which every writer of the store's files
   holds; and at times `<store key>.void`, naming files to take as absent. A
   file not written for a day goes at that store's next session start.
   Deleting the folder loses nothing: the next session start builds it
