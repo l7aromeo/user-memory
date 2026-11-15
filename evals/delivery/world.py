@@ -15,11 +15,18 @@ When a memory is needed, by shape:
 - a lesson, at a failed run of its command only: "when `cargo publish`
   times out, wait and retry" changes nothing on a run that succeeds;
   shown earlier in a task where the run fails, it counts as early;
+- a trap, before every run of its command: "never delete another
+  session's lock file in a chained `git commit`" is needed before the
+  command runs, so a hold meets it and a push after the run is late;
+- each of several notes on a busy command (a mature store's build, test
+  and release commands), at every run of it, as any note;
 - a note on a file, at the edit of that file;
 - a design decision on a component, at the prompt naming the component
   and at a task handed to a helper on it;
 - a rule naming a command, at every run of it; a rule naming no action
   ("start rule"), at the prompt of each task of its kind of work;
+- a project essential, such as how the project builds, at the prompt of
+  most tasks, whatever their kind of work;
 - a point of a long merged memory, as the shape it would have alone;
 - a look-alike or filler memory, never.
 
@@ -124,6 +131,22 @@ WORK = {
     "split": [("cargo", "test"), ("git", "rebase")],
 }
 
+# Other ways an action spells what a memory names, on `SPELLED_SHARE` of
+# commands and of file edits in every store: a subcommand alias, a wrapper
+# that runs the command, a program's own flag before the subcommand, and a
+# path written relative to the current folder or from the root.
+SPELLED_SHARE = 0.2
+ALIASES = {("git", "commit"): "git ci", ("cargo", "test"): "cargo t", ("cargo", "build"): "cargo b",
+           ("npm", "install"): "npm i", ("kubectl", "apply"): "k apply",
+           ("terraform", "apply"): "tf apply", ("docker", "build"): "docker image build"}
+WRAPPED = {("cargo", "test"): "just test", ("cargo", "build"): "make build",
+           ("cargo", "publish"): "just publish", ("git", "push"): "scripts/push.sh",
+           ("docker", "build"): "make image", ("cargo", "clippy"): "just lint"}
+FLAG_FIRST = {"git": "-C .", "cargo": "--locked", "gh": "--repo example/ledger", "docker": "--debug",
+              "kubectl": "-n prod", "terraform": "-chdir=infra", "npm": "--prefix .",
+              "just": "--justfile justfile", "make": "-C ."}
+ROOT_FOLDER = "/work/ledger"
+
 # Flags commands carry, which never join the window.
 FLAGS = ["--dry-run", "--all", "-v", "--locked", "--force-with-lease", "-s", "--watch",
          "--release", "--no-verify", "-n", "--quiet"]
@@ -198,6 +221,31 @@ ANCHORED_SHARE = 0.6
 SAME_WORDS_SHARE = 0.5
 # Share of command notes with a lesson about the command failing.
 LESSON_SHARE = 0.5
+# A project's essentials: memories most of its tasks need from the start,
+# which session start's most-used part is for (#123). Each world has this
+# many, each needed by this share of tasks; half are short enough to print
+# whole, half long, their point in the first sentence and detail after.
+ESSENTIALS = 4
+ESSENTIAL_TASK_SHARE = 0.7
+ESSENTIAL_FACTS = ["The project builds only through its own script; a plain build skips the generated code.",
+                   "Each migration file is named after the month it was written in.",
+                   "Errors go to the shared log, never to standard output.",
+                   "The staging database is reset every night at two; never keep test data there.",
+                   "The parser's test fixtures live beside the grammar, never in the tests folder.",
+                   "Timestamps are stored in the harbour's local time, not in UTC."]
+ESSENTIAL_DETAIL_WORDS = (90, 140)
+
+# Share of commands with a trap: a note that has to arrive before the
+# command runs (#118's example).
+TRAP_SHARE = 0.3
+# What a trap says not to do, and what it prevents.
+TRAPS = ["delete another session's lock file", "chain it after a reset", "run it from a subfolder",
+         "pass the token on the command line", "run two of it at once", "skip the dry run"]
+# Share of the commands tasks run that are busy: a mature store holds
+# several notes on each, every one needed when it runs, all naming it as
+# written. Each busy command has this many notes beyond its first.
+BUSY_SHARE = 0.3
+BUSY_NOTES = (3, 6)
 # Share of notes written with a context saying when they apply.
 CONTEXT_SHARE = 0.3
 # Points of a long merged memory, each about one subject.
@@ -256,10 +304,12 @@ class World:
         extra = [c for c in sorted(COMMANDS) if c not in work]
         self.commands = work + rng.sample(extra, self.shape["extra_commands"])
         self.files = {c: f"{rng.choice(FOLDERS)}/{c}.{rng.choice(EXTENSIONS)}" for c in COMPONENTS}
+        self.busy = {c: rng.randint(*BUSY_NOTES) for c in rng.sample(work, round(len(work) * BUSY_SHARE))}
         projects = [PROJECT] + ([OTHER_PROJECT] if self.shape["other_project"] else [])
         for project in projects:
             self._notes(project, needed=project == PROJECT)
         self._rules()
+        self._essentials()
         self._merged()
         self._look_alikes()
         self._tasks()
@@ -324,6 +374,23 @@ class World:
                              about=["command", program, sub], anchored=anchored)
             if needed:
                 self._need(("command", program, sub), m)
+            if needed and (program, sub) in self.busy:
+                for _ in range(self.busy[(program, sub)]):
+                    said = self._command_name(program, sub, True)
+                    text = self._advice(said)
+                    m = self._memory("note", rng.choice(["fact", "constraint"]), "tooling",
+                                     f"{program} {sub}".strip() + ": " + text.strip("`").split(";")[0][:60],
+                                     text, project, about=["command", program, sub], anchored=True)
+                    self._need(("command", program, sub), m)
+            if rng.random() < TRAP_SHARE:
+                trap_anchored = rng.random() < ANCHORED_SHARE
+                said = self._command_name(program, sub, trap_anchored)
+                text = f"Never {rng.choice(TRAPS)} with {said}: it {rng.choice(FAILURES)}."
+                m = self._memory("trap", "constraint", "tooling",
+                                 f"{program} {sub}: never {text.split('Never ', 1)[1][:40]}".replace("  ", " "),
+                                 text, project, about=["command", program, sub], anchored=trap_anchored)
+                if needed:
+                    self._need(("trap", program, sub), m)
             if rng.random() < LESSON_SHARE:
                 lesson_anchored = rng.random() < ANCHORED_SHARE
                 said = self._command_name(program, sub, lesson_anchored)
@@ -367,6 +434,18 @@ class World:
                                  rule, text, "", about=about, anchored=anchored)
                 self._need(("rule", *command) if command else ("start rule", kind), m)
 
+    def _essentials(self):
+        rng = self.rng
+        for n, fact in enumerate(rng.sample(ESSENTIAL_FACTS, ESSENTIALS)):
+            content = fact
+            if n % 2:
+                detail = " ".join(rng.choice(COMMON) for _ in range(rng.randint(*ESSENTIAL_DETAIL_WORDS)))
+                content = f"{fact}\n\n{detail.capitalize()}."
+            m = self._memory("essential", "fact", "workflow", fact.split(";")[0].split(",")[0][:70], content,
+                             PROJECT, points=[{"start": 0, "end": len(fact), "about": ["work", "all"],
+                                               "anchored": False}])
+            self._need(("essential", n), m)
+
     def _merged(self):
         """Long merged memories: a handbook of many points, each about one
         command or component; a need is one point."""
@@ -398,10 +477,10 @@ class World:
         common words and are about something else."""
         rng = self.rng
         for subject, needed in sorted(self.needed.items()):
-            if subject[0] in ("rule", "start rule"):
+            if subject[0] in ("rule", "start rule", "essential"):
                 continue
             for _ in range(len(needed) * rng.randint(*self.shape["look_alikes"])):
-                if subject[0] in ("command", "failure"):
+                if subject[0] in ("command", "failure", "trap"):
                     program = subject[1]
                     other = rng.choice(UNRUN[program])
                     text = (f"`{program} {other}` {rng.choice(['needs', 'skips', 'reads'])} "
@@ -467,17 +546,32 @@ class World:
                           "subject": subject[0]})
 
     def _command(self, actions, needs, program, sub, failed):
-        flags = " ".join(self.rng.sample(FLAGS, self.rng.randint(0, 2)))
+        rng = self.rng
+        flags = " ".join(rng.sample(FLAGS, rng.randint(0, 2)))
+        text = " ".join(part for part in [program, sub, flags] if part)
+        spelled = None
+        if rng.random() < SPELLED_SHARE:
+            ways = ([("alias", ALIASES[(program, sub)])] if (program, sub) in ALIASES else []) + (
+                [("wrapper", WRAPPED[(program, sub)])] if (program, sub) in WRAPPED else []) + (
+                [("flag first", f"{program} {FLAG_FIRST[program]} {sub}")] if program in FLAG_FIRST else [])
+            if ways:
+                spelled, said = rng.choice(ways)
+                text = " ".join(part for part in [said, flags] if part)
         actions.append({"kind": "command", "failed": failed, "about": ["command", program, sub],
-                        "text": " ".join(part for part in [program, sub, flags] if part)})
+                        "text": text, "spelled": spelled})
         self._needs_at(needs, len(actions) - 1, ("command", program, sub))
         self._needs_at(needs, len(actions) - 1, ("rule", program, sub))
+        self._needs_at(needs, len(actions) - 1, ("trap", program, sub))
         if failed:
             self._needs_at(needs, len(actions) - 1, ("failure", program, sub))
 
     def _file(self, actions, needs, component):
-        actions.append({"kind": "file", "text": self.files[component], "failed": False,
-                        "about": ["file", component]})
+        path, spelled = self.files[component], None
+        if self.rng.random() < SPELLED_SHARE:
+            spelled = self.rng.choice(["relative", "from the root"])
+            path = f"./{path}" if spelled == "relative" else f"{ROOT_FOLDER}/{path}"
+        actions.append({"kind": "file", "text": path, "failed": False, "about": ["file", component],
+                        "spelled": spelled})
         self._needs_at(needs, len(actions) - 1, ("file", component))
 
     def _tasks(self):
@@ -509,6 +603,9 @@ class World:
                 actions.append({"kind": "prompt", "text": prompt, "failed": False,
                                 "about": ["component", component], "literal": literal})
                 self._needs_at(needs, 0, ("start rule", kind))
+                for e in range(ESSENTIALS):
+                    if rng.random() < ESSENTIAL_TASK_SHARE:
+                        self._needs_at(needs, 0, ("essential", e))
                 if kind != "release":
                     self._needs_at(needs, 0, ("component", component))
                 if unnamed:

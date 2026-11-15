@@ -6,12 +6,15 @@ The matcher misses what shares no anchor with the work, such as a design
 decision named by a synonym. Such a memory can still be present when the
 work starts, listed by session start. This measures how often.
 
-Each task is one session, in an order drawn from the seed. In the first
-session there is no use history, so session start is today's: the real
+Each task is one session, in an order drawn from the seed; the tasks run
+`ROUNDS` times, each round in a new order, as a project's work recurs, so
+a window longer than one round can be told apart. In the first session
+there is no use history, so session start is today's: the real
 `user-memory session-start` output, run in a throwaway home on a folder
 whose remote is the world's project. In later sessions the model orders
 the index by how many of the last `USE_WINDOW` sessions used each memory,
-and prints the most-used part above it.
+and prints the most-used part above it: a memory there is printed, its
+text present, where the index lists only its line.
 
 What a session used is counted two ways:
 - delivered: what the matcher pushed or held in it;
@@ -63,8 +66,15 @@ ESSENTIALS_CHARS = 3000
 PASSAGE_CHARS = 400
 
 # The values each constant is tried at.
-USE_WINDOWS = [5, 10, 20]
+USE_WINDOWS = [5, 10, 20, 40]
 ESSENTIAL_SHARES = [0.25, 0.5, 0.75]
+# The most-used part's limits, each tried alone with the others at their
+# constants, with reads counted, at `USE_WINDOW` and `ESSENTIAL_SHARE`.
+LIMITS = {"most": [2, 5, 15], "whole": [150, 300, 600], "room": [1500, 3000, 4500]}
+
+# Times the tasks run, each round in a new order: 40 to 48 tasks a round,
+# so three rounds let a window of 40 sessions fill.
+ROUNDS = 3
 
 # A listed memory's line: its 8-character id after the indent.
 LISTED = re.compile(r"^\s+([0-9a-f]{8}) ")
@@ -121,9 +131,9 @@ def used(task, matched, bars, reads):
     return out
 
 
-def start(history, lines, header, memories, window, share):
-    """The ids the modelled session start lists or prints, from the use of
-    the sessions in `history`, newest last."""
+def start(history, lines, header, memories, window, share, limits=None):
+    """The ids the modelled session start lists or prints, and the ids it
+    prints, from the use of the sessions in `history`, newest last."""
     recent = list(history)[-window:]
     weight = Counter()
     sessions = Counter()
@@ -131,19 +141,22 @@ def start(history, lines, header, memories, window, share):
         for memory, w in session.items():
             weight[memory] += w
             sessions[memory] += 1
+    limits = {"most": ESSENTIALS_MAX, "whole": ESSENTIAL_WHOLE_CHARS, "room": ESSENTIALS_CHARS,
+              **(limits or {})}
     shown = set()
-    room = ESSENTIALS_CHARS
+    room = limits["room"]
     essentials = sorted((m for m in sessions if recent and sessions[m] / len(recent) >= share
                          and memories[m]["shape"] not in ("rule", "start rule")),
-                        key=lambda m: -sessions[m])[:ESSENTIALS_MAX]
+                        key=lambda m: -sessions[m])[:limits["most"]]
     used_room = 0
     for m in essentials:
         size = len(memories[m]["content"])
-        size = size if size <= ESSENTIAL_WHOLE_CHARS else len(memories[m]["title"]) + PASSAGE_CHARS
+        size = size if size <= limits["whole"] else len(memories[m]["title"]) + PASSAGE_CHARS
         if used_room + size > room:
             break
         used_room += size
         shown.add(m)
+    printed = set(shown)
     room = INDEX_CHARS - header - max(used_room, ESSENTIALS_FLOOR if essentials else 0)
     order = {m: i for i, (m, _) in enumerate(lines)}
     for m, length in sorted(lines, key=lambda line: (-weight[line[0]], order[line[0]])):
@@ -151,14 +164,15 @@ def start(history, lines, header, memories, window, share):
             break
         room -= length + 1
         shown.add(m)
-    return shown
+    return shown, printed
 
 
-def tally(counts, phase, task, shown):
+def tally(counts, phase, task, shown, printed=frozenset()):
     for need in task["needs"]:
         for group in (f"{phase}|{need['subject']}", f"{phase}|all"):
             counts[f"needed {group}"] += 1
             counts[f"listed {group}"] += need["memory"][:8] in shown
+            counts[f"printed {group}"] += need["memory"][:8] in printed
 
 
 def presence(binary, env, folder, drawn, matched, bars, seed):
@@ -169,16 +183,17 @@ def presence(binary, env, folder, drawn, matched, bars, seed):
     first, lines, header = today(binary, env, folder)
     memories = {m["id"][:8]: m for m in drawn["memories"]}
     tasks = [t for t in drawn["tasks"] if not t.get("probe")]
-    random.Random(seed).shuffle(tasks)
+    order = random.Random(seed)
     today_counts = Counter()
     for task in tasks:
         tally(today_counts, "first", task, first)
+    tasks = [t for _ in range(ROUNDS) for t in order.sample(tasks, len(tasks))]
     # The model with no use at all: what its filling alone lists, so the
     # rows after it show what use adds.
     unused = start([], lines, header, memories, USE_WINDOW, ESSENTIAL_SHARE)
     rows = [(None, Counter())]
     for task in tasks[1:]:
-        tally(rows[0][1], "later", task, unused)
+        tally(rows[0][1], "later", task, *unused)
     for reads in (False, True):
         for window in USE_WINDOWS:
             for share in ESSENTIAL_SHARES:
@@ -187,7 +202,17 @@ def presence(binary, env, folder, drawn, matched, bars, seed):
                 for k, task in enumerate(tasks):
                     if k:
                         tally(counts, "later", task,
-                              start(history, lines, header, memories, window, share))
+                              *start(history, lines, header, memories, window, share))
                     history.append(used(task, matched[task["id"]], bars, reads))
                 rows.append(((reads, window, share), counts))
+    for name, values in LIMITS.items():
+        for value in values:
+            counts = Counter()
+            history = deque(maxlen=max(USE_WINDOWS))
+            for k, task in enumerate(tasks):
+                if k:
+                    tally(counts, "later", task, *start(history, lines, header, memories, USE_WINDOW,
+                                                        ESSENTIAL_SHARE, {name: value}))
+                history.append(used(task, matched[task["id"]], bars, True))
+            rows.append(((name, value), counts))
     return today_counts, rows

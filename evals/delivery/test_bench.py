@@ -17,9 +17,10 @@ BARS = {"push": 2.0, "failure": 1.0, "hold": 3.0}
 
 
 def candidate(memory, score, slot=1, start=0, length=10, fired=True, failed=False,
-              anchored=False, command=False):
+              anchored=False, command=False, fewest=0):
     return {"id": memory, "slot": slot, "start": start, "length": length, "score": score,
-            "fired": fired, "failed": failed, "anchored": anchored, "command": command}
+            "fired": fired, "failed": failed, "anchored": anchored, "command": command,
+            "fewest": fewest}
 
 
 class Decisions(unittest.TestCase):
@@ -41,6 +42,11 @@ class Decisions(unittest.TestCase):
         # Not a command: never a hold, whatever it holds.
         self.assertEqual(metrics.decisions(candidate("a", 3.0, command=True), BARS, "file"), {"push"})
         self.assertEqual(metrics.decisions(candidate("a", 2.9, command=True), BARS, "command"), {"push"})
+        anchored_failure = {**BARS, "failure anchor": True}
+        self.assertEqual(metrics.decisions(candidate("a", 1.0, fired=False, failed=True), anchored_failure,
+                                           "command"), set())
+        self.assertEqual(metrics.decisions(candidate("a", 1.0, fired=False, failed=True, anchored=True),
+                                           anchored_failure, "command"), {"failure"})
 
 
 class Places(unittest.TestCase):
@@ -183,21 +189,82 @@ class Classes(unittest.TestCase):
         self.assertEqual(why({**need, "memory": "decision"}, unanchored, [[]], BARS, [self.git_tag]),
                          metrics.NO_ANCHOR)
 
-    def test_a_lesson_is_placed_against_its_commands_runs(self):
-        moment = metrics.lesson_moment
+    def test_a_delivery_is_placed_against_its_commands_runs(self):
         lesson = self.memories["lesson"]
+        moment = lambda i, actions, way: metrics.run_moment(lesson, candidate("lesson", 3, length=30), i,
+                                                           actions, way)
         prompt = {"kind": "prompt", "about": ["component", "parser"]}
-        failing = [prompt, {**self.git_tag, "failed": True}, self.git_tag]
-        self.assertEqual(moment(lesson, 0, failing, "push"), metrics.BEFORE_FAILURE)
-        self.assertEqual(moment(lesson, 1, failing, "push"), metrics.AT_FAILURE)
-        self.assertEqual(moment(lesson, 2, failing, "push"), metrics.AFTER_FAILURE)
+        failing = [prompt, {**self.git_tag, "failed": True}, prompt, self.git_tag]
+        self.assertEqual(moment(0, failing, "push"), metrics.BEFORE_FAILURE)
+        self.assertEqual(moment(1, failing, "push"), metrics.AT_FAILURE)
+        self.assertEqual(moment(2, failing, "push"), metrics.AFTER_FAILURE)
+        # Against the last run before it: the second run succeeded.
+        self.assertEqual(moment(3, failing, "push"), metrics.AFTER_SUCCESS)
         # A hold at the failing command shows it before the command runs.
-        self.assertEqual(moment(lesson, 1, failing, "hold"), metrics.BEFORE_FAILURE)
+        self.assertEqual(moment(1, failing, "hold"), metrics.BEFORE_FAILURE)
         passing = [prompt, self.git_tag]
-        self.assertEqual(moment(lesson, 0, passing, "push"), metrics.BEFORE_SUCCESS)
-        self.assertEqual(moment(lesson, 1, passing, "hold"), metrics.BEFORE_SUCCESS)
-        self.assertEqual(moment(lesson, 1, passing, "push"), metrics.AFTER_SUCCESS)
-        self.assertEqual(moment(lesson, 0, [prompt], "push"), metrics.NOT_RUN)
+        self.assertEqual(moment(0, passing, "push"), metrics.BEFORE_SUCCESS)
+        self.assertEqual(moment(1, passing, "hold"), metrics.BEFORE_SUCCESS)
+        self.assertEqual(moment(1, passing, "push"), metrics.AFTER_SUCCESS)
+        self.assertEqual(moment(0, [prompt], "push"), metrics.NOT_RUN)
+        decision = self.memories["decision"]
+        self.assertEqual(metrics.run_moment(decision, candidate("decision", 3, length=30), 0, passing, "push"),
+                         metrics.NO_COMMAND)
+
+    def test_a_trap_is_met_by_a_hold_and_late_after_its_command(self):
+        memories = {**self.memories, "trap": {"shape": "trap", "points": [
+            {"start": 0, "end": 30, "about": ["command", "git", "tag"], "anchored": True}]}}
+        task = {"kind": "release", "actions": [{"kind": "prompt"}, self.git_tag],
+                "needs": [{"action": 1, "memory": "trap", "point": 0, "subject": "trap"}]}
+        held = metrics.evaluate(task, [[], [candidate("trap", 3.5, length=30, command=True)]], memories, BARS)
+        self.assertEqual((held["now|all"], held["late|all"], held["timing on time|all"]), (1, 0, 1))
+        self.assertEqual((held["command needs"], held["held before its action"]), (1, 1))
+        pushed = metrics.evaluate(task, [[], [candidate("trap", 2.5, length=30, command=True)]], memories, BARS)
+        # Right in the task, so never a wrong topic; late, as the command ran.
+        self.assertEqual((pushed["right|all"], pushed["now|all"], pushed["late|all"]), (1, 0, 1))
+        self.assertEqual((pushed["timing late|all"], pushed["in time|all"], pushed["found|all"]), (1, 0, 1))
+        self.assertEqual(pushed[f"moment {metrics.AFTER_SUCCESS}|shape:trap|late"], 1)
+        # A note pushed at its command is on time: it holds whatever the run does.
+        task["needs"][0] = {"action": 1, "memory": "note", "point": 0, "subject": "command"}
+        note = metrics.evaluate(task, [[], [candidate("note", 2.5, length=30, command=True)]], memories, BARS)
+        self.assertEqual((note["now|all"], note["timing on time|all"]), (1, 1))
+
+    def test_an_event_pushes_at_most_three_and_the_rest_wait(self):
+        memories = {m: {"shape": "note", "points": [{"start": 0, "end": 10}]} for m in "abcde"}
+        task = {"kind": "change", "actions": [{"kind": "file"}, {"kind": "file"}],
+                "needs": [{"action": 1, "memory": m, "point": 0, "subject": "file"} for m in "abcde"]}
+        five = [candidate(m, 7 - n) for n, m in enumerate("abcde")]
+        c = metrics.evaluate(task, [five, []], memories, BARS)
+        self.assertEqual(c["delivered|all"], metrics.PUSH_PER_EVENT)
+        self.assertEqual(c["found|all"], 3)
+        # The two the store ranked lowest come at the next action that matches them.
+        c = metrics.evaluate(task, [five, five], memories, BARS)
+        self.assertEqual((c["delivered|all"], c["found|all"], c["timing on time|all"]), (5, 5, 2))
+        # Holds are not pushes and do not count against it.
+        holds = [candidate(m, 5, command=True) for m in "abcde"]
+        task["actions"] = [{"kind": "command"}]
+        task["needs"] = []
+        c = metrics.evaluate(task, [holds], memories, BARS)
+        self.assertEqual((c["delivered|way:hold"], c["denials"]), (5, 1))
+        task["actions"] = [{"kind": "file"}]
+        c = metrics.evaluate(task, [five], memories, {**BARS, "per_event": None})
+        self.assertEqual(c["delivered|all"], 5)
+
+    def test_deliveries_and_needs_are_banded_by_their_anchors_holders(self):
+        memories = {m: {"shape": "note", "points": [{"start": 0, "end": 10, "anchored": True}]}
+                    for m in ("one", "few", "many", "words")}
+        memories["words"]["points"][0]["anchored"] = False
+        task = {"kind": "change", "actions": [{"kind": "file"}],
+                "needs": [{"action": 0, "memory": m, "point": 0, "subject": "file"} for m in memories]}
+        matched = [[candidate("one", 5, fewest=1), candidate("few", 4, fewest=4)]]
+        c = metrics.evaluate(task, matched, memories, BARS)
+        self.assertEqual((c["band 1|delivered"], c["band 3-5|delivered"], c["band 3-5|now"]), (1, 1, 1))
+        self.assertEqual((c["needed|band 1"], c["found|band 3-5"]), (1, 1))
+        # An anchored need its action never matched, and one with no anchor.
+        self.assertEqual(c["needed|band not a candidate"], 1)
+        self.assertEqual(sum(c[f"needed|band {b}"] for b in metrics.BANDS + ["not a candidate"]), 3)
+        self.assertEqual([metrics.band(n) for n in (0, 1, 2, 3, 5, 6, 40)],
+                         ["no anchor", "1", "2", "3-5", "3-5", "6+", "6+"])
 
     def test_rules_that_name_no_action_stay_out_of_the_totals(self):
         task = {"kind": "release",
@@ -236,6 +303,23 @@ class Generator(unittest.TestCase):
         for memory in drawn["memories"]:
             if memory["shape"] == "look-alike":
                 self.assertFalse(any(memory["content"].startswith(c) for c in run), memory)
+
+    def test_a_stated_share_of_actions_spell_their_subject_another_way(self):
+        drawn = world.generate(5, 1_000)
+        actions = [a for t in drawn["tasks"] for a in t["actions"] if a["kind"] in ("command", "file")
+                   and a.get("about")]
+        spelled = [a for a in actions if a.get("spelled")]
+        self.assertTrue(0.1 < len(spelled) / len(actions) < 0.3, (len(spelled), len(actions)))
+        for a in spelled:
+            if a["spelled"] in ("alias", "wrapper"):
+                program, sub = a["about"][1:]
+                self.assertNotIn(f"{program} {sub}", a["text"], a)
+            elif a["spelled"] == "flag first":
+                self.assertIn(world.FLAG_FIRST[a["about"][1]], a["text"], a)
+            else:
+                self.assertTrue(a["text"].startswith(("./", world.ROOT_FOLDER)), a)
+        self.assertEqual({a["spelled"] for a in spelled} & {"alias", "wrapper", "relative"},
+                         {"alias", "wrapper", "relative"})
 
     def test_tasks_no_memory_names_hold_only_unnamed_commands(self):
         drawn = world.generate(5, 1_000)

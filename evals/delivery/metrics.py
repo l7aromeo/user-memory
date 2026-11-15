@@ -14,19 +14,53 @@ once per task, as #117 shows it once per context: a later match of the
 same passage delivers nothing.
 
 A delivery is right when its memory is needed in the task and its passage
-overlaps a point the task needs of it. A wrong one is either about this
-action (a point it overlaps is about what the action runs or edits, or
-about the task's kind of work) and not needed in this task, or about
-something else.
+overlaps a point the task needs of it. A right one is needed now when a
+need of that point is still ahead (a trap's need is before its command
+runs, so only a hold or an earlier push meets it), and late otherwise. A
+wrong one is either about this action (a point it overlaps is about what
+the action runs or edits, or about the task's kind of work) and not needed
+in this task, or about something else.
 
-Rules that name no action ("start rule") are their own row: their
-deliveries and needs stay out of the totals the precision budget reads.
+At most `PUSH_PER_EVENT` pushes are shown per action, in the store's
+order; the rest wait for a later action that matches them (#117).
+
+Rules that name no action ("start rule") and a project's essentials, which
+most tasks need from their start ("essential"), are their own rows: their
+deliveries and needs stay out of the totals the precision budget reads, as
+session start serves them, not a match on the work.
 """
 
 from collections import Counter, defaultdict
 
+# Shapes whose deliveries and needs stay out of the totals.
+OUTSIDE = ("start rule", "essential")
+
 # Where a need's timing falls: before its action, at it, after it, never.
 EARLY, ON_TIME, LATE, NEVER = "early", "on time", "late", "never"
+
+# #117's limit on what one event pushes: more would bury the work.
+PUSH_PER_EVENT = 3
+
+# Bands of how many memories hold the rarest anchor of the action that a
+# passage holds (the matcher's `fewest`).
+BANDS = ["no anchor", "1", "2", "3-5", "6+"]
+
+
+def band(fewest):
+    return BANDS[0] if not fewest else "1" if fewest == 1 else "2" if fewest == 2 else (
+        "3-5" if fewest <= 5 else "6+")
+
+
+def shown_at(i, way):
+    """When a delivery at action `i` is seen: a hold before the action
+    runs, a push after it."""
+    return i - 0.5 if way == "hold" else i
+
+
+def in_time(shown, need):
+    """Whether a passage seen at `shown` meets `need`: a trap's before its
+    command runs, any other's by its action."""
+    return shown < need["action"] if need["subject"] == "trap" else shown <= need["action"]
 
 
 def decisions(candidate, bars, action_kind):
@@ -45,7 +79,10 @@ def decisions(candidate, bars, action_kind):
             out.add("push")
     elif candidate["fired"] and anchored and score >= bars["push"]:
         out.add("push")
-    if candidate["failed"] and score >= bars["failure"]:
+    # With `bars["failure anchor"]`, a push after a failure needs an anchor
+    # of the failed action too.
+    if (candidate["failed"] and score >= bars["failure"]
+            and (candidate.get("anchored") or not bars.get("failure anchor"))):
         out.add("failure")
     if action_kind == "command" and candidate["command"] and score >= bars["hold"]:
         out.add("hold")
@@ -100,24 +137,32 @@ def right(candidate, needed_points):
 
 def evaluate(task, matched, memories, bars):
     """The counts one task gives: deliveries and the right ones by way,
-    signal and shape; needs and the delivered ones by subject and shape,
-    with their timing; holds on actions no memory names; and how often a
-    long memory's delivered passage holds its needed point whole.
+    signal and shape, each needed now, late, about this action or about
+    something else, and placed against its command's runs; needs and the
+    delivered ones by subject, shape and holders' band, with their timing;
+    holds and the actions they deny; holds on actions no memory names; and
+    how often a long memory's delivered passage holds its needed point
+    whole.
 
     `memories` maps a memory id to its `shape` and `points`."""
     actions = task["actions"]
     kind_of_work = task.get("kind")
+    per_event = bars.get("per_event", PUSH_PER_EVENT)
     needed_points = defaultdict(list)
+    needs_of = defaultdict(list)
     for need in task["needs"]:
-        needed_points[need["memory"]].append(memories[need["memory"]]["points"][need["point"]])
-    counts = Counter()
+        point = memories[need["memory"]]["points"][need["point"]]
+        needed_points[need["memory"]].append(point)
+        needs_of[need["memory"]].append((point, need))
+    counts = Counter({"tasks": 1})
     shown = set()
-    first = {}  # (memory, slot) -> action delivered at
+    first = {}  # (memory, slot) -> when it was seen
     for i, candidates in enumerate(matched):
         kind = actions[i]["kind"]
         signal = "prompt" if i == 0 else kind
         named = any(need["action"] == i for need in task["needs"])
         held_here = False
+        pushed_here = 0
         for c in candidates:
             ways = decisions(c, bars, kind)
             if not ways:
@@ -125,28 +170,40 @@ def evaluate(task, matched, memories, bars):
             key = (c["id"], c["slot"])
             if key in shown:
                 continue
-            shown.add(key)
-            first[key] = i
-            memory = memories[c["id"]]
-            shape = memory["shape"]
-            ok = right(c, needed_points)
             # The way it is delivered: a hold comes before the command, a
             # push after it; a failure push only when the plain bar misses.
             way = "hold" if "hold" in ways else ("push" if "push" in ways else "failure")
+            if way != "hold":
+                if per_event is not None and pushed_here >= per_event:
+                    continue
+                pushed_here += 1
+            shown.add(key)
+            seen = shown_at(i, way)
+            first[key] = seen
+            memory = memories[c["id"]]
+            shape = memory["shape"]
+            ok = right(c, needed_points)
             held_here |= way == "hold"
-            groups = ([f"shape:{shape}"] if shape == "start rule"
+            groups = ([f"shape:{shape}"] if shape in OUTSIDE
                       else ["all", f"way:{way}", f"signal:{signal}", f"shape:{shape}"])
-            if signal == "prompt" and shape != "start rule":
+            if signal == "prompt" and shape not in OUTSIDE:
                 groups.append("prompt literal" if actions[i].get("literal") else "prompt plain")
             wrong = None if ok else ("about" if about_action(c, memory, actions[i], kind_of_work)
                                      else "elsewhere")
+            now = ok and any(in_time(seen, need) for point, need in needs_of[c["id"]]
+                             if c["slot"] == 255 or overlaps(c, point))
+            moment = run_moment(memory, c, i, actions, way)
+            how = "now" if now else "late" if ok else wrong
             for group in groups:
                 counts[f"delivered|{group}"] += 1
                 counts[f"right|{group}"] += ok
+                counts[f"{how}|{group}"] += 1
                 if wrong:
                     counts[f"wrong {wrong}|{group}"] += 1
-            if shape == "lesson":
-                counts[f"lesson {lesson_moment(memory, i, actions, way)}|{'right' if ok else 'wrong'}"] += 1
+            counts[f"moment {moment}|shape:{shape}|{how}"] += 1
+            if shape not in OUTSIDE:
+                counts[f"band {band(c.get('fewest'))}|delivered"] += 1
+                counts[f"band {band(c.get('fewest'))}|now"] += now
             if shape == "merged" and ok:
                 counts["merged delivered"] += 1
                 counts["merged whole"] += any(holds_whole(c, p) for p in needed_points[c["id"]])
@@ -165,36 +222,43 @@ def evaluate(task, matched, memories, bars):
         if i == 0:
             counts["prompts"] += 1
             counts["prompts literal"] += bool(actions[0].get("literal"))
-        if kind == "command" and not named:
-            counts["unnamed commands"] += 1
-            counts["unnamed held"] += held_here
+        if kind == "command":
+            counts["denials"] += held_here
+            if not named:
+                counts["unnamed commands"] += 1
+                counts["unnamed held"] += held_here
     for need in task["needs"]:
         point = memories[need["memory"]]["points"][need["point"]]
         shape = memories[need["memory"]]["shape"]
         at = [first[key] for key in first if key[0] == need["memory"]
               and (key[1] == 255 or overlaps_slot(key, point, matched))]
-        when = NEVER if not at else (EARLY if min(at) < need["action"]
-                                      else ON_TIME if min(at) == need["action"] else LATE)
+        # Seen at its own action, held or pushed, is on time; a trap only
+        # when held, as a push comes after the command ran.
+        when = NEVER if not at else (EARLY if min(at) < need["action"] - 0.5
+                                     else ON_TIME if in_time(min(at), need) else LATE)
         groups = [f"subject:{need['subject']}", f"shape:{shape}"]
-        if need["subject"] != "start rule":
+        if need["subject"] not in OUTSIDE:
             groups.append("all")
             # The matcher's own recall: needs whose point an anchor can match.
             if point.get("anchored"):
                 groups.append("anchored")
+                groups.append(f"spelling {actions[need['action']].get('spelled') or 'as written'}")
+                here = [c for c in matched[need["action"]] if c["id"] == need["memory"]
+                        and (c["slot"] == 255 or overlaps(c, point))]
+                groups.append(f"band {band(here[0].get('fewest')) if here else 'not a candidate'}")
         for group in groups:
             counts[f"needed|{group}"] += 1
             counts[f"found|{group}"] += when != NEVER
+            counts[f"in time|{group}"] += when in (EARLY, ON_TIME)
             counts[f"timing {when}|{group}"] += 1
             if when == NEVER:
                 counts[f"missed {why_missed(need, point, matched, bars, actions)}|{group}"] += 1
         if need["subject"] == "failure":
             counts["failure needs"] += 1
-            counts["failure found at its action"] += need["action"] in at
-        if need["subject"] in ("command", "failure") and actions[need["action"]]["kind"] == "command":
+            counts["failure found at its action"] += need["action"] in at or need["action"] - 0.5 in at
+        if need["subject"] in ("command", "failure", "trap") and actions[need["action"]]["kind"] == "command":
             counts["command needs"] += 1
-            counts["held before its action"] += any(
-                first.get(key) == need["action"] and was_held(key, need["action"], matched, bars, actions)
-                for key in first if key[0] == need["memory"])
+            counts["held before its action"] += need["action"] - 0.5 in at
     return counts
 
 
@@ -221,30 +285,36 @@ def why_missed(need, point, matched, bars, actions):
     return BELOW
 
 
-# When a lesson was shown, against the runs of the command it is about.
-BEFORE_FAILURE = "before its command, which fails later"
+# When a delivery was seen, against the runs of the command its point is
+# about.
+BEFORE_FAILURE = "before its command, whose next run fails"
+BEFORE_SUCCESS = "before its command, whose next run succeeds"
 AT_FAILURE = "at its command's failure"
 AFTER_FAILURE = "after its command failed"
-BEFORE_SUCCESS = "before its command, which succeeds"
-AFTER_SUCCESS = "after its command succeeded"
-NOT_RUN = "in a task that never runs its command"
+AFTER_SUCCESS = "at or after its command's success"
+NOT_RUN = "about a command the task doesn't run"
+NO_COMMAND = "about no command"
 
 
-def lesson_moment(memory, i, actions, way):
-    """When, against its command's runs in the task, a lesson delivered at
-    action `i` was shown: a hold shows it before action `i` runs, a push
-    after."""
-    subject = subject_of(memory["points"][0].get("about"))
-    runs = [j for j, a in enumerate(actions) if subject_of(a.get("about")) == subject]
-    failures = [j for j in runs if actions[j].get("failed")]
-    # Half an action earlier: a hold comes before its command runs.
-    shown = i - 0.5 if way == "hold" else i
-    if failures:
-        return (BEFORE_FAILURE if shown < failures[0] else AT_FAILURE if shown == failures[0]
-                else AFTER_FAILURE)
-    if runs:
-        return BEFORE_SUCCESS if shown < runs[0] else AFTER_SUCCESS
-    return NOT_RUN
+def run_moment(memory, candidate, i, actions, way):
+    """When a passage delivered at action `i` was seen against the runs of
+    the command its point is about: before the next run (by how that run
+    ends), at a failed run, or after the last run before it."""
+    points = [p for p in memory["points"] if candidate["slot"] == 255 or overlaps(candidate, p)]
+    about = subject_of(points[0].get("about")) if points else None
+    if not about or about[0] != "command":
+        return NO_COMMAND
+    runs = [j for j, a in enumerate(actions) if subject_of(a.get("about")) == about]
+    if not runs:
+        return NOT_RUN
+    seen = shown_at(i, way)
+    before = [j for j in runs if j <= seen]
+    if not before:
+        return BEFORE_FAILURE if actions[runs[0]].get("failed") else BEFORE_SUCCESS
+    last = before[-1]
+    if actions[last].get("failed"):
+        return AT_FAILURE if last == seen else AFTER_FAILURE
+    return AFTER_SUCCESS
 
 
 def overlaps_slot(key, point, matched):
@@ -254,13 +324,6 @@ def overlaps_slot(key, point, matched):
         for c in candidates:
             if (c["id"], c["slot"]) == key:
                 return overlaps(c, point)
-    return False
-
-
-def was_held(key, i, matched, bars, actions):
-    for c in matched[i]:
-        if (c["id"], c["slot"]) == key:
-            return "hold" in decisions(c, bars, actions[i]["kind"])
     return False
 
 
