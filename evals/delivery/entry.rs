@@ -175,7 +175,9 @@ fn run(cli: Cli) -> Result<(), String> {
     match cli.command {
         Command::Index { db, projects, out } => {
             let started = std::time::Instant::now();
-            let bytes = delivery::build(&db, &projects).map_err(|e| e.to_string())?;
+            // The bench keeps no position: the store's change number names it.
+            let bytes = delivery::build(&db, &projects, |_, change| format!("bench.{change}"))
+                .map_err(|e| e.to_string())?;
             let build_ms = started.elapsed().as_secs_f64() * 1e3;
             fs::write(&out, &bytes).map_err(|e| format!("{}: {e}", out.display()))?;
             let memories = DeliveryIndex::read(bytes).map_err(|e| e.to_string())?.len();

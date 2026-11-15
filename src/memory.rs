@@ -15,6 +15,10 @@ mod calibration;
 mod changes;
 #[cfg(test)]
 mod delivery;
+#[cfg(test)]
+mod delivery_files;
+#[cfg(test)]
+pub use changes::position as store_position;
 pub use changes::{marked, reconcile};
 pub mod embedding;
 mod history;
@@ -458,7 +462,8 @@ mod tests {
             "observed",
         );
         let file = dir.path().join("delivery.index");
-        std::fs::write(&file, delivery::build(&db, &[ours.to_owned()]).unwrap()).unwrap();
+        let built = delivery::build(&db, &[ours.to_owned()], |_, change| change.to_string());
+        std::fs::write(&file, built.unwrap()).unwrap();
         let index = DeliveryIndex::load(&file).unwrap();
         assert_eq!(index.len(), 1, "only this project's stated memory");
         let mut window = Window::default();
@@ -575,13 +580,14 @@ mod tests {
             assert_eq!(out["stored"], true, "{out}");
         }
         let projects = [ours.to_owned()];
-        let built = delivery::build(&db, &projects).unwrap();
+        let built = delivery::build(&db, &projects, |_, change| change.to_string()).unwrap();
+        let header = DeliveryIndex::read(built.clone()).unwrap().header;
         let sources = delivery_sources(&db, &projects);
         assert_eq!(sources.len(), 4);
         assert!(
             sources.iter().any(|s| s.rows.len() > 3),
             "a memory of several passages"
         );
-        assert!(built == DeliveryIndex::write(&sources).unwrap());
+        assert!(built == DeliveryIndex::write_with(&header, &sources).unwrap());
     }
 }

@@ -118,6 +118,28 @@ pub fn resolved(path: &Path) -> PathBuf {
     }
 }
 
+/// The identity of the memories behind `server`'s address, or of the local
+/// store at `db` without one: its path spelled the same before the store
+/// file is created as after.
+pub fn store_identity(server: Option<&str>, db: &Path) -> String {
+    match server {
+        Some(url) => format!("server {url}"),
+        None => format!("store {}", resolved(db).to_string_lossy()),
+    }
+}
+
+/// Hex characters of a store key: 64 bits of the SHA-256 of the store's
+/// identity, so two stores on one machine never share a key, without a path
+/// or address in a file's name.
+pub const STORE_KEY_CHARS: usize = 16;
+
+/// The key that names the files of the store named `identity` (see
+/// [`store_identity`]) in the state folder: its session snapshots, the
+/// rules it last showed and its delivery index.
+pub fn store_key(identity: &str) -> String {
+    crate::setup::sha256(identity.as_bytes())[..STORE_KEY_CHARS].to_owned()
+}
+
 fn variable(name: &str) -> Option<OsString> {
     env::var_os(name)
 }

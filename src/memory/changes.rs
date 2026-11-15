@@ -223,6 +223,16 @@ pub fn marked(db: &Path) -> Option<super::Position> {
     read_marker(db).map(|state| super::Position::at(&state.store_id, state.last_change, 0))
 }
 
+#[cfg(test)]
+/// The position the store at `db` is at, read from the store itself and not
+/// its marker, which a store put back by hand leaves as it was; none when
+/// it cannot be read or counts no changes.
+pub fn position(db: &Path) -> Option<super::Position> {
+    let conn = Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    let state = state(&conn).ok()??;
+    Some(super::Position::at(&state.store_id, state.last_change, 0))
+}
+
 /// At session start, for the store at `db` on this machine: when its
 /// marker does not say what the store says, as after a crash between a
 /// commit and its marker, an edit by hand or another program, takes the

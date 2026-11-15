@@ -29,8 +29,45 @@ fn prefix(anchor: bool) -> u8 {
 }
 
 /// The file the delivery index is written to starts with this, its format
-/// in the last byte.
-const MAGIC: &[u8; 8] = b"UMDELIV1";
+/// in the last byte: 2 added the header of [`Header`].
+const MAGIC: &[u8; 8] = b"UMDELIV2";
+
+/// Which of a scope's two files an index is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Part {
+    /// The scope's memories at one position of the store.
+    Base,
+    /// The memories changed since the base's position, and the base's
+    /// memories they replace.
+    Overlay,
+}
+
+impl Part {
+    /// The byte the file names it by.
+    fn byte(self) -> u8 {
+        match self {
+            Part::Base => b'B',
+            Part::Overlay => b'O',
+        }
+    }
+}
+
+/// What a delivery file says of itself before its memories.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Header {
+    pub(crate) part: Part,
+    /// The store's position (#119) the file holds the memories of. It names
+    /// the store by a digest of its id, never the id.
+    pub(crate) position: String,
+    /// The position of the base an overlay was made for; a base names its
+    /// own.
+    pub(crate) made_for: String,
+    /// The scope's project keys, global memories being in every scope.
+    pub(crate) projects: Vec<String>,
+    /// The base's memories an overlay hides: each memory changed since the
+    /// base's position, by id only. A base hides none.
+    pub(crate) skip: Vec<String>,
+}
 
 /// A memory id as the store writes it: a hyphenated UUID.
 const ID_BYTES: usize = 36;
@@ -45,7 +82,8 @@ pub(in crate::memory) const POSTING_BYTES: usize = 5;
 pub(crate) enum Error {
     Store(rusqlite::Error),
     File(std::io::Error),
-    /// The store's keyword index is missing, stale or has memories queued.
+    /// The store's keyword index is missing, stale or has memories queued,
+    /// or the store counts no changes.
     NotCurrent,
     /// The file isn't a delivery index this code wrote, or was cut short.
     Format,
@@ -165,7 +203,11 @@ impl Builder {
     /// The file's bytes for the memories `ids` names, in the order their
     /// rows name them: their ids, their rows, and each term's rows sorted by
     /// its key, so a lookup reads only its terms.
-    fn bytes<'i>(self, ids: impl ExactSizeIterator<Item = &'i str>) -> Result<Vec<u8>, Error> {
+    fn bytes<'i>(
+        self,
+        header: &Header,
+        ids: impl ExactSizeIterator<Item = &'i str>,
+    ) -> Result<Vec<u8>, Error> {
         let Self {
             rows,
             keys,
@@ -195,9 +237,21 @@ impl Builder {
             *at += 1;
         }
         let mut bytes = MAGIC.to_vec();
-        let stamp = stamp();
-        put(&mut bytes, stamp.len())?;
-        bytes.extend(stamp.as_bytes());
+        put_text(&mut bytes, &stamp())?;
+        bytes.push(header.part.byte());
+        put_text(&mut bytes, &header.position)?;
+        put_text(&mut bytes, &header.made_for)?;
+        put(&mut bytes, header.projects.len())?;
+        for project in &header.projects {
+            put_text(&mut bytes, project)?;
+        }
+        put(&mut bytes, header.skip.len())?;
+        for id in &header.skip {
+            if id.len() != ID_BYTES {
+                return Err(Error::Format);
+            }
+            bytes.extend(id.as_bytes());
+        }
         put(&mut bytes, ids.len())?;
         for id in ids {
             if id.len() != ID_BYTES {
@@ -241,8 +295,10 @@ impl Builder {
     }
 }
 
-/// The delivery index: the bytes of its file, read in place.
+/// The delivery index: the bytes of its file, read in place, and its
+/// header.
 pub(crate) struct DeliveryIndex {
+    pub(crate) header: Header,
     pub(in crate::memory) bytes: Vec<u8>,
     pub(in crate::memory) memories: usize,
     pub(in crate::memory) ids_at: usize,
@@ -271,11 +327,42 @@ fn put(bytes: &mut Vec<u8>, value: usize) -> Result<(), Error> {
     Ok(())
 }
 
+/// Writes `text` as its length and its bytes.
+fn put_text(bytes: &mut Vec<u8>, text: &str) -> Result<(), Error> {
+    put(bytes, text.len())?;
+    bytes.extend(text.as_bytes());
+    Ok(())
+}
+
+/// The text [`put_text`] wrote at `*at`, moving `*at` past it.
+fn text_at<'b>(bytes: &'b [u8], at: &mut usize) -> Result<&'b str, Error> {
+    let len = u32_at(bytes, *at)? as usize;
+    let text = bytes
+        .get(*at + 4..*at + 4 + len)
+        .and_then(|text| std::str::from_utf8(text).ok())
+        .ok_or(Error::Format)?;
+    *at += 4 + len;
+    Ok(text)
+}
+
 impl DeliveryIndex {
-    /// The file's bytes for `memories`, built from their terms as given:
+    /// A base file's bytes for `memories`, built from their terms as given:
     /// for tests, which make their memories by hand.
     #[cfg(test)]
     pub(crate) fn write(memories: &[Source]) -> Result<Vec<u8>, Error> {
+        let header = Header {
+            part: Part::Base,
+            position: String::new(),
+            made_for: String::new(),
+            projects: Vec::new(),
+            skip: Vec::new(),
+        };
+        Self::write_with(&header, memories)
+    }
+
+    /// [`DeliveryIndex::write`] with `header`.
+    #[cfg(test)]
+    pub(crate) fn write_with(header: &Header, memories: &[Source]) -> Result<Vec<u8>, Error> {
         let mut built = Builder::default();
         for (m, memory) in memories.iter().enumerate() {
             for row in &memory.rows {
@@ -288,7 +375,7 @@ impl DeliveryIndex {
                 }
             }
         }
-        built.bytes(memories.iter().map(|m| m.id.as_str()))
+        built.bytes(header, memories.iter().map(|m| m.id.as_str()))
     }
 
     /// Reads the index from `bytes`, checking its sections fit, without
@@ -298,12 +385,41 @@ impl DeliveryIndex {
             return Err(Error::Format);
         }
         let mut at = MAGIC.len();
-        let stamp_len = u32_at(&bytes, at)? as usize;
-        at += 4;
-        if bytes.get(at..at + stamp_len) != Some(stamp().as_bytes()) {
+        if text_at(&bytes, &mut at)? != stamp() {
             return Err(Error::Format);
         }
-        at += stamp_len;
+        let part = match bytes.get(at) {
+            Some(b'B') => Part::Base,
+            Some(b'O') => Part::Overlay,
+            _ => return Err(Error::Format),
+        };
+        at += 1;
+        let position = text_at(&bytes, &mut at)?.to_owned();
+        let made_for = text_at(&bytes, &mut at)?.to_owned();
+        let count = u32_at(&bytes, at)? as usize;
+        at += 4;
+        let mut projects = Vec::new();
+        for _ in 0..count {
+            projects.push(text_at(&bytes, &mut at)?.to_owned());
+        }
+        let count = u32_at(&bytes, at)? as usize;
+        at += 4;
+        let mut skip = Vec::new();
+        for _ in 0..count {
+            let id = bytes
+                .get(at..at + ID_BYTES)
+                .and_then(|id| std::str::from_utf8(id).ok())
+                .ok_or(Error::Format)?;
+            skip.push(id.to_owned());
+            at += ID_BYTES;
+        }
+        let header = Header {
+            part,
+            position,
+            made_for,
+            projects,
+            skip,
+        };
         let memories = u32_at(&bytes, at)? as usize;
         let ids_at = at + 4;
         at = ids_at + memories * ID_BYTES;
@@ -317,6 +433,7 @@ impl DeliveryIndex {
         let pool_at = at + 4;
         let postings_at = pool_at + pool_len;
         let index = Self {
+            header,
             bytes,
             memories,
             ids_at,
@@ -405,6 +522,31 @@ impl DeliveryIndex {
     }
 }
 
+/// A scope's base and the overlay made for it, as a reader takes them: the
+/// overlay's memories, and the base's but those the overlay's skip list
+/// names.
+pub(crate) struct View {
+    pub(crate) base: DeliveryIndex,
+    pub(crate) overlay: Option<DeliveryIndex>,
+}
+
+impl View {
+    /// `base` with `overlay` when the overlay was made for it: an overlay
+    /// made for another base, older or newer, is left out, so a reader
+    /// that read between a writer's two renames never pairs them.
+    pub(crate) fn new(base: DeliveryIndex, overlay: Option<DeliveryIndex>) -> Option<Self> {
+        if base.header.part != Part::Base {
+            return None;
+        }
+        let overlay = overlay.filter(|overlay| {
+            overlay.header.part == Part::Overlay
+                && overlay.header.made_for == base.header.position
+                && overlay.header.projects == base.header.projects
+        });
+        Some(Self { base, overlay })
+    }
+}
+
 /// The memories search may deliver in a scope: active ones of the global
 /// scope and of `projects`, never a guess or an observation about the user
 /// (inferred memories, types `behavior` and `pattern`).
@@ -414,12 +556,27 @@ pub(in crate::memory) const CANDIDATES: &str = "SELECT k.key,m.id FROM search_ke
      AND (m.scope='global' OR (m.scope='project' AND m.project IN (SELECT value FROM json_each(?1)))) \
      ORDER BY k.key";
 
-/// The delivery index file of the memories search may deliver in the
-/// global scope and `projects`, from the store at `db`, read without
-/// writing. One pass over the keyword index's rows: each stored token is
-/// already its term's key, so no term is decoded and encoded again.
-pub(crate) fn build(db: &Path, projects: &[String]) -> Result<Vec<u8>, Error> {
-    let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+/// The base file of the memories search may deliver in the global scope
+/// and `projects`, from the store at `db`, read without writing, with the
+/// position `position` makes of the store's id and latest change. One read
+/// transaction, so the position is that of the rows. One pass over the
+/// keyword index's rows: each stored token is already its term's key, so
+/// no term is decoded and encoded again.
+pub(crate) fn build(
+    db: &Path,
+    projects: &[String],
+    position: impl FnOnce(&str, i64) -> String,
+) -> Result<Vec<u8>, Error> {
+    let mut conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let conn = conn.transaction()?;
+    let (store_id, change): (String, i64) = conn
+        .query_row(
+            "SELECT store_id,last_change FROM store_changes WHERE id=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|_| Error::NotCurrent)?;
+    let position = position(&store_id, change);
     let current: Option<String> = conn
         .query_row("SELECT stemmed_by FROM search_state WHERE id=1", [], |r| {
             r.get(0)
@@ -475,7 +632,14 @@ pub(crate) fn build(db: &Path, projects: &[String]) -> Result<Vec<u8>, Error> {
             built.term(&key, Field::Body)?;
         }
     }
-    built.bytes(ids.iter().map(String::as_str))
+    let header = Header {
+        part: Part::Base,
+        made_for: position.clone(),
+        position,
+        projects: projects.to_vec(),
+        skip: Vec::new(),
+    };
+    built.bytes(&header, ids.iter().map(String::as_str))
 }
 
 /// Text column `at` of `row` as stored, borrowed; empty when null.

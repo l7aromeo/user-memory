@@ -233,10 +233,23 @@ const RENAME_PAUSE_MAX: Duration = Duration::from_millis(250);
 /// violation): a program may open a new or newly started executable for a
 /// moment. Any other error, access denied among them, is returned at once.
 pub fn rename(from: &Path, to: &Path, wait: Duration) -> io::Result<()> {
+    retry_shared(wait, || std::fs::rename(from, to))
+}
+
+/// Deletes `path`, trying again for up to `wait` while another program has
+/// it open without sharing delete, as [`rename`] does.
+pub fn remove_file(path: &Path, wait: Duration) -> io::Result<()> {
+    retry_shared(wait, || std::fs::remove_file(path))
+}
+
+/// Runs `step` until it ends in anything but a sharing violation, or `wait`
+/// has passed, pausing longer between tries as [`RENAME_PAUSE`] and
+/// [`RENAME_PAUSE_MAX`] say.
+fn retry_shared(wait: Duration, mut step: impl FnMut() -> io::Result<()>) -> io::Result<()> {
     let deadline = Instant::now() + wait;
     let mut pause = RENAME_PAUSE;
     loop {
-        let err = match std::fs::rename(from, to) {
+        let err = match step() {
             Err(err) if err.raw_os_error() == Some(ERROR_SHARING_VIOLATION.0 as i32) => err,
             done => return done,
         };
