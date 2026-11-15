@@ -42,10 +42,17 @@ SIZES = [50, 1_000, 10_000]
 # two never overlap, so the report isn't graded on what tuned it.
 TUNING_SEEDS = [1, 2, 3]
 REPORT_SEEDS = [11, 12, 13]
-# The bars a sweep tries.
-PUSH_BARS = [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0]
-FAILURE_BARS = [0.5, 0.75, 1.0, 1.5, 2.0]
-HOLD_BARS = [1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0]
+# What the bars test, and the bars a sweep tries on each: the store's
+# score, which grows with the store's size at a fixed number of holders;
+# and three quantities free of it (`Matched::holders` in
+# src/memory/delivery.rs). Each grid spans its quantity's deciles on the
+# tuning seeds, with the picked bar inside it, not at an end.
+SCALES = {
+    "score": [0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0],
+    "holders": [0.2, 0.25, 0.3, 0.35, 0.4, 0.5, 0.6, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0],
+    "root": [0.5, 0.6, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 6.0],
+    "share": [0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.75, 1.0, 1.25],
+}
 # The window settings a sweep tries.
 WINDOWS = [10, 30]
 HALF_LIVES = [2.0, 5.0, 10.0]
@@ -168,7 +175,8 @@ def report(title, total, by_kind):
     print(f"  pushes: precision {fmt(r(total['right|all'], total['delivered|all']))} of "
           f"{total['delivered|all']}, at the prompt {fmt(r(total['right|signal:prompt'], total['delivered|signal:prompt']))} "
           f"of {total['delivered|signal:prompt']}; recall {fmt(r(total['found|all'], total['needed|all']))} "
-          f"of {total['needed|all']} needs")
+          f"of {total['needed|all']} needs, {fmt(r(total['found|anchored'], total['needed|anchored']))} "
+          f"of the {total['needed|anchored']} whose point holds an anchor")
     print("  by way      " + "  ".join(
         f"{w} {fmt(r(total[f'right|way:{w}'], total[f'delivered|way:{w}']))}/{total[f'delivered|way:{w}']}"
         for w in ("push", "failure", "hold")))
@@ -267,26 +275,32 @@ def sweep(found, sizes, seeds, tuning, keep):
     """Precision and recall over bars and window settings, on the tuning
     seeds: the rows the constants are set from."""
     print("\nsweep on seeds", seeds)
-    print("size  window half-life anchor push  failure hold   precision prompt  recall  held  unnamed-held")
+    print("size  window half-life scale   anchor push  failure hold   precision prompt  recall  anchored "
+          "hold-precision held  unnamed-held")
+    r = metrics.ratio
     for size in sizes:
         for window in WINDOWS:
             for half_life in HALF_LIVES:
                 runs = [run_world(found, seed, size, {**tuning, "window": window, "half-life": half_life}, keep)
                         for seed in seeds]
-                for anchor in ANCHOR_RULES:
-                  for push in PUSH_BARS:
-                    for failure in [b for b in FAILURE_BARS if b <= push]:
-                        for hold in [b for b in HOLD_BARS if b >= push]:
-                            bars = {"push": push, "failure": failure, "hold": hold, "anchor": anchor}
-                            total = Counter()
-                            for drawn, matched, _, _ in runs:
-                                total.update(counts(drawn, matched, bars)[0])
-                            r = metrics.ratio
-                            print(f"{size:<6}{window:<7}{half_life:<10}{anchor!s:<7}{push:<6}{failure:<8}{hold:<7}"
-                                  f"{fmt(r(total['right|all'], total['delivered|all']))}     "
-                                  f"{fmt(r(total['right|signal:prompt'], total['delivered|signal:prompt']))}  "
-                                  f"{fmt(r(total['found|all'], total['needed|all']))}   "
-                                  f"{total['held before its action']:>4}  {total['unnamed held']:>4}")
+                for scale, grid in SCALES.items():
+                    for anchor in ANCHOR_RULES:
+                        for push in grid:
+                            for failure in [b for b in grid if b <= push]:
+                                for hold in [b for b in grid if b >= push]:
+                                    bars = {"push": push, "failure": failure, "hold": hold, "anchor": anchor,
+                                            "scale": scale}
+                                    total = Counter()
+                                    for drawn, matched, _, _ in runs:
+                                        total.update(counts(drawn, matched, bars)[0])
+                                    print(f"{size:<6}{window:<7}{half_life:<10}{scale:<8}{anchor!s:<7}{push:<6}"
+                                          f"{failure:<8}{hold:<7}"
+                                          f"{fmt(r(total['right|all'], total['delivered|all']))}     "
+                                          f"{fmt(r(total['right|signal:prompt'], total['delivered|signal:prompt']))}  "
+                                          f"{fmt(r(total['found|all'], total['needed|all']))}   "
+                                          f"{fmt(r(total['found|anchored'], total['needed|anchored']))}    "
+                                          f"{fmt(r(total['right|way:hold'], total['delivered|way:hold']))}          "
+                                          f"{total['held before its action']:>4}  {total['unnamed held']:>4}")
 
 
 def cost(found, seed, size, keep):
@@ -332,7 +346,8 @@ def main():
     parser.add_argument("--check-cost", action="store_true", help="fail when the lookup's median is over its limit")
     parser.add_argument("--credit", type=float, help="credit for terms only other passages hold")
     parser.add_argument("--bars", action="append",
-                        help="PUSH,FAILURE,HOLD[,anchor] to report at instead of the matcher's; repeatable")
+                        help="PUSH,FAILURE,HOLD[,anchor][,scale=NAME] to report at instead of the matcher's; "
+                             "NAME is what the bars test (score, holders, root, share); repeatable")
     parser.add_argument("--presence", action="store_true",
                         help="how often session start lists what tasks need (evals/delivery/presence.py)")
     parser.add_argument("--prompt-curve", help="prompt bars, on stems alone, to report prompt pushes at")
@@ -358,8 +373,13 @@ def main():
         variants = []
         for given in args.bars:
             parts = given.split(",")
+            extra = parts[3:]
+            scale = next((p.removeprefix("scale=") for p in extra if p.startswith("scale=")), "score")
+            if scale not in SCALES or any(p != "anchor" and not p.startswith("scale=") for p in extra):
+                raise SystemExit(f"--bars {given}: expected PUSH,FAILURE,HOLD[,anchor][,scale=NAME], "
+                                 f"NAME one of {', '.join(SCALES)}")
             variants.append({"push": float(parts[0]), "failure": float(parts[1]),
-                             "hold": float(parts[2]), "anchor": parts[3:] == ["anchor"]})
+                             "hold": float(parts[2]), "anchor": "anchor" in extra, "scale": scale})
     print(f"delivery matching on seeds {seeds}" + (f"; credit {args.credit}" if args.credit else ""))
     for size in sizes:
         def present(env, folder, drawn, matched, seed):
@@ -378,8 +398,9 @@ def main():
                 total.update(c)
                 for kind, value in k.items():
                     by_kind.setdefault(kind, Counter()).update(value)
-            report(f"{size} memories ({built}); bars push {bars['push']}, failure {bars['failure']}, "
-                   f"hold {bars['hold']}" + ("; a push needs an anchor" if bars.get("anchor") else ""),
+            report(f"{size} memories ({built}); bars on {bars.get('scale', 'score')}: push {bars['push']}, "
+                   f"failure {bars['failure']}, hold {bars['hold']}"
+                   + ("; a push needs an anchor" if bars.get("anchor") else ""),
                    total, by_kind)
         if args.presence:
             report_presence(size, runs)
