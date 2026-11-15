@@ -106,6 +106,26 @@ impl Home {
     /// What session start prints for a new session `session` in `cwd`,
     /// started as `source` names it.
     fn start(&self, session: &str, cwd: &Path, source: &str) -> String {
+        self.told(session, cwd, source).0
+    }
+    /// What session start gives the agent and, when it has one, its
+    /// message for the user.
+    fn told(&self, session: &str, cwd: &Path, source: &str) -> (String, Option<String>) {
+        let raw = self.raw(session, cwd, source);
+        if !raw.starts_with('{') {
+            return (raw, None);
+        }
+        let out: Value = serde_json::from_str(&raw).unwrap();
+        (
+            out["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+            Some(out["systemMessage"].as_str().unwrap().to_owned()),
+        )
+    }
+    /// What session start prints.
+    fn raw(&self, session: &str, cwd: &Path, source: &str) -> String {
         let payload = json!({"session_id": session, "cwd": cwd, "hook_event_name": "SessionStart", "source": source});
         let mut child = self
             .command(&["session-start", "--client", "claude"], cwd)
@@ -177,6 +197,73 @@ fn unlike(n: usize) -> String {
     .map(|word| format!("{word}{n}q"))
     .collect::<Vec<_>>()
     .join(" ")
+}
+
+/// Records an observation, as an agent does on its own; its id.
+fn observe(home: &Home, title: &str) -> String {
+    home.record(
+        title,
+        &[
+            "--type",
+            "fact",
+            "--scope",
+            "global",
+            "--source",
+            "observed",
+            "--evidence",
+            "Seen once",
+        ],
+    )
+}
+
+#[test]
+fn the_user_is_told_once_at_startup_when_a_rule_is_new() {
+    let home = Home::new();
+    let here = home.path();
+    // No file: nothing said, and the plain text as before.
+    observe(&home, "Alpha observation before any file");
+    assert_eq!(home.told("s1", here, "startup").1, None);
+    assert!(!home.raw("s1", here, "startup").starts_with('{'));
+    // Agents' memories alone: nothing said.
+    observe(&home, "Bravo observation without a rule");
+    assert_eq!(home.told("s2", here, "startup").1, None);
+    // A rule: told, counting both agents' memories since.
+    home.rule("Charlie rule another session recorded");
+    observe(&home, "Delta observation beside the rule");
+    let (text, message) = home.told("s3", here, "startup");
+    assert_eq!(
+        message.as_deref(),
+        Some(
+            "1 new rule and 2 new memories recorded by agents since your last session: `user-memory review` lists them."
+        )
+    );
+    assert!(block(&text).is_some(), "{text}");
+    // The agent's text is what a plain start prints: origin line first.
+    assert!(
+        text.starts_with("Conversation origin: claude:session/s3"),
+        "{text}"
+    );
+    // Once.
+    assert_eq!(home.told("s4", here, "startup").1, None);
+}
+
+#[test]
+fn a_rule_first_shown_where_the_user_could_not_be_told_is_told_at_the_next_startup() {
+    let home = Home::new();
+    let here = home.path();
+    home.listed("s1", here);
+    let rule = home.rule("Echo rule recorded before a compaction");
+    // A compacted session's start lists it to the agent, telling no one.
+    let (text, message) = home.told("s1", here, "compact");
+    assert_eq!((listed(&text), message), (vec![id8(&rule)], None));
+    // The next new session tells the user, listing nothing again.
+    let (text, message) = home.told("s2", here, "startup");
+    assert_eq!(listed(&text), Vec::<String>::new());
+    assert_eq!(
+        message.as_deref(),
+        Some("1 new rule since your last session: `user-memory review` lists them.")
+    );
+    assert_eq!(home.told("s3", here, "startup").1, None);
 }
 
 fn id8(id: &str) -> String {

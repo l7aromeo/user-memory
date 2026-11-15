@@ -13,6 +13,7 @@ use crate::{db_path, memory, memory::FitUnit, project, setup};
 use anyhow::Context;
 use clap::ValueEnum;
 use live::{LINKED, LISTED, PENDING, THIS_FOLDER};
+use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
     collections::BTreeSet,
@@ -216,15 +217,19 @@ pub async fn start(path: PathBuf, client: Option<HookClient>) -> String {
         let _ = tokio::time::timeout_at(until, reconcile).await;
     }
     let (limit, unit) = hook_limit(client);
-    let block = match (seen.ok().flatten(), &index) {
+    let found = match (seen.ok().flatten(), &index) {
         // Only beside an index: a start without one says nothing is new.
         (Some((snapshot, reply)), Ok(Ok(_))) => {
             new_rules(&snapshot, &reply, startup(payload.as_deref()), deadline)
                 .await
-                .and_then(|found| new_rules_block(&found, &snapshot, &reply, unit))
+                .map(|found| (found, snapshot, reply))
         }
         _ => None,
     };
+    let block = found
+        .as_ref()
+        .and_then(|(found, snapshot, reply)| new_rules_block(found, snapshot, reply, unit));
+    let told = found.and_then(|(found, ..)| found.told);
     let index = match index {
         Ok(Ok((lines, index))) => {
             if let Some(missed) = &missed {
@@ -259,10 +264,61 @@ pub async fn start(path: PathBuf, client: Option<HookClient>) -> String {
         ),
         None => index,
     };
-    match versions.ok().flatten() {
+    let text = match versions.ok().flatten() {
         Some(line) => format!("{line}\n{index}"),
         None => index,
+    };
+    match told {
+        Some(told) => told_output(&told, text),
+        None => text,
     }
+}
+
+/// Session start's output when it has a message for the user: the JSON
+/// both clients read, with `text` for the agent as it would be printed
+/// alone. Every other start prints `text` as it is.
+fn told_output(told: &seen::Told, text: String) -> String {
+    serde_json::to_string(&StartOutput {
+        system_message: told_message(told),
+        hook_specific_output: StartContext {
+            hook_event_name: "SessionStart",
+            additional_context: text,
+        },
+    })
+    .expect("a struct of strings always serializes")
+}
+
+/// Session start's JSON: only fields both clients know, since Codex
+/// refuses an unknown one and the agent then gets no index at all.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StartOutput {
+    /// Shown to the user.
+    system_message: String,
+    hook_specific_output: StartContext,
+}
+
+/// What the agent reads.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StartContext {
+    hook_event_name: &'static str,
+    additional_context: String,
+}
+
+/// What the user is told: the rules added or changed and the memories
+/// agents recorded since the user was last told.
+fn told_message(told: &seen::Told) -> String {
+    let rules = match told.rules {
+        1 => "1 new rule".to_owned(),
+        n => format!("{n} new rules"),
+    };
+    let agents = match told.agents {
+        0 => String::new(),
+        1 => " and 1 new memory recorded by agents".to_owned(),
+        n => format!(" and {n} new memories recorded by agents"),
+    };
+    format!("{rules}{agents} since your last session: `user-memory review` lists them.")
 }
 
 /// Opens the list of rules added or changed since the last session.
@@ -1229,6 +1285,63 @@ fn capped(text: String, limit: usize, unit: FitUnit, note: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The fields Codex 0.163.0 reads from a session-start hook's JSON
+    /// (codex-rs/hooks/schema/generated/session-start.command.output.schema.json),
+    /// whose parser refuses any other; Claude Code reads the same names.
+    const CODEX_FIELDS: [&str; 5] = [
+        "continue",
+        "stopReason",
+        "suppressOutput",
+        "systemMessage",
+        "hookSpecificOutput",
+    ];
+    /// The fields of its `hookSpecificOutput`.
+    const CODEX_SPECIFIC: [&str; 2] = ["hookEventName", "additionalContext"];
+
+    /// The JSON holds only fields Codex knows, so a field added to it fails
+    /// here before Codex drops a session's whole index; the agent's text
+    /// is what plain output would print.
+    #[test]
+    fn the_message_output_holds_only_fields_both_clients_read() {
+        let text = "Conversation origin: x\nindex".to_owned();
+        let out: Value = serde_json::from_str(&told_output(
+            &seen::Told {
+                rules: 2,
+                agents: 1,
+            },
+            text.clone(),
+        ))
+        .unwrap();
+        let keys =
+            |value: &Value| -> Vec<String> { value.as_object().unwrap().keys().cloned().collect() };
+        assert!(
+            keys(&out)
+                .iter()
+                .all(|k| CODEX_FIELDS.contains(&k.as_str())),
+            "{out}"
+        );
+        let specific = &out["hookSpecificOutput"];
+        assert!(
+            keys(specific)
+                .iter()
+                .all(|k| CODEX_SPECIFIC.contains(&k.as_str())),
+            "{out}"
+        );
+        assert_eq!(specific["hookEventName"], "SessionStart");
+        assert_eq!(specific["additionalContext"], text.as_str());
+        assert_eq!(
+            out["systemMessage"],
+            "2 new rules and 1 new memory recorded by agents since your last session: `user-memory review` lists them."
+        );
+        assert_eq!(
+            told_message(&seen::Told {
+                rules: 1,
+                agents: 0
+            }),
+            "1 new rule since your last session: `user-memory review` lists them."
+        );
+    }
 
     /// Fills the store at `db` with `per` memories globally and in each of
     /// `projects`, of rule and other types, across a few categories.
