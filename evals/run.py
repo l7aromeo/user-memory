@@ -1359,6 +1359,11 @@ def grade(check, sandbox, records, memories):
 
     def step():
         return records[spec.get("step", -1) if isinstance(spec, dict) else -1]
+    if kind == "any":
+        # Passes when one of its checks does: an outcome reached two ways,
+        # such as the tests ran or nothing was committed.
+        results = [grade(c, sandbox, records, memories) for c in spec]
+        return any(ok for ok, _ in results), "; ".join(detail for _, detail in results)
     if kind == "memory":
         pool = memories if spec.get("status") == "all" else active
         found = [m for m in pool if matches(m, spec.get("where", {}))]
@@ -1544,7 +1549,8 @@ def server_step(step, servers, sandbox):
 
 def write_files(scenario, sandbox, projects):
     """The scenario's `files`, by trial path; one inside a project checkout
-    is committed there, so it is part of the project."""
+    joins the project's first commit, so it is part of the project and the
+    `commits` checks count only what the agent committed."""
     checkouts = {sandbox.workdir(spec, projects) for spec in project_specs(scenario)}
     for name, text in scenario.get("files", {}).items():
         path = sandbox.dir / name
@@ -1559,7 +1565,7 @@ def write_files(scenario, sandbox, projects):
             git = {**sandbox.env, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null"}
             relative = str(path.resolve().relative_to(checkout.resolve()))
             subprocess.run([GIT, "add", relative], cwd=checkout, env=git, check=True, capture_output=True)
-            subprocess.run([GIT, "commit", "-q", "-m", f"Add {relative}"], cwd=checkout, env=git,
+            subprocess.run([GIT, "commit", "-q", "--amend", "--no-edit"], cwd=checkout, env=git,
                            check=True, capture_output=True)
 
 

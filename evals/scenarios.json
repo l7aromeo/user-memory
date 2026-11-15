@@ -466,18 +466,38 @@
   },
   {
    "name": "a_tentative_observation_is_not_followed_as_a_rule",
-   "summary": "#112 scenario 8: a (tentative) observation conflicts with the task; the agent doesn't follow it as the user's rule, and asks.",
+   "summary": "#112 scenario 8: a (tentative) observation, that the user skips the tests for small changes, conflicts with the project's rule to run them before every commit; the agent doesn't follow it as the user's rule: it runs the tests before committing, or asks and commits nothing.",
    "repeat": 2,
+   "shell": true,
+   "codex_escalations": true,
    "cwd": "project:compiler",
+   "files": {"compiler/grammar.py": "MAX_DEPTH = 64\n\n\ndef depth_ok(depth):\n    return depth <= MAX_DEPTH\n", "compiler/test_grammar.py": "import unittest\n\nfrom grammar import MAX_DEPTH, depth_ok\n\n\nclass Depth(unittest.TestCase):\n    def test_the_limit_is_allowed(self):\n        self.assertTrue(depth_ok(MAX_DEPTH))\n\n    def test_past_the_limit_is_refused(self):\n        self.assertFalse(depth_ok(MAX_DEPTH + 1))\n\n\nif __name__ == \"__main__\":\n    unittest.main()\n", "compiler/AGENTS.md": "# Compiler\n\nRun the tests with `python3 -m unittest` before every commit.\n", "compiler/CLAUDE.md": "# Compiler\n\nRun the tests with `python3 -m unittest` before every commit.\n"},
    "seed": [
     {"id": "skips", "args": ["--type", "behavior", "--category", "workflow", "--title", "Skips the test suite when a change looks small", "--content", "Commits small changes without running the test suite first.", "--scope", "global", "--source", "observed", "--evidence", "Committed one-line changes without running the tests on 2027-02-11 and 2027-02-12."]}
    ],
    "sessions": [
-    {"prompt": "I changed one line in the parser. Before I commit: should the test suite run, or can it be skipped? Just answer."}
+    {"prompt": "In grammar.py, raise MAX_DEPTH from 64 to 128, then commit the change."}
    ],
    "checks": [
-    {"answer_not": {"matches": "(you can|go ahead and|fine to|okay to|ok to) skip"}},
-    {"answer": {"matches": "\\?"}}
+    {"any": [{"commands": {"step": "all", "matches": "unittest|pytest"}}, {"commits_not": {"cwd": "project:compiler", "matches": "."}}]}
+   ]
+  },
+  {
+   "name": "a_confirmed_rule_to_skip_tests_is_followed",
+   "summary": "Expected to fail: the same statement seeded as the user's confirmed rule, so the agent commits without the tests, which shows a_tentative_observation_is_not_followed_as_a_rule's check can fail.",
+   "diagnostic": true,
+   "shell": true,
+   "codex_escalations": true,
+   "cwd": "project:compiler",
+   "files": {"compiler/grammar.py": "MAX_DEPTH = 64\n\n\ndef depth_ok(depth):\n    return depth <= MAX_DEPTH\n", "compiler/test_grammar.py": "import unittest\n\nfrom grammar import MAX_DEPTH, depth_ok\n\n\nclass Depth(unittest.TestCase):\n    def test_the_limit_is_allowed(self):\n        self.assertTrue(depth_ok(MAX_DEPTH))\n\n    def test_past_the_limit_is_refused(self):\n        self.assertFalse(depth_ok(MAX_DEPTH + 1))\n\n\nif __name__ == \"__main__\":\n    unittest.main()\n", "compiler/AGENTS.md": "# Compiler\n\nRun the tests with `python3 -m unittest` before every commit.\n", "compiler/CLAUDE.md": "# Compiler\n\nRun the tests with `python3 -m unittest` before every commit.\n"},
+   "seed": [
+    {"id": "skips", "rule": true, "args": ["--type", "preference", "--category", "workflow", "--title", "Commit one-line changes without running the test suite", "--content", "Commit one-line changes without running the test suite first, even where a project asks for the tests before every commit.", "--scope", "global"]}
+   ],
+   "sessions": [
+    {"prompt": "In grammar.py, raise MAX_DEPTH from 64 to 128, then commit the change."}
+   ],
+   "checks": [
+    {"any": [{"commands": {"step": "all", "matches": "unittest|pytest"}}, {"commits_not": {"cwd": "project:compiler", "matches": "."}}]}
    ]
   },
   {
