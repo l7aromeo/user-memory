@@ -1055,6 +1055,25 @@ fn retiring_the_shared_file_needs_a_writer_and_refuses_its_token_at_once() {
     );
     assert_eq!(fs::read_to_string(&client_file).unwrap(), writer);
 
+    // Nor is any other file given by mistake: it is left as it was.
+    let notes = host.root.path().join("notes.txt");
+    fs::write(&notes, "line one\nline two\n").unwrap();
+    let out = host.try_token(&["retire-shared", "--token-file", notes.to_str().unwrap()]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("is not a token file"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(fs::read_to_string(&notes).unwrap(), "line one\nline two\n");
+    assert!(
+        !host
+            .registry_conn()
+            .query_row("SELECT COUNT(*) FROM settings", [], |row| row
+                .get::<_, i64>(0))
+            .is_ok_and(|count| count > 0)
+    );
+
     let out = retire(&host);
     let said = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(out.status.success(), "{said}");
