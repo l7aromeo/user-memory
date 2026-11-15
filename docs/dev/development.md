@@ -663,6 +663,12 @@ Commands:
     just delivery-bench --sizes 50       # one size
     just delivery-bench --sweep          # bars and window, on the tuning seeds
     just delivery-bench --cost           # one lookup's time, 10,000 memories
+    just delivery-bench --check-cost     # the same, failing past a budget
+
+`--cost` times one lookup from a new process, and the build of the index
+from the store (budget: 60 ms at 10,000 memories, so session start's build
+finishes beside its own index); `--check-cost` fails when either median is
+past its budget.
 
 The bars and window are set on the tuning seeds (`--sweep`) and reported on
 others, so the report isn't graded on what set them. The report uses the

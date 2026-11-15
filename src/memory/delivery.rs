@@ -14,17 +14,18 @@ use crate::memory::index::{
     stems::{Field, stamp, token},
 };
 use rusqlite::{Connection, OpenFlags, params_from_iter};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fmt, fs,
-    path::Path,
-};
+use std::{collections::HashMap, fmt, fs, path::Path};
 
 /// How the index keys a term: a stem or an anchor, as its hex token.
 pub(in crate::memory) fn key(anchor: bool, term: &str) -> Vec<u8> {
-    let mut key = vec![if anchor { b'a' } else { b's' }];
+    let mut key = vec![prefix(anchor)];
     key.extend(token(term).into_bytes());
     key
+}
+
+/// The first byte of a term's key: an anchor's sorts before a stem's.
+fn prefix(anchor: bool) -> u8 {
+    if anchor { b'a' } else { b's' }
 }
 
 /// The file the delivery index is written to starts with this, its format
@@ -86,13 +87,15 @@ pub(in crate::memory) struct Row {
 }
 
 /// One memory's rows for building: its slot 0 and passages, each with its
-/// stems by field and its anchors.
+/// stems by field and its anchors. Tests make these by hand.
+#[cfg(test)]
 pub(crate) struct Source {
     pub(in crate::memory) id: String,
     pub(in crate::memory) rows: Vec<SourceRow>,
 }
 
 /// One row of a memory to index (see `index::rows`).
+#[cfg(test)]
 pub(in crate::memory) struct SourceRow {
     pub(in crate::memory) slot: i64,
     pub(in crate::memory) start: usize,
@@ -101,9 +104,142 @@ pub(in crate::memory) struct SourceRow {
     pub(in crate::memory) anchors: Vec<String>,
 }
 
-/// One term's rows while the index is built: each row with the field
-/// holding the term there, and the memories holding it.
-type Postings = (Vec<(u32, u8)>, BTreeSet<u32>);
+/// One posting while an index is built: the term's number in the order
+/// first met, the row, the field holding the term there, and the row's
+/// memory.
+#[derive(Clone, Copy, Default)]
+struct Posting {
+    term: u32,
+    row: u32,
+    field: u8,
+    memory: u32,
+}
+
+/// An index being built: its rows, each term's key kept once, and every
+/// posting in the order met, which is row order. The file is written with
+/// one counting sort of the postings by term: keying a map by term for
+/// each posting took two thirds of a build.
+#[derive(Default)]
+struct Builder {
+    rows: Vec<Row>,
+    numbers: HashMap<Box<[u8]>, u32>,
+    keys: Vec<Box<[u8]>>,
+    postings: Vec<Posting>,
+}
+
+impl Builder {
+    /// Adds a row of memory `memory`; its terms follow, each with
+    /// [`Builder::term`].
+    fn row(&mut self, memory: usize, slot: i64, start: usize, length: usize) -> Result<(), Error> {
+        self.rows.push(Row {
+            memory: u32::try_from(memory).map_err(|_| Error::Format)?,
+            slot: u16::try_from(slot).map_err(|_| Error::Format)?,
+            start: u32::try_from(start).map_err(|_| Error::Format)?,
+            length: u32::try_from(length).map_err(|_| Error::Format)?,
+        });
+        Ok(())
+    }
+
+    /// Adds the term keyed `key` to the last row, held there in `field`.
+    fn term(&mut self, key: &[u8], field: Field) -> Result<(), Error> {
+        let row = self.rows.len().checked_sub(1).ok_or(Error::Format)?;
+        let memory = self.rows[row].memory;
+        let term = match self.numbers.get(key) {
+            Some(&term) => term,
+            None => {
+                let term = u32::try_from(self.keys.len()).map_err(|_| Error::Format)?;
+                self.keys.push(key.into());
+                self.numbers.insert(key.into(), term);
+                term
+            }
+        };
+        self.postings.push(Posting {
+            term,
+            row: u32::try_from(row).map_err(|_| Error::Format)?,
+            field: field as u8,
+            memory,
+        });
+        Ok(())
+    }
+
+    /// The file's bytes for the memories `ids` names, in the order their
+    /// rows name them: their ids, their rows, and each term's rows sorted by
+    /// its key, so a lookup reads only its terms.
+    fn bytes<'i>(self, ids: impl ExactSizeIterator<Item = &'i str>) -> Result<Vec<u8>, Error> {
+        let Self {
+            rows,
+            keys,
+            postings,
+            ..
+        } = self;
+        // Terms in key order, and each term's place in it.
+        let mut order: Vec<usize> = (0..keys.len()).collect();
+        order.sort_unstable_by(|&a, &b| keys[a].cmp(&keys[b]));
+        let mut place = vec![0; keys.len()];
+        for (at, &term) in order.iter().enumerate() {
+            place[term] = at;
+        }
+        // Each term's postings, in the order met.
+        let mut starts = vec![0; keys.len() + 1];
+        for posting in &postings {
+            starts[place[posting.term as usize] + 1] += 1;
+        }
+        for at in 0..keys.len() {
+            starts[at + 1] += starts[at];
+        }
+        let mut sorted = vec![Posting::default(); postings.len()];
+        let mut next = starts.clone();
+        for posting in postings {
+            let at = &mut next[place[posting.term as usize]];
+            sorted[*at] = posting;
+            *at += 1;
+        }
+        let mut bytes = MAGIC.to_vec();
+        let stamp = stamp();
+        put(&mut bytes, stamp.len())?;
+        bytes.extend(stamp.as_bytes());
+        put(&mut bytes, ids.len())?;
+        for id in ids {
+            if id.len() != ID_BYTES {
+                return Err(Error::Format);
+            }
+            bytes.extend(id.as_bytes());
+        }
+        put(&mut bytes, rows.len())?;
+        for row in &rows {
+            bytes.extend(row.memory.to_le_bytes());
+            bytes.extend(row.slot.to_le_bytes());
+            bytes.extend(row.start.to_le_bytes());
+            bytes.extend(row.length.to_le_bytes());
+        }
+        put(&mut bytes, keys.len())?;
+        let mut pool: Vec<u8> = Vec::new();
+        let mut lists: Vec<u8> = Vec::with_capacity(sorted.len() * POSTING_BYTES);
+        for (at, &term) in order.iter().enumerate() {
+            let list = &sorted[starts[at]..starts[at + 1]];
+            // Rows are in memory order, so a term's holders are its runs.
+            let holders = list
+                .iter()
+                .enumerate()
+                .filter(|(i, p)| *i == 0 || list[i - 1].memory != p.memory)
+                .count();
+            put(&mut bytes, pool.len())?;
+            put(&mut bytes, keys[term].len())?;
+            put(&mut bytes, holders)?;
+            put(&mut bytes, lists.len() / POSTING_BYTES)?;
+            put(&mut bytes, list.len())?;
+            pool.extend_from_slice(&keys[term]);
+            for posting in list {
+                lists.extend(posting.row.to_le_bytes());
+                lists.push(posting.field);
+            }
+        }
+        put(&mut bytes, pool.len())?;
+        bytes.extend(pool);
+        bytes.extend(lists);
+        Ok(bytes)
+    }
+}
 
 /// The delivery index: the bytes of its file, read in place.
 pub(crate) struct DeliveryIndex {
@@ -136,77 +272,23 @@ fn put(bytes: &mut Vec<u8>, value: usize) -> Result<(), Error> {
 }
 
 impl DeliveryIndex {
-    /// The file's bytes for `memories`: their ids, their rows, and each
-    /// term's rows sorted by its key, so a lookup reads only its terms.
+    /// The file's bytes for `memories`, built from their terms as given:
+    /// for tests, which make their memories by hand.
+    #[cfg(test)]
     pub(crate) fn write(memories: &[Source]) -> Result<Vec<u8>, Error> {
-        let mut rows: Vec<Row> = Vec::new();
-        // Each term's rows with the field holding it, and the memories
-        // holding it.
-        let mut postings: BTreeMap<Vec<u8>, Postings> = BTreeMap::new();
+        let mut built = Builder::default();
         for (m, memory) in memories.iter().enumerate() {
-            let m = u32::try_from(m).map_err(|_| Error::Format)?;
             for row in &memory.rows {
-                let r = u32::try_from(rows.len()).map_err(|_| Error::Format)?;
-                rows.push(Row {
-                    memory: m,
-                    slot: u16::try_from(row.slot).map_err(|_| Error::Format)?,
-                    start: u32::try_from(row.start).map_err(|_| Error::Format)?,
-                    length: u32::try_from(row.length).map_err(|_| Error::Format)?,
-                });
-                let terms = row
-                    .stems
-                    .iter()
-                    .map(|(stem, field)| (key(false, stem), *field as u8))
-                    .chain(
-                        row.anchors
-                            .iter()
-                            .map(|anchor| (key(true, anchor), Field::Body as u8)),
-                    );
-                for (key, field) in terms {
-                    let (list, holders) = postings.entry(key).or_default();
-                    list.push((r, field));
-                    holders.insert(m);
+                built.row(m, row.slot, row.start, row.length)?;
+                for (stem, field) in &row.stems {
+                    built.term(&key(false, stem), *field)?;
+                }
+                for anchor in &row.anchors {
+                    built.term(&key(true, anchor), Field::Body)?;
                 }
             }
         }
-        let mut bytes = MAGIC.to_vec();
-        let stamp = stamp();
-        put(&mut bytes, stamp.len())?;
-        bytes.extend(stamp.as_bytes());
-        put(&mut bytes, memories.len())?;
-        for memory in memories {
-            let mut id = memory.id.clone().into_bytes();
-            if id.len() != ID_BYTES {
-                return Err(Error::Format);
-            }
-            bytes.append(&mut id);
-        }
-        put(&mut bytes, rows.len())?;
-        for row in &rows {
-            bytes.extend(row.memory.to_le_bytes());
-            bytes.extend(row.slot.to_le_bytes());
-            bytes.extend(row.start.to_le_bytes());
-            bytes.extend(row.length.to_le_bytes());
-        }
-        put(&mut bytes, postings.len())?;
-        let mut pool: Vec<u8> = Vec::new();
-        let mut lists: Vec<u8> = Vec::new();
-        for (key, (list, holders)) in &postings {
-            put(&mut bytes, pool.len())?;
-            put(&mut bytes, key.len())?;
-            put(&mut bytes, holders.len())?;
-            put(&mut bytes, lists.len() / POSTING_BYTES)?;
-            put(&mut bytes, list.len())?;
-            pool.extend(key);
-            for (row, field) in list {
-                lists.extend(row.to_le_bytes());
-                lists.push(*field);
-            }
-        }
-        put(&mut bytes, pool.len())?;
-        bytes.extend(pool);
-        bytes.extend(lists);
-        Ok(bytes)
+        built.bytes(memories.iter().map(|m| m.id.as_str()))
     }
 
     /// Reads the index from `bytes`, checking its sections fit, without
@@ -326,15 +408,17 @@ impl DeliveryIndex {
 /// The memories search may deliver in a scope: active ones of the global
 /// scope and of `projects`, never a guess or an observation about the user
 /// (inferred memories, types `behavior` and `pattern`).
-const CANDIDATES: &str = "SELECT k.key,m.id FROM search_keys k JOIN memories m ON m.id=k.id \
+pub(in crate::memory) const CANDIDATES: &str = "SELECT k.key,m.id FROM search_keys k JOIN memories m ON m.id=k.id \
      WHERE m.status IN ('confirmed','tentative') AND m.source!='inferred' \
      AND m.memory_type NOT IN ('behavior','pattern') \
      AND (m.scope='global' OR (m.scope='project' AND m.project IN (SELECT value FROM json_each(?1)))) \
      ORDER BY k.key";
 
-/// The rows of the store's keyword index at `db` for the memories search
-/// may deliver in the global scope and `projects`, read without writing.
-pub(crate) fn sources(db: &Path, projects: &[String]) -> Result<Vec<Source>, Error> {
+/// The delivery index file of the memories search may deliver in the
+/// global scope and `projects`, from the store at `db`, read without
+/// writing. One pass over the keyword index's rows: each stored token is
+/// already its term's key, so no term is decoded and encoded again.
+pub(crate) fn build(db: &Path, projects: &[String]) -> Result<Vec<u8>, Error> {
     let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let current: Option<String> = conn
         .query_row("SELECT stemmed_by FROM search_state WHERE id=1", [], |r| {
@@ -353,17 +437,16 @@ pub(crate) fn sources(db: &Path, projects: &[String]) -> Result<Vec<Source>, Err
             .collect::<Vec<_>>()
             .join(",")
     );
-    let mut keys: BTreeMap<i64, usize> = BTreeMap::new();
-    let mut sources = Vec::new();
+    let mut keys: HashMap<i64, usize> = HashMap::new();
+    let mut ids: Vec<String> = Vec::new();
     let mut statement = conn.prepare(CANDIDATES)?;
     let mut found = statement.query(params_from_iter([scope]))?;
     while let Some(r) = found.next()? {
-        keys.insert(r.get(0)?, sources.len());
-        sources.push(Source {
-            id: r.get(1)?,
-            rows: Vec::new(),
-        });
+        keys.insert(r.get(0)?, ids.len());
+        ids.push(r.get(1)?);
     }
+    let mut built = Builder::default();
+    let (mut key, mut raw) = (Vec::new(), Vec::new());
     let mut statement = conn.prepare(
         "SELECT rowid,category,title,type,body,anchors,start,length FROM search_words ORDER BY rowid",
     )?;
@@ -373,28 +456,87 @@ pub(crate) fn sources(db: &Path, projects: &[String]) -> Result<Vec<Source>, Err
         let Some(&m) = keys.get(&number.div_euclid(SLOTS)) else {
             continue;
         };
-        let mut stems = Vec::new();
-        for (c, field) in Field::ALL.into_iter().enumerate() {
-            let column: String = r.get(c + 1)?;
-            stems.extend(column.split_whitespace().map(|t| (decode(t), field)));
-        }
-        let anchors: String = r.get(5)?;
         let start: Option<i64> = r.get(6)?;
         let length: Option<i64> = r.get(7)?;
-        sources[m].rows.push(SourceRow {
-            slot: number.rem_euclid(SLOTS),
-            start: usize::try_from(start.unwrap_or(0)).unwrap_or(0),
-            length: usize::try_from(length.unwrap_or(0)).unwrap_or(0),
-            stems,
-            anchors: anchors.split_whitespace().map(decode).collect(),
-        });
+        built.row(
+            m,
+            number.rem_euclid(SLOTS),
+            usize::try_from(start.unwrap_or(0)).unwrap_or(0),
+            usize::try_from(length.unwrap_or(0)).unwrap_or(0),
+        )?;
+        for (c, field) in Field::ALL.into_iter().enumerate() {
+            for token in column(r, c + 1)?.split_whitespace() {
+                stored_key(false, token, &mut key, &mut raw);
+                built.term(&key, field)?;
+            }
+        }
+        for token in column(r, 5)?.split_whitespace() {
+            stored_key(true, token, &mut key, &mut raw);
+            built.term(&key, Field::Body)?;
+        }
     }
-    Ok(sources)
+    built.bytes(ids.iter().map(String::as_str))
+}
+
+/// Text column `at` of `row` as stored, borrowed; empty when null.
+fn column<'r>(row: &'r rusqlite::Row<'_>, at: usize) -> Result<&'r str, Error> {
+    let value = row.get_ref(at)?;
+    value
+        .as_str_or_null()
+        .map(Option::unwrap_or_default)
+        .map_err(|e| {
+            Error::Store(rusqlite::Error::FromSqlConversionFailure(
+                at,
+                value.data_type(),
+                Box::new(e),
+            ))
+        })
+}
+
+/// Writes into `key` the key of the term the stored token `token` stands
+/// for: the token itself after its prefix when it is the lowercase hex of
+/// UTF-8, as `stems::token` writes every token, else the key of the term
+/// [`decode`] makes of it, so the file is the same either way. `raw` is
+/// scratch room for the decoded bytes.
+pub(in crate::memory) fn stored_key(
+    anchor: bool,
+    token: &str,
+    key: &mut Vec<u8>,
+    raw: &mut Vec<u8>,
+) {
+    key.clear();
+    key.push(prefix(anchor));
+    raw.clear();
+    let (pairs, odd) = token.as_bytes().as_chunks::<2>();
+    let hex = odd.is_empty()
+        && pairs
+            .iter()
+            .all(|&[high, low]| match (nibble(high), nibble(low)) {
+                (Some(high), Some(low)) => {
+                    raw.push(high << 4 | low);
+                    true
+                }
+                _ => false,
+            });
+    if hex && std::str::from_utf8(raw).is_ok() {
+        key.extend_from_slice(token.as_bytes());
+    } else {
+        key.extend(self::token(&decode(token)).into_bytes());
+    }
+}
+
+/// The value of a lowercase hex digit.
+fn nibble(digit: u8) -> Option<u8> {
+    match digit {
+        b'0'..=b'9' => Some(digit - b'0'),
+        b'a'..=b'f' => Some(digit - b'a' + 10),
+        _ => None,
+    }
 }
 
 /// The term a hex token stands for (see `stems::token`); a token that isn't
 /// one stays as it is, and matches nothing a window holds.
-fn decode(token: &str) -> String {
+pub(in crate::memory) fn decode(token: &str) -> String {
     let bytes: Option<Vec<u8>> = (0..token.len())
         .step_by(2)
         .map(|at| {
@@ -406,4 +548,33 @@ fn decode(token: &str) -> String {
     bytes
         .and_then(|bytes| String::from_utf8(bytes).ok())
         .unwrap_or_else(|| token.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A stored token keys its term as decoding and encoding it again would,
+    /// whether or not it is the lowercase hex of UTF-8.
+    #[test]
+    fn a_stored_token_keys_its_term_as_the_term_itself_would() {
+        let (mut stored, mut raw) = (Vec::new(), Vec::new());
+        for token in [
+            "6465706c6f79", // "deploy"
+            "c3a9",         // "é"
+            "e6bca2e5ad97", // "漢字"
+            "",
+            "6A",       // uppercase: decodes to "j", whose token is "6a"
+            "abc",      // odd length: stays as it is
+            "ff",       // not UTF-8: stays as it is
+            "zz",       // not hex
+            "64 65",    // never split like this, but not a token either
+            "2f746d70", // "/tmp"
+        ] {
+            for anchor in [false, true] {
+                stored_key(anchor, token, &mut stored, &mut raw);
+                assert_eq!(stored, key(anchor, &decode(token)), "{token:?}");
+            }
+        }
+    }
 }
