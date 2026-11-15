@@ -742,7 +742,7 @@ fn add_history(conn: &Connection, result: &mut Value) -> Result<()> {
 
 /// Types whose explicit, confirmed memories are standing rules: the index
 /// lists them under Rules.
-const RULE_TYPES: [&str; 3] = ["preference", "constraint", "value"];
+pub(super) const RULE_TYPES: [&str; 3] = ["preference", "constraint", "value"];
 
 pub(super) fn standing_rule(m: &Memory) -> bool {
     is_rule(&m.source, &m.status, &m.memory_type)

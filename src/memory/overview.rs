@@ -54,6 +54,11 @@ pub struct Index {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(skip)]
     pub stamps_since: Option<super::stamps::Position>,
+    /// Used by user-memory's own session hook with stamps and stamps_since; leave unset. Each line also says whether the memory is a standing rule or was recorded by an agent, with a rule's fingerprint and the client of its latest change, so session start can list the rules added since the last session. An older server ignores it and sends no fingerprints, and the hook lists no rules.
+    #[arg(skip)]
+    #[serde(default)]
+    #[schemars(skip)]
+    pub rule_prints: bool,
     /// Used by user-memory's own client to add the projects this conversation origin linked; leave unset.
     #[arg(skip)]
     #[serde(default)]
@@ -169,7 +174,7 @@ pub fn index(db: &Path, input: &Index) -> Result<String> {
         #[cfg(debug_assertions)]
         let since = since.filter(|_| std::env::var_os(TEST_NO_POSITIONS).is_none());
         return match since {
-            Some(since) => super::stamps::stamps_since(&conn, &filter, since),
+            Some(since) => super::stamps::stamps_since(&conn, &filter, since, input.rule_prints),
             None => super::stamps::stamps(&conn, &filter),
         };
     }

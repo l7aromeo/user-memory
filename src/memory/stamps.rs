@@ -23,6 +23,67 @@ pub const STAMPS: &str = "user-memory stamps v1";
 /// its own.
 pub const STAMPS_SINCE: &str = "user-memory stamps v2";
 
+/// Opens a [`STAMPS_SINCE`] reply to a client that also asked for rule
+/// prints: after each memory's origin come its kind ([`RULE`], [`AGENT`] or
+/// empty), a rule's [`print`], the client and the conversation that wrote
+/// the version of a rule in force ([`WRITER`]; the conversation only when
+/// it is not the memory's origin), and a rule's or an agent's memory's
+/// project (empty for a global one), so the hook knows which projects it
+/// has seen; other memories leave these empty.
+pub const STAMPS_RULES: &str = "user-memory stamps v3";
+
+/// The kind of a standing rule in a [`STAMPS_RULES`] reply: an explicit,
+/// confirmed memory of a rule type, as `read::standing_rule` decides.
+pub const RULE: &str = "rule";
+/// The kind of a memory an agent recorded: observed or inferred.
+pub const AGENT: &str = "agent";
+
+/// Who wrote the version of the memory `{id}` names that is in force: the
+/// conversation origin and the client of its latest change, joined by
+/// U+001F, which neither holds. Changes an undone import cancelled are
+/// passed over, so a memory the undo gave back names who wrote what it
+/// says again. An import's client is the importer's, not the author's, so
+/// none is given for one.
+const WRITER: &str = "coalesce((SELECT origin||char(31)||CASE op WHEN 'import' THEN '' ELSE client END FROM memory_events e WHERE memory_id={id} AND op NOT IN ('confirm','distinct','origin_removed') AND NOT {undone} ORDER BY seq DESC LIMIT 1),char(31))";
+
+/// The columns a rule's print covers: what the rule says and where it
+/// applies. Not its project key, so a move or a rekey keeps it, nor its
+/// category, type or evidence, which change nothing it asks.
+const PRINTED: [&str; 5] = ["title", "content", "context", "reason", "scope"];
+
+/// The way [`print`] hashes rules, which session hooks keep beside the
+/// prints they saved. A new way gets a new number, and a hook that kept
+/// prints of the old way starts afresh rather than listing every rule as
+/// changed; a test pins one print, so the way never changes unnoticed.
+pub const PRINT_FORMAT: u32 = 1;
+
+/// A standing rule's fingerprint: [`digest`] of the [`PRINT_FORMAT`] and
+/// the [`PRINTED`] columns, quoted and joined as [`printed`] reads them.
+fn print(printed: &str) -> String {
+    digest(&format!("print {PRINT_FORMAT}\u{1f}{printed}"))
+}
+
+/// An SQL expression over a row of `memories` that changes exactly when a
+/// [`PRINTED`] column does.
+fn printed() -> String {
+    PRINTED
+        .iter()
+        .map(|column| format!("quote({column})"))
+        .collect::<Vec<_>>()
+        .join("||char(31)||")
+}
+
+/// An SQL condition over a row of `memories` that holds for a standing
+/// rule, as `read::standing_rule` decides.
+fn rule_condition() -> String {
+    let types = super::read::RULE_TYPES
+        .iter()
+        .map(|t| format!("'{t}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("(source='explicit' AND status='confirmed' AND memory_type IN ({types}))")
+}
+
 /// The conversation origin of the latest change to the memory `{id}` names,
 /// empty when none was given: a confirmation, a distinct pair or a removed
 /// conversation changes nothing a session is told of.
@@ -139,9 +200,15 @@ fn digest(values: &str) -> String {
 
 /// The stamps of the memories `filter` selects, as [`STAMPS_SINCE`] says:
 /// only those changed after `since` when it is this store's position and
-/// the store still counts every change since then, else all of them. One
-/// read, so the position it reports is that of what it lists.
-pub(super) fn stamps_since(conn: &Connection, filter: &Filter, since: &Position) -> Result<String> {
+/// the store still counts every change since then, else all of them; with
+/// `prints`, as [`STAMPS_RULES`] says. One read, so the position it reports
+/// is that of what it lists.
+pub(super) fn stamps_since(
+    conn: &Connection,
+    filter: &Filter,
+    since: &Position,
+    prints: bool,
+) -> Result<String> {
     let read = conn.unchecked_transaction()?;
     let (store_id, last, pruned, seq): (String, i64, i64, i64) = read.query_row(
         "SELECT store_id,last_change,pruned_through,(SELECT coalesce(max(seq),0) FROM memory_events) FROM store_changes WHERE id=1",
@@ -162,8 +229,22 @@ pub(super) fn stamps_since(conn: &Connection, filter: &Filter, since: &Position)
         None => LATEST_ORIGIN.replace("{id}", id),
     };
     let (condition, mut values) = condition(filter)?;
+    // A rule's print and writer are read for rules alone, so the other
+    // memories pay only for their kind.
+    let rule = rule_condition();
+    let ruled = if prints {
+        format!(
+            ",CASE WHEN {rule} THEN '{RULE}' WHEN source<>'explicit' THEN '{AGENT}' ELSE '' END,CASE WHEN {rule} THEN {} END,CASE WHEN {rule} THEN {} END,CASE WHEN {rule} OR source<>'explicit' THEN project END",
+            printed(),
+            WRITER
+                .replace("{id}", "memories.id")
+                .replace("{undone}", &super::history::undone("e")),
+        )
+    } else {
+        String::new()
+    };
     let mut sql = format!(
-        "SELECT id,status,title,{},{} FROM memories WHERE {condition}",
+        "SELECT id,status,title,{},{}{ruled} FROM memories WHERE {condition}",
         super::changes::digested(),
         origin("memories.id"),
     );
@@ -174,7 +255,8 @@ pub(super) fn stamps_since(conn: &Connection, filter: &Filter, since: &Position)
     sql.push_str(" ORDER BY id");
     let kind = if delta { "delta" } else { "full" };
     let now = Position::at(&store_id, last, seq);
-    let mut lines = vec![format!("{STAMPS_SINCE}\t{}\t{kind}", now.0)];
+    let head = if prints { STAMPS_RULES } else { STAMPS_SINCE };
+    let mut lines = vec![format!("{head}\t{}\t{kind}", now.0)];
     let mut listed = BTreeSet::new();
     let mut statement = read.prepare(&sql)?;
     let mut rows = statement.query(params_from_iter(values))?;
@@ -184,10 +266,27 @@ pub(super) fn stamps_since(conn: &Connection, filter: &Filter, since: &Position)
         let title: String = row.get(2)?;
         let counted: String = row.get(3)?;
         let origin: String = row.get(4)?;
-        lines.push(format!(
-            "{id}\t{}\t{status}\t{origin}\t{title}",
-            digest(&counted)
-        ));
+        let digest = digest(&counted);
+        lines.push(if prints {
+            let kind: String = row.get(5)?;
+            let printed: Option<String> = row.get(6)?;
+            let writer: Option<String> = row.get(7)?;
+            let project: Option<String> = row.get(8)?;
+            let (written, client) = writer
+                .as_deref()
+                .and_then(|w| w.split_once('\u{1f}'))
+                .unwrap_or_default();
+            // The memory's origin already says it, as for every rule but
+            // one an undone import gave back.
+            let written = if written == origin { "" } else { written };
+            format!(
+                "{id}\t{digest}\t{status}\t{origin}\t{kind}\t{}\t{client}\t{written}\t{}\t{title}",
+                printed.as_deref().map(print).unwrap_or_default(),
+                project.unwrap_or_default(),
+            )
+        } else {
+            format!("{id}\t{digest}\t{status}\t{origin}\t{title}")
+        });
         listed.insert(id);
     }
     if let Some(after) = after {
@@ -222,17 +321,48 @@ pub struct StampsReply {
     /// The conversation origin of the latest change to each memory listed
     /// or gone, where one was given.
     pub origins: BTreeMap<String, String>,
+    /// Whether the reply says which memories are rules and which agents
+    /// recorded ([`STAMPS_RULES`]); an older server's does not.
+    pub prints: bool,
+    /// Each standing rule listed, by id.
+    pub rules: BTreeMap<String, Rule>,
+    /// The project of each memory listed that an agent recorded, by id;
+    /// empty for a global one.
+    pub agents: BTreeMap<String, String>,
 }
 
-/// The reply to a stamps request with a [`Position`], or a [`STAMPS`] reply from
-/// a server that knows none; `None` for any other text.
+/// What a [`STAMPS_RULES`] reply says of a standing rule.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Rule {
+    /// Its fingerprint, which changes with what it says and where it
+    /// applies.
+    pub print: String,
+    /// The client that wrote the version in force, empty when unknown.
+    pub client: String,
+    /// The conversation that wrote the version in force, as forgetting by
+    /// origin names it; empty when unknown.
+    pub origin: String,
+    /// Its project, empty for a global rule.
+    pub project: String,
+}
+
+/// The reply to a stamps request with a [`Position`], with rule prints or
+/// without, or a [`STAMPS`] reply from a server that knows none; `None` for
+/// any other text.
 pub fn parse_stamps_reply(text: &str) -> Option<StampsReply> {
     let (head, body) = text.split_once('\n').unwrap_or((text, ""));
-    let Some(state) = head.strip_prefix(STAMPS_SINCE) else {
-        return parse_stamps(text).map(|stamps| StampsReply {
-            stamps,
-            ..StampsReply::default()
-        });
+    let (state, prints) = match (
+        head.strip_prefix(STAMPS_RULES),
+        head.strip_prefix(STAMPS_SINCE),
+    ) {
+        (Some(state), _) => (state, true),
+        (None, Some(state)) => (state, false),
+        (None, None) => {
+            return parse_stamps(text).map(|stamps| StampsReply {
+                stamps,
+                ..StampsReply::default()
+            });
+        }
     };
     let mut fields = state.strip_prefix('\t')?.split('\t');
     let since = Position(fields.next()?.to_owned());
@@ -244,8 +374,10 @@ pub fn parse_stamps_reply(text: &str) -> Option<StampsReply> {
     let mut reply = StampsReply {
         since: Some(since),
         delta,
+        prints,
         ..StampsReply::default()
     };
+    let fields_per_line = if prints { 10 } else { 5 };
     for line in body.lines() {
         let (id, origin) = match line.strip_prefix("-\t") {
             Some(gone) => {
@@ -254,11 +386,36 @@ pub fn parse_stamps_reply(text: &str) -> Option<StampsReply> {
                 (id.to_owned(), origin)
             }
             None => {
-                let mut fields = line.splitn(5, '\t');
+                let mut fields = line.splitn(fields_per_line, '\t');
                 let id = fields.next()?.to_owned();
                 let digest = fields.next()?.to_owned();
                 let status = fields.next()?.to_owned();
                 let origin = fields.next()?;
+                if prints {
+                    let kind = fields.next()?;
+                    let print = fields.next()?;
+                    let client = fields.next()?;
+                    let written = fields.next()?;
+                    let project = fields.next()?;
+                    match kind {
+                        RULE => {
+                            let written = if written.is_empty() { origin } else { written };
+                            reply.rules.insert(
+                                id.clone(),
+                                Rule {
+                                    print: print.to_owned(),
+                                    client: client.to_owned(),
+                                    origin: written.to_owned(),
+                                    project: project.to_owned(),
+                                },
+                            );
+                        }
+                        AGENT => {
+                            reply.agents.insert(id.clone(), project.to_owned());
+                        }
+                        _ => {}
+                    }
+                }
                 let title = fields.next()?.to_owned();
                 let stamp = Stamp {
                     digest,
@@ -344,7 +501,206 @@ mod tests {
         let filter = super::super::selection::Selection::default()
             .filter()
             .unwrap();
-        parse_stamps_reply(&stamps_since(conn, &filter, since).unwrap()).unwrap()
+        parse_stamps_reply(&stamps_since(conn, &filter, since, false).unwrap()).unwrap()
+    }
+
+    /// The reply with rule prints for global memories and those of
+    /// `github.com/x/y`, from no position.
+    fn ruled(conn: &Connection) -> StampsReply {
+        let filter = super::super::selection::Selection {
+            projects: vec!["github.com/x/y".into()],
+            ..Default::default()
+        }
+        .filter()
+        .unwrap();
+        let text = stamps_since(conn, &filter, &Position::default(), true).unwrap();
+        assert!(text.starts_with(STAMPS_RULES), "{text}");
+        parse_stamps_reply(&text).unwrap()
+    }
+
+    /// Inserts a memory with these columns; the others take their defaults.
+    fn put(conn: &Connection, id: &str, memory_type: &str, source: &str, status: &str) {
+        conn.execute(
+            "INSERT INTO memories (id,memory_type,category,title,content,source,status,evidence) VALUES (?1,?2,'tooling','A title','Some content',?3,?4,CASE ?3 WHEN 'observed' THEN 'Seen' ELSE '' END)",
+            rusqlite::params![id, memory_type, source, status],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_reply_with_prints_marks_rules_and_agents_and_prints_rules_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = super::super::schema::connect(&dir.path().join("m.sqlite3")).unwrap();
+        put(&conn, A, "preference", "explicit", "confirmed");
+        put(&conn, B, "fact", "observed", "tentative");
+        put(&conn, C, "preference", "explicit", "tentative");
+        conn.execute(
+            "INSERT INTO memory_events (memory_id,op,origin,client) VALUES (?1,'update','claude:session/x','claude')",
+            [A],
+        )
+        .unwrap();
+        let reply = ruled(&conn);
+        assert!(reply.prints);
+        assert_eq!(reply.rules.keys().collect::<Vec<_>>(), [A]);
+        assert_eq!(reply.rules[A].client, "claude");
+        assert_eq!(reply.rules[A].print.len(), DIGEST_BYTES * 2);
+        assert_eq!(reply.agents.keys().collect::<Vec<_>>(), [B]);
+        assert_eq!(
+            (reply.rules[A].project.as_str(), reply.agents[B].as_str()),
+            ("", "")
+        );
+        // Every memory is still a stamp, with its title whole.
+        assert_eq!(reply.stamps.len(), 3);
+        assert_eq!(reply.stamps[A].title, "A title");
+        let print = |conn: &Connection| ruled(conn).rules[A].print.clone();
+        let first = print(&conn);
+        // What the rule asks or where it applies moves the print; its
+        // project key, category, rule type and evidence do not.
+        for (change, moves) in [
+            ("project='github.com/x/y',scope='project'", true),
+            ("project='github.com/x/z'", false),
+            (
+                "category='workflow',memory_type='constraint',evidence='Said'",
+                false,
+            ),
+            ("scope='global',project=''", true),
+            ("content='Other content'", true),
+            ("context='When'", true),
+            ("reason='Because'", true),
+            ("title='Another title'", true),
+        ] {
+            let before = print(&conn);
+            conn.execute(&format!("UPDATE memories SET {change} WHERE id=?1"), [A])
+                .unwrap();
+            if change.starts_with("project='github.com/x/z'") {
+                // Out of view now; back into it to read its print.
+                conn.execute(
+                    "UPDATE memories SET project='github.com/x/y' WHERE id=?1",
+                    [A],
+                )
+                .unwrap();
+            }
+            assert_eq!(print(&conn) != before, moves, "{change}");
+            if change.starts_with("project='github.com/x/y'") {
+                assert_eq!(ruled(&conn).rules[A].project, "github.com/x/y");
+            }
+        }
+        assert_ne!(print(&conn), first);
+        // An import's client is the importer's: none is given.
+        conn.execute(
+            "INSERT INTO memory_events (memory_id,op,client) VALUES (?1,'import','cli')",
+            [A],
+        )
+        .unwrap();
+        assert_eq!(ruled(&conn).rules[A].client, "");
+        // A reply without prints says nothing of rules.
+        let plain = reply_all(&conn);
+        assert!(!plain.prints && plain.rules.is_empty() && plain.agents.is_empty());
+    }
+
+    /// A rule an undone import gave back names who wrote it before the
+    /// import: the import's own event and the undo's are passed over. The
+    /// memory's origin still names its latest change, the undo, so the
+    /// session that undid it is not told of it.
+    #[test]
+    fn a_rule_an_undone_import_gave_back_names_its_earlier_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = super::super::schema::connect(&dir.path().join("m.sqlite3")).unwrap();
+        put(&conn, A, "preference", "explicit", "confirmed");
+        let named = "shared.json@2026-01-01T00:00:00Z";
+        for (op, origin, client, imported) in [
+            ("update", "claude:session/x", "claude", String::new()),
+            ("import", "", "cli", named.to_owned()),
+            (
+                "update",
+                "codex:session/y",
+                "codex",
+                format!("undo:{named}"),
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO memory_events (memory_id,op,origin,client,imported) VALUES (?1,?2,?3,?4,nullif(?5,''))",
+                rusqlite::params![A, op, origin, client, imported],
+            )
+            .unwrap();
+        }
+        let reply = ruled(&conn);
+        let rule = &reply.rules[A];
+        assert_eq!(
+            (rule.origin.as_str(), rule.client.as_str()),
+            ("claude:session/x", "claude")
+        );
+        assert_eq!(reply.origins[A], "codex:session/y");
+        // Not undone, the import is the latest change: no client.
+        conn.execute("DELETE FROM memory_events WHERE imported LIKE 'undo:%'", [])
+            .unwrap();
+        let reply = ruled(&conn);
+        assert_eq!(
+            (
+                reply.rules[A].origin.as_str(),
+                reply.rules[A].client.as_str()
+            ),
+            ("", "")
+        );
+    }
+
+    /// The reply without prints for every global memory.
+    fn reply_all(conn: &Connection) -> StampsReply {
+        reply(conn, &Position::default())
+    }
+
+    /// A print of fixed text is pinned: a session hook keeps the prints it
+    /// showed, and a print that changed between versions would list every
+    /// rule as changed after an upgrade.
+    #[test]
+    fn a_print_is_the_same_on_every_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = super::super::schema::connect(&dir.path().join("m.sqlite3")).unwrap();
+        conn.execute(
+            "INSERT INTO memories (id,memory_type,category,title,content,context,reason,scope) VALUES (?1,'preference','tooling','Use tabs','Indent with tabs, not spaces.','In Go code','gofmt does','global')",
+            [A],
+        )
+        .unwrap();
+        assert_eq!(PRINT_FORMAT, 1);
+        // SHA-256 of "print 1", then each column quoted as SQLite's quote()
+        // does, all joined by U+001F; its first 8 bytes in hex.
+        assert_eq!(ruled(&conn).rules[A].print, "a0b34f6246b14fe9");
+    }
+
+    /// The rule condition read in SQL holds exactly for the memories
+    /// `read::standing_rule` calls rules.
+    #[test]
+    fn the_rule_condition_agrees_with_standing_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = super::super::schema::connect(&dir.path().join("m.sqlite3")).unwrap();
+        let mut n = 0;
+        for memory_type in ["preference", "constraint", "value", "fact", "pattern"] {
+            for source in ["explicit", "observed"] {
+                for status in ["confirmed", "tentative"] {
+                    n += 1;
+                    put(
+                        &conn,
+                        &format!("0bd1ba49-2b63-4aab-9c3a-{n:012}"),
+                        memory_type,
+                        source,
+                        status,
+                    );
+                }
+            }
+        }
+        let filter = super::super::selection::Selection::default()
+            .filter()
+            .unwrap();
+        let rules: BTreeSet<String> = candidates(&conn, &filter)
+            .unwrap()
+            .iter()
+            .filter(|m| super::super::read::standing_rule(m))
+            .map(|m| m.id.to_string())
+            .collect();
+        assert_eq!(rules.len(), 3);
+        let reply = ruled(&conn);
+        assert_eq!(reply.rules.keys().cloned().collect::<BTreeSet<_>>(), rules);
+        assert_eq!(reply.agents.len(), 10);
     }
 
     #[test]
