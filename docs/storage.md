@@ -306,7 +306,15 @@ on Windows), each private to you:
   no store and is never read; that session's next prompt starts a new one
   quietly, and the old file goes with the 30-day clean-up. A session whose
   start could not read memory has a `.missed` file beside its snapshot
-  until a prompt gives it the index.
+  until a prompt gives it the index. `seen-<store key>.json` holds, per
+  store, the ids and fingerprints of the rules session start last listed,
+  and the ids of the memories agents had recorded when you were last told,
+  by project key: no memory text or origin. Session start compares against
+  it to list new rules ([session hooks](clients.md#session-hooks)); a
+  `seen-<store key>.lock` beside it lets two session starts take turns.
+  Both go after a year unused: every session start of the store marks them
+  used. Deleting them loses nothing: the next
+  session start writes them again and lists nothing that time.
 - `servers/`: for each memory server this machine is a client of, the
   server's position as its connector last found it (`<key>.changed`, the
   key a hash of the server's address), when a hook last ran

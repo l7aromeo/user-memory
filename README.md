@@ -27,7 +27,8 @@ apart.
   the rules asks before it records what you said, and before it records
   anything for every project. What it only observed needs evidence and stays
   tentative. The server can't tell whether a person said yes: [what it can
-  check](docs/memory-model.md#what-the-server-can-and-cannot-check).
+  check](docs/memory-model.md#what-the-server-can-and-cannot-check). Rules
+  an agent added since your last session are shown at session start.
 - **Project memory that follows the repository.** A project is named by its
   git remote, so every clone on every machine shares it.
 - **Changes reach running sessions.** When another session or machine

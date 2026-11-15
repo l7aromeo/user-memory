@@ -148,7 +148,8 @@ What user-memory never sends anywhere:
   refuse paths.
 - The files `.user-memory` and `.user-memory-key`. The client reads them and
   sends only the project keys they lead to.
-- The session snapshots and write records in `~/.local/state/user-memory/`.
+- The session snapshots, the rules each store last showed (ids and
+  fingerprints only) and the write records in `~/.local/state/user-memory/`.
 
 ## Your agent's model provider
 
