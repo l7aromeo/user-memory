@@ -9,6 +9,20 @@ are a prompt and a list of actions, in five kinds of work; for each action
 the generator knows which memories, and which point of a long one, the
 work needs then.
 
+When a memory is needed, by shape:
+- a note on a command, at every run of it: "`cargo test` needs the
+  database running" holds whether the run then passes or fails;
+- a lesson, at a failed run of its command only: "when `cargo publish`
+  times out, wait and retry" changes nothing on a run that succeeds;
+  shown earlier in a task where the run fails, it counts as early;
+- a note on a file, at the edit of that file;
+- a design decision on a component, at the prompt naming the component
+  and at a task handed to a helper on it;
+- a rule naming a command, at every run of it; a rule naming no action
+  ("start rule"), at the prompt of each task of its kind of work;
+- a point of a long merged memory, as the shape it would have alone;
+- a look-alike or filler memory, never.
+
 What keeps the benchmark honest:
 - a needed memory names its subject the way a person writes it down, not
   the way the action says it: a command in a code span only some of the
@@ -190,6 +204,9 @@ CONTEXT_SHARE = 0.3
 MERGED_POINTS = (6, 12)
 # Common words padding a merged memory's point, so each is a passage.
 POINT_PADDING = (14, 30)
+# Share of prompts that name a literal, as real prompts often do: a file, a
+# command or a pull request's number.
+PROMPT_LITERAL_SHARE = 0.4
 # Share of commands in a task that fail, and of tasks whose commands no
 # memory names.
 FAILURE_SHARE = 0.15
@@ -266,13 +283,18 @@ class World:
         return text[0].upper() + text[1:] if not text.startswith("`") else text
 
     def _memory(self, kind, memory_type, category, title, content, project, context="",
-                points=None):
+                points=None, about=None, anchored=False):
+        """A memory. Each point says what it is `about` (a subject such as
+        ["command", "git", "tag"], or None) and whether it names that as
+        written, so an anchor can match (`anchored`)."""
         memory = {
             "id": str(uuid.UUID(int=self.rng.getrandbits(128), version=4)),
             "shape": kind, "type": memory_type, "category": category,
             "title": title[:scale.TITLE_CHARS].rstrip(), "content": content,
             "context": context, "scope": "project" if project else "global",
-            "project": project, "points": points or [{"start": 0, "end": len(content)}],
+            "project": project,
+            "points": points or [{"start": 0, "end": len(content), "about": about,
+                                  "anchored": anchored}],
         }
         self.memories.append(memory)
         return memory
@@ -298,32 +320,37 @@ class World:
             text = self._advice(self._command_name(program, sub, anchored))
             title = f"{program} {sub}".strip() + ": " + text.strip("`").split(";")[0][:60]
             m = self._memory("note", rng.choice(["fact", "decision", "constraint"]), "tooling",
-                             title, text, project, self._context(f"running {program}"))
+                             title, text, project, self._context(f"running {program}"),
+                             about=["command", program, sub], anchored=anchored)
             if needed:
                 self._need(("command", program, sub), m)
             if rng.random() < LESSON_SHARE:
-                said = self._command_name(program, sub, rng.random() < ANCHORED_SHARE)
+                lesson_anchored = rng.random() < ANCHORED_SHARE
+                said = self._command_name(program, sub, lesson_anchored)
                 lesson = f"When {said} fails with a timeout, {rng.choice(DOS)} and run it again."
                 m = self._memory("lesson", "fact", "tooling",
                                  f"{program} {sub} failing: what helps".replace("  ", " "),
-                                 lesson, project)
+                                 lesson, project, about=["command", program, sub],
+                                 anchored=lesson_anchored)
                 if needed:
                     self._need(("failure", program, sub), m)
         for component in self.components:
             synonyms = COMPONENTS[component]
             path = self.files[component]
-            said = f"`{path}`" if rng.random() < ANCHORED_SHARE else f"the {self._word(synonyms)} code"
+            anchored = rng.random() < ANCHORED_SHARE
+            said = f"`{path}`" if anchored else f"the {self._word(synonyms)} code"
             text = self._advice(said)
             m = self._memory("note", rng.choice(["fact", "decision"]), "programming",
                              f"{self._word(synonyms).capitalize()}: {text.strip('`')[:60]}", text,
-                             project, self._context(f"editing the {synonyms[0]}"))
+                             project, self._context(f"editing the {synonyms[0]}"),
+                             about=["file", component], anchored=anchored)
             if needed:
                 self._need(("file", component), m)
             decision = (f"The {self._word(synonyms)} keeps {rng.choice(THINGS)}; "
                         f"we chose that because it {rng.choice(FAILURES)} otherwise.")
             m = self._memory("decision", "decision", "design",
                              f"{self._word(synonyms).capitalize()} design decision", decision,
-                             project)
+                             project, about=["component", component])
             if needed:
                 self._need(("component", component), m)
 
@@ -332,11 +359,13 @@ class World:
         for kind, rules in RULES.items():
             for rule, command in rules[:self.shape["rules"]]:
                 text = rule
-                if command and rng.random() < ANCHORED_SHARE:
+                anchored = bool(command) and rng.random() < ANCHORED_SHARE
+                if anchored:
                     text = f"{rule} (`{command[0]} {command[1]}`)"
-                m = self._memory("rule", "preference", "workflow", rule, text, "")
-                if command:
-                    self._need(("rule", *command), m)
+                about = ["command", *command] if command else ["work", kind]
+                m = self._memory("rule" if command else "start rule", "preference", "workflow",
+                                 rule, text, "", about=about, anchored=anchored)
+                self._need(("rule", *command) if command else ("start rule", kind), m)
 
     def _merged(self):
         """Long merged memories: a handbook of many points, each about one
@@ -348,16 +377,17 @@ class World:
             chosen = rng.sample(subjects, min(len(subjects), rng.randint(*MERGED_POINTS)))
             content, points = "", []
             for subject in chosen:
+                anchored = subject[0] == "command" and rng.random() < ANCHORED_SHARE
                 if subject[0] == "command":
-                    text = self._advice(self._command_name(subject[1], subject[2],
-                                                           rng.random() < ANCHORED_SHARE))
+                    text = self._advice(self._command_name(subject[1], subject[2], anchored))
                 else:
                     text = self._advice(f"the {self._word(COMPONENTS[subject[1]])}")
                 padding = " ".join(rng.choice(COMMON) for _ in range(rng.randint(*POINT_PADDING)))
                 text = f"{text} Also {padding}."
                 start = len(content) + 2 if content else 2
                 content = f"{content} - {text}" if content else f"- {text}"
-                points.append({"start": start, "end": len(content), "subject": list(subject)})
+                points.append({"start": start, "end": len(content), "subject": list(subject),
+                               "about": list(subject), "anchored": anchored})
             m = self._memory("merged", "fact", "workflow", f"{PROJECT.rsplit('/', 1)[-1]} handbook",
                              content, PROJECT, points=points)
             for i, point in enumerate(points):
@@ -368,7 +398,7 @@ class World:
         common words and are about something else."""
         rng = self.rng
         for subject, needed in sorted(self.needed.items()):
-            if subject[0] == "rule":
+            if subject[0] in ("rule", "start rule"):
                 continue
             for _ in range(len(needed) * rng.randint(*self.shape["look_alikes"])):
                 if subject[0] in ("command", "failure"):
@@ -377,7 +407,8 @@ class World:
                     text = (f"`{program} {other}` {rng.choice(['needs', 'skips', 'reads'])} "
                             f"{rng.choice(THINGS)} on the {rng.choice(COMMON)} {rng.choice(COMMON)}.")
                     title = f"{program} {other}: {rng.choice(COMMON)} {rng.choice(COMMON)}"
-                    self._memory("look-alike", "fact", "tooling", title, text, PROJECT)
+                    self._memory("look-alike", "fact", "tooling", title, text, PROJECT,
+                                 about=["command", program, other], anchored=True)
                 else:
                     folder = self.files[subject[1]].rsplit("/", 1)[0]
                     path = f"{folder}/{rng.choice(NEIGHBOURS)}.{rng.choice(EXTENSIONS)}"
@@ -385,7 +416,8 @@ class World:
                             f"{rng.choice(COMMON)} and needs {rng.choice(THINGS)} before a "
                             f"{rng.choice(COMMON)}.")
                     self._memory("look-alike", "fact", "programming",
-                                 f"{path}: {rng.choice(COMMON)} {rng.choice(COMMON)}", text, PROJECT)
+                                 f"{path}: {rng.choice(COMMON)} {rng.choice(COMMON)}", text, PROJECT,
+                                 about=["path", path], anchored=True)
 
     def _filler(self):
         rng = self.rng
@@ -436,7 +468,7 @@ class World:
 
     def _command(self, actions, needs, program, sub, failed):
         flags = " ".join(self.rng.sample(FLAGS, self.rng.randint(0, 2)))
-        actions.append({"kind": "command", "failed": failed,
+        actions.append({"kind": "command", "failed": failed, "about": ["command", program, sub],
                         "text": " ".join(part for part in [program, sub, flags] if part)})
         self._needs_at(needs, len(actions) - 1, ("command", program, sub))
         self._needs_at(needs, len(actions) - 1, ("rule", program, sub))
@@ -444,7 +476,8 @@ class World:
             self._needs_at(needs, len(actions) - 1, ("failure", program, sub))
 
     def _file(self, actions, needs, component):
-        actions.append({"kind": "file", "text": self.files[component], "failed": False})
+        actions.append({"kind": "file", "text": self.files[component], "failed": False,
+                        "about": ["file", component]})
         self._needs_at(needs, len(actions) - 1, ("file", component))
 
     def _tasks(self):
@@ -464,7 +497,18 @@ class World:
                     "research": f"Find out why the {name} {rng.choice(SYMPTOMS)} and report",
                     "split": f"Split the {name} rewrite between two helpers and merge their work",
                 }[kind]
-                actions.append({"kind": "prompt", "text": prompt, "failed": False})
+                literal = rng.random() < PROMPT_LITERAL_SHARE
+                if literal:
+                    prompt += {
+                        "change": f" in `{self.files[component]}`",
+                        "release": " with `cargo publish`",
+                        "review": f" (pull request #{rng.randint(100, 999)})",
+                        "research": f"; it lives in {self.files[component]}",
+                        "split": f" ({self.files[component]})",
+                    }[kind]
+                actions.append({"kind": "prompt", "text": prompt, "failed": False,
+                                "about": ["component", component], "literal": literal})
+                self._needs_at(needs, 0, ("start rule", kind))
                 if kind != "release":
                     self._needs_at(needs, 0, ("component", component))
                 if unnamed:
