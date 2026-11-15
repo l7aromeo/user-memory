@@ -64,6 +64,19 @@ def in_time(shown, need):
 
 
 def decisions(candidate, bars, action_kind):
+    """See `tested`; with `bars["scale"] == "kind"`, a command's
+    passages are tested on `bars["command"]` and every other event's on
+    `bars["other"]`; with `"either"`, a way passes when it passes on any
+    of `bars["parts"]`."""
+    if bars.get("scale") == "kind":
+        return tested(candidate, {**bars, **bars["command" if action_kind == "command" else "other"]},
+                      action_kind)
+    if bars.get("scale") == "either":
+        return set().union(*(tested(candidate, {**bars, **part}, action_kind) for part in bars["parts"]))
+    return tested(candidate, bars, action_kind)
+
+
+def tested(candidate, bars, action_kind):
     """Which ways `candidate` is delivered at bars `bars`: pushed, pushed
     after a failure, held before a command. With `bars["anchor"]`, a push
     also needs an anchor of the action that fired. `bars["scale"]` names
@@ -251,6 +264,18 @@ def evaluate(task, matched, memories, bars, earlier=None):
             counts["prompts literal"] += bool(actions[0].get("literal"))
         if held_count:
             counts[f"hold size {held_count}"] += 1
+        if actions[i].get("repeat"):
+            # A second or later run of a busy command in this task.
+            counts["repeat runs"] += 1
+            counts["repeat held"] += held_count > 0
+            counts["repeat pushed"] += held_count == 0 and pushed_here > 0
+            counts["repeat nothing"] += held_count == 0 and pushed_here == 0
+        if actions[i].get("busy"):
+            # A run of a command with many notes: what it delivered, and
+            # how much of that it needed now.
+            counts["busy runs"] += 1
+            counts["busy delivered"] += held_count + pushed_here
+            counts["busy needed"] += sum(n["action"] == i for n in task["needs"])
         if kind == "command":
             counts["denials"] += held_here
             counts["denials with a need"] += held_now_here

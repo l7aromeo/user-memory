@@ -55,6 +55,7 @@ SCALES = {
     "share": [0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.75, 1.0, 1.25],
     "mixed": [0.2, 0.25, 0.3, 0.35, 0.4, 0.5, 0.6, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0],
     "mixed_log": [0.2, 0.25, 0.3, 0.35, 0.4, 0.5, 0.6, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0],
+    "flat": [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0],
 }
 # The window settings a sweep tries.
 WINDOWS = [10, 30]
@@ -393,7 +394,7 @@ def main():
     parser.add_argument("--credit", type=float, help="credit for terms only other passages hold")
     parser.add_argument("--bars", action="append",
                         help="PUSH,FAILURE,HOLD[,anchor][,scale=NAME] to report at instead of the matcher's; "
-                             "NAME is what the bars test (score, holders, root, share, mixed, mixed_log); repeatable")
+                             "NAME is what the bars test (score, holders, root, share, mixed, mixed_log, flat); repeatable")
     parser.add_argument("--presence", action="store_true",
                         help="how often session start lists what tasks need (evals/delivery/presence.py)")
     parser.add_argument("--prompt-curve", help="prompt bars, on stems alone, to report prompt pushes at")
