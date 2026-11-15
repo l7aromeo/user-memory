@@ -220,10 +220,15 @@ async fn plan(
 ) -> Result<Option<Plan>> {
     if let Machine::Client(connection) = machine {
         let server = &connection.url;
-        let said = connection.handshake().await.map_err(|_| {
-            anyhow::anyhow!(
-                "The memory server at {server} can't be reached, so its version is unknown; nothing was changed."
-            )
+        let said = connection.handshake().await.map_err(|err| {
+            match crate::remote::refused::Reason::of(&err) {
+                Some(reason) => {
+                    anyhow::anyhow!("{} Nothing was changed.", reason.sentence(server))
+                }
+                None => anyhow::anyhow!(
+                    "The memory server at {server} can't be reached, so its version is unknown; nothing was changed."
+                ),
+            }
         })?;
         let version = said
             .pointer("/serverInfo/version")

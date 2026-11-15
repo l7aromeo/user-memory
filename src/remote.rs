@@ -31,6 +31,7 @@ use std::{
 
 mod gate;
 pub(crate) mod marker;
+pub(crate) mod refused;
 pub(crate) mod scope;
 mod tokens;
 mod transfer;
@@ -133,7 +134,13 @@ impl Connection {
         let service = tokio::time::timeout(Duration::from_secs(10), ().serve(self.transport()?))
             .await
             .context("Memory server connection timed out")?
-            .context("Cannot connect to memory server; check endpoint and access token")?;
+            .map_err(|err| {
+                refused::told(
+                    err,
+                    &self.url,
+                    Some("Cannot connect to memory server; check endpoint and access token"),
+                )
+            })?;
         let result = tokio::time::timeout(Duration::from_secs(10), service.list_all_tools()).await;
         let _ = service.cancel().await;
         let tools = result.context("Memory server tool check timed out")??;
@@ -149,7 +156,9 @@ impl Connection {
         check_tools(&schemas)
     }
 
-    /// What the server says in its handshake: its `initialize` result.
+    /// What the server says in its handshake: its `initialize` result. A
+    /// refused token's reason stays in the error's chain for
+    /// [`refused::Reason::of`].
     pub async fn handshake(&self) -> Result<serde_json::Value> {
         let service = tokio::time::timeout(Duration::from_secs(10), ().serve(self.transport()?))
             .await
@@ -164,7 +173,9 @@ impl Connection {
         let service = tokio::time::timeout(Duration::from_secs(10), ().serve(self.transport()?))
             .await
             .context("Memory server connection timed out")?
-            .context("Cannot connect to memory server")?;
+            .map_err(|err| {
+                refused::told(err, &self.url, Some("Cannot connect to memory server"))
+            })?;
         // An input the server is too old for is refused, not sent: it would
         // be ignored and the reply would look complete.
         let handshake = service.peer_info().map(serde_json::to_value).transpose()?;
@@ -183,7 +194,11 @@ impl Connection {
         let result =
             tokio::time::timeout(Duration::from_secs(10), service.call_tool(request)).await;
         let _ = service.cancel().await;
-        let result = serde_json::to_value(result.context("Memory server request timed out")??)?;
+        let result = serde_json::to_value(
+            result
+                .context("Memory server request timed out")?
+                .map_err(|err| refused::told(err, &self.url, None))?,
+        )?;
         let content = result["content"]
             .as_array()
             .context("Memory server returned no content")?;
@@ -988,8 +1003,9 @@ async fn forward<R: Transport<RoleClient>>(
 enum Failure {
     /// The server couldn't be reached, or the connection ended.
     Unanswered,
-    /// The server answered 401: it refused this machine's access token.
-    Refused,
+    /// The server answered 401: it refused this machine's access token,
+    /// saying why when it is revoked or expired.
+    Refused(Option<refused::Reason>),
 }
 
 impl Failure {
@@ -997,7 +1013,7 @@ impl Failure {
     /// server's 401 as an [`AuthRequiredError`] in the chain.
     fn of(err: &anyhow::Error) -> Self {
         if err.chain().any(|cause| cause.is::<AuthRequiredError>()) {
-            Self::Refused
+            Self::Refused(refused::Reason::of(err))
         } else {
             Self::Unanswered
         }
@@ -1012,7 +1028,12 @@ impl Failure {
             Self::Unanswered => format!(
                 "The memory server at {endpoint} did not answer; the call may not have completed. Before repeating a write, search for it. Memory reconnects on the next call."
             ),
-            Self::Refused => format!(
+            Self::Refused(Some(reason)) => format!(
+                "{} The call was not run. Tell the user; don't open the token file ({}).",
+                reason.sentence(endpoint),
+                token_file.display()
+            ),
+            Self::Refused(None) => format!(
                 "The memory server at {endpoint} refused this machine's access token ({}); the call was not run. Tell the user the token in that file needs replacing (user-memory doctor shows it); don't open the file. Memory tries again on the next call.",
                 token_file.display()
             ),

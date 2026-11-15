@@ -247,11 +247,17 @@ impl Connection {
         if status.is_success() {
             return Ok(response);
         }
+        let reason = response
+            .headers()
+            .get(reqwest::header::WWW_AUTHENTICATE)
+            .and_then(|challenge| challenge.to_str().ok())
+            .and_then(super::refused::Reason::from_challenge);
         let message = response.text().await.unwrap_or_default();
         Err(match status {
-            reqwest::StatusCode::UNAUTHORIZED => {
-                anyhow!("The memory server refused the access token")
-            }
+            reqwest::StatusCode::UNAUTHORIZED => match reason {
+                Some(reason) => anyhow!("{}", reason.sentence(&self.url)),
+                None => anyhow!("The memory server refused the access token"),
+            },
             reqwest::StatusCode::NOT_FOUND => anyhow!(
                 "The memory server does not take {name} from clients; upgrade it to this version"
             ),

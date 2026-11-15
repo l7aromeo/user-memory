@@ -88,6 +88,18 @@ impl Server {
             .trim()
             .to_owned()
     }
+    /// Runs `user-memory host token ARGS` on this server's store.
+    fn host_token(&self, args: &[&str]) {
+        let out = Command::new(env!("CARGO_BIN_EXE_user-memory"))
+            .args(["host", "token"])
+            .args(args)
+            .arg("--db")
+            .arg(self.root.path().join("memories.sqlite3"))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+    }
+
     fn base(&self) -> String {
         format!("http://{}", self.address)
     }
@@ -3623,6 +3635,25 @@ fn upgrade_on_a_client_changes_nothing_where_its_server_has_no_release() {
     let out = detached(c.upgrade(&releases, "0.9.0", &["--yes"]));
     assert_eq!(out.status.code(), Some(1), "{out:?}");
     assert!(text(&out).1.contains(&format!("The memory server at {url} can't be reached, so its version is unknown; nothing was changed.")), "{out:?}");
+
+    // A server that answers but revoked this machine's token says so.
+    let s = Server::start();
+    let file = s.root.path().join("laptop.token");
+    s.host_token(&["add", "laptop", "--out", file.to_str().unwrap()]);
+    let out = c.install(
+        &releases,
+        &[("USER_MEMORY_TOKEN", &fs::read_to_string(&file).unwrap())],
+        &["--url", &s.base()],
+    );
+    assert!(out.status.success(), "{}", text(&out).1);
+    s.host_token(&["revoke", "laptop"]);
+    let before = c.installed();
+    let out = detached(c.upgrade(&releases, "0.9.0", &["--yes"]));
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let url = format!("{}/mcp", s.base());
+    assert!(text(&out).1.contains(&format!("The memory server at {url} revoked this machine's token. Ask its operator for a new token file, then run the installer with --url {url} --token-file FILE. Nothing was changed.")), "{out:?}");
+    assert_eq!(c.installed(), before);
+    assert_eq!(c.leftovers(), Vec::<String>::new());
 }
 
 /// The installer's Docker server is rebuilt from the release and its store
