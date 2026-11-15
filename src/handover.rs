@@ -66,7 +66,7 @@ const TEST_EXEC_FAIL: &str = "USER_MEMORY_TEST_EXEC_FAIL";
 /// hand-over decision, the build serving, the file on disk and the
 /// requests in flight, so a test that sees no hand-over says why.
 #[cfg(debug_assertions)]
-const TEST_TRACE: &str = "USER_MEMORY_TEST_TRACE";
+pub(crate) const TEST_TRACE: &str = "USER_MEMORY_TEST_TRACE";
 /// How many times a replacement whose check was ended by a signal is
 /// checked again, at later messages, before it is refused. macOS can kill a
 /// new executable while it assesses it on a loaded machine

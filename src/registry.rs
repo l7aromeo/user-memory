@@ -73,6 +73,27 @@ pub fn unreadable(path: &Path, err: &impl std::fmt::Display) -> String {
     )
 }
 
+/// The refusal for a registry at schema version `found`, newer than this
+/// binary's.
+fn newer(path: &Path, found: i64) -> String {
+    format!(
+        "The server's token registry {} has schema version {found}, but this user-memory is older than it (it uses version {SCHEMA_VERSION}); update user-memory. The registry was left unchanged.",
+        path.display()
+    )
+}
+
+/// Fails when the registry behind `conn` has become newer than this binary
+/// since it was opened, as a newer user-memory run beside it can make it.
+pub fn still_current(conn: &Connection, path: &Path) -> Result<()> {
+    let found: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(|err| anyhow::anyhow!(unreadable(path, &err)))?;
+    if found > SCHEMA_VERSION {
+        bail!(newer(path, found));
+    }
+    Ok(())
+}
+
 /// Opens the registry at `path`, upgrading an older one; `None` when there
 /// is none. Never creates it.
 pub fn open(path: &Path) -> Result<Option<Connection>> {
@@ -108,10 +129,7 @@ fn ready(mut conn: Connection, path: &Path) -> Result<Connection> {
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(damaged)?;
     if found > SCHEMA_VERSION {
-        bail!(
-            "The server's token registry {} has schema version {found}, but this user-memory is older than it (it uses version {SCHEMA_VERSION}); update user-memory. The registry was left unchanged.",
-            path.display()
-        );
+        bail!(newer(path, found));
     }
     if found < SCHEMA_VERSION {
         let tx = conn
@@ -160,6 +178,8 @@ impl Scope {
 /// One client token as the registry keeps it.
 #[derive(Clone, Debug)]
 pub struct ClientToken {
+    /// The token's SHA-256, in hex: all the registry keeps of it.
+    pub hash: String,
     pub name: String,
     pub scope: Scope,
     pub created_at: i64,
@@ -173,9 +193,35 @@ impl ClientToken {
     /// its `--expires` date and [`INACTIVITY_EXPIRY`] after its last use (or
     /// its creation) comes first.
     pub fn expiry(&self) -> i64 {
-        let idle = self.last_used_at.unwrap_or(self.created_at) + INACTIVITY_EXPIRY.as_secs_i64();
+        let idle = self.idle_expiry();
         self.expires_at.map_or(idle, |date| date.min(idle))
     }
+
+    /// When [`INACTIVITY_EXPIRY`] after its last use (or creation) ends.
+    fn idle_expiry(&self) -> i64 {
+        self.last_used_at.unwrap_or(self.created_at) + INACTIVITY_EXPIRY.as_secs_i64()
+    }
+
+    /// Why the token no longer works at `now`, if it has expired: whichever
+    /// expiry came first.
+    pub fn expired(&self, now: i64) -> Option<Expired> {
+        if self.expiry() > now {
+            return None;
+        }
+        Some(match self.expires_at {
+            Some(date) if date <= self.idle_expiry() => Expired::OnItsDate,
+            _ => Expired::Unused,
+        })
+    }
+}
+
+/// How a token expired.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Expired {
+    /// [`INACTIVITY_EXPIRY`] passed without a use.
+    Unused,
+    /// The date set with `--expires` passed.
+    OnItsDate,
 }
 
 /// A token unused this long is refused as expired: long enough for a
@@ -183,7 +229,11 @@ impl ClientToken {
 /// stops working on its own.
 pub const INACTIVITY_EXPIRY: Duration = Duration::from_secs(90 * 24 * 60 * 60);
 
-trait SecondsI64 {
+/// Last use is written at most once this often per token, so a busy client
+/// costs the registry one write an hour, not one per request.
+pub const LAST_USE_RESOLUTION: Duration = Duration::from_secs(60 * 60);
+
+pub(crate) trait SecondsI64 {
     fn as_secs_i64(&self) -> i64;
 }
 
@@ -196,17 +246,18 @@ impl SecondsI64 for Duration {
 /// Every token, revoked ones included, oldest first.
 pub fn tokens(conn: &Connection) -> Result<Vec<ClientToken>> {
     let mut statement = conn.prepare(
-        "SELECT name, scope, created_at, last_used_at, expires_at, revoked_at
+        "SELECT hash, name, scope, created_at, last_used_at, expires_at, revoked_at
          FROM client_tokens ORDER BY created_at, name",
     )?;
     let rows = statement.query_map([], |row| {
         Ok(ClientToken {
-            name: row.get(0)?,
-            scope: Scope::parse(&row.get::<_, String>(1)?),
-            created_at: row.get(2)?,
-            last_used_at: row.get(3)?,
-            expires_at: row.get(4)?,
-            revoked_at: row.get(5)?,
+            hash: row.get(0)?,
+            name: row.get(1)?,
+            scope: Scope::parse(&row.get::<_, String>(2)?),
+            created_at: row.get(3)?,
+            last_used_at: row.get(4)?,
+            expires_at: row.get(5)?,
+            revoked_at: row.get(6)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -267,6 +318,24 @@ pub fn revoke(conn: &Connection, name: &str) -> Result<bool> {
         "UPDATE client_tokens SET revoked_at = ?2 WHERE name = ?1 AND revoked_at IS NULL",
         rusqlite::params![name, now()],
     )? > 0)
+}
+
+/// Revokes the token whose SHA-256 is `hash`; false when it was revoked
+/// already or is not in the registry.
+pub fn revoke_hash(conn: &Connection, hash: &str) -> Result<bool> {
+    Ok(conn.execute(
+        "UPDATE client_tokens SET revoked_at = ?2 WHERE hash = ?1 AND revoked_at IS NULL",
+        rusqlite::params![hash, now()],
+    )? > 0)
+}
+
+/// Writes `at` as the last use of the token whose SHA-256 is `hash`.
+pub fn used(conn: &Connection, hash: &str, at: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE client_tokens SET last_used_at = ?2 WHERE hash = ?1",
+        rusqlite::params![hash, at],
+    )?;
+    Ok(())
 }
 
 /// How many bytes of randomness a client token holds: 256 bits, beyond
@@ -365,6 +434,7 @@ mod tests {
     fn expiry_is_the_earlier_of_the_date_and_idleness() {
         let idle = INACTIVITY_EXPIRY.as_secs_i64();
         let token = |last: Option<i64>, expires: Option<i64>| ClientToken {
+            hash: String::new(),
             name: String::new(),
             scope: Scope::Write,
             created_at: 1_000,
@@ -376,5 +446,19 @@ mod tests {
         assert_eq!(token(Some(5_000), None).expiry(), 5_000 + idle);
         assert_eq!(token(Some(5_000), Some(2_000)).expiry(), 2_000);
         assert_eq!(token(None, Some(i64::MAX)).expiry(), 1_000 + idle);
+        // Which expiry ended it: the earlier one.
+        assert_eq!(token(Some(5_000), None).expired(5_000 + idle - 1), None);
+        assert_eq!(
+            token(Some(5_000), None).expired(5_000 + idle),
+            Some(Expired::Unused)
+        );
+        assert_eq!(
+            token(Some(5_000), Some(2_000)).expired(2_000),
+            Some(Expired::OnItsDate)
+        );
+        assert_eq!(
+            token(Some(5_000), Some(9_000 + idle)).expired(9_000 + idle),
+            Some(Expired::Unused)
+        );
     }
 }

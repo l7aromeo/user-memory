@@ -101,7 +101,11 @@ fn matches(allowed: &str, authority: &Authority) -> bool {
     }
 }
 
-async fn admit(State(allowed): State<Allowed>, request: Request, next: Next) -> Response {
+pub(super) async fn admit(
+    State(allowed): State<Allowed>,
+    request: Request,
+    next: Next,
+) -> Response {
     if !allowed.admits(request.uri(), request.headers()) {
         return (
             StatusCode::FORBIDDEN,

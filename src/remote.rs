@@ -4,11 +4,9 @@ use crate::private;
 use anyhow::{Context, Result, bail};
 use axum::{
     Router,
-    extract::{Request, State},
-    http::{StatusCode, header},
-    middleware::{self, Next},
-    response::{IntoResponse, Response},
-    routing::get,
+    http::StatusCode,
+    middleware,
+    routing::{delete, get},
 };
 use clap::{Args, Subcommand};
 use rmcp::{
@@ -30,8 +28,8 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
-use subtle::ConstantTimeEq;
 
+mod gate;
 pub(crate) mod marker;
 mod tokens;
 mod transfer;
@@ -303,24 +301,6 @@ fn host_token(path: &Path) -> Result<String> {
     Ok(token)
 }
 
-async fn authenticate(State(token): State<String>, request: Request, next: Next) -> Response {
-    let provided = request
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .unwrap_or("");
-    if !bool::from(provided.as_bytes().ct_eq(token.as_bytes())) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            [(header::WWW_AUTHENTICATE, "Bearer")],
-            "Authentication required",
-        )
-            .into_response();
-    }
-    next.run(request).await
-}
-
 /// Resolves when the process is asked to stop: Ctrl-C (SIGINT, which the
 /// Docker server's compose file sends) everywhere, and SIGTERM on Unix.
 pub async fn stopped() {
@@ -369,6 +349,14 @@ pub async fn host(options: HostOptions) -> Result<()> {
         .with_allowed_hosts(allowed_hosts)
         .with_allowed_origins(origins);
     let shutdown = config.cancellation_token.clone();
+    let gate = gate::Gate::new(token, crate::registry::path(&db));
+    let own_token = Router::new()
+        .route("/auth/token", delete(gate::revoke_own))
+        .with_state(gate.clone())
+        .layer(middleware::from_fn_with_state(
+            allowed.clone(),
+            transfer::admit,
+        ));
     let transfers = transfer::routes(db.clone(), allowed);
     let service: StreamableHttpService<crate::UserMemoryServer, LocalSessionManager> =
         StreamableHttpService::new(
@@ -381,13 +369,15 @@ pub async fn host(options: HostOptions) -> Result<()> {
             Default::default(),
             config,
         );
-    // /mcp and the export and import endpoints need the token. `/` names
-    // the service for health checks and reverse-proxy smoke tests and reads
-    // nothing; other paths are 404.
+    // /mcp, the export and import endpoints and a token's own revocation
+    // need a token (src/remote/gate.rs). `/` names the service for health
+    // checks and reverse-proxy smoke tests and reads nothing; other paths
+    // are 404.
     let router = Router::new()
         .nest_service("/mcp", service)
         .merge(transfers)
-        .layer(middleware::from_fn_with_state(token, authenticate))
+        .merge(own_token)
+        .layer(middleware::from_fn_with_state(gate, gate::authenticate))
         .route(
             "/",
             get(|| async { "user-memory MCP server. Endpoint: /mcp\n" }),
