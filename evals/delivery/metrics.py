@@ -115,8 +115,9 @@ def subject_of(about):
 def about_action(candidate, memory, action, task_kind):
     """Whether a delivered passage is about the action it was delivered
     at: a point it overlaps (any, for a context passage) is about the same
-    subject, or about the task's kind of work."""
-    wanted = {subject_of(action.get("about")), ("work", task_kind)} - {None}
+    subject, about what the action names (a prompt naming a command), or
+    about the task's kind of work."""
+    wanted = {subject_of(action.get("about")), subject_of(action.get("names")), ("work", task_kind)} - {None}
     for point in memory["points"]:
         if candidate["slot"] == 255 or overlaps(candidate, point):
             if subject_of(point.get("about")) in wanted:

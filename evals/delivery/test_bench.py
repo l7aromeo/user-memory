@@ -173,6 +173,10 @@ class Classes(unittest.TestCase):
         # A rule for a kind of work is about every action of a task of it.
         self.assertTrue(about(candidate("start", 3), self.memories["start"], self.git_tag, "release"))
         self.assertFalse(about(candidate("start", 3), self.memories["start"], self.git_tag, "review"))
+        # A prompt naming a command is about that command too.
+        prompt = {"kind": "prompt", "about": ["component", "parser"], "names": ["command", "git", "tag"]}
+        self.assertTrue(about(candidate("note", 3), self.memories["note"], prompt, "change"))
+        self.assertFalse(about(candidate("note", 3), self.memories["note"], {**prompt, "names": None}, "change"))
         # A passage beside the point is about nothing the point is.
         self.assertFalse(about(candidate("note", 3, start=30), self.memories["note"], self.git_tag, "change"))
 

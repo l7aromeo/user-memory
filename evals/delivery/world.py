@@ -600,8 +600,13 @@ class World:
                         "research": f"; it lives in {self.files[component]}",
                         "split": f" ({self.files[component]})",
                     }[kind]
+                # What a literal prompt names is a subject of it too.
+                names = None
+                if literal:
+                    names = (["command", "cargo", "publish"] if kind == "release"
+                             else None if kind == "review" else ["file", component])
                 actions.append({"kind": "prompt", "text": prompt, "failed": False,
-                                "about": ["component", component], "literal": literal})
+                                "about": ["component", component], "literal": literal, "names": names})
                 self._needs_at(needs, 0, ("start rule", kind))
                 for e in range(ESSENTIALS):
                     if rng.random() < ESSENTIAL_TASK_SHARE:
