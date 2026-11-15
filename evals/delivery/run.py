@@ -34,6 +34,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 sys.path.insert(0, str(HERE))
 import metrics  # noqa: E402
+import presence  # noqa: E402
 import world  # noqa: E402
 
 SIZES = [50, 1_000, 10_000]
@@ -109,9 +110,11 @@ def match(bench_binary, index, drawn, folder, tuning):
     return matched
 
 
-def run_world(binaries, seed, size, tuning, keep=None):
+def run_world(binaries, seed, size, tuning, keep=None, then=None):
     """One world's tasks, matched: the drawn world, what each action matched,
-    the store's size and the seconds building it took."""
+    the store's size and the seconds building it took. `then(env, folder,
+    drawn, matched)` runs while the store still exists; its result comes
+    last."""
     drawn = world.generate(seed, size)
     with tempfile.TemporaryDirectory() as tmp:
         folder = Path(keep or tmp) / f"seed{seed}-size{size}"
@@ -120,7 +123,8 @@ def run_world(binaries, seed, size, tuning, keep=None):
         index = folder / "delivery.index"
         bench(binaries["bench"], "index", "--db", db, "--project", world.PROJECT, "--out", index)
         matched = match(binaries["bench"], index, drawn, folder, tuning)
-    return drawn, matched, seconds
+        extra = then(sandbox(folder / "home"), folder, drawn, matched) if then else None
+    return drawn, matched, seconds, extra
 
 
 def counts(drawn, matched, bars):
@@ -186,6 +190,37 @@ def report(title, total, by_kind):
             timing = "  ".join(f"{total[f'timing {w}|subject:{subject}']:<7}"
                                for w in (metrics.EARLY, metrics.ON_TIME, metrics.LATE, metrics.NEVER))
             print(f"    {subject:<10}{fmt(r(total[f'found|subject:{subject}'], n))} /{n:<4} {timing}")
+    print("  wrong deliveries: about this action but not needed in the task / about something else")
+    for group in ["all"] + [f"shape:{s}" for s in ("note", "lesson", "decision", "rule", "merged",
+                                                    "look-alike", "filler")]:
+        wrong = total[f"delivered|{group}"] - total[f"right|{group}"]
+        if wrong:
+            print(f"    {group.removeprefix('shape:'):<10} {total[f'wrong about|{group}']:>4} / "
+                  f"{total[f'wrong elsewhere|{group}']:<4}")
+    print(f"  precision both ways: needed in the task {fmt(r(total['right|all'], total['delivered|all']))}, "
+          f"about this action {fmt(r(total['right|all'] + total['wrong about|all'], total['delivered|all']))}")
+    moments = (metrics.BEFORE_FAILURE, metrics.AT_FAILURE, metrics.AFTER_FAILURE,
+               metrics.BEFORE_SUCCESS, metrics.AFTER_SUCCESS, metrics.NOT_RUN)
+    if any(total[f"lesson {m}|{v}"] for m in moments for v in ("right", "wrong")):
+        print("  lessons shown, right / wrong:")
+        for m in moments:
+            if total[f"lesson {m}|right"] or total[f"lesson {m}|wrong"]:
+                print(f"    {m:<40} {total[f'lesson {m}|right']:>4} / {total[f'lesson {m}|wrong']}")
+    print(f"  prompts naming a literal {total['prompts literal']} of {total['prompts']}; prompt "
+          f"deliveries right: with a literal {fmt(r(total['right|prompt literal'], total['delivered|prompt literal']))}"
+          f"/{total['delivered|prompt literal']}, without {fmt(r(total['right|prompt plain'], total['delivered|prompt plain']))}"
+          f"/{total['delivered|prompt plain']}")
+    reasons = (metrics.NO_ANCHOR, metrics.NOT_MATCHED, metrics.SPELLED, metrics.BELOW)
+    print("  misses by reason: " + " / ".join(reasons))
+    for subject in ("command", "failure", "file", "component", "rule", "start rule"):
+        n = total[f"needed|subject:{subject}"]
+        if n:
+            print(f"    {subject:<10} " + " / ".join(
+                f"{total[f'missed {why}|subject:{subject}']}" for why in reasons)
+                  + f"   of {n - total[f'found|subject:{subject}']} missed")
+    print(f"  rules that name no action (outside the budget): pushed {total['delivered|shape:start rule']}, "
+          f"right {total['right|shape:start rule']}; needed {total['needed|subject:start rule']}, "
+          f"found {total['found|subject:start rule']}")
     print(f"  failures: found at the failed action {total['failure found at its action']} of "
           f"{total['failure needs']}; failure-only pushes right "
           f"{total['right|way:failure']} of {total['delivered|way:failure']}")
@@ -195,6 +230,8 @@ def report(title, total, by_kind):
     if total["split probes"]:
         print(f"  split words: the long memory ranks first for {total['split found']} of "
               f"{total['split probes']} searches naming a word of each half of its point")
+    print(f"  long against short: a needed short memory outranked by a long memory's passage not "
+          f"needed then {total['long over short']} of {total['short needed']}")
     if total["merged delivered"]:
         print(f"  long memories: delivered passages holding the needed point whole "
               f"{total['merged whole']} of {total['merged delivered']}")
@@ -242,7 +279,7 @@ def sweep(found, sizes, seeds, tuning, keep):
                         for hold in [b for b in HOLD_BARS if b >= push]:
                             bars = {"push": push, "failure": failure, "hold": hold, "anchor": anchor}
                             total = Counter()
-                            for drawn, matched, _ in runs:
+                            for drawn, matched, _, _ in runs:
                                 total.update(counts(drawn, matched, bars)[0])
                             r = metrics.ratio
                             print(f"{size:<6}{window:<7}{half_life:<10}{anchor!s:<7}{push:<6}{failure:<8}{hold:<7}"
@@ -294,7 +331,11 @@ def main():
     parser.add_argument("--cost", action="store_true", help="time one lookup on the largest size")
     parser.add_argument("--check-cost", action="store_true", help="fail when the lookup's median is over its limit")
     parser.add_argument("--credit", type=float, help="credit for terms only other passages hold")
-    parser.add_argument("--bars", help="PUSH,FAILURE,HOLD[,anchor] to report at instead of the matcher's")
+    parser.add_argument("--bars", action="append",
+                        help="PUSH,FAILURE,HOLD[,anchor] to report at instead of the matcher's; repeatable")
+    parser.add_argument("--presence", action="store_true",
+                        help="how often session start lists what tasks need (evals/delivery/presence.py)")
+    parser.add_argument("--prompt-curve", help="prompt bars, on stems alone, to report prompt pushes at")
     parser.add_argument("--debug", action="store_true", help="use the debug build")
     parser.add_argument("--keep", type=Path, help="keep the built stores in this folder")
     args = parser.parse_args()
@@ -312,28 +353,73 @@ def main():
               tuning, args.keep)
         return 0
     seeds = [int(s) for s in args.seeds.split(",")] if args.seeds else REPORT_SEEDS
-    bars = bars_of_matcher()
+    variants = [bars_of_matcher()]
     if args.bars:
-        parts = args.bars.split(",")
-        bars = {"push": float(parts[0]), "failure": float(parts[1]), "hold": float(parts[2]),
-                "anchor": parts[3:] == ["anchor"]}
-    print(f"delivery matching on seeds {seeds}; bars push {bars['push']}, failure "
-          f"{bars['failure']}, hold {bars['hold']}" + ("; a push needs an anchor" if bars.get("anchor") else "")
-          + (f"; credit {args.credit}" if args.credit else ""))
+        variants = []
+        for given in args.bars:
+            parts = given.split(",")
+            variants.append({"push": float(parts[0]), "failure": float(parts[1]),
+                             "hold": float(parts[2]), "anchor": parts[3:] == ["anchor"]})
+    print(f"delivery matching on seeds {seeds}" + (f"; credit {args.credit}" if args.credit else ""))
     for size in sizes:
-        total, by_kind, stores = Counter(), {}, []
-        for seed in seeds:
-            drawn, matched, seconds = run_world(found, seed, size, tuning, args.keep)
-            if args.credit is None and not args.bars:
-                check_constants(drawn, matched, bars)
-            c, k = counts(drawn, matched, bars)
-            total.update(c)
-            for kind, value in k.items():
-                by_kind.setdefault(kind, Counter()).update(value)
-            stores.append((len(drawn["memories"]), seconds))
-        built = ", ".join(f"{n} memories in {s:.1f} s" for n, s in stores)
-        report(f"{size} memories ({built})", total, by_kind)
+        def present(env, folder, drawn, matched, seed):
+            return presence.presence(found["user-memory"], env, folder, drawn, matched, variants[0], seed)
+
+        runs = [run_world(found, seed, size, tuning, args.keep,
+                          (lambda *a, seed=seed: present(*a, seed)) if args.presence else None)
+                for seed in seeds]
+        built = ", ".join(f"{len(drawn['memories'])} memories in {s:.1f} s" for drawn, _, s, _ in runs)
+        for bars in variants:
+            total, by_kind = Counter(), {}
+            for drawn, matched, _, _ in runs:
+                if args.credit is None and not args.bars:
+                    check_constants(drawn, matched, bars)
+                c, k = counts(drawn, matched, bars)
+                total.update(c)
+                for kind, value in k.items():
+                    by_kind.setdefault(kind, Counter()).update(value)
+            report(f"{size} memories ({built}); bars push {bars['push']}, failure {bars['failure']}, "
+                   f"hold {bars['hold']}" + ("; a push needs an anchor" if bars.get("anchor") else ""),
+                   total, by_kind)
+        if args.presence:
+            report_presence(size, runs)
+        if args.prompt_curve:
+            print(f"\n  prompt bar on stems alone, {size} memories, other bars as {variants[0]}:")
+            print("    bar   precision  of     recall of the prompt's needs")
+            for bar in map(float, args.prompt_curve.split(",")):
+                bars = {**variants[0], "prompt": bar}
+                total = Counter()
+                for drawn, matched, _, _ in runs:
+                    total.update(counts(drawn, matched, bars)[0])
+                print(f"    {bar:<5} {fmt(metrics.ratio(total['right|signal:prompt'], total['delivered|signal:prompt']))}"
+                      f"      {total['delivered|signal:prompt']:<6} "
+                      f"{fmt(metrics.ratio(total['found|subject:component'], total['needed|subject:component']))}")
     return 0
+
+
+def report_presence(size, runs):
+    """Session start's share of each subject's needs, today's and the
+    model's, summed over the seeds."""
+    r = metrics.ratio
+    first = Counter()
+    rows = {}
+    for *_, (today_counts, model) in runs:
+        first.update(today_counts)
+        for key, counts in model:
+            rows.setdefault(key, Counter()).update(counts)
+    subjects = ("component", "command", "file", "failure", "rule", "start rule", "all")
+    print(f"\n  session start lists the needed memory, {size} memories: share of needs")
+    print("    " + " " * 42 + "  ".join(f"{s:<9}" for s in subjects))
+    print(f"    {"today, first sessions":<42}" + "  ".join(
+        f"{fmt(r(first[f'listed first|{s}'], first[f'needed first|{s}'])):<9}" for s in subjects))
+    for key, counts in rows.items():
+        if key is None:
+            label = "model, no use yet"
+        else:
+            reads, window, share = key
+            label = f"{'delivered or read' if reads else 'delivered'}, window {window}, share {share}"
+        print(f"    {label:<42}" + "  ".join(
+            f"{fmt(r(counts[f'listed later|{s}'], counts[f'needed later|{s}'])):<9}" for s in subjects))
 
 
 if __name__ == "__main__":

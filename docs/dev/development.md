@@ -622,7 +622,10 @@ needs then. It writes the memories into a throwaway store, indexes them
 with `user-memory reindex`, builds the delivery index, runs every task
 through `user-memory-bench match` and reports precision and recall by way,
 signal, shape and kind of work, with timing, holds and failures
-(`evals/delivery/metrics.py`):
+(`evals/delivery/metrics.py`). It also says whether each wrong delivery was
+about the action or about something else, and why each missed need was
+missed: its memory holds no anchor, its anchor matched nothing, or it
+matched below the bar:
 
     just delivery-bench                  # 50, 1,000 and 10,000 memories
     just delivery-bench --sizes 50       # one size
@@ -631,8 +634,12 @@ signal, shape and kind of work, with timing, holds and failures
 
 The bars and window are set on the tuning seeds (`--sweep`) and reported on
 others, so the report isn't graded on what set them. `--bars` reports at
-other bars, `--credit` with credit for a memory's other passages, and
-`--keep DIR` keeps the built stores. The measures' own tests run with
+other bars (repeat it to compare several on the same stores), `--credit`
+with credit for a memory's other passages, `--prompt-curve` at several
+prompt bars on stems alone, and `--keep DIR` keeps the built stores.
+`--presence` adds how often session start already lists what the tasks
+need: today's, from `user-memory session-start`, and a model of the
+index ordered by use, whose constants are in `evals/delivery/presence.py`. The measures' own tests run with
 `python3 -I evals/delivery/test_bench.py`.
 
 ## Repository rules
