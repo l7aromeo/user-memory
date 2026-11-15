@@ -241,13 +241,14 @@ fn fitted(
     } else {
         room.saturating_sub(unit.len(&rules) + 1)
     };
-    let mut index = fitted_index(conn, input, selection, filter, left)?;
-    let mut in_index = candidates(conn, filter)?;
-    in_index.retain(|m| !standing_rule(m) || (m.scope == "global" && !input.without_global_rules));
-    if !split_listed(&index, &in_index).1.is_empty() {
+    let mut shapes = IndexShapes::render(conn, input, selection, filter)?;
+    let mut index = shapes.fit(left)?;
+    // The whole index lists every memory in it, so one that lists fewer
+    // lines is partial.
+    if memory_lines(&index).len() < shapes.listed.len() {
         let room = left.saturating_sub(UNLISTED_MAP_CHARS + 1);
-        index = fitted_index(conn, input, selection, filter, room)?;
-        let map = unlisted_map(&index, &in_index, unit);
+        index = shapes.fit(room)?;
+        let map = unlisted_map(&index, &shapes.listed, unit);
         if !map.is_empty() {
             index = format!("{index}\n{map}");
         }
@@ -293,25 +294,31 @@ const MAP_WORDS: usize = 4;
 /// The shortest word the map shows: shorter ones say little about a topic.
 const MAP_WORD_MIN: usize = 3;
 
+/// A memory the whole index lists, with its line there.
+type Listed = (String, Memory);
+
 /// `in_index` split into the memories `index` lists and those it does not,
 /// each matched by its whole line, so two memories whose ids share their
 /// short form are told apart; a line listed once matches one memory.
-fn split_listed<'a>(index: &str, in_index: &'a [Memory]) -> (Vec<&'a Memory>, Vec<&'a Memory>) {
+fn split_listed<'a>(index: &str, in_index: &'a [Listed]) -> (Vec<&'a Memory>, Vec<&'a Memory>) {
     let mut lines: BTreeMap<&str, usize> = BTreeMap::new();
     for shown in index.lines() {
         *lines.entry(shown).or_default() += 1;
     }
-    in_index.iter().partition(|m| {
-        lines
-            .get_mut(line(m).as_str())
+    let (mut listed, mut unlisted) = (Vec::new(), Vec::new());
+    for (shown, m) in in_index {
+        let found = lines
+            .get_mut(shown.as_str())
             .is_some_and(|left| match left.checked_sub(1) {
                 Some(less) => {
                     *left = less;
                     true
                 }
                 None => false,
-            })
-    })
+            });
+        if found { &mut listed } else { &mut unlisted }.push(m);
+    }
+    (listed, unlisted)
 }
 
 /// The line that ends an index which does not list all of `in_index`: how
@@ -321,7 +328,7 @@ fn split_listed<'a>(index: &str, in_index: &'a [Memory]) -> (Vec<&'a Memory>, Ve
 /// then alphabetically, so the same store gives the same map. Within
 /// [`UNLISTED_MAP_CHARS`] in `unit`: fewer words, then fewer types, until it
 /// fits. Empty when every memory is listed.
-fn unlisted_map(index: &str, in_index: &[Memory], unit: FitUnit) -> String {
+fn unlisted_map(index: &str, in_index: &[Listed], unit: FitUnit) -> String {
     let (listed, unlisted) = split_listed(index, in_index);
     if unlisted.is_empty() {
         return String::new();
@@ -412,51 +419,104 @@ fn fitted_index(
     filter: &Filter,
     room: usize,
 ) -> Result<String> {
-    let unit = input.fit_unit;
-    let whole = render(conn, input, filter, None)?;
-    let others: Vec<&String> = selection
-        .projects
-        .iter()
-        .filter(|p| !input.fit_whole_projects.contains(p))
-        .collect();
-    if unit.len(&whole) <= room || others.is_empty() {
-        return Ok(shorten(&whole, room, unit));
-    }
-    let part = |selection: Selection, without_global_rules: bool| {
-        let index = Index {
+    IndexShapes::render(conn, input, selection, filter)?.fit(room)
+}
+
+/// The renderings [`fitted_index`] shortens, each read from the store once,
+/// so fitting the index again in a smaller room reads it no more: the whole
+/// index with each memory it lists, and, the first time it does not fit with
+/// every project, the core (global memories and the folder's own projects)
+/// and each other project.
+struct IndexShapes<'a> {
+    conn: &'a rusqlite::Connection,
+    input: &'a Index,
+    selection: &'a Selection,
+    whole: String,
+    listed: Vec<Listed>,
+    tiers: Option<(String, Vec<ProjectIndex>)>,
+}
+
+impl<'a> IndexShapes<'a> {
+    fn render(
+        conn: &'a rusqlite::Connection,
+        input: &'a Index,
+        selection: &'a Selection,
+        filter: &Filter,
+    ) -> Result<Self> {
+        let (whole, listed) = render_listed(conn, input, filter, None)?;
+        Ok(Self {
+            conn,
+            input,
             selection,
-            without_global_rules,
-            fit_room: input.fit_room,
-            fit_rules_room: input.fit_rules_room,
-            ..Index::default()
+            whole,
+            listed,
+            tiers: None,
+        })
+    }
+
+    /// The projects other than the folder's own the session sees.
+    fn others(&self) -> Vec<&'a String> {
+        self.selection
+            .projects
+            .iter()
+            .filter(|p| !self.input.fit_whole_projects.contains(p))
+            .collect()
+    }
+
+    /// The index within `room` in `input.fit_unit`.
+    fn fit(&mut self, room: usize) -> Result<String> {
+        let unit = self.input.fit_unit;
+        if unit.len(&self.whole) <= room || self.others().is_empty() {
+            return Ok(shorten(&self.whole, room, unit));
+        }
+        let (core, projects) = match self.tiers.take() {
+            Some(tiers) => tiers,
+            None => self.render_tiers()?,
         };
-        render(conn, &index, &index.selection.filter()?, None)
-    };
-    let core = part(
-        Selection {
-            projects: input.fit_whole_projects.clone(),
-            ..Selection::default()
-        },
-        input.without_global_rules,
-    )?;
-    let mut projects = Vec::new();
-    for key in others {
-        let index = part(
+        let index = tiered(&self.whole, &core, &projects, room, unit);
+        self.tiers = Some((core, projects));
+        Ok(index)
+    }
+
+    /// The core's index and each other project's.
+    fn render_tiers(&self) -> Result<(String, Vec<ProjectIndex>)> {
+        let input = self.input;
+        let part = |selection: Selection, without_global_rules: bool| {
+            let index = Index {
+                selection,
+                without_global_rules,
+                fit_room: input.fit_room,
+                fit_rules_room: input.fit_rules_room,
+                ..Index::default()
+            };
+            render(self.conn, &index, &index.selection.filter()?, None)
+        };
+        let core = part(
             Selection {
-                projects: vec![key.clone()],
-                scope: Some(ScopeFilter::Project),
+                projects: input.fit_whole_projects.clone(),
                 ..Selection::default()
             },
-            false,
+            input.without_global_rules,
         )?;
-        projects.push(ProjectIndex {
-            key: key.clone(),
-            // The Projects line names where each comes from.
-            label: key.clone(),
-            index,
-        });
+        let mut projects = Vec::new();
+        for key in self.others() {
+            let index = part(
+                Selection {
+                    projects: vec![key.clone()],
+                    scope: Some(ScopeFilter::Project),
+                    ..Selection::default()
+                },
+                false,
+            )?;
+            projects.push(ProjectIndex {
+                key: key.clone(),
+                // The Projects line names where each comes from.
+                label: key.clone(),
+                index,
+            });
+        }
+        Ok((core, projects))
     }
-    Ok(tiered(&whole, &core, &projects, room, unit))
 }
 
 /// The index of `filter`'s memories as `input` asks for it: the page
@@ -467,6 +527,16 @@ fn render(
     filter: &Filter,
     paging: Option<&Paging>,
 ) -> Result<String> {
+    Ok(render_listed(conn, input, filter, paging)?.0)
+}
+
+/// [`render`]'s index, and each memory it lists with its line.
+fn render_listed(
+    conn: &rusqlite::Connection,
+    input: &Index,
+    filter: &Filter,
+    paging: Option<&Paging>,
+) -> Result<(String, Vec<Listed>)> {
     let matched: Vec<_> = if tokenize(&input.topic).is_empty() {
         Vec::new()
     } else {
@@ -482,7 +552,10 @@ fn render(
     if all.is_empty() {
         let stored: i64 =
             conn.query_row("SELECT EXISTS (SELECT 1 FROM memories)", [], |r| r.get(0))?;
-        return Ok(if stored == 0 { EMPTY } else { NO_MATCH }.into());
+        return Ok((
+            if stored == 0 { EMPTY } else { NO_MATCH }.into(),
+            Vec::new(),
+        ));
     }
     all.sort_by(|a, b| {
         relevance(a)
@@ -526,23 +599,26 @@ fn render(
         lines.push(RULES_ELSEWHERE.to_owned());
     }
     let (mut section, mut group) = ("", String::new());
-    for (title, name, size, m) in &shown {
-        if *title != section {
-            lines.push((*title).to_owned());
+    let mut listed = Vec::with_capacity(shown.len());
+    for (title, name, size, m) in shown {
+        if title != section {
+            lines.push(title.to_owned());
             section = title;
             group.clear();
         }
-        if *name != group {
+        if name != group {
             // A group that continues from the previous page keeps its total.
             lines.push(format!("  {name} ({size})"));
-            group.clone_from(name);
+            group = name;
         }
-        lines.push(line(m));
+        let shown_line = line(&m);
+        lines.push(shown_line.clone());
+        listed.push((shown_line, m));
     }
     if let Some(next) = next {
         lines.push(format!("{NEXT_CURSOR}{next}{NEXT_CURSOR_NOTE}"));
     }
-    Ok(lines.join("\n"))
+    Ok((lines.join("\n"), listed))
 }
 
 /// The line after the header that counts every memory in the index's scope
@@ -1290,6 +1366,7 @@ mod tests {
                 memories.push(memory(k * 10 + i + 1, kind, &title));
             }
         }
+        let memories: Vec<Listed> = memories.into_iter().map(|m| (line(&m), m)).collect();
         let map = unlisted_map("", &memories, FitUnit::Utf8Bytes);
         assert!(map.len() <= UNLISTED_MAP_CHARS, "{} {map}", map.len());
         assert!(
@@ -1316,8 +1393,9 @@ mod tests {
             shared(1, "Builds run nightly"),
             shared(2, "Caches expire weekly"),
         ];
-        let index = |listed: &[Memory]| {
-            let lines: Vec<String> = listed.iter().map(line).collect();
+        let both: Vec<Listed> = both.into_iter().map(|m| (line(&m), m)).collect();
+        let index = |listed: &[Listed]| {
+            let lines: Vec<&str> = listed.iter().map(|(shown, _)| shown.as_str()).collect();
             format!(
                 "Other memories\n  fact ({})\n{}",
                 listed.len(),
