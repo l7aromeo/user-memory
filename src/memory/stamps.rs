@@ -50,6 +50,17 @@ impl Position {
         Self(format!("{POSITION_FORMAT}.{}.{change}", digest(store_id)))
     }
 
+    /// A position kept as text, such as a server's in its marker on this
+    /// machine, taken as it is.
+    pub fn kept(text: String) -> Self {
+        Self(text)
+    }
+
+    /// The position as the store wrote it, to keep.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
     /// The change this position names in the store whose id is `store_id`;
     /// none for another store's position or one this version does not write.
     fn change_in(&self, store_id: &str) -> Option<i64> {

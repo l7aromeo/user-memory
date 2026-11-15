@@ -3500,3 +3500,271 @@ fn a_session_started_while_its_server_was_down_gets_the_index_when_it_is_back() 
     );
     assert_eq!(hook("prompt-submit"), "", "told once");
 }
+
+/// `REMOTE_MARKER_POLL` in `src/remote/marker.rs`.
+const MARKER_POLL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// A TCP relay to a host that counts the connections it takes, so a test
+/// sees from the server's side whether a client asked it anything.
+struct Counting {
+    address: String,
+    taken: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Counting {
+    fn to(host: &str) -> Self {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let taken = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = taken.clone();
+        let host = host.to_owned();
+        std::thread::spawn(move || {
+            for client in listener.incoming() {
+                let Ok(client) = client else { break };
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let Ok(server) = TcpStream::connect(&host) else {
+                    continue;
+                };
+                for (mut from, mut to) in [
+                    (client.try_clone().unwrap(), server.try_clone().unwrap()),
+                    (server, client),
+                ] {
+                    std::thread::spawn(move || {
+                        let _ = std::io::copy(&mut from, &mut to);
+                        let _ = to.shutdown(std::net::Shutdown::Write);
+                    });
+                }
+            }
+        });
+        Self { address, taken }
+    }
+    fn taken(&self) -> usize {
+        self.taken.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// The hooks and the connector of one machine, a client of the server at
+/// `url`, with `env` added.
+struct Machine {
+    home: TempDir,
+    url: String,
+    token: std::path::PathBuf,
+    env: Vec<(&'static str, String)>,
+}
+
+impl Machine {
+    fn command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_user-memory"));
+        command
+            .args(args)
+            .current_dir(self.home.path())
+            .sandboxed(self.home.path())
+            .env("USER_MEMORY_URL", &self.url)
+            .env("USER_MEMORY_TOKEN_FILE", &self.token)
+            .env_remove("USER_MEMORY_DB")
+            .env(time::HOOK_ROOM.0, time::HOOK_ROOM.1)
+            .envs(self.env.iter().map(|(k, v)| (*k, v.as_str())))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        command
+    }
+    /// The connector a client session runs, polling the server.
+    fn connector(&self) -> ChildGuard {
+        ChildGuard(
+            self.command(&["connect", "--url", &self.url, "--token-file"])
+                .arg(&self.token)
+                .spawn()
+                .unwrap(),
+        )
+    }
+    /// A hook's stdout and stderr for session `s`.
+    fn hook(&self, subcommand: &str) -> (String, String) {
+        let mut child = self
+            .command(&[subcommand, "--client", "claude"])
+            .spawn()
+            .unwrap();
+        let payload = json!({"session_id":"s","cwd":self.home.path(),"hook_event_name":subcommand});
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload.to_string().as_bytes())
+            .unwrap();
+        let out = time::finish(child, "the hook");
+        assert!(out.status.success(), "{out:?}");
+        (
+            String::from_utf8(out.stdout).unwrap(),
+            String::from_utf8(out.stderr).unwrap(),
+        )
+    }
+    /// The server's marker, once the connector wrote it.
+    fn marker(&self) -> std::path::PathBuf {
+        let mut found = None;
+        time::until("the connector wrote a marker", || {
+            found = find(self.home.path(), "changed");
+            found.is_some()
+        });
+        found.unwrap()
+    }
+}
+
+/// The file with extension `extension` in a `servers` folder under `dir`.
+fn find(dir: &Path, extension: &str) -> Option<std::path::PathBuf> {
+    for entry in fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = find(&path, extension) {
+                return Some(found);
+            }
+        } else if path.parent().is_some_and(|p| p.ends_with("servers"))
+            && path.extension().is_some_and(|e| e == extension)
+        {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn modified(path: &Path) -> std::time::SystemTime {
+    fs::metadata(path).unwrap().modified().unwrap()
+}
+
+fn record_global(host: &Host, id: u64, title: &str) {
+    host.rpc(initialize(id));
+    host.rpc(call(
+        id + 1,
+        "record",
+        json!({"category":"workflow","context":"Working","title":title,"content":title,"reason":"Because","scope":"global","user_confirmed":true}),
+    ));
+}
+
+// The connector keeps the server's position in a marker on this machine: a
+// change reaches it within a poll, and a prompt whose snapshot holds that
+// position asks the server nothing, as the requests reaching the server
+// show.
+#[test]
+fn a_servers_marker_takes_a_change_within_a_poll_and_spares_the_server_a_quiet_prompt() {
+    let host = Host::start(root());
+    let proxy = Counting::to(&host.address);
+    let machine = Machine {
+        home: tempdir().unwrap(),
+        url: format!("http://{}/mcp", proxy.address),
+        token: host.root.path().join("token"),
+        env: Vec::new(),
+    };
+    let connector = machine.connector();
+    machine.hook("session-start");
+    let marker = machine.marker();
+    let before = fs::read(&marker).unwrap();
+    record_global(&host, 1, "Prefer small pull requests");
+    let recorded = std::time::Instant::now();
+    time::until("the marker moved", || fs::read(&marker).unwrap() != before);
+    let took = recorded.elapsed();
+    assert!(
+        took <= MARKER_POLL + std::time::Duration::from_secs(1),
+        "{took:?}"
+    );
+    let (told, _) = machine.hook("prompt-submit");
+    assert!(told.contains("Prefer small pull requests"), "{told}");
+    // The marker stays good for three polls after its connector stops,
+    // which leaves the requests the server sees to the hook alone.
+    drop(connector);
+    let asked = proxy.taken();
+    let (quiet, log) = machine.hook("prompt-submit");
+    assert_eq!(quiet, "", "{log}");
+    assert!(log.contains("none: the marker is unchanged"), "{log}");
+    assert_eq!(proxy.taken(), asked, "a quiet prompt asked the server");
+}
+
+// After a quiet spell the connector polls once a quiet interval; a hook
+// then finds the marker stale, asks the server itself, and brings the
+// connector back to a poll's interval. With the connector stopped, the next
+// prompt asks the server and tells the change.
+#[test]
+fn a_hook_after_a_quiet_spell_asks_the_server_and_speeds_the_connector_up() {
+    // 300 ms polls: quiet after 7.2 s, a quiet poll every 3.6 s, a marker
+    // stale after 0.9 s.
+    let poll = std::time::Duration::from_millis(300);
+    let host = Host::start(root());
+    let proxy = Counting::to(&host.address);
+    let machine = Machine {
+        home: tempdir().unwrap(),
+        url: format!("http://{}/mcp", proxy.address),
+        token: host.root.path().join("token"),
+        env: vec![("USER_MEMORY_MARKER_POLL_MS", poll.as_millis().to_string())],
+    };
+    let connector = machine.connector();
+    machine.hook("session-start");
+    let marker = machine.marker();
+    // Quiet: two writes of the marker a quiet interval apart.
+    let mut last = modified(&marker);
+    time::until("the connector slowed down", || {
+        let now = modified(&marker);
+        let gap = now.duration_since(last).unwrap_or_default();
+        last = now;
+        gap >= poll * 10
+    });
+    time::until("the marker went stale", || {
+        modified(&marker).elapsed().unwrap_or_default() > poll * 5
+    });
+    record_global(&host, 1, "Prefer small pull requests");
+    let asked = proxy.taken();
+    let (told, _) = machine.hook("prompt-submit");
+    assert!(told.contains("Prefer small pull requests"), "{told}");
+    assert!(proxy.taken() > asked, "the hook asked the server itself");
+    // Back to a poll's interval: two writes less than a quiet poll apart.
+    let mut last = modified(&marker);
+    let mut gaps = Vec::new();
+    time::until("the connector sped up", || {
+        let now = modified(&marker);
+        if now != last {
+            gaps.push(now.duration_since(last).unwrap_or_default());
+            last = now;
+        }
+        gaps.len() >= 2
+    });
+    assert!(gaps[1] < poll * 6, "{gaps:?}");
+    // Stopped: the marker ages out and the next prompt asks the server.
+    drop(connector);
+    time::until("the marker went stale", || {
+        modified(&marker).elapsed().unwrap_or_default() > poll * 5
+    });
+    record_global(&host, 3, "Prefer rebase merges");
+    let (told, _) = machine.hook("prompt-submit");
+    assert!(told.contains("Prefer rebase merges"), "{told}");
+}
+
+// Many sessions on one machine, each with its connector, poll the server
+// about as often as one: a connector finds the marker fresh after
+// another's poll and skips its own.
+#[test]
+fn connectors_on_one_machine_share_their_polls() {
+    let poll = std::time::Duration::from_millis(500);
+    let host = Host::start(root());
+    let proxy = Counting::to(&host.address);
+    let machine = Machine {
+        home: tempdir().unwrap(),
+        url: format!("http://{}/mcp", proxy.address),
+        token: host.root.path().join("token"),
+        env: vec![("USER_MEMORY_MARKER_POLL_MS", poll.as_millis().to_string())],
+    };
+    machine.hook("session-start");
+    let window = poll * 8;
+    let asked = |connectors: usize| {
+        let running: Vec<ChildGuard> = (0..connectors).map(|_| machine.connector()).collect();
+        machine.marker();
+        // Sessions rarely start in the same instant; connectors that do may
+        // each poll once before the claim of the first is in place.
+        std::thread::sleep(poll * 2);
+        let start = proxy.taken();
+        std::thread::sleep(window);
+        let taken = proxy.taken() - start;
+        drop(running);
+        taken
+    };
+    let one = asked(1);
+    let five = asked(5);
+    assert!(one > 0);
+    assert!(five <= one + one / 2, "one connector: {one}; five: {five}");
+}

@@ -281,6 +281,19 @@ failure, so a slow or unreachable store never delays a prompt. A session
 started before the hook was installed gets its first snapshot at its next
 prompt and no notice.
 
+A prompt with nothing changed reads nothing: on a store on this machine, the
+store's marker still holds the position of the session's snapshot
+([storage](storage.md#writers-take-turns)); on a memory server, the
+connector (`serve`) asks the server for its position every 5 seconds, or
+every minute once no hook ran for two minutes, and keeps it in the
+[state folder](storage.md#the-state-folder) for every session on the
+machine, so a prompt whose snapshot holds it sends the server no request.
+Several connectors on one machine share the polls. A position older than
+three polls, as with no connector running or after a quiet spell, counts
+as moved: the prompt asks the server itself, and the connector goes back to
+polling every 5 seconds. A server too old to give positions gets no
+marker, and every prompt asks it, as before.
+
 - Setup only touches its own entries, refuses a file that is not valid JSON,
   writes atomically, keeps key order, and migrates hooks written by earlier
   versions. Codex's `config.toml` is never edited; `doctor` warns when it also
