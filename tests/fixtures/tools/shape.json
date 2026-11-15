@@ -1,0 +1,992 @@
+[
+  {
+    "name": "export",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "ScopeFilter": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "global"
+            },
+            {
+              "type": "string",
+              "const": "project"
+            },
+            {
+              "type": "string",
+              "const": "all"
+            }
+          ]
+        },
+        "Source": {
+          "type": "string",
+          "enum": [
+            "explicit",
+            "observed",
+            "inferred"
+          ]
+        },
+        "StatusFilter": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "active"
+            },
+            {
+              "type": "string",
+              "const": "stale"
+            },
+            {
+              "type": "string",
+              "const": "superseded"
+            },
+            {
+              "type": "string",
+              "const": "all"
+            }
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "overwrite": {
+          "type": "boolean",
+          "default": false
+        },
+        "projects": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "scope": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScopeFilter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "category": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Source"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StatusFilter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "origin": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    }
+  },
+  {
+    "name": "forget",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "memory_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid",
+          "default": null
+        },
+        "origin": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "import": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "user_confirmed": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "type": "object"
+    }
+  },
+  {
+    "name": "import",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "OnConflict": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "abort"
+            },
+            {
+              "type": "string",
+              "const": "keep-store"
+            },
+            {
+              "type": "string",
+              "const": "use-file"
+            }
+          ]
+        },
+        "ScopeFilter": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "global"
+            },
+            {
+              "type": "string",
+              "const": "project"
+            },
+            {
+              "type": "string",
+              "const": "all"
+            }
+          ]
+        },
+        "Source": {
+          "type": "string",
+          "enum": [
+            "explicit",
+            "observed",
+            "inferred"
+          ]
+        },
+        "StatusFilter": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "active"
+            },
+            {
+              "type": "string",
+              "const": "stale"
+            },
+            {
+              "type": "string",
+              "const": "superseded"
+            },
+            {
+              "type": "string",
+              "const": "all"
+            }
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "apply": {
+          "type": "boolean",
+          "default": false
+        },
+        "on_conflict": {
+          "$ref": "#/$defs/OnConflict",
+          "default": "abort"
+        },
+        "user_confirmed": {
+          "type": "boolean",
+          "default": false
+        },
+        "titles": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": null
+        },
+        "projects": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "scope": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScopeFilter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "category": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Source"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StatusFilter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "origin": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    }
+  },
+  {
+    "name": "index",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "ScopeFilter": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "global"
+            },
+            {
+              "type": "string",
+              "const": "project"
+            },
+            {
+              "type": "string",
+              "const": "all"
+            }
+          ]
+        },
+        "Source": {
+          "type": "string",
+          "enum": [
+            "explicit",
+            "observed",
+            "inferred"
+          ]
+        },
+        "StatusFilter": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "active"
+            },
+            {
+              "type": "string",
+              "const": "stale"
+            },
+            {
+              "type": "string",
+              "const": "superseded"
+            },
+            {
+              "type": "string",
+              "const": "all"
+            }
+          ]
+        }
+      },
+      "properties": {
+        "projects": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "scope": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScopeFilter"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "category": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "type": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Source"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "status": {
+          "$ref": "#/$defs/StatusFilter",
+          "default": "active"
+        },
+        "origin": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "topic": {
+          "type": "string",
+          "default": ""
+        },
+        "cursor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "page_size": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0,
+          "default": null
+        }
+      },
+      "type": "object"
+    }
+  },
+  {
+    "name": "link",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "origin": {
+          "type": "string",
+          "default": ""
+        },
+        "projects": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "unlink": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "type": "object"
+    }
+  },
+  {
+    "name": "read",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "ScopeFilter": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "global"
+            },
+            {
+              "type": "string",
+              "const": "project"
+            },
+            {
+              "type": "string",
+              "const": "all"
+            }
+          ]
+        },
+        "Source": {
+          "type": "string",
+          "enum": [
+            "explicit",
+            "observed",
+            "inferred"
+          ]
+        },
+        "StatusFilter": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "active"
+            },
+            {
+              "type": "string",
+              "const": "stale"
+            },
+            {
+              "type": "string",
+              "const": "superseded"
+            },
+            {
+              "type": "string",
+              "const": "all"
+            }
+          ]
+        }
+      },
+      "properties": {
+        "ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "projects": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "scope": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScopeFilter"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "category": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "type": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Source"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "status": {
+          "$ref": "#/$defs/StatusFilter",
+          "default": "active"
+        },
+        "origin": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "cursor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "page_size": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0,
+          "default": null
+        },
+        "history": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "type": "object"
+    }
+  },
+  {
+    "name": "record",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "Scope": {
+          "type": "string",
+          "enum": [
+            "global",
+            "project"
+          ]
+        },
+        "Source": {
+          "type": "string",
+          "enum": [
+            "explicit",
+            "observed",
+            "inferred"
+          ]
+        }
+      },
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "default": "fact"
+        },
+        "category": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "context": {
+          "type": "string",
+          "default": ""
+        },
+        "reason": {
+          "type": "string",
+          "default": ""
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "project": {
+          "type": "string",
+          "default": ""
+        },
+        "source": {
+          "$ref": "#/$defs/Source",
+          "default": "explicit"
+        },
+        "evidence": {
+          "type": "string",
+          "default": ""
+        },
+        "evidence_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "default": []
+        },
+        "origin": {
+          "type": "string",
+          "default": ""
+        },
+        "supersedes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "default": []
+        },
+        "merge": {
+          "type": "boolean",
+          "default": false
+        },
+        "confirms": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid",
+          "default": null
+        },
+        "distinct_from": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "default": []
+        },
+        "user_confirmed": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": [
+        "category",
+        "title",
+        "content",
+        "scope"
+      ]
+    }
+  },
+  {
+    "name": "review",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "projects": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "max_groups": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "default": 5
+        },
+        "keep": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "default": []
+        },
+        "user_confirmed": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "type": "object"
+    }
+  },
+  {
+    "name": "search",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "ScopeFilter": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "global"
+            },
+            {
+              "type": "string",
+              "const": "project"
+            },
+            {
+              "type": "string",
+              "const": "all"
+            }
+          ]
+        },
+        "Source": {
+          "type": "string",
+          "enum": [
+            "explicit",
+            "observed",
+            "inferred"
+          ]
+        },
+        "StatusFilter": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "active"
+            },
+            {
+              "type": "string",
+              "const": "stale"
+            },
+            {
+              "type": "string",
+              "const": "superseded"
+            },
+            {
+              "type": "string",
+              "const": "all"
+            }
+          ]
+        }
+      },
+      "properties": {
+        "topic": {
+          "type": "string",
+          "default": ""
+        },
+        "projects": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "scope": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScopeFilter"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "category": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "type": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Source"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "status": {
+          "$ref": "#/$defs/StatusFilter",
+          "default": "active"
+        },
+        "origin": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "cursor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "page_size": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0,
+          "default": null
+        }
+      },
+      "type": "object"
+    }
+  },
+  {
+    "name": "update",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "Scope": {
+          "type": "string",
+          "enum": [
+            "global",
+            "project"
+          ]
+        }
+      },
+      "type": "object",
+      "properties": {
+        "memory_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "type": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "category": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "content": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "context": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "evidence": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "scope": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Scope"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "project": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "origin": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "replace_origins": {
+          "type": "boolean",
+          "default": false
+        },
+        "distinct_from": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "default": []
+        },
+        "drop_history": {
+          "type": "boolean",
+          "default": false
+        },
+        "user_confirmed": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": [
+        "memory_id"
+      ]
+    }
+  }
+]
