@@ -22,7 +22,8 @@ guard watches. `--rehearse` installs
 one trial per scenario and client and checks what setup wrote (instruction
 files with the seeded rules, both hooks or none, the MCP registration, and
 Codex's approval of the hooks), plus the session-start header a scenario's
-`rehearse` entries describe. `--budget` refuses a batch that would take the
+`rehearse` entries describe, and grades a scenario's checks on its
+[planted transcripts](#planted-transcripts). `--budget` refuses a batch that would take the
 total past that many sessions; the total is kept in
 `$USER_MEMORY_EVAL_OUT/run-count`. Reports, per-trial JSON with raw event
 streams, and the guard log go to `$USER_MEMORY_EVAL_OUT` (default
@@ -291,6 +292,26 @@ the trial's installed session-start hook in its `cwd` with a made-up payload
 (`source` defaults to `startup`), after linking `links` to that made-up
 conversation, and requires every `matches` pattern in the header it prints
 and no `lacks` pattern.
+
+### Planted transcripts
+
+A check that cannot fail proves nothing, and a billed session is a costly
+way to find one. `planted` lists transcripts of sessions that did what the
+scenario's checks forbid, such as following an instruction written inside a
+memory. Each has `steps`, one record per turn from the first, with only the
+fields it needs (`commands`, `tool_calls` as `[name, args]` pairs,
+`approvals`, `answer`); and `remove`, trial paths deleted while it is graded
+and put back afterwards, even when a check raises. `obeyed` is a transcript
+of a session that did right; by default, one that did nothing. `{seed:NAME}`
+works in both as in checks.
+
+`--rehearse` grades the scenario's decisive checks on the fresh trial
+against `obeyed`, where each must pass, and against each planted
+transcript, where each must fail at least once. Its line says how many were
+shown able to fail (`ok   NAME/claude (4 of 4 checks shown able to fail)`)
+and names any that `obeyed` fails or no planted transcript does. Nothing in
+a transcript is sent to a model or counted against the budget. A scenario
+without `planted` rehearses as before.
 
 Checks grade the final store (read with `search --scope all --status all`)
 and each step, by default the last (`"step": N`). In any string,

@@ -13,7 +13,8 @@ Usage:
 
 Every agent session is a billed run. `--dry-run` prints the plan, the login
 files and the guard without running anything; `--rehearse` also installs
-every trial and checks what setup wrote, still without a single session.
+every trial, checks what setup wrote and grades each scenario's checks on
+its planted transcripts, still without a single session.
 `--budget` caps the total number of sessions recorded in the output
 directory's run counter (default 100); a batch that would exceed it is
 refused before it starts.
@@ -1950,13 +1951,78 @@ def rehearse(scenarios, clients, base, source, projects, guard):
             sandbox = prepare(scenario, client, base, source, projects)
             try:
                 notes = rehearsal_notes(scenario, client, sandbox, projects)
+                planted, shown = planted_notes(scenario, client, sandbox)
+                notes += planted
             finally:
                 stop_servers(sandbox)
             guard.check(f"rehearsal {scenario['name']}/{client}")
             failures += bool(notes)
             print(f"{'ok  ' if not notes else 'FAIL'} {scenario['name']}/{client}"
+                  + (f" ({shown[0]} of {shown[1]} checks shown able to fail)" if shown else "")
                   + "".join(f"\n      {n}" for n in notes), flush=True)
     return failures
+
+
+def blank_record(index):
+    """A turn that did nothing, which a planted transcript's step fills in."""
+    return {"step": index, "answer": "", "tool_calls": [], "commands": [], "file_writes": [],
+            "file_reads": [], "hook_context": [], "approvals": [], "questions": [], "origins": [],
+            "files": {}}
+
+
+def planted_grades(scenario, transcript, checks, sandbox, memories):
+    """(passed, detail) for each of `checks` on `transcript`: a turn record
+    per step, filled from the transcript's `steps`, after its `remove` files
+    are deleted from the trial. They are put back afterwards, even when a
+    check raises. Nothing here reaches a model or the budget."""
+    turns = len(steps(scenario))
+    given = transcript.get("steps", [])
+    if len(given) > turns:
+        raise ValueError(f"{scenario['name']}: a planted transcript has {len(given)} steps, the scenario {turns}")
+    removed = {}
+    try:
+        for name in transcript.get("remove", []):
+            path = sandbox.dir / name
+            removed[path] = (path.read_bytes(), path.stat().st_mode & 0o777)
+            path.unlink()
+        records = [blank_record(i) for i in range(turns)]
+        for record, step in zip(records, given):
+            record.update(resolve(step, sandbox, memories))
+        for record in records:
+            record["files"] = watched(scenario, sandbox)
+        return [grade(check, sandbox, records, memories) for check in checks]
+    finally:
+        for path, (data, mode) in removed.items():
+            path.write_bytes(data)
+            path.chmod(mode)
+
+
+def planted_notes(scenario, client, sandbox):
+    """What a rehearsal finds wrong with a scenario's decisive checks, graded
+    on its `planted` transcripts, sessions that followed an instruction they
+    should not have, and on `obeyed`, one that did right (by default, a
+    session that did nothing): each check must pass on `obeyed` and fail on
+    at least one planted transcript, or it could not fail a real session.
+    Also (shown, total): how many checks a planted transcript failed. Both
+    empty for a scenario without `planted`."""
+    if "planted" not in scenario:
+        return [], None
+    memories = sandbox.memories()
+    checks = [resolve({k: v for k, v in check.items() if k not in ("client", "informational")},
+                      sandbox, memories)
+              for check in scenario["checks"]
+              if check.get("client", client) == client
+              and not check.get("informational", scenario.get("informational", False))]
+    notes = [f"fails on the obeyed transcript: {check} ({detail})"
+             for check, (passed, detail) in zip(
+                 checks, planted_grades(scenario, scenario.get("obeyed", {}), checks, sandbox, memories))
+             if not passed]
+    shown = [False] * len(checks)
+    for transcript in scenario["planted"]:
+        grades = planted_grades(scenario, transcript, checks, sandbox, memories)
+        shown = [was or not passed for was, (passed, _) in zip(shown, grades)]
+    notes += [f"no planted transcript fails {check}" for check, was in zip(checks, shown) if not was]
+    return notes, (sum(shown), len(checks))
 
 
 def rehearsal_notes(scenario, client, sandbox, projects):

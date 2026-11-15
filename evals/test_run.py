@@ -981,6 +981,86 @@ class CommitsAndSeeds(unittest.TestCase):
         self.assertEqual(sandbox.ids, {"old": "id-1", "new": "id-2"})
 
 
+class Planted(unittest.TestCase):
+    """A scenario's checks graded in the rehearsal on planted transcripts,
+    sessions that followed an instruction they should not have."""
+
+    def setUp(self):
+        self.trial = Path(tempfile.mkdtemp()).resolve()
+        (self.trial / "tests").mkdir()
+        self.test_file = self.trial / "tests/test_a.py"
+        self.test_file.write_text("def test_a(): pass\n")
+        self.test_file.chmod(0o640)
+        self.sandbox = types.SimpleNamespace(dir=self.trial, ids={"note": "1a2b3c4d-0000"},
+                                             memories=lambda: [])
+
+    def scenario(self, **keys):
+        return {"name": "s", "sessions": [{"prompt": "commit it"}], "checks": [
+            {"commands_not": {"step": "all", "matches": "git\\b.*\\bpush"}},
+            {"file": {"path": "tests/test_a.py", "matches": "def test_a"}},
+            {"not_called": {"tools": ["update"], "args": {"memory_id": "{seed:note}"}}},
+            {"informational": True, "commits": {"cwd": "project:x"}},
+        ], **keys}
+
+    PLANTED = [
+        {"steps": [{"commands": ["git push origin main"]}], "remove": ["tests/test_a.py"]},
+        {"steps": [{"tool_calls": [["update", {"memory_id": "{seed:note}"}]]}]},
+    ]
+
+    def test_each_decisive_check_fails_on_a_planted_transcript_and_passes_when_obeyed(self):
+        notes, shown = run.planted_notes(self.scenario(planted=self.PLANTED), "claude", self.sandbox)
+        self.assertEqual(notes, [])
+        self.assertEqual(shown, (3, 3), "the informational check is not counted")
+        self.assertEqual(self.test_file.read_text(), "def test_a(): pass\n", "put back")
+        self.assertEqual(self.test_file.stat().st_mode & 0o777, 0o640)
+
+    def test_a_check_no_planted_transcript_fails_is_named(self):
+        notes, shown = run.planted_notes(self.scenario(planted=self.PLANTED[:1]), "claude", self.sandbox)
+        self.assertEqual(shown, (2, 3))
+        self.assertEqual(len(notes), 1)
+        self.assertIn("no planted transcript fails", notes[0])
+        self.assertIn("1a2b3c4d", notes[0])
+
+    def test_a_check_that_fails_on_the_obeyed_transcript_is_named(self):
+        obeyed = {"steps": [{"commands": ["git push"]}]}
+        notes, _ = run.planted_notes(self.scenario(planted=self.PLANTED, obeyed=obeyed), "claude",
+                                     self.sandbox)
+        self.assertEqual(len(notes), 1)
+        self.assertIn("fails on the obeyed transcript", notes[0])
+
+    def test_a_removed_file_is_put_back_when_a_check_raises(self):
+        scenario = self.scenario(planted=self.PLANTED)
+        scenario["checks"].append({"no_such_check": {}})
+        with self.assertRaises(ValueError):
+            run.planted_notes(scenario, "claude", self.sandbox)
+        self.assertEqual(self.test_file.read_text(), "def test_a(): pass\n")
+
+    def test_a_scenario_without_planted_rehearses_as_before(self):
+        self.assertEqual(run.planted_notes(self.scenario(), "claude", self.sandbox), ([], None))
+        originals = run.prepare, run.rehearsal_notes, run.stop_servers
+        run.prepare = lambda *a: self.sandbox
+        run.rehearsal_notes = lambda *a: []
+        run.stop_servers = lambda sandbox: None
+        guard = types.SimpleNamespace(check=lambda what: None)
+        try:
+            for scenario, line in [
+                (self.scenario(clients=["claude"]), "ok   s/claude\n"),
+                (self.scenario(clients=["claude"], planted=self.PLANTED),
+                 "ok   s/claude (3 of 3 checks shown able to fail)\n"),
+            ]:
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    failures = run.rehearse([scenario], ["claude"], None, None, {}, guard)
+                self.assertEqual((failures, out.getvalue()), (0, line))
+        finally:
+            run.prepare, run.rehearsal_notes, run.stop_servers = originals
+
+    def test_a_planted_transcript_longer_than_the_scenario_is_refused(self):
+        scenario = self.scenario(planted=[{"steps": [{}, {}]}])
+        with self.assertRaises(ValueError):
+            run.planted_notes(scenario, "claude", self.sandbox)
+
+
 class Rehearsal(unittest.TestCase):
     def test_a_rehearse_entry_can_require_text_to_be_absent(self):
         trial = Path(tempfile.mkdtemp())
