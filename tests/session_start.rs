@@ -1943,6 +1943,45 @@ fn project_rules_come_first_in_full_and_leave_the_index() {
     assert!(index.contains("Scope: global 1, project 3"), "{hook}");
 }
 
+// A rule stated in two conversations keeps its "×2" in the rules part: an
+// observation's mark replaces the count only on an observation's line.
+#[test]
+fn a_rule_stated_twice_keeps_its_count_in_the_rules_part() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path();
+    let app = repository(home, "app", "git@github.com:acme/app.git");
+    let rule = |n: usize| {
+        (
+            format!("Run the app's migrations twice {n}"),
+            String::new(),
+            String::new(),
+            String::new(),
+        )
+    };
+    with_project_rules(home, "github.com/acme/app", &[rule(1), rule(2)]);
+    // The second rule's id, as `with_project_rules` writes it.
+    let second = format!("{:08x}-0000-4000-8000-{:012x}", 2, 2);
+    let conn = rusqlite::Connection::open(home.join("memory.sqlite3")).unwrap();
+    for origin in ["chat/a", "chat/b"] {
+        conn.execute(
+            "INSERT INTO memory_origins (memory_id,origin) VALUES (?1,?2)",
+            [second.as_str(), origin],
+        )
+        .unwrap();
+    }
+    let hook = started(home, &app, "s", "startup");
+    let part = rules_part(&hook);
+    assert_eq!(part.len(), 3, "{hook}");
+    assert!(
+        part[1].ends_with(" Run the app's migrations twice 2 ×2"),
+        "{hook}"
+    );
+    assert!(
+        part[2].ends_with(" Run the app's migrations twice 1"),
+        "{hook}"
+    );
+}
+
 // A rule longer than the full limit is shown by its title even as the
 // strongest, so it cannot push the others to their titles.
 #[test]
