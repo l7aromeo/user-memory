@@ -55,7 +55,9 @@ pub use schema::{
     compact, compact_skipped, compacted, connect, expect_migration, hold, servable, store_turn,
 };
 pub use selection::{Subset, local_path};
-pub use stamps::{Position, Stamp, Stamps, StampsReply, parse_stamps_reply};
+#[cfg(test)]
+pub use stamps::Rule;
+pub use stamps::{PRINT_FORMAT, Position, Stamp, Stamps, StampsReply, parse_stamps_reply};
 pub use titles::{Titles, parse_titles};
 pub use transfer::{
     ExportFile, ExportMemories, ImportMemories, ImportRequest, MAX_BYTES, OnConflict,
