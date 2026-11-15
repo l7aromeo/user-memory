@@ -1002,3 +1002,41 @@ fn a_relays_child_that_ends_is_started_again_from_the_newer_build() {
     let (stderr, _) = session.finish();
     assert_eq!(after, Some(NEWER.into()), "{stderr}");
 }
+
+/// A call the app cancelled gets no answer, so it doesn't hold a hand-over
+/// back: the next call after an upgrade is answered by the newer build.
+#[test]
+fn a_cancelled_call_does_not_hold_a_hand_over_back() {
+    for way in ways() {
+        let place = Place::new();
+        // A new store's first open pauses until the file is removed.
+        let pause = place.dir.path().join("pause");
+        fs::write(&pause, "").unwrap();
+        let mut session = place.serve(way, &[("USER_MEMORY_PAUSE_OPEN", pause.to_str().unwrap())]);
+        session.write(&[session.call_message("stopped", "index")]);
+        let reached = place.dir.path().join("pause.reached");
+        let deadline = Instant::now() + REPLY_WAIT;
+        while !reached.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "{way:?}: the call never opened the store"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+        // The user stops the turn: the app cancels the call.
+        session.write(&[
+            json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"stopped","reason":"stopped by the user"}}),
+        ]);
+        fs::remove_file(&pause).unwrap();
+        place.upgrade();
+        let after = session.version("after");
+        let (stderr, seen) = session.finish();
+        assert_eq!(after, Some(NEWER.into()), "{way:?}: {stderr}");
+        // Whatever the server did with the cancelled call, the app saw at
+        // most one reply to it.
+        assert!(
+            seen.iter().filter(|m| m["id"] == "stopped").count() <= 1,
+            "{way:?}: {seen:?}"
+        );
+    }
+}
