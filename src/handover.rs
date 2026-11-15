@@ -50,7 +50,7 @@ const REPLAY_ID: &str = "user-memory-handover-handshake";
 const TOOLS_ID: &str = "user-memory-handover-tools";
 /// The in-memory pipe between the front and a server in this process: one
 /// stdio read's worth, as the pipe from the app holds.
-const PIPE_BUFFER: usize = 64 * 1024;
+pub(crate) const PIPE_BUFFER: usize = 64 * 1024;
 /// How much the reader takes from stdin in one read.
 const READ_CHUNK: usize = 64 * 1024;
 /// In debug builds, set to 1, it makes `serve` hand over by relaying on
@@ -325,6 +325,7 @@ fn start_here(inner: &Inner) -> Backend {
             connection,
             server_read,
             server_write,
+            true,
         )),
     };
     let (read, write) = tokio::io::split(front);
@@ -971,6 +972,14 @@ impl Front {
         let Ok(mut message) = serde_json::from_str::<Value>(&line) else {
             return self.write_app(&line).await;
         };
+        if message["method"] == crate::remote::SERVER_LINE_NOTICE {
+            // The bridge's own, for the front.
+            self.session.server_line = message
+                .pointer("/params/line")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            return Ok(());
+        }
         if message["method"] == "notifications/tools/list_changed"
             && message.pointer("/params/_meta").is_none()
             && !self.legacy()

@@ -557,7 +557,7 @@
   },
   {
    "name": "memory_failures_leave_the_agent_a_safe_next_step",
-   "summary": "#112 scenario 13, with #114: a session that starts while the server is down tells the user once, names doctor and finishes the task; a second session, started with the server up, has a write cut off, searches before repeating it once the server is back, and says the token was refused without opening a token file. A client loads a server's tools only at session start, so the writes need a session that began with the server up.",
+   "summary": "#112 scenario 13, with #114: a session that starts while the server is down tells the user once, names doctor and finishes the task; a second session, started with the server up, has a write cut off, searches before repeating it once the server is back, and says the token was refused without opening a token file. Its writes run in a session that began with the server up; one that began with it down is #130's scenario.",
    "repeat": 2,
    "cwd": "project:compiler",
    "claude_file_tools": true,
@@ -584,6 +584,24 @@
    ],
    "rehearse": [
     {"cwd": "project:compiler", "matches": ["^USER MEMORY INDEX"], "lacks": ["User memory unavailable"]}
+   ]
+  },
+  {
+   "name": "a_session_started_in_an_outage_records_once_the_server_is_back",
+   "summary": "#130: a session that starts while its memory server is down still gets the memory tools, from the client itself. The server is back after the first turn, and in a later turn of the same session the agent records a new rule through record.",
+   "repeat": 2,
+   "cwd": "project:compiler",
+   "claude_file_tools": true,
+   "servers": ["main"],
+   "steps": [
+    {"session": "a", "server": {"stop": "main"}, "prompt": "Write a one-line note for the team saying the 2.4 release is out."},
+    {"session": "a", "server": {"start": "main"}, "prompt": "Remember for every project: release notes list breaking changes first."}
+   ],
+   "checks": [
+    {"answer": {"step": 0, "matches": "2\\.4"}},
+    {"called": {"step": 1, "tools": ["record"]}},
+    {"memory": {"where": {"content": "breaking changes"}, "count": "1", "fields": {"scope": "^global$"}}},
+    {"answer_not": {"step": 1, "matches": "(not|isn't|aren't|no longer) (available|connected)|unavailable"}}
    ]
   }
  ]

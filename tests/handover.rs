@@ -1101,3 +1101,138 @@ fn a_starting_serve_removes_hand_over_files_left_behind() {
     assert!(recent.exists(), "a recent hand-over file went");
     assert!(other.exists(), "another file went");
 }
+
+/// The token the tests' memory server accepts.
+const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+/// An address on loopback where nothing listens yet.
+fn free_address() -> String {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .to_string()
+}
+
+/// A memory server of this build on `address`, its store and token in
+/// `dir`; killed when dropped.
+struct Host(Child);
+
+impl Host {
+    fn start(dir: &Path, address: &str) -> Self {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_user-memory"))
+            .args(["host", "--listen", address, "--db"])
+            .arg(dir.join("shared.sqlite3"))
+            .arg("--token-file")
+            .arg(dir.join("token"))
+            .sandboxed(dir)
+            .env_remove("USER_MEMORY_DB")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        assert!(line.starts_with("Listening: http://"), "{line}");
+        Self(child)
+    }
+}
+
+impl Drop for Host {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// A bridge's `serve` whose memory server is not up yet, at `address`.
+fn bridge_env(place: &Place, address: &str) -> Vec<(&'static str, String)> {
+    let token = place.dir.path().join("token");
+    fs::write(&token, TOKEN).unwrap();
+    vec![
+        ("USER_MEMORY_URL", format!("http://{address}/mcp")),
+        (
+            "USER_MEMORY_TOKEN_FILE",
+            token.to_string_lossy().into_owned(),
+        ),
+    ]
+}
+
+/// A session that started while its memory server was down hands over to
+/// a replaced binary like any other: the new code answers the handshake
+/// itself too, the app is told of its other tools, and once the server is
+/// up the next call is served.
+#[test]
+fn a_session_started_in_an_outage_hands_over() {
+    for way in ways() {
+        let place = Place::new();
+        let address = free_address();
+        let env = bridge_env(&place, &address);
+        let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let mut session = place.serve(way, &env);
+        place.upgrade();
+        let down = session.call("down", "index");
+        assert_eq!(down["result"]["isError"], true, "{way:?}: {down}");
+        assert!(
+            texts(&down)[0].ends_with("did not answer; the call may not have completed. Before repeating a write, search for it. Memory reconnects on the next call."),
+            "{way:?}: {down}"
+        );
+        let host = Host::start(place.dir.path(), &address);
+        let up = session.call("up", "index");
+        assert_eq!(up["result"]["isError"], false, "{way:?}: {up}");
+        drop(host);
+        // Told twice, each on its own schedule: the newer build adds a tool,
+        // and the server, a build without it, takes it away again.
+        let (stderr, seen) = session.finish();
+        assert_eq!(
+            count(&seen, "notifications/tools/list_changed"),
+            2,
+            "{way:?}: {seen:?}"
+        );
+        assert!(
+            stderr.contains(&format!("user-memory {NEWER}: took over this session")),
+            "{way:?}: {stderr}"
+        );
+        assert!(!stderr.contains(TOKEN), "{way:?}: the token is in stderr");
+    }
+}
+
+/// A version line the first real handshake said is not said again when the
+/// session hands over to a build of the same version, as a reinstall does:
+/// the bridge gives the front its line.
+#[test]
+fn a_version_line_is_said_once_across_a_hand_over_to_the_same_version() {
+    for way in ways() {
+        let place = Place::new();
+        let address = free_address();
+        let mut env = bridge_env(&place, &address);
+        // Below the host's oldest client, before and after the hand-over.
+        env.push(("USER_MEMORY_TEST_VERSION", "0.7.9".into()));
+        env.push(("FAKE_USER_MEMORY_VERSION", "0.7.9".into()));
+        let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let mut session = place.serve(way, &env);
+        session.call("down", "index");
+        let host = Host::start(place.dir.path(), &address);
+        let line = format!(
+            "The memory server at http://{address}/mcp runs user-memory {} and needs 0.8.0 or newer on this machine (0.7.9). Upgrade: user-memory upgrade",
+            env!("CARGO_PKG_VERSION")
+        );
+        let first = session.call("first", "index");
+        assert_eq!(texts(&first).last(), Some(&line), "{way:?}: {first}");
+        place.upgrade();
+        let after = session.call("after", "index");
+        assert_eq!(after["result"]["isError"], false, "{way:?}: {after}");
+        assert!(
+            !texts(&after).contains(&line),
+            "{way:?}: said again: {after}"
+        );
+        drop(host);
+        let stderr = session.close();
+        assert!(
+            stderr.contains("user-memory 0.7.9: took over this session"),
+            "{way:?}: {stderr}"
+        );
+    }
+}
