@@ -482,12 +482,17 @@ fn answered(message: &impl serde::Serialize) -> Option<serde_json::Value> {
 const RECONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Reestablish the upstream session without repeating a client request.
+/// A 2026-07-28 session that sent no handshake has none to replay: each of
+/// its requests names its version in `_meta`, so the new transport alone
+/// carries it on.
 async fn reconnect<R: Transport<RoleClient>>(
     mut remote: R,
     initialize: Option<RxJsonRpcMessage<RoleServer>>,
     initialized: Option<RxJsonRpcMessage<RoleServer>>,
 ) -> Result<(R, Option<serde_json::Value>)> {
-    let init = initialize.context("Client did not initialize")?;
+    let Some(init) = initialize else {
+        return Ok((remote, None));
+    };
     let init_id = serde_json::to_value(&init)?
         .get("id")
         .cloned()

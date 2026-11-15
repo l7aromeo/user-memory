@@ -2261,3 +2261,150 @@ fn the_servers_oldest_client_is_said_to_a_client_below_it() {
         );
     }
 }
+
+/// An app's session with `serve` on a client of the server at `url`, which
+/// keeps every message that is not the reply it waits for.
+struct App {
+    child: ChildGuard,
+    input: Option<std::process::ChildStdin>,
+    output: std::sync::mpsc::Receiver<String>,
+    /// Messages that came while waiting for a reply.
+    others: Vec<Value>,
+}
+
+impl App {
+    /// `serve` as the app starts it, with `envs` set besides the server's.
+    fn start(home: &Path, url: &str, token: &Path, envs: &[(&str, &str)]) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_user-memory"));
+        command
+            .arg("serve")
+            .sandboxed(home)
+            .env_remove("USER_MEMORY_DB")
+            .env("USER_MEMORY_URL", url)
+            .env("USER_MEMORY_TOKEN_FILE", token)
+            .envs(envs.iter().copied())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        Self::over(command)
+    }
+
+    fn over(mut command: Command) -> Self {
+        let mut child = ChildGuard(command.spawn().unwrap());
+        let input = child.0.stdin.take();
+        let output = lines(child.0.stdout.take().unwrap());
+        Self {
+            child,
+            input,
+            output,
+            others: Vec::new(),
+        }
+    }
+
+    fn send(&mut self, message: &Value) {
+        let input = self.input.as_mut().unwrap();
+        writeln!(input, "{message}").unwrap();
+        input.flush().unwrap();
+    }
+
+    /// The reply to the request `message`, as the line the app reads.
+    fn ask_line(&mut self, message: &Value) -> String {
+        self.send(message);
+        loop {
+            let line = self
+                .output
+                .recv_timeout(STUCK)
+                .expect("serve sent no reply");
+            let value: Value = serde_json::from_str(&line).unwrap();
+            if value["id"] == message["id"] && value.get("method").is_none() {
+                return line;
+            }
+            self.others.push(value);
+        }
+    }
+
+    fn ask(&mut self, message: &Value) -> Value {
+        serde_json::from_str(&self.ask_line(message)).unwrap()
+    }
+
+    /// Ends the session; serve's stderr and the lines it printed meanwhile.
+    fn close(mut self) -> (String, Vec<String>) {
+        drop(self.input.take());
+        let status = self.child.0.wait().unwrap();
+        assert!(status.success(), "serve failed: {status}");
+        let mut said = String::new();
+        if let Some(mut errors) = self.child.0.stderr.take() {
+            errors.read_to_string(&mut said).unwrap();
+        }
+        let rest = self.output.iter().collect();
+        (said, rest)
+    }
+}
+
+/// The texts of a tool reply's content.
+fn texts(reply: &Value) -> Vec<String> {
+    reply["result"]["content"]
+        .as_array()
+        .unwrap_or_else(|| panic!("not a tool reply: {reply}"))
+        .iter()
+        .map(|item| item["text"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// What a client of `url` says for a call its server did not answer.
+fn unanswered(url: &str) -> String {
+    format!(
+        "The memory server at {url} did not answer; the call may not have completed. Before repeating a write, search for it. Memory reconnects on the next call."
+    )
+}
+
+/// The `_meta` every 2026-07-28 request carries: its protocol version and
+/// the client, in place of a handshake.
+fn meta_2026() -> Value {
+    json!({"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"test-device","version":"1"},"io.modelcontextprotocol/clientCapabilities":{}})
+}
+
+/// `message` as a 2026-07-28 request.
+fn on_2026(mut message: Value) -> Value {
+    message["params"]["_meta"] = meta_2026();
+    message
+}
+
+/// The 2026-07-28 protocol has no handshake, and `server/discover` is
+/// optional: a session that never sends it reconnects after the server
+/// restarts, as one that did.
+#[test]
+fn a_2026_session_without_discover_reconnects_after_an_outage() {
+    let mut host = Host::start(root());
+    let home = tempdir().unwrap();
+    let token = home.path().join("token");
+    fs::write(&token, TOKEN).unwrap();
+    let url = format!("http://{}/mcp", host.address);
+    let mut app = App::start(home.path(), &url, &token, &[]);
+    let tools = app.ask(&on_2026(
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}),
+    ));
+    assert!(tools.get("result").is_some(), "{tools}");
+    let before = app.ask(&on_2026(call(2, "index", json!({}))));
+    assert_ne!(before["result"]["isError"], true, "{before}");
+    host.child.kill().unwrap();
+    host.child.wait().unwrap();
+    let failed = app.ask(&on_2026(call(3, "index", json!({}))));
+    assert_eq!(texts(&failed), [unanswered(&url)]);
+    host.restart();
+    let mut replies = Vec::new();
+    for id in 4..7 {
+        let reply = app.ask(&on_2026(call(id, "index", json!({}))));
+        let served = reply["result"]["isError"] != true;
+        replies.push(reply);
+        if served {
+            break;
+        }
+    }
+    assert_ne!(
+        replies.last().unwrap()["result"]["isError"],
+        true,
+        "never reconnected: {replies:?}"
+    );
+    app.close();
+}
