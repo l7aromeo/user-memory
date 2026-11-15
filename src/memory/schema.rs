@@ -7,12 +7,13 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use std::{fs, path::Path, time::Duration};
 use uuid::Uuid;
 
-/// Stamped into `PRAGMA user_version`. Bump it whenever `SCHEMA` or the
-/// search index SQL in `index.rs` changes, and add the step that upgrades the
+/// Stamped into `PRAGMA user_version`. Bump it whenever `SCHEMA`, the
+/// search index SQL in `index.rs` or the change counter's in `changes.rs`
+/// changes, and add the step that upgrades the
 /// previous version in `migrate.rs`: `IF NOT EXISTS` keeps an older table or
 /// trigger as it was, so connecting refuses a store from another version
 /// instead of half upgrading it.
-pub(super) const SCHEMA_VERSION: i64 = 9;
+pub(super) const SCHEMA_VERSION: i64 = 10;
 
 /// The tables and the triggers that stale inferred patterns when their
 /// support weakens: a supporting memory deleted; one changed in what it
@@ -193,6 +194,8 @@ pub fn connect(db: &Path) -> Result<Connection> {
             tx.execute_batch(super::history::EVENTS)?;
             super::index::create(&tx)?;
             super::index::start(&tx)?;
+            tx.execute_batch(&super::changes::schema())?;
+            tx.execute_batch(super::changes::START)?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         tx.commit()?;
@@ -224,6 +227,7 @@ pub fn connect(db: &Path) -> Result<Connection> {
     conn.execute_batch(CUTOFFS)?;
     conn.execute_batch(super::history::EVENTS)?;
     super::index::create(&conn)?;
+    conn.execute_batch(&super::changes::schema())?;
     Ok(conn)
 }
 

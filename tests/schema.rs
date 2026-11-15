@@ -237,6 +237,20 @@ fn data(db: &Path) -> Vec<Vec<String>> {
 
 /// The first schema version that keeps each memory's history.
 const HISTORY_VERSION: i64 = 7;
+/// The first schema version that counts the store's changes.
+const CHANGES_VERSION: i64 = 10;
+
+/// The store's latest change and how many memories have a counted change.
+fn changes(db: &Path) -> (i64, i64) {
+    Connection::open(db)
+        .unwrap()
+        .query_row(
+            "SELECT last_change, (SELECT COUNT(*) FROM memory_changes) FROM store_changes",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+}
 
 /// Every event of the history of the store at `db`, or none for a store
 /// from before history existed.
@@ -442,6 +456,11 @@ fn every_snapshot_migrates_to_the_current_schema_and_keeps_its_data() {
         assert_eq!(version(&db), current);
         assert_eq!(normalized(&statements(&db)), target, "v{n}");
         assert_eq!(data(&db), before, "v{n} lost data");
+        // The migration writes no memory: a store reaching the counter's
+        // version has counted no change yet.
+        if n < CHANGES_VERSION {
+            assert_eq!(changes(&db), (0, 0), "v{n} counted a change");
+        }
         // A store from before history starts with none; one with history
         // keeps every event as it was.
         assert_eq!(

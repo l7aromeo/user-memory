@@ -761,3 +761,33 @@ fn a_replaced_reason_is_restored_from_the_history() {
     let read = store.value(&["read", &id]);
     assert_eq!(read["memories"][0]["reason"], "Mornings are for deep work");
 }
+
+// The store counts each change in tables of its own and never writes the
+// memory's row a second time, so the history records each change once and
+// the keyword index sees it once.
+#[test]
+fn counting_a_change_adds_no_event_and_indexes_the_memory_once() {
+    let s = Store::new();
+    let id = s.record("workflow", "Run the tests first", &[]);
+    let indexed = || -> i64 {
+        s.sql()
+            .query_row(
+                "SELECT COUNT(*) FROM search_changes WHERE id=?1",
+                [&id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    let counted = || -> i64 {
+        s.sql()
+            .query_row("SELECT last_change FROM store_changes", [], |r| r.get(0))
+            .unwrap()
+    };
+    assert_eq!(s.ops(&id), ["record"]);
+    assert_eq!(indexed(), 1);
+    let before = counted();
+    s.value(&["update", &id, "--content", "Run the tests first, always"]);
+    assert_eq!(s.ops(&id), ["record", "update"]);
+    assert_eq!(indexed(), 2);
+    assert_eq!(counted(), before + 1);
+}
