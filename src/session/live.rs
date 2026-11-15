@@ -3,7 +3,7 @@
 //! state directory, written at session start and after each prompt.
 
 use crate::{
-    memory::{Stamp, Stamps},
+    memory::{Since, Stamp, Stamps},
     paths, private,
 };
 use serde::{Deserialize, Serialize};
@@ -111,6 +111,10 @@ pub(super) fn gone(old: &Snapshot, new: &Snapshot) -> Vec<String> {
 pub(super) struct Snapshot {
     pub projects: Option<Vec<Project>>,
     pub stamps: Stamps,
+    /// Where the stamps stand in the store's count of changes; none from a
+    /// server that knows no count, or in a snapshot saved before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changes: Option<Since>,
 }
 
 /// Hex characters of the store key in a snapshot's file name: 64 bits of
@@ -329,7 +333,12 @@ fn projects_changed(old: Option<&[Project]>, new: Option<&[Project]>) -> Option<
 /// marked `<` with its title rather than `-`.
 pub(super) fn notice(old: &Snapshot, new: &Snapshot, left: &BTreeSet<String>) -> Option<String> {
     let projects = projects_changed(old.projects.as_deref(), new.projects.as_deref());
-    let memories = memory_notice(&old.stamps, &new.stamps, left);
+    // A snapshot saved before digests holds each memory's last update in
+    // their place: compared with a digest, every memory would read as
+    // changed, so the first notice after an upgrade compares status and
+    // title alone.
+    let digests = old.changes.is_some() == new.changes.is_some();
+    let memories = memory_notice(&old.stamps, &new.stamps, left, digests);
     match (projects, memories) {
         (None, None) => None,
         (projects, memories) => Some(
@@ -343,7 +352,12 @@ pub(super) fn notice(old: &Snapshot, new: &Snapshot, left: &BTreeSet<String>) ->
 }
 
 /// The memory lines of a notice, or `None` when no memory changed.
-fn memory_notice(old: &Stamps, new: &Stamps, left: &BTreeSet<String>) -> Option<String> {
+fn memory_notice(
+    old: &Stamps,
+    new: &Stamps,
+    left: &BTreeSet<String>,
+    digests: bool,
+) -> Option<String> {
     let short = |id: &str| id.chars().take(8).collect::<String>();
     let line =
         |sign: char, id: &str, stamp: &Stamp| format!("{sign} {} {}", short(id), stamp.title);
@@ -353,7 +367,13 @@ fn memory_notice(old: &Stamps, new: &Stamps, left: &BTreeSet<String>) -> Option<
         .map(|(id, stamp)| line('+', id, stamp));
     let changed = new
         .iter()
-        .filter(|(id, stamp)| old.get(*id).is_some_and(|was| was != *stamp))
+        .filter(|(id, stamp)| {
+            old.get(*id).is_some_and(|was| {
+                (digests && was.digest != stamp.digest)
+                    || was.status != stamp.status
+                    || was.title != stamp.title
+            })
+        })
         .map(|(id, stamp)| line('~', id, stamp));
     let removed = old
         .iter()
@@ -386,7 +406,7 @@ mod tests {
 
     fn stamp(updated_at: &str, status: &str, title: &str) -> Stamp {
         Stamp {
-            updated_at: updated_at.into(),
+            digest: updated_at.into(),
             status: status.into(),
             title: title.into(),
         }
@@ -417,7 +437,7 @@ mod tests {
                 stamp("2026-10-01 10:00:00", "confirmed", "Old title"),
             ),
         ]);
-        assert_eq!(memory_notice(&old, &old, &BTreeSet::new()), None);
+        assert_eq!(memory_notice(&old, &old, &BTreeSet::new(), true), None);
         let new = stamps(&[
             ("11111111-aaaa", kept),
             (
@@ -434,7 +454,7 @@ mod tests {
             ),
         ]);
         assert_eq!(
-            memory_notice(&old, &new, &BTreeSet::new()).unwrap(),
+            memory_notice(&old, &new, &BTreeSet::new(), true).unwrap(),
             [
                 HEADER,
                 "+ 55555555 Ask before pushing",
@@ -456,7 +476,7 @@ mod tests {
                 )
             })
             .collect();
-        let text = memory_notice(&Stamps::new(), &new, &BTreeSet::new()).unwrap();
+        let text = memory_notice(&Stamps::new(), &new, &BTreeSet::new(), true).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 1 + NOTICE_LINES + 1);
         assert_eq!(
@@ -466,7 +486,7 @@ mod tests {
         assert_eq!(lines[NOTICE_LINES + 1], "and 3 more: call index");
         let exact: Stamps = new.into_iter().take(NOTICE_LINES).collect();
         assert!(
-            !memory_notice(&Stamps::new(), &exact, &BTreeSet::new())
+            !memory_notice(&Stamps::new(), &exact, &BTreeSet::new(), true)
                 .unwrap()
                 .contains("more")
         );
@@ -519,6 +539,7 @@ mod tests {
                 source: THIS_FOLDER.into(),
             }]),
             stamps: stamps(&[("11111111-aaaa", stamp("t", "confirmed", "Prefer Rust"))]),
+            changes: None,
         };
         let old = sessions.join("codex-gone.json");
         let recent = sessions.join("codex-recent.json");
@@ -561,6 +582,7 @@ mod tests {
         let second = Snapshot {
             projects: None,
             stamps: Stamps::new(),
+            changes: None,
         };
         save(&path, &second, &Landing::default()).unwrap();
         assert_eq!(load(&path), Some(second));
@@ -607,6 +629,7 @@ mod tests {
                     )
                 })
                 .collect(),
+            changes: None,
         };
         let mut calls = Calls::default();
         write_whole(&mut calls, &snapshot).unwrap();
@@ -620,6 +643,7 @@ mod tests {
         let told = Snapshot {
             projects: None,
             stamps: stamps(&[("11111111-aaaa", stamp("t", "confirmed", "Prefer Rust"))]),
+            changes: None,
         };
         save(&path, &told, &Landing::default()).unwrap();
         // Abandoned before it replaced the file: the session keeps what it
@@ -629,6 +653,7 @@ mod tests {
         let unsaid = Snapshot {
             projects: None,
             stamps: Stamps::new(),
+            changes: None,
         };
         let err = save(&path, &unsaid, &landing).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::Interrupted);
@@ -657,6 +682,7 @@ mod tests {
                 project("local:app", PENDING),
             ]),
             stamps: kept.clone(),
+            changes: None,
         };
         let mut gained = kept.clone();
         gained.insert(
@@ -669,6 +695,7 @@ mod tests {
                 project("github.com/x/web", LISTED),
             ]),
             stamps: gained,
+            changes: None,
         };
         assert_eq!(
             notice(&old, &new, &BTreeSet::new()).unwrap(),
@@ -683,6 +710,7 @@ mod tests {
         let same_memories = Snapshot {
             projects: new.projects.clone(),
             stamps: kept.clone(),
+            changes: None,
         };
         assert!(
             notice(&old, &same_memories, &BTreeSet::new())
@@ -692,6 +720,7 @@ mod tests {
         let unknown = Snapshot {
             projects: None,
             stamps: kept,
+            changes: None,
         };
         assert_eq!(notice(&unknown, &same_memories, &BTreeSet::new()), None);
         assert_eq!(notice(&old, &old, &BTreeSet::new()), None);

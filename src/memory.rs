@@ -53,7 +53,7 @@ pub use schema::{
     compact, compact_skipped, compacted, connect, expect_migration, hold, store_turn,
 };
 pub use selection::{Subset, local_path};
-pub use stamps::{Stamp, Stamps, parse_stamps};
+pub use stamps::{Since, Stamp, Stamps, StampsReply, parse_stamps_reply};
 pub use titles::{Titles, parse_titles};
 pub use transfer::{
     ExportFile, ExportMemories, ImportMemories, ImportRequest, MAX_BYTES, OnConflict,

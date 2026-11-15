@@ -582,3 +582,118 @@ fn a_snapshot_from_before_the_upgrade_gives_no_notice() {
         Some(format!("+ {} Ask before pushing", id8(&added)).as_str())
     );
 }
+
+// An update that changes nothing an agent acts on, such as one that only
+// adds this conversation, still counts as a confirmation but is no change
+// to tell; a content change under the same title still is one.
+#[test]
+fn only_a_change_an_agent_acts_on_is_told() {
+    let home = Home::new();
+    let id = home.cli(&[
+        "record",
+        "--type",
+        "preference",
+        "--category",
+        "style",
+        "--title",
+        "Keep pull requests small",
+        "--content",
+        "Keep pull requests under 400 changed lines",
+        "--scope",
+        "global",
+        "--origin",
+        "chat/one",
+    ])["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // Recorded a while ago, so a write now moves its update time, which
+    // counts in seconds.
+    rusqlite::Connection::open(home.path().join("memory.sqlite3"))
+        .unwrap()
+        .execute(
+            "UPDATE memories SET updated_at='2026-01-01 00:00:00' WHERE id=?1",
+            [&id],
+        )
+        .unwrap();
+    home.hook("SessionStart", "s", &[]);
+    home.cli(&["update", &id, "--origin", "chat/two"]);
+    assert_eq!(home.notice("s"), "", "a confirmation is no change");
+    let read = home.cli(&["read", &id]);
+    assert_eq!(read["memories"][0]["confirmations"], 2, "{read}");
+    home.cli(&[
+        "update",
+        &id,
+        "--content",
+        "Keep pull requests under 300 changed lines",
+    ]);
+    assert_eq!(
+        home.notice("s"),
+        [
+            "Memory changed since this session last looked (+ new, ~ changed, - no longer active; read before applying):".to_owned(),
+            format!("~ {} Keep pull requests small", id8(&id)),
+        ]
+        .join("\n")
+    );
+}
+
+// A snapshot saved before stamps held digests, with each memory's last
+// update in their place, is compared by status and title on the first
+// prompt after the upgrade, so it does not list every memory as changed.
+#[test]
+fn a_snapshot_from_before_digests_lists_no_memory_as_changed() {
+    let home = Home::new();
+    for title in ["Prefer Rust for tools", "Ask before pushing", "Use tabs"] {
+        home.record(title);
+    }
+    home.hook("SessionStart", "s", &[]);
+    let path = home.snapshot("s");
+    let mut snapshot: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let fields = snapshot.as_object_mut().unwrap();
+    assert!(fields.remove("changes").is_some(), "{fields:?}");
+    for stamp in fields["stamps"].as_object_mut().unwrap().values_mut() {
+        let stamp = stamp.as_object_mut().unwrap();
+        stamp.remove("digest").unwrap();
+        stamp.insert("updated_at".into(), json!("2026-10-01 10:00:00"));
+    }
+    std::fs::write(&path, snapshot.to_string()).unwrap();
+    assert_eq!(home.notice("s"), "");
+    let added = home.record("Write release notes");
+    assert_eq!(
+        home.notice("s").lines().nth(1),
+        Some(format!("+ {} Write release notes", id8(&added)).as_str())
+    );
+}
+
+// Before each prompt the hook reads only the memories changed since the
+// session last looked, however many the store holds; a session whose
+// projects changed, or a store with a new id, is read whole.
+#[test]
+fn a_prompt_reads_only_what_changed_since_the_session_looked() {
+    let home = Home::new();
+    for i in 0..50 {
+        home.record(&format!("Memory number {i}"));
+    }
+    home.hook("SessionStart", "s", &[]);
+    let read = |home: &Home| {
+        let out = home.hook("UserPromptSubmit", "s", &[]);
+        String::from_utf8(out.stderr)
+            .unwrap()
+            .lines()
+            .find_map(|l| l.strip_prefix("user-memory: read ").map(str::to_owned))
+            .unwrap_or_default()
+    };
+    assert_eq!(read(&home), "0 stamps (changed)");
+    home.record("Ask before pushing");
+    assert_eq!(read(&home), "1 stamps (changed)");
+    // A store that took a new id, as after a restore, is read whole.
+    rusqlite::Connection::open(home.path().join("memory.sqlite3"))
+        .unwrap()
+        .execute(
+            "UPDATE store_changes SET store_id='0123456789abcdef0123456789abcdef'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(read(&home), "51 stamps (every)");
+    assert_eq!(read(&home), "0 stamps (changed)");
+}

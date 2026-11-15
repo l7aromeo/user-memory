@@ -265,7 +265,7 @@ is removed. When the projects change, the notice opens with a line such as
 and the memories of a project gained follow as `+` lines, those of a project
 lost as `<` lines with their title and `(project no longer loaded)`: they
 are still active, only no longer loaded here. `+` is a new memory, `~` one
-whose title, status or content changed, and `-` one no longer active
+changed in what an agent acts on (a confirmation is not a change), and `-` one no longer active
 (forgotten, superseded or stale). Ten changes are listed;
 more are counted, with a pointer to `index`. The projects line names 20
 projects at most and counts the rest, and the notice keeps to the same
