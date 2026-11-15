@@ -1019,7 +1019,7 @@ mod tests {
         tx.execute("INSERT INTO big VALUES (randomblob(?1))", [size])
             .unwrap();
         tx.execute(
-            "INSERT INTO memories (id,memory_type,category,title,content) VALUES ('0bd1ba49-2b63-4aab-8d57-38d9be10a281','fact','tooling','A fact','A fact')",
+            "INSERT INTO memories (id,memory_type,category,title,content) VALUES ('e0000001-0000-4000-8000-000000000001','fact','tooling','A fact','A fact')",
             [],
         )
         .unwrap();
@@ -1094,7 +1094,7 @@ mod tests {
         connect(&db)
             .unwrap()
             .execute(
-                "INSERT INTO memories (id,memory_type,category,title,content) VALUES ('0bd1ba49-2b63-4aab-8d57-38d9be10a281','fact','tooling','A fact','A fact')",
+                "INSERT INTO memories (id,memory_type,category,title,content) VALUES ('e0000001-0000-4000-8000-000000000001','fact','tooling','A fact','A fact')",
                 [],
             )
             .unwrap();

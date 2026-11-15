@@ -339,14 +339,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let conn = super::super::schema::connect(&dir.path().join("m.sqlite3")).unwrap();
         conn.execute(
-            "INSERT INTO memories (id,memory_type,category,title,content) VALUES ('0bd1ba49-2b63-4aab-9c3a-111111111111','fact','tooling','A title','Some content')",
+            "INSERT INTO memories (id,memory_type,category,title,content) VALUES ('e0000001-0000-4000-8000-000000000001','fact','tooling','A title','Some content')",
             [],
         )
         .unwrap();
         (dir, conn)
     }
 
-    const ID: &str = "0bd1ba49-2b63-4aab-9c3a-111111111111";
+    const ID: &str = "e0000001-0000-4000-8000-000000000001";
 
     /// The store's last change and the memory's row: its change and
     /// removal time.

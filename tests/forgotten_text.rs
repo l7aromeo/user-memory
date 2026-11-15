@@ -372,12 +372,12 @@ fn forget_the_marker_as_before(db: &Path) {
     let conn = Connection::open(db).unwrap();
     conn.pragma_update(None, "secure_delete", false).unwrap();
     conn.execute(
-        "INSERT INTO memories (id,memory_type,category,title,content) VALUES ('0bd1ba49-2b63-4aab-8d57-38d9be10a281','fact','tooling','Deploy key',?1)",
+        "INSERT INTO memories (id,memory_type,category,title,content) VALUES ('e0000001-0000-4000-8000-000000000001','fact','tooling','Deploy key',?1)",
         [format!("The deploy key {MARKER} is in the vault")],
     )
     .unwrap();
     conn.execute(
-        "DELETE FROM memories WHERE id='0bd1ba49-2b63-4aab-8d57-38d9be10a281'",
+        "DELETE FROM memories WHERE id='e0000001-0000-4000-8000-000000000001'",
         [],
     )
     .unwrap();

@@ -613,7 +613,7 @@ fn a_snapshot_from_before_the_upgrade_gives_no_notice() {
     // As 0.9.0 wrote it: one memory this store never held.
     std::fs::write(
         home.sessions().join("claude-old.json"),
-        json!({"projects":[],"stamps":{"0b9d3a11-0000-4000-8000-000000000000":{"updated_at":"2026-10-01 10:00:00","status":"confirmed","title":"Use tabs"}}}).to_string(),
+        json!({"projects":[],"stamps":{"e0000006-0000-4000-8000-000000000006":{"updated_at":"2026-10-01 10:00:00","status":"confirmed","title":"Use tabs"}}}).to_string(),
     )
     .unwrap();
     assert_eq!(home.notice("old"), "");

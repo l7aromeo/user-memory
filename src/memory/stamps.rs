@@ -475,9 +475,9 @@ pub fn parse_stamps(text: &str) -> Option<Stamps> {
 mod tests {
     use super::*;
 
-    const A: &str = "0bd1ba49-2b63-4aab-9c3a-aaaaaaaaaaaa";
-    const B: &str = "0bd1ba49-2b63-4aab-9c3a-bbbbbbbbbbbb";
-    const C: &str = "0bd1ba49-2b63-4aab-9c3a-cccccccccccc";
+    const A: &str = "e0000002-0000-4000-8000-000000000002";
+    const B: &str = "e0000003-0000-4000-8000-000000000003";
+    const C: &str = "e0000004-0000-4000-8000-000000000004";
 
     fn store() -> (tempfile::TempDir, Connection) {
         let dir = tempfile::tempdir().unwrap();
@@ -680,7 +680,7 @@ mod tests {
                     n += 1;
                     put(
                         &conn,
-                        &format!("0bd1ba49-2b63-4aab-9c3a-{n:012}"),
+                        &format!("e{n:07}-0000-4000-8000-{n:012}"),
                         memory_type,
                         source,
                         status,
@@ -819,11 +819,11 @@ mod tests {
     #[test]
     fn only_a_stamps_reply_is_read_as_a_snapshot() {
         let reply = format!(
-            "{STAMPS}\n0bd1ba49-2b63-4aab-8d57-38d9be10a281\t2026-10-16 10:00:00\tconfirmed\tPrefer Rust for tools"
+            "{STAMPS}\ne0000001-0000-4000-8000-000000000001\t2026-10-16 10:00:00\tconfirmed\tPrefer Rust for tools"
         );
         let stamps = parse_stamps(&reply).unwrap();
         assert_eq!(
-            stamps["0bd1ba49-2b63-4aab-8d57-38d9be10a281"],
+            stamps["e0000001-0000-4000-8000-000000000001"],
             Stamp {
                 digest: "2026-10-16 10:00:00".into(),
                 status: "confirmed".into(),

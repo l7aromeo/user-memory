@@ -882,7 +882,7 @@ mod tests {
         let db = dir.join("memories.sqlite3");
         let conn = schema::connect(&db).unwrap();
         conn.execute(
-            "INSERT INTO memories (id,memory_type,category,title,content) VALUES ('0bd1ba49-2b63-4aab-8d57-38d9be10a281','preference','programming','Prefer Rust','Prefer Rust')",
+            "INSERT INTO memories (id,memory_type,category,title,content) VALUES ('e0000001-0000-4000-8000-000000000001','preference','programming','Prefer Rust','Prefer Rust')",
             [],
         )
         .unwrap();
@@ -1023,7 +1023,7 @@ mod tests {
 
     fn orphan(conn: &Connection, _: Option<&Titles>) -> Result<()> {
         conn.execute(
-            "INSERT INTO memory_origins (memory_id, origin) VALUES ('6f1c3a52-7d0e-4c1b-9a2e-3b4c5d6e7f80','chat/x')",
+            "INSERT INTO memory_origins (memory_id, origin) VALUES ('e0000009-0000-4000-8000-000000000009','chat/x')",
             [],
         )?;
         Ok(())
@@ -1051,7 +1051,7 @@ mod tests {
         Connection::open(&db)
             .unwrap()
             .execute(
-                "INSERT INTO memory_origins (memory_id, origin) VALUES ('0bd1ba49-2b63-4aab-8d57-38d9be10a281','chat/x')",
+                "INSERT INTO memory_origins (memory_id, origin) VALUES ('e0000001-0000-4000-8000-000000000001','chat/x')",
                 [],
             )
             .unwrap();
@@ -1210,7 +1210,7 @@ mod tests {
         Connection::open(&db)
             .unwrap()
             .execute(
-                "INSERT INTO memories (id,memory_type,category,title,content) VALUES ('7c1f5d2e-3b4a-4c5d-9e6f-0a1b2c3d4e5f','preference','writing','Answer briefly','Answer briefly')",
+                "INSERT INTO memories (id,memory_type,category,title,content) VALUES ('e0000004-0000-4000-8000-000000000004','preference','writing','Answer briefly','Answer briefly')",
                 [],
             )
             .unwrap();

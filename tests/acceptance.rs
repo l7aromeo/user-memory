@@ -558,7 +558,7 @@ fn changed_preference_supersedes_the_old_one_and_stales_dependents() {
         "--content",
         "Indent with three spaces",
         "--supersedes",
-        "3d9f829a-c594-45d2-84b6-1469b20d653b",
+        "e0000007-0000-4000-8000-000000000007",
     ]);
     assert_eq!(missing["stored"], false, "missing target: {missing}");
 }

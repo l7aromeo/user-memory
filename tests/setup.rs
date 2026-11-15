@@ -169,7 +169,7 @@ fn installed_commands_remember_the_database_and_selected_clients() {
     s.client("claude", false);
     assert_success(&s.run(&["setup", "--client", "codex"]));
     let conn = rusqlite::Connection::open(s.path("private memory.sqlite3")).unwrap();
-    conn.execute("INSERT INTO memories(id,memory_type,category,context,content,reason,title) VALUES ('0bd1ba49-2b63-4aab-8d57-38d9be10a281','preference','test','setup','remember db','keep configured database','remember db')", []).unwrap();
+    conn.execute("INSERT INTO memories(id,memory_type,category,context,content,reason,title) VALUES ('e0000001-0000-4000-8000-000000000001','preference','test','setup','remember db','keep configured database','remember db')", []).unwrap();
     drop(conn);
     let run = |command| {
         Command::new(s.path("installed tools/user-memory"))
@@ -271,7 +271,7 @@ fn setup_is_repeatable_and_preserves_saved_memories() {
     let db = s.path("private memory.sqlite3");
     let conn = rusqlite::Connection::open(&db).unwrap();
     conn.execute(
-        "INSERT INTO memories(id,memory_type,category,context,content,title) VALUES ('0bd1ba49-2b63-4aab-8d57-38d9be10a281','fact','test','setup','keep this','keep this')",
+        "INSERT INTO memories(id,memory_type,category,context,content,title) VALUES ('e0000001-0000-4000-8000-000000000001','fact','test','setup','keep this','keep this')",
         [],
     )
     .unwrap();
@@ -847,8 +847,8 @@ fn setup_adds_session_hooks_that_load_the_project_index() {
     );
 
     let conn = rusqlite::Connection::open(s.path("private memory.sqlite3")).unwrap();
-    conn.execute("INSERT INTO memories(id,memory_type,category,content,title) VALUES ('0bd1ba49-2b63-4aab-8d57-38d9be10a281','preference','programming','Prefer Rust','Prefer Rust')", []).unwrap();
-    conn.execute("INSERT INTO memories(id,memory_type,category,content,scope,project,title) VALUES ('1bd1ba49-2b63-4aab-8d57-38d9be10a281','constraint','programming','Use Python here','project','github.com/owner/repo','Use Python here')", []).unwrap();
+    conn.execute("INSERT INTO memories(id,memory_type,category,content,title) VALUES ('e0000001-0000-4000-8000-000000000001','preference','programming','Prefer Rust','Prefer Rust')", []).unwrap();
+    conn.execute("INSERT INTO memories(id,memory_type,category,content,scope,project,title) VALUES ('e0000002-0000-4000-8000-000000000002','constraint','programming','Use Python here','project','github.com/owner/repo','Use Python here')", []).unwrap();
     drop(conn);
     let checkout = s.path("home/repo");
     fs::create_dir(&checkout).unwrap();
@@ -1060,12 +1060,12 @@ fn setup_rewrites_a_store_holding_text_forgotten_before() {
     let conn = rusqlite::Connection::open(&db).unwrap();
     conn.pragma_update(None, "secure_delete", false).unwrap();
     conn.execute(
-        "INSERT INTO memories (id,memory_type,category,title,content) VALUES ('0bd1ba49-2b63-4aab-8d57-38d9be10a281','fact','tooling','Deploy key','The deploy key zq7marker is in the vault')",
+        "INSERT INTO memories (id,memory_type,category,title,content) VALUES ('e0000001-0000-4000-8000-000000000001','fact','tooling','Deploy key','The deploy key zq7marker is in the vault')",
         [],
     )
     .unwrap();
     conn.execute(
-        "DELETE FROM memories WHERE id='0bd1ba49-2b63-4aab-8d57-38d9be10a281'",
+        "DELETE FROM memories WHERE id='e0000001-0000-4000-8000-000000000001'",
         [],
     )
     .unwrap();
@@ -1837,7 +1837,7 @@ fn pre_roadmap_store(path: &std::path::Path) {
 CREATE TRIGGER memory_support_deleted AFTER DELETE ON memories BEGIN
     UPDATE memories SET status='stale' WHERE source='inferred' AND EXISTS (SELECT 1 FROM json_each(evidence_ids) WHERE value=OLD.id);
 END;
-INSERT INTO memories (id,memory_type,category,content) VALUES ('0bd1ba49-2b63-4aab-8d57-38d9be10a281','preference','programming','Prefer Rust');"#).unwrap();
+INSERT INTO memories (id,memory_type,category,content) VALUES ('e0000001-0000-4000-8000-000000000001','preference','programming','Prefer Rust');"#).unwrap();
 }
 
 #[test]

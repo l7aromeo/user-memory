@@ -1884,7 +1884,7 @@ fn supersession_refuses_weaker_sources_other_projects_and_itself() {
             "--content",
             "Anything",
             "--supersedes",
-            "3d9f829a-c594-45d2-84b6-1469b20d653b",
+            "e0000007-0000-4000-8000-000000000007",
         ],
     );
     assert_eq!(missing["reason"], "Superseded memory does not exist");
@@ -2055,7 +2055,7 @@ fn pre_roadmap_store(path: &std::path::Path) {
 CREATE TRIGGER memory_support_deleted AFTER DELETE ON memories BEGIN
     UPDATE memories SET status='stale' WHERE source='inferred' AND EXISTS (SELECT 1 FROM json_each(evidence_ids) WHERE value=OLD.id);
 END;
-INSERT INTO memories (id,memory_type,category,content) VALUES ('0bd1ba49-2b63-4aab-8d57-38d9be10a281','preference','programming','Prefer Rust');"#).unwrap();
+INSERT INTO memories (id,memory_type,category,content) VALUES ('e0000001-0000-4000-8000-000000000001','preference','programming','Prefer Rust');"#).unwrap();
 }
 
 fn user_version(db: &std::path::Path) -> i64 {
@@ -2513,7 +2513,7 @@ fn origin_and_distinct_rows_follow_their_memories_and_their_rules() {
         ),
         (
             "INSERT INTO memory_origins (memory_id,origin) VALUES (?1,?2)",
-            ["3d9f829a-c594-45d2-84b6-1469b20d653b", "chat/q"],
+            ["e0000007-0000-4000-8000-000000000007", "chat/q"],
             "unknown memory",
         ),
         (
