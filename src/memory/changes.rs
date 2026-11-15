@@ -220,7 +220,7 @@ fn read_marker(db: &Path) -> Option<State> {
 /// position with it, whole, without opening the store; none when the marker
 /// is missing or unreadable.
 pub fn marked(db: &Path) -> Option<super::Position> {
-    read_marker(db).map(|state| super::Position::at(&state.store_id, state.last_change))
+    read_marker(db).map(|state| super::Position::at(&state.store_id, state.last_change, 0))
 }
 
 /// At session start, for the store at `db` on this machine: when its

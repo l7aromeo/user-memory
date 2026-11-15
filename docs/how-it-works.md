@@ -229,7 +229,7 @@ Memory changed since this session last looked (+ new, ~ changed, - forgotten or 
 `+` is a new memory, `~` a changed one, and `-` one that was forgotten or
 replaced, which the agent stops following even where the rules it loaded at
 the start still list it. What the session changed itself is not repeated
-back to it. When the session's projects change, for example after you edit
+back to it, unless another session changed the same memory too. When the session's projects change, for example after you edit
 `.user-memory` or the agent links a project, the notice starts with a line
 such as the one below, and the memories of a project that left follow as `<`
 lines: still active, only no longer loaded in this session. The agent moving

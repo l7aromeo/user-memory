@@ -28,6 +28,12 @@ pub const STAMPS_SINCE: &str = "user-memory stamps v2";
 /// conversation changes nothing a session is told of.
 const LATEST_ORIGIN: &str = "coalesce((SELECT origin FROM memory_events WHERE memory_id={id} AND op NOT IN ('confirm','distinct','origin_removed') ORDER BY seq DESC LIMIT 1),'')";
 
+/// The one conversation origin of every change to the memory `{id}` names
+/// after the event `{seq}`, empty when there were several or one gave
+/// none: a session is spared only a change that was all its own, never one
+/// another session made before it.
+const ONLY_ORIGIN: &str = "coalesce((SELECT CASE WHEN count(DISTINCT origin)=1 THEN max(origin) END FROM memory_events WHERE memory_id={id} AND seq>{seq} AND op NOT IN ('confirm','distinct','origin_removed')),'')";
+
 /// Where a session's snapshot stands in the store's count of its changes,
 /// as the store wrote it: a string a hook keeps and sends back as it is,
 /// like a paging cursor. Only the store reads what is inside, and its
@@ -43,11 +49,39 @@ pub struct Position(String);
 const POSITION_FORMAT: &str = "1";
 
 impl Position {
-    /// The position at `change` of the store whose id is `store_id`: the
-    /// format, a digest of the id, so the id itself never leaves the store,
-    /// and the change.
-    pub(super) fn at(store_id: &str, change: i64) -> Self {
-        Self(format!("{POSITION_FORMAT}.{}.{change}", digest(store_id)))
+    /// The position at `change` of the store whose id is `store_id`, when
+    /// its history's latest event was `seq`: the format, a digest of the
+    /// id, so the id itself never leaves the store, the change and the
+    /// event. A marker holds no event; its position names 0, which
+    /// [`Position::same_change`] does not compare.
+    pub(super) fn at(store_id: &str, change: i64, seq: i64) -> Self {
+        Self(format!(
+            "{POSITION_FORMAT}.{}.{change}.{seq}",
+            digest(store_id)
+        ))
+    }
+
+    /// Whether this position and `other` name the same change of the same
+    /// store, in a format this version writes: then nothing a session is
+    /// told of changed between them.
+    pub fn same_change(&self, other: &Position) -> bool {
+        match (self.parts(), other.parts()) {
+            (Some((store, change, _)), Some((other_store, other_change, _))) => {
+                store == other_store && change == other_change
+            }
+            _ => false,
+        }
+    }
+
+    /// The store's digest, the change and the event this position names,
+    /// when it is in a format this version writes.
+    fn parts(&self) -> Option<(&str, i64, i64)> {
+        let rest = self.0.strip_prefix(POSITION_FORMAT)?.strip_prefix('.')?;
+        let mut parts = rest.split('.');
+        let store = parts.next()?;
+        let change = parts.next()?.parse().ok()?;
+        let seq = parts.next()?.parse().ok()?;
+        parts.next().is_none().then_some((store, change, seq))
     }
 
     /// A position kept as text, such as a server's in its marker on this
@@ -61,15 +95,12 @@ impl Position {
         &self.0
     }
 
-    /// The change this position names in the store whose id is `store_id`;
-    /// none for another store's position or one this version does not write.
-    fn change_in(&self, store_id: &str) -> Option<i64> {
-        let rest = self.0.strip_prefix(POSITION_FORMAT)?.strip_prefix('.')?;
-        let (store, change) = rest.split_once('.')?;
-        if store != digest(store_id) {
-            return None;
-        }
-        change.parse().ok()
+    /// The change and the event this position names in the store whose id
+    /// is `store_id`; none for another store's position or one this version
+    /// does not write.
+    fn change_in(&self, store_id: &str) -> Option<(i64, i64)> {
+        let (store, change, seq) = self.parts()?;
+        (store == digest(store_id)).then_some((change, seq))
     }
 }
 
@@ -110,20 +141,29 @@ fn digest(values: &str) -> String {
 /// read, so the position it reports is that of what it lists.
 pub(super) fn stamps_since(conn: &Connection, filter: &Filter, since: &Position) -> Result<String> {
     let read = conn.unchecked_transaction()?;
-    let (store_id, last, pruned): (String, i64, i64) = read.query_row(
-        "SELECT store_id,last_change,pruned_through FROM store_changes WHERE id=1",
+    let (store_id, last, pruned, seq): (String, i64, i64, i64) = read.query_row(
+        "SELECT store_id,last_change,pruned_through,(SELECT coalesce(max(seq),0) FROM memory_events) FROM store_changes WHERE id=1",
         [],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;
-    let after = since
-        .change_in(&store_id)
+    let known = since.change_in(&store_id);
+    let after = known
+        .map(|(change, _)| change)
         .filter(|change| (pruned..=last).contains(change));
     let delta = after.is_some();
+    // Since a position of this store, a change is the session's own only
+    // when every change since was; otherwise its latest change says.
+    let origin = |id: &str| match known {
+        Some((_, since_seq)) => ONLY_ORIGIN
+            .replace("{id}", id)
+            .replace("{seq}", &since_seq.to_string()),
+        None => LATEST_ORIGIN.replace("{id}", id),
+    };
     let (condition, mut values) = condition(filter)?;
     let mut sql = format!(
         "SELECT id,status,title,{},{} FROM memories WHERE {condition}",
         super::changes::digested(),
-        LATEST_ORIGIN.replace("{id}", "memories.id"),
+        origin("memories.id"),
     );
     if let Some(after) = after {
         sql.push_str(" AND id IN (SELECT memory_id FROM memory_changes WHERE change>?)");
@@ -131,7 +171,7 @@ pub(super) fn stamps_since(conn: &Connection, filter: &Filter, since: &Position)
     }
     sql.push_str(" ORDER BY id");
     let kind = if delta { "delta" } else { "full" };
-    let now = Position::at(&store_id, last);
+    let now = Position::at(&store_id, last, seq);
     let mut lines = vec![format!("{STAMPS_SINCE}\t{}\t{kind}", now.0)];
     let mut listed = BTreeSet::new();
     let mut statement = read.prepare(&sql)?;
@@ -151,7 +191,7 @@ pub(super) fn stamps_since(conn: &Connection, filter: &Filter, since: &Position)
     if let Some(after) = after {
         let mut changed = read.prepare(&format!(
             "SELECT memory_id,{} FROM memory_changes WHERE change>?1 ORDER BY memory_id",
-            LATEST_ORIGIN.replace("{id}", "memory_changes.memory_id")
+            origin("memory_changes.memory_id")
         ))?;
         let rows = changed.query_map([after], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
@@ -345,21 +385,24 @@ mod tests {
             (moved.stamps.len(), moved.gone.clone()),
             (0, vec![C.to_owned()])
         );
-        // The position names the store and its change, never the raw id.
-        let (id, change): (String, i64) = conn
-            .query_row("SELECT store_id,last_change FROM store_changes", [], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })
+        // The position names the store, its change and its latest event,
+        // never the raw id.
+        let (id, change, seq): (String, i64, i64) = conn
+            .query_row(
+                "SELECT store_id,last_change,(SELECT coalesce(max(seq),0) FROM memory_events) FROM store_changes",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
             .unwrap();
         let now = moved.since.unwrap();
-        assert_eq!(now, Position::at(&id, change));
+        assert_eq!(now, Position::at(&id, change, seq));
         assert!(!now.0.contains(&id), "{now:?}");
         // A position the store does not know gets the whole list: another
         // store's, one ahead of what it counted, another format's, a
         // made-up one or none.
         for (case, since) in [
-            ("another store", Position::at(&"0".repeat(32), change)),
-            ("ahead", Position::at(&id, change + 1)),
+            ("another store", Position::at(&"0".repeat(32), change, seq)),
+            ("ahead", Position::at(&id, change + 1, seq)),
             (
                 "another format",
                 Position(now.0.replacen(POSITION_FORMAT, "2", 1)),
@@ -372,7 +415,12 @@ mod tests {
         // One below what the store dropped too.
         conn.execute("UPDATE store_changes SET pruned_through=?1", [change])
             .unwrap();
-        assert!(!reply(&conn, &Position::at(&id, change - 1)).delta);
+        assert!(!reply(&conn, &Position::at(&id, change - 1, seq)).delta);
+        // A marker's position names no event: the same change all the same.
+        assert!(now.same_change(&Position::at(&id, change, 0)));
+        assert!(!now.same_change(&Position::at(&id, change - 1, seq)));
+        assert!(!now.same_change(&Position::at(&"0".repeat(32), change, seq)));
+        assert!(!now.same_change(&Position("not a position".into())));
         assert!(reply(&conn, &now).delta, "at the pruned change itself");
     }
 
