@@ -3801,8 +3801,9 @@ fn connectors_on_one_machine_share_their_polls() {
 }
 
 // A write one session's connector relays reaches the other sessions on the
-// machine at their next prompt, not at the next poll: the connector drops
-// the marker once the server has answered the write.
+// machine at their next prompt, not at the next poll: once the server has
+// answered the write, the connector sets the marker aside as old, so the
+// hooks ask the server.
 #[test]
 fn a_write_through_one_connector_reaches_another_sessions_next_prompt() {
     let host = Host::start(root());
@@ -3811,7 +3812,8 @@ fn a_write_through_one_connector_reaches_another_sessions_next_prompt() {
         home: tempdir().unwrap(),
         url: format!("http://{}/mcp", proxy.address),
         token: host.root.path().join("token"),
-        // Polls far apart, so only the dropped marker can tell the write.
+        // Polls far apart, so only the marker set aside as old can tell the
+        // write.
         env: vec![("USER_MEMORY_MARKER_POLL_MS", "20000".to_owned())],
     };
     let mut connector = machine.connector();
