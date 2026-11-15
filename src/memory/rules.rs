@@ -144,7 +144,7 @@ mod tests {
     #[test]
     fn only_confirmed_explicit_global_rules_are_listed_by_category() {
         let (_dir, db) = store();
-        let push = add(&db, "Push only with the user's go-ahead", &[]);
+        let push = add(&db, "Ask before every git push", &[]);
         let attribution = add(
             &db,
             "No AI attribution in commits",
@@ -194,7 +194,7 @@ mod tests {
                 "".to_owned(),
                 "workflow".to_owned(),
                 format!("- {} No AI attribution in commits", short(attribution)),
-                format!("- {} Push only with the user's go-ahead", short(push)),
+                format!("- {} Ask before every git push", short(push)),
             ],
             "{text}"
         );

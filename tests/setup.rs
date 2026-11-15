@@ -2404,7 +2404,7 @@ fn setup_writes_the_global_rules_into_each_clients_instruction_file() {
 
     // A rule recorded elsewhere leaves the files outdated until the next
     // write here; setup brings them up to date.
-    add_rule(&s, "Push only with the user's go-ahead");
+    add_rule(&s, "Ask before every git push");
     let doctor = s.run(&["doctor", "--client", "both"]);
     assert_success(&doctor);
     assert!(
@@ -2416,12 +2416,12 @@ fn setup_writes_the_global_rules_into_each_clients_instruction_file() {
     assert!(
         fs::read_to_string(&claude)
             .unwrap()
-            .contains("Push only with the user's go-ahead")
+            .contains("Ask before every git push")
     );
     assert!(
         fs::read_to_string(&codex)
             .unwrap()
-            .contains("Push only with the user's go-ahead")
+            .contains("Ask before every git push")
     );
 
     // Off removes both and stays off.
@@ -2595,9 +2595,9 @@ fn writes_and_session_starts_keep_the_instruction_files_current() {
         fs::read_to_string(&claude).unwrap().contains(title)
             && fs::read_to_string(&codex).unwrap().contains(title)
     };
-    let stored = s.tool("record", preference("Push only with the user's go-ahead"));
+    let stored = s.tool("record", preference("Ask before every git push"));
     assert_eq!(stored["stored"], true, "{stored}");
-    assert!(holds("Push only with the user's go-ahead"));
+    assert!(holds("Ask before every git push"));
     let cli = s
         .installed(&[
             "record",
@@ -2675,7 +2675,7 @@ fn the_hook_leaves_global_rules_to_the_instruction_files() {
     s.client("codex", false);
     s.client("claude", false);
     assert_success(&s.run(&["setup", "--client", "both"]));
-    add_rule(&s, "Push only with the user's go-ahead");
+    add_rule(&s, "Ask before every git push");
     add_memory(&s, "Works on user-memory", &[("memory_type", "fact")]);
     add_memory(
         &s,
@@ -2718,15 +2718,12 @@ fn the_hook_leaves_global_rules_to_the_instruction_files() {
     // The rule was added after setup, so the client read its file without
     // it at launch: the hook that writes it shows the rules once more.
     let first = hook("claude");
-    assert!(
-        first.contains("Push only with the user's go-ahead"),
-        "{first}"
-    );
+    assert!(first.contains("Ask before every git push"), "{first}");
     assert!(!first.contains(elsewhere), "{first}");
     for client in ["claude", "codex"] {
         let index = hook(client);
         assert!(
-            !index.contains("Push only with the user's go-ahead"),
+            !index.contains("Ask before every git push"),
             "{client}: {index}"
         );
         for kept in ["Use Python here", "Works on user-memory", elsewhere] {
@@ -2736,19 +2733,19 @@ fn the_hook_leaves_global_rules_to_the_instruction_files() {
     assert!(
         fs::read_to_string(s.path("home/rules/user-memory.md"))
             .unwrap()
-            .contains("Push only with the user's go-ahead")
+            .contains("Ask before every git push")
     );
     // A Claude rules file the user wrote holds none of them: that client's
     // hook shows them again, the other client's still leaves them out.
     fs::write(s.path("home/rules/user-memory.md"), "# My own rules\n").unwrap();
-    assert!(hook("claude").contains("Push only with the user's go-ahead"));
-    assert!(!hook("codex").contains("Push only with the user's go-ahead"));
+    assert!(hook("claude").contains("Ask before every git push"));
+    assert!(!hook("codex").contains("Ask before every git push"));
     fs::remove_file(s.path("home/rules/user-memory.md")).unwrap();
     assert_success(&s.run(&["setup", "--client", "both", "--no-instructions"]));
     for client in ["claude", "codex"] {
         let index = hook(client);
         assert!(
-            index.contains("Push only with the user's go-ahead"),
+            index.contains("Ask before every git push"),
             "{client}: {index}"
         );
         assert!(!index.contains(elsewhere), "{client}: {index}");
@@ -3016,7 +3013,7 @@ fn a_stalled_sync_leaves_the_hook_its_index() {
     let s = Sandbox::new();
     s.client("claude", false);
     assert_success(&s.run(&["setup", "--client", "claude"]));
-    add_rule(&s, "Push only with the user's go-ahead");
+    add_rule(&s, "Ask before every git push");
     let stall = s.path("stall-sync");
     fs::write(&stall, "").unwrap();
     let out = s
@@ -3027,10 +3024,7 @@ fn a_stalled_sync_leaves_the_hook_its_index() {
         .unwrap();
     assert_success(&out);
     let index = stdout(&out);
-    assert!(
-        index.contains("Push only with the user's go-ahead"),
-        "{index}"
-    );
+    assert!(index.contains("Ask before every git push"), "{index}");
     assert!(!index.contains("unavailable"), "{index}");
 }
 
