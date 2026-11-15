@@ -8,7 +8,7 @@ Two uses: moving user-memory to a newer release ("update memory", "upgrade user-
 2. Say in one line what needs upgrading and to which version: this machine, the server, or both. A client of a memory server follows its server: it upgrades to the server's version, never past it.
 3. With the user's yes to that upgrade, run `user-memory upgrade --yes`; without a terminal the command needs the flag. Without the yes, give the user `user-memory upgrade` to run in a terminal, where it asks.
 4. If the server needs upgrading, say on which machine; when this is that machine, run `user-memory upgrade --yes` there, after the user's yes.
-5. Run `user-memory doctor` again and report what changed. Open sessions move to the new version on their next call; one from before 0.10.0 needs its agent restarted once.
+5. Run `user-memory doctor` again and report what changed. Open sessions move to the new version on their next call; one from before 0.10.0 needs its agent restarted once. From 0.10.0 setup writes more session hooks; Codex runs them only after the user approves them once (at startup Codex says hooks need review, or `/hooks`), and `doctor` names that step.
 
 If it says ``Nothing to upgrade``, report its line. If it refuses, its line says why and that nothing was changed; report it. To go back to an earlier version, see "Roll back an upgrade" below: `user-memory upgrade` only moves forward.
 
