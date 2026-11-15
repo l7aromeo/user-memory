@@ -134,14 +134,17 @@ enum Command {
     Review(memory::Review),
     /// Apply a correction or confirmation explicitly requested by the user.
     Update(memory::Update),
-    /// Forget a memory, or every memory from one conversation; invalidate patterns that depend on them.
+    /// Forget a memory, every memory from one conversation, or what one import brought; invalidate patterns that depend on them.
     Forget {
         /// ID of the memory to forget, in full or as the index's 8 characters.
-        #[arg(required_unless_present = "origin", conflicts_with = "origin")]
+        #[arg(required_unless_present_any = ["origin", "import"], conflicts_with_all = ["origin", "import"])]
         id: Option<memory::MemoryRef>,
         /// Forget every memory recorded with this conversation origin.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "import")]
         origin: Option<String>,
+        /// Undo the import its summary names so: delete what it added and restore what it replaced, except memories changed since.
+        #[arg(long)]
+        import: Option<String>,
     },
     /// Print the index for a client session hook; always exits successfully.
     SessionStart {
@@ -407,7 +410,7 @@ impl UserMemoryServer {
         .await
     }
     #[tool(
-        description = "Forget one memory, or every memory of one conversation origin, only on the user's explicit request; give exactly one of memory_id or origin. Memories another conversation also stated are kept."
+        description = "Forget one memory, every memory of one conversation origin, or what one import brought, only on the user's explicit request; give exactly one of memory_id, origin or import. Memories another conversation also stated are kept."
     )]
     async fn forget(
         &self,
@@ -802,9 +805,9 @@ async fn main() -> Result<()> {
                 value["user_confirmed"] = json!(true);
                 Some(("update", value))
             }
-            Command::Forget { id, origin } => Some((
+            Command::Forget { id, origin, import } => Some((
                 "forget",
-                json!({"memory_id":id,"origin":origin,"user_confirmed":true}),
+                json!({"memory_id":id,"origin":origin,"import":import,"user_confirmed":true}),
             )),
             _ => None,
         };
@@ -1011,13 +1014,14 @@ async fn main() -> Result<()> {
             input.user_confirmed = true;
             println!("{}", memory::update(&db, input)?);
         }
-        Command::Forget { id, origin } => println!(
+        Command::Forget { id, origin, import } => println!(
             "{}",
             memory::forget(
                 &db,
                 memory::Forget {
                     memory_id: id,
                     origin,
+                    import,
                     user_confirmed: true,
                 }
             )?

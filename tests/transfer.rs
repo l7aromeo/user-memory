@@ -127,9 +127,12 @@ fn a_file_export_restores_into_a_fresh_store_after_a_preview() {
     );
     let applied = fresh.value(&["import", file.to_str().unwrap(), "--apply"]);
     assert_eq!(applied["applied"], true, "{applied}");
+    let named = applied["import"].as_str().unwrap();
     assert_eq!(
         applied["next"],
-        "optionally run `user-memory reindex` to embed the new memories now; search embeds them as it goes"
+        format!(
+            "optionally run `user-memory reindex` to embed the new memories now; search embeds them as it goes; to undo it, forget with import \"{named}\" (`user-memory forget --import \"{named}\"`)"
+        )
     );
     assert_eq!(fresh.memories(), s.memories());
 }
@@ -374,6 +377,41 @@ fn an_import_reply_carries_no_file_text_but_rule_titles() {
         "{}",
         replies[3]
     );
+}
+
+// An agent undoes an import with the user's yes through the forget tool,
+// by the name the import's summary gave.
+#[test]
+fn an_agent_undoes_an_import_by_its_name() {
+    let s = Store::new();
+    s.seed();
+    let fresh = Store::new();
+    fresh.value(&["search"]);
+    private_exports(&fresh);
+    fs::write(
+        exports(&fresh).join("shared.json"),
+        s.ok(&["export", "-"]).stdout,
+    )
+    .unwrap();
+    let applied = tools(
+        &fresh,
+        &[(
+            "import",
+            json!({"name": "shared.json", "apply": true, "user_confirmed": true}),
+        )],
+    );
+    let named = applied[0]["import"].as_str().unwrap().to_owned();
+    assert!(named.starts_with("shared.json@"), "{}", applied[0]);
+    let undone = tools(
+        &fresh,
+        &[
+            ("forget", json!({"import": named})),
+            ("forget", json!({"import": named, "user_confirmed": true})),
+        ],
+    );
+    assert_eq!(undone[0]["deleted"], false, "needs the user's request");
+    assert_eq!(undone[1]["count"], 2, "{}", undone[1]);
+    assert!(fresh.memories().as_array().unwrap().is_empty());
 }
 
 // A client connected to a shared server has no store of its own to export.

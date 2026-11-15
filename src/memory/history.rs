@@ -24,11 +24,12 @@ use uuid::Uuid;
 ///   `last_at` when it last happened, which differ only for confirmations
 ///   merged into one event (`count` of them). `before` holds the changed
 ///   fields' previous values, as a JSON object under their export names.
-///   `imported` marks an event an import brought in from its file, by that
-///   import's time; on the `import` event an import's own write made for a
-///   memory it added or replaced, it holds that import's name instead (see
-///   [`IMPORT_MARK`]). It has no foreign key: a forgotten memory's events
-///   stay as tombstones.
+///   `imported` holds one of three kinds of value, which [`kind_of`] alone
+///   tells apart: the time of the import that brought the event in from its
+///   file; the name of the import whose own write made this `import` event,
+///   for a memory it added or replaced (a name holds [`IMPORT_MARK`]); or
+///   [`UNDO`] and that name, on an event an undo of that import wrote. It
+///   has no foreign key: a forgotten memory's events stay as tombstones.
 /// - `memory_writer` holds, only inside a write transaction, the client
 ///   writing, and for the write functions the operation and the memory it
 ///   is about (`subject`) and the conversation (`origin`).
@@ -157,6 +158,74 @@ pub(super) const OPS: [&str; 12] = [
 /// time does.
 pub(super) const IMPORT_MARK: char = '@';
 
+/// What starts `imported` on an event an undo of an import wrote, before
+/// the import's name. An import's name never starts with it, since a file
+/// name in one holds no `:`, and no time does.
+pub(super) const UNDO: &str = "undo:";
+
+/// The key in an import's own event's `before` that keeps the origins it
+/// brought, so an undo can tell an origin another import added since.
+pub(super) const IMPORT_ORIGINS: &str = "import_origins";
+
+/// The key an undo of the import adds to the import's own event for a
+/// memory it kept, so the undo of a later import that gives the memory back
+/// this import's version can say this one was undone.
+pub(super) const UNDO_KEPT: &str = "undo_kept";
+
+/// The keys an import's own event's `before` holds for an undo here:
+/// [`IMPORT_ORIGINS`]; for a memory it replaced, the origins and times it
+/// replaced, which the trigger does not keep; and [`UNDO_KEPT`]. History
+/// shows the first under its own name and hides the last; an export leaves
+/// all of them out, as it leaves out the import's name, since no other
+/// store could undo this import.
+pub(super) const UNDO_KEYS: [&str; 5] = [
+    IMPORT_ORIGINS,
+    REPLACED_ORIGINS,
+    "created_at",
+    "last_confirmed_at",
+    UNDO_KEPT,
+];
+
+/// The key under which an import's own event keeps the origins of a memory
+/// it replaced. Only a replacement writes it, and no trigger does, so it
+/// tells a replaced memory from an added one by what the import itself
+/// recorded, whatever history came before it.
+pub(super) const REPLACED_ORIGINS: &str = "origins";
+
+/// Whether the import whose own event holds `before` replaced the memory,
+/// rather than added it.
+pub(super) fn replaced(before: &Map<String, Value>) -> bool {
+    before.contains_key(REPLACED_ORIGINS)
+}
+
+/// What an event's `imported` holds. Everything that reads the column tells
+/// the kinds apart through [`kind_of`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Mark<'a> {
+    /// The time of the import that brought the event in from its file.
+    Brought(&'a str),
+    /// The name of the import whose own write made this `import` event.
+    Import(&'a str),
+    /// The name of the import whose undo wrote this event.
+    Undo(&'a str),
+}
+
+/// The kind of value `imported` holds.
+pub(super) fn kind_of(imported: &str) -> Mark<'_> {
+    if let Some(named) = imported.strip_prefix(UNDO) {
+        Mark::Undo(named)
+    } else if imported.contains(IMPORT_MARK) {
+        Mark::Import(imported)
+    } else {
+        Mark::Brought(imported)
+    }
+}
+
+/// What `imported` holds on an event the undo of import `named` wrote.
+pub(super) fn undo_mark(named: &str) -> String {
+    format!("{UNDO}{named}")
+}
+
 /// How long events are kept, as SQLite's date modifier: history is for
 /// undoing recent mistakes, and a year covers a correction noticed late
 /// while bounding what a store keeps of text the user replaced.
@@ -258,9 +327,23 @@ pub(super) fn drop_history(
 ) -> rusqlite::Result<()> {
     let id = id.to_string();
     let earlier = earlier.unwrap_or(i64::MIN);
+    // An import's or its undo's name is no value the memory had: it stays,
+    // so an undo of that import still finds the memory and keeps it.
+    let named: Vec<i64> = conn
+        .prepare("SELECT seq,imported FROM memory_events WHERE memory_id=?1 AND seq<=?2 AND imported IS NOT NULL")?
+        .query_map(params![id, earlier], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })?
+        .filter_map(|row| match row {
+            Ok((seq, imported)) => {
+                (!matches!(kind_of(&imported), Mark::Brought(_))).then_some(Ok(seq))
+            }
+            Err(err) => Some(Err(err)),
+        })
+        .collect::<rusqlite::Result<_>>()?;
     conn.execute(
-        "UPDATE memory_events SET origin='',client='',before=NULL,imported=NULL WHERE memory_id=?1 AND seq<=?2",
-        params![id, earlier],
+        "UPDATE memory_events SET origin='',client='',before=NULL,imported=CASE WHEN seq IN (SELECT value FROM json_each(?3)) THEN imported END WHERE memory_id=?1 AND seq<=?2",
+        params![id, earlier, serde_json::to_string(&named).unwrap_or_default()],
     )?;
     conn.execute(
         "UPDATE memory_events SET before=NULL WHERE memory_id=?1 AND seq>?2",
@@ -305,18 +388,26 @@ fn shown(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
         }
     }
     if let Some(before) = r.get::<_, Option<String>>("before")? {
-        event.insert(
-            "before".into(),
-            serde_json::from_str(&before).unwrap_or(Value::String(before)),
-        );
+        let mut before = serde_json::from_str(&before).unwrap_or(Value::String(before));
+        // The origins an import brought are not a value it replaced: an
+        // added memory had none before.
+        if let Some(fields) = before.as_object_mut() {
+            if let Some(origins) = fields.remove(IMPORT_ORIGINS) {
+                event.insert(IMPORT_ORIGINS.into(), origins);
+            }
+            fields.remove(UNDO_KEPT);
+        }
+        if before.as_object().is_none_or(|fields| !fields.is_empty()) {
+            event.insert("before".into(), before);
+        }
     }
     if let Some(imported) = r.get::<_, Option<String>>("imported")? {
-        let field = if imported.contains(IMPORT_MARK) {
-            "import"
-        } else {
-            "imported"
+        let (field, value) = match kind_of(&imported) {
+            Mark::Brought(time) => ("imported", time),
+            Mark::Import(named) => ("import", named),
+            Mark::Undo(named) => ("undoes", named),
         };
-        event.insert(field.into(), json!(imported));
+        event.insert(field.into(), json!(value));
     }
     Ok(Value::Object(event))
 }
@@ -394,7 +485,25 @@ pub(super) fn exported(conn: &Connection, ids: &[Uuid]) -> Result<Vec<Value>> {
     )?;
     let ids = serde_json::to_string(&ids.iter().map(Uuid::to_string).collect::<Vec<_>>())?;
     let rows = statement.query_map([ids], |r| {
-        let before: Option<String> = r.get(7)?;
+        let imported: Option<String> = r.get(8)?;
+        let marked = imported.as_deref().map(kind_of);
+        let mut before: Option<Value> = r
+            .get::<_, Option<String>>(7)?
+            .map(|b| serde_json::from_str::<Value>(&b).unwrap_or(Value::String(b)));
+        if let Some(fields) = before.as_mut().and_then(Value::as_object_mut)
+            && matches!(marked, Some(Mark::Import(_)))
+        {
+            for key in UNDO_KEYS {
+                fields.remove(key);
+            }
+        }
+        if before
+            .as_ref()
+            .and_then(Value::as_object)
+            .is_some_and(Map::is_empty)
+        {
+            before = None;
+        }
         Ok(json!({
             "memory_id": r.get::<_, String>(0)?,
             "op": r.get::<_, String>(1)?,
@@ -403,10 +512,14 @@ pub(super) fn exported(conn: &Connection, ids: &[Uuid]) -> Result<Vec<Value>> {
             "count": r.get::<_, i64>(4)?,
             "origin": r.get::<_, String>(5)?,
             "client": r.get::<_, String>(6)?,
-            "before": before.map(|b| serde_json::from_str::<Value>(&b).unwrap_or(Value::String(b))),
+            "before": before,
             // An import's name holds a file name the user gave this store,
-            // which no other store could use: it stays here.
-            "imported": r.get::<_, Option<String>>(8)?.filter(|i| !i.contains(IMPORT_MARK)),
+            // which no other store could use: it stays here, with what only
+            // its undo here reads.
+            "imported": match marked {
+                Some(Mark::Brought(time)) => Some(time),
+                _ => None,
+            },
         }))
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -573,40 +686,53 @@ pub(super) fn add_imported(
     Ok(true)
 }
 
+/// A memory an import added or replaced, as its own event keeps it for an
+/// undo: the origins the import brought, and for a replaced memory what it
+/// replaced beyond the fields (its origins and times before).
+pub(super) struct Marked {
+    pub(super) id: Uuid,
+    pub(super) brought: Vec<String>,
+    pub(super) replaced: Option<Value>,
+}
+
 /// Marks the import `named` on its own `import` events after event number
-/// `mark`: those of the memories it `added`, and those of the memories it
-/// replaced, whose replaced values gain what an undo needs beyond the
-/// fields (`earlier`: each one's origins and times before the import). A
-/// memory it found identical keeps an unmarked event, if any.
+/// `mark`, those of the memories in `marked`, with what each keeps for an
+/// undo under [`UNDO_KEYS`]. A memory it found identical keeps an unmarked
+/// event, if any.
 pub(super) fn mark_import(
     conn: &Connection,
     named: &str,
     mark: i64,
-    added: &[Uuid],
-    earlier: &[(Uuid, Value)],
+    marked: &[Marked],
 ) -> Result<()> {
-    let ids: Vec<String> = added
-        .iter()
-        .chain(earlier.iter().map(|(id, _)| id))
-        .map(Uuid::to_string)
-        .collect();
+    let ids: Vec<String> = marked.iter().map(|m| m.id.to_string()).collect();
     conn.execute(
         "UPDATE memory_events SET imported=?1 WHERE seq>?2 AND op='import' AND imported IS NULL AND memory_id IN (SELECT value FROM json_each(?3))",
         params![named, mark, serde_json::to_string(&ids)?],
     )?;
     // json_set rather than json_patch, which drops a key whose value is
     // null, as a memory never confirmed has.
-    let mut keep = conn.prepare(
-        "UPDATE memory_events SET before=json_set(coalesce(before,'{}'),'$.origins',json(?3),'$.created_at',?4,'$.last_confirmed_at',?5) WHERE imported=?1 AND memory_id=?2",
+    let mut brought = conn.prepare(
+        "UPDATE memory_events SET before=json_set(coalesce(before,'{}'),'$.import_origins',json(?3)) WHERE imported=?1 AND memory_id=?2",
     )?;
-    for (id, values) in earlier {
-        keep.execute(params![
+    let mut replaced = conn.prepare(&format!(
+        "UPDATE memory_events SET before=json_set(before,'$.{REPLACED_ORIGINS}',json(?3),'$.created_at',?4,'$.last_confirmed_at',?5) WHERE imported=?1 AND memory_id=?2",
+    ))?;
+    for m in marked {
+        brought.execute(params![
             named,
-            id.to_string(),
-            values["origins"].to_string(),
-            values["created_at"].as_str(),
-            values["last_confirmed_at"].as_str(),
+            m.id.to_string(),
+            serde_json::to_string(&m.brought)?
         ])?;
+        if let Some(values) = &m.replaced {
+            replaced.execute(params![
+                named,
+                m.id.to_string(),
+                values[REPLACED_ORIGINS].to_string(),
+                values["created_at"].as_str(),
+                values["last_confirmed_at"].as_str(),
+            ])?;
+        }
     }
     Ok(())
 }

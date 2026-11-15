@@ -586,6 +586,10 @@ fn a_read_only_token_reads_and_searches_but_changes_nothing() {
             json!({"memory_id":id,"content":"Prefer spaces","user_confirmed":true}),
         ),
         ("forget", json!({"memory_id":id,"user_confirmed":true})),
+        (
+            "forget",
+            json!({"import":"backup.json@2026-11-15T10:42:07Z.3f9a1c2b","user_confirmed":true}),
+        ),
         ("import", json!({"name":"backup.json"})),
         ("review", json!({"keep":[&id[..8]],"user_confirmed":true})),
         ("export", json!({"name":"backup.json","overwrite":true})),

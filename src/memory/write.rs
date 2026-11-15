@@ -172,12 +172,15 @@ pub struct Update {
 
 #[derive(Deserialize, JsonSchema)]
 pub struct Forget {
-    /// The memory to delete, by its full id or the 8 characters the index shows. Give exactly one of memory_id or origin.
+    /// The memory to delete, by its full id or the 8 characters the index shows. Give exactly one of memory_id, origin or import.
     #[serde(default)]
     pub memory_id: Option<MemoryRef>,
     /// Delete every memory recorded with this origin, such as a deleted conversation.
     #[serde(default)]
     pub origin: Option<String>,
+    /// Undo an import by the name its summary gave: deletes what it added and restores what it replaced, except memories changed since.
+    #[serde(default)]
+    pub import: Option<String>,
     /// True only when the user asked to forget this memory or this conversation's memories. A message they typed, even mid-turn, or an answer they picked counts.
     #[serde(default)]
     pub user_confirmed: bool,
@@ -871,12 +874,21 @@ pub fn forget(db: &Path, input: Forget) -> Result<Value> {
         );
     }
     let origin = input.origin.map(|origin| clean(&origin, usize::MAX));
+    let import = input.import.filter(|import| !import.trim().is_empty());
     let conn = connect(db)?;
     let tx = write(&conn)?;
     let active = ids_where(&tx, ACTIVE)?;
     let orphaned = ids_where(&tx, ORPHANED)?;
-    let mut result = match (input.memory_id, origin) {
-        (Some(named), None) => {
+    // A forget that deletes memories copies the store first, in this write
+    // turn, so the copy holds exactly what it deletes.
+    let copy = || -> Result<String> {
+        let memories = super::migrate::memory_rows(&tx)?;
+        super::backups::before_forget(db, memories)
+            .map_err(|err| anyhow::anyhow!("{COPY_FAILED}{}", copy_cause(&err)))
+    };
+    let mut result = match (input.memory_id, origin, import) {
+        (None, None, Some(import)) => super::undo::forget_import(&tx, &import, copy)?,
+        (Some(named), None, None) => {
             let id = match full_id(&tx, &named)? {
                 Ok(id) => id,
                 Err(reason) => return Ok(json!({"deleted":false,"reason":reason})),
@@ -884,23 +896,13 @@ pub fn forget(db: &Path, input: Forget) -> Result<Value> {
             let count = tx.execute("DELETE FROM memories WHERE id=?1", [id.to_string()])?;
             json!({"deleted":count>0,"id":id})
         }
-        (None, Some(origin)) if !origin.is_empty() => {
-            // A forget that deletes memories copies the store first, in this
-            // write turn, so the copy holds exactly what it deletes.
+        (None, Some(origin), None) if !origin.is_empty() => {
             let deleting: i64 = tx.query_row(
                 "SELECT COUNT(DISTINCT memory_id) FROM memory_origins o WHERE origin=?1 AND NOT EXISTS (SELECT 1 FROM memory_origins p WHERE p.memory_id=o.memory_id AND p.origin<>?1)",
                 [&origin],
                 |r| r.get(0),
             )?;
-            let backup = if deleting > 0 {
-                let memories = super::migrate::memory_rows(&tx)?;
-                Some(
-                    super::backups::before_forget(db, memories)
-                        .map_err(|err| anyhow::anyhow!("{COPY_FAILED}{}", copy_cause(&err)))?,
-                )
-            } else {
-                None
-            };
+            let backup = if deleting > 0 { Some(copy()?) } else { None };
             // Removing the origin stales dependents of every memory that had it;
             // a memory is deleted only when no other conversation stated it.
             let touched = tx
@@ -934,7 +936,7 @@ pub fn forget(db: &Path, input: Forget) -> Result<Value> {
         }
         _ => {
             return Ok(
-                json!({"deleted":false,"reason":"Give exactly one of memory_id or a non-empty origin"}),
+                json!({"deleted":false,"reason":"Give exactly one of memory_id, a non-empty origin or a non-empty import"}),
             );
         }
     };
@@ -951,11 +953,13 @@ pub fn forget(db: &Path, input: Forget) -> Result<Value> {
     // The next step for each list with entries, one line each, for an agent
     // that never loaded the skill's forget playbook. A string, as import's
     // next is.
-    let next: Vec<&str> = [("staled", STALED_NEXT), ("left_superseded", ORPHANED_NEXT)]
+    let mut next: Vec<&str> = [("staled", STALED_NEXT), ("left_superseded", ORPHANED_NEXT)]
         .into_iter()
         .filter(|(list, _)| result[list].as_array().is_some_and(|ids| !ids.is_empty()))
         .map(|(_, line)| line)
         .collect();
+    let undone = result["next"].as_str().map(str::to_owned);
+    next.extend(undone.as_deref());
     if !next.is_empty() {
         result["next"] = json!(next.join("\n"));
     }

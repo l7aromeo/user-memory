@@ -192,6 +192,8 @@ on the command line) returns them, oldest first:
 | `before` | The changed fields' previous values, by their export names. |
 | `imported` | For an event an import brought in: when that import ran, in the same form as `at`. Imported events are kept as the file had them; nothing reads them as this store's own. |
 | `import` | On the `import` event of a memory an import added or replaced: that import's name, as its summary gave it. |
+| `import_origins` | On that same event: the conversations the import brought to the memory, which [undoing it](#undoing-an-import) checks. |
+| `undoes` | For an event an [undo of an import](#undoing-an-import) wrote: that import's name. |
 
 - Undo a wrong correction by `update` with the values in `before`.
 - An import that changes a memory, even only its last confirmation, is an
@@ -201,7 +203,9 @@ on the command line) returns them, oldest first:
   under `forgotten`, with those tombstones.
 - `update` with `drop_history` (`--drop-history`) does the same for a
   memory that stays, and keeps no `before` for that change: for a
-  correction that removes something sensitive.
+  correction that removes something sensitive. It keeps the `import` and
+  `undoes` names, so an undo still finds the memory, and keeps it as
+  changed since.
 - Events older than a year are dropped when an automatic backup is made,
   before the copy ([automatic backups](backup.md#automatic-backups)).
   History is for undoing recent mistakes: after a year, a rule edited once
@@ -211,7 +215,36 @@ on the command line) returns them, oldest first:
   holds or one it could not have written, and reports how many under
   `history`. A file without the section imports as before. An export
   leaves out each event's `import` name, which holds a file name only this
-  store has a use for.
+  store has a use for. It leaves out what only an undo here reads too:
+  `import_origins`, and on that event the conversations and times the
+  import replaced. `imported` stays only for events an import brought in.
+
+### Undoing an import
+
+`forget` with `import` (`user-memory forget --import NAME`) undoes an
+applied import by the name its summary gave, using each memory's `import`
+event. For each memory that import added or replaced:
+
+| What happened since | What the undo does | Reply |
+|---|---|---|
+| Nothing | Deletes a memory the import added; gives a memory it replaced back its earlier fields, conversations, creation and confirmation times | `ids`, `restored` |
+| A confirmation, correction, supersede, merge, move, revive or pair marked as different | Keeps it | `kept`, with the change in `kept_since` |
+| A later import changed it | Keeps it, and `next` says to undo the later import first | `kept_since`: `import` |
+| A later import found it identical | Keeps it, as for a confirmation: that import has nothing to undo | `kept_since`: `import` |
+| A conversation the import did not bring now holds it | Keeps it, as forgetting by conversation keeps a memory another conversation stated | `kept_since`: `origin` |
+| A pattern it replaced had a support forgotten since | Keeps it: the earlier version would claim evidence the store no longer holds | `kept_since`: `support gone` |
+| It went stale, or lost a conversation | Undoes it anyway; a pattern given back stays stale | |
+
+- A later import that was undone since counts as no change, so imports
+  can be undone in either order. A memory kept because of a later import
+  is undone once that one is: run the earlier undo again.
+- When an undo gives a memory back the version of an import that was
+  undone too, its `next` names that import's undo command.
+- Undoing an import twice changes nothing and says so (`reason`).
+- Before deleting, it copies the store, as a forget by origin does
+  (`backup`).
+- Imports made before imports had names, and imports whose events were
+  forgotten or are past a year old, can't be undone this way.
 
 ## Passages
 

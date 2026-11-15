@@ -184,17 +184,30 @@ pub(crate) struct OptionFloor {
 /// and the bridge both refuse by this table. A newer input an older server
 /// may ignore without misleading anyone goes in `IGNORED_SAFELY` beside the
 /// tests instead, with its reason; a test fails for an input in neither.
-pub(crate) const OPTION_FLOORS: &[OptionFloor] = &[OptionFloor {
-    tool: "read",
-    field: "history",
-    since: Version {
-        major: 0,
-        minor: 10,
-        patch: 0,
+pub(crate) const OPTION_FLOORS: &[OptionFloor] = &[
+    OptionFloor {
+        tool: "read",
+        field: "history",
+        since: Version {
+            major: 0,
+            minor: 10,
+            patch: 0,
+        },
+        lacks: "keeps no history",
+        for_agent: "Nothing was read. Tell the user this memory server is too old to show history. A read without history still returns the memory, but says nothing about whether it changed.",
     },
-    lacks: "keeps no history",
-    for_agent: "Nothing was read. Tell the user this memory server is too old to show history. A read without history still returns the memory, but says nothing about whether it changed.",
-}];
+    OptionFloor {
+        tool: "forget",
+        field: "import",
+        since: Version {
+            major: 0,
+            minor: 10,
+            patch: 0,
+        },
+        lacks: "cannot undo an import",
+        for_agent: "Nothing was forgotten. Tell the user this memory server is too old to undo an import; until it is upgraded, what the import added can only be forgotten one memory at a time.",
+    },
+];
 
 /// The floor this build applies for an input from release `since`: that
 /// release, or this build's own version when it is lower. A tree reports

@@ -78,7 +78,7 @@ restoring one of them brings the memory back:
 
 - the automatic backups made before the forget, until 7 newer backups have
   replaced them;
-- the copy a forget by origin makes just before it deletes memories, beside
+- the copy a forget by origin or by import makes just before it deletes memories, beside
   the automatic backups, which goes 7 days after it was made;
 - the `.bak` files beside the store, from upgrades, repairs and project
   moves, which are never rotated;

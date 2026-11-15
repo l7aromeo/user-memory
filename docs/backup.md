@@ -31,7 +31,7 @@ history events older than a year are dropped
 ([history](memory-model.md#history)); the backups made before still hold
 them until they rotate out.
 
-A forget by origin that deletes memories first copies the store into the
+A forget by origin or by import that deletes memories first copies the store into the
 same folder, as `memories-forget-<UTC time>.sqlite3`, and its reply names
 the copy under `backup`. The copy is taken in the forget's own write turn,
 so it holds exactly what the forget deletes, and the forget fails whole if
