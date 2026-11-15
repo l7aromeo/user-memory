@@ -23,6 +23,7 @@ pub(super) mod embed;
 pub(super) mod passages;
 pub(super) mod stems;
 pub(super) mod vectors;
+pub(super) mod weights;
 
 use super::{similar::category_group, words::tokenize};
 use stems::{Field, Stems, Text, stamp, token};
