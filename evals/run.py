@@ -1482,8 +1482,7 @@ class Server:
         self.folder.mkdir(parents=True)
         self.db = self.folder / "memory.sqlite3"
         self.token = self.folder / "token"
-        self.token.write_text(secrets.token_hex(32))
-        self.token.chmod(0o600)
+        self.new_token()
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             self.port = probe.getsockname()[1]
@@ -1506,6 +1505,20 @@ class Server:
             except OSError:
                 time.sleep(0.1)
         raise RuntimeError(f"server {self.name} did not start: see {self.folder / 'host.log'}")
+
+    def new_token(self):
+        self.token.write_text(secrets.token_hex(32))
+        self.token.chmod(0o600)
+
+    def refuse(self):
+        """Stops accepting the token its clients hold, as when the server's
+        token is replaced: a client's bridge keeps the token it started with,
+        so only the server's side can refuse it mid-session."""
+        running = self.child is not None
+        self.stop()
+        self.new_token()
+        if running:
+            self.start()
 
     def stop(self):
         if self.child is not None:
@@ -1536,15 +1549,15 @@ def start_servers(scenario, sandbox):
 
 def server_step(step, servers, sandbox):
     """What a step does to the trial's servers before its turn: stop or
-    start one, or `refuse`: the client's token file gets a token the server
-    doesn't accept."""
+    start one, or `refuse`: the server takes a new token, so the one in the
+    client's token file is refused."""
     action = step.get("server") or {}
     if "stop" in action:
         servers[action["stop"]].stop()
     if "start" in action:
         servers[action["start"]].start()
     if "refuse" in action:
-        sandbox.token_file.write_text(secrets.token_hex(32))
+        servers[action["refuse"]].refuse()
 
 
 def write_files(scenario, sandbox, projects):
