@@ -146,18 +146,25 @@ pub fn position(url: &str) -> Option<Position> {
     fresh.then(|| files.position()).flatten()
 }
 
+/// Wakes this process's poller after a write the relay passed on.
+static WROTE: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
 /// For the relay, after the server answered a write it passed on: the
-/// marker no longer says where the server at `url` stands, so it goes, and
-/// the claim with it. Until the next tick's poll writes it again, the hooks
-/// of every session on this machine ask the server, and hear the write.
-/// Another connector's poll that was asked before the write and answers
-/// after this can put the older position back; the write then reaches the
-/// other sessions with the next poll, as a write from elsewhere does.
+/// marker no longer says where the server at `url` stands. It is made old
+/// rather than removed, so the hooks of every session on this machine ask
+/// the server and hear the write, while the poll, woken at once, still asks
+/// from the position it holds and gets only the changes since. Another
+/// connector's poll that was asked before the write and answers after this
+/// one can put the older position back; the write then reaches the other
+/// sessions with the next poll, as a write from elsewhere does.
 pub fn moved(url: &str) {
     if let Some(files) = Files::of(url) {
-        let _ = fs::remove_file(&files.marker);
+        if let Ok(marker) = fs::OpenOptions::new().write(true).open(&files.marker) {
+            let _ = marker.set_modified(SystemTime::UNIX_EPOCH);
+        }
         let _ = fs::remove_file(&files.claim);
     }
+    WROTE.notify_one();
 }
 
 /// Sets the time of the private file `path`, creating it.
@@ -183,15 +190,20 @@ pub async fn poll(connection: Connection) {
     let mut without_positions: Option<serde_json::Value> = None;
     let mut last_asked: Option<tokio::time::Instant> = None;
     loop {
-        tokio::time::sleep(poll_every() / TICKS_PER_POLL).await;
+        let woken = tokio::select! {
+            () = tokio::time::sleep(poll_every() / TICKS_PER_POLL) => false,
+            () = WROTE.notified() => true,
+        };
         // Never sooner than a poll after its own last ask, answered or not,
-        // so an unreachable server is not asked at every tick.
+        // so an unreachable server is not asked at every tick; a write this
+        // process relayed is the exception.
         let wait = if without_positions.is_none() {
             poll_every()
         } else {
             poll_every() * QUIET_POLLS
         };
-        if last_asked.is_some_and(|at| at.elapsed() < wait) || !files.due(SystemTime::now()) {
+        let waiting = !woken && last_asked.is_some_and(|at| at.elapsed() < wait);
+        if waiting || !files.due(SystemTime::now()) {
             continue;
         }
         last_asked = Some(tokio::time::Instant::now());
