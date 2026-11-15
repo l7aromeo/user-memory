@@ -2,12 +2,7 @@
 
 use crate::private;
 use anyhow::{Context, Result, bail};
-use axum::{
-    Router,
-    http::StatusCode,
-    middleware,
-    routing::{delete, get},
-};
+use axum::{Router, http::StatusCode, middleware, routing::get};
 use clap::{Args, Subcommand};
 use rmcp::{
     RoleClient, RoleServer, ServiceExt,
@@ -168,6 +163,35 @@ impl Connection {
         let info = service.peer_info().map(serde_json::to_value);
         let _ = service.cancel().await;
         Ok(info.context("Memory server sent no handshake")??)
+    }
+
+    /// Whether the server says this machine's token is read-only, from
+    /// `GET /auth/token` beside the MCP endpoint. Any other answer, as from
+    /// a server too old to have the route, counts as a token that writes.
+    pub async fn read_only(&self) -> bool {
+        let asked = async {
+            self.validate().ok()?;
+            let url = reqwest::Url::parse(&self.url)
+                .ok()?
+                .join("auth/token")
+                .ok()?;
+            let response = reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(5))
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .ok()?
+                .get(url)
+                .bearer_auth(read_token(&self.token_file).ok()?)
+                .send()
+                .await
+                .ok()?;
+            if response.status() != reqwest::StatusCode::OK {
+                return None;
+            }
+            let answer: serde_json::Value = response.json().await.ok()?;
+            Some(answer["scope"] == "read")
+        };
+        asked.await.unwrap_or(false)
     }
 
     pub async fn call(&self, name: &'static str, arguments: serde_json::Value) -> Result<String> {
@@ -446,7 +470,7 @@ pub async fn host(options: HostOptions) -> Result<()> {
     let shutdown = config.cancellation_token.clone();
     let gate = gate::Gate::new(token, crate::registry::path(&db));
     let own_token = Router::new()
-        .route("/auth/token", delete(gate::revoke_own))
+        .route("/auth/token", get(gate::own_scope).delete(gate::revoke_own))
         .with_state(gate.clone())
         .layer(middleware::from_fn_with_state(
             allowed.clone(),

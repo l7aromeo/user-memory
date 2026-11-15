@@ -248,7 +248,9 @@ expiry. The server refuses a revoked or expired token from its next request,
 without a restart, and that machine tells its user why and what to do:
 ask the server's operator for a new token file and run the installer with
 it. A machine that leaves the server can revoke its own token with
-`DELETE /auth/token`.
+`DELETE /auth/token`. `GET /auth/token` answers the calling token's scope,
+`{"scope":"read"}` or `{"scope":"write"}` (the shared token file writes);
+session start asks it to say who can remove a new rule.
 
 ### Retire the shared token file
 
