@@ -173,6 +173,8 @@ impl Place {
             .env("USER_MEMORY_DB", self.db())
             .env("FAKE_USER_MEMORY", env!("CARGO_BIN_EXE_user-memory"))
             .env("FAKE_USER_MEMORY_VERSION", NEWER)
+            // Each hand-over decision on stderr, for a failure to show.
+            .env("USER_MEMORY_TEST_TRACE", "1")
             .envs(env.iter().copied())
             .sandboxed(self.dir.path());
         if matches!(way, Way::Relay) {
@@ -740,7 +742,13 @@ fn a_check_ended_by_a_signal_is_tried_again_without_a_notice() {
         assert_eq!(texts(&first).len(), 1, "{way:?}: {first}");
         assert!(!place.bin().join("user-memory.killed-once").exists());
         assert_eq!(session.version("second"), Some(NEWER.into()), "{way:?}");
-        session.close();
+        let stderr = session.close();
+        assert!(
+            stderr.contains(
+                "a check of the replaced binary failed (it ended with signal: 6 (SIGABRT)"
+            ) && stderr.contains("trying again at the next message"),
+            "{way:?}: {stderr}"
+        );
     }
 }
 
@@ -769,9 +777,10 @@ fn a_listen_is_told_only_of_a_changed_tool_list_across_two_hand_overs() {
         assert_eq!(session.version("same"), None, "{way:?}");
         // The newer build adds a tool.
         place.upgrade_again(NEWER);
-        assert_eq!(session.version("newer"), Some(NEWER.into()), "{way:?}");
-        assert_eq!(place.state_files(), Vec::<String>::new(), "{way:?}");
+        let newer = session.version("newer");
         let (stderr, seen) = session.finish();
+        assert_eq!(newer, Some(NEWER.into()), "{way:?}: {stderr}");
+        assert_eq!(place.state_files(), Vec::<String>::new(), "{way:?}");
         assert_eq!(
             stderr.matches("took over this session").count(),
             2,
@@ -911,4 +920,47 @@ fn a_stopped_serve_completes_its_open_listen() {
         "{complete}"
     );
     session.close();
+}
+
+/// A version after the newer build's, for a second upgrade.
+const LATER: &str = "9.9.10";
+
+/// A second upgrade that lands as the new code starts, before it has
+/// answered anything, is handed over to: the baseline is the build that was
+/// checked and started, not the file found, and the front's own replayed
+/// requests don't hold the hand-over back. After an `exec` the new code
+/// sees it at the call that started the hand-over; a relay may already
+/// have passed that call to its child, and sees it at the next one.
+#[test]
+fn an_upgrade_landing_as_the_new_code_starts_is_handed_over_to() {
+    for way in ways() {
+        let place = Place::new();
+        let mut session = place.serve(way, &[]);
+        let fakes = place.dir.path().join("fakes-then");
+        fs::create_dir_all(&fakes).unwrap();
+        fs::copy(
+            fake::fake(&fakes, "user-memory"),
+            place.bin().join("user-memory.then"),
+        )
+        .unwrap();
+        fs::write(place.bin().join("user-memory.then-version"), LATER).unwrap();
+        place.upgrade();
+        let first = session.version("first");
+        let second = session.version("second");
+        let (stderr, _) = session.finish();
+        if matches!(way, Way::Exec) {
+            assert_eq!(first, Some(LATER.into()), "{way:?}: {stderr}");
+        }
+        assert_eq!(second, Some(LATER.into()), "{way:?}: {stderr}");
+        assert!(
+            !place.bin().join("user-memory.then").exists(),
+            "{way:?}: the second build never took the first's place"
+        );
+        assert_eq!(
+            stderr.matches("took over this session").count(),
+            2,
+            "{way:?}: {stderr}"
+        );
+        assert_eq!(place.state_files(), Vec::<String>::new(), "{way:?}");
+    }
 }

@@ -783,6 +783,23 @@ fn newer_build(args: &[String]) -> u8 {
         |_| env::var_os("FAKE_USER_MEMORY_VERSION").unwrap(),
         |version| version.trim().into(),
     );
+    // A build waiting beside the copy takes its place as this one starts
+    // serving a handed-over session, with its own version: a second upgrade
+    // landing before the new code first looks at the binary.
+    let exe = env::current_exe().unwrap();
+    let then = exe.with_file_name("user-memory.then");
+    let serving = args.first().is_some_and(|arg| arg == "serve")
+        && env::var_os("USER_MEMORY_HANDOVER").is_some_and(|value| value != "probe");
+    if serving && then.exists() {
+        let then_version =
+            fs::read_to_string(exe.with_file_name("user-memory.then-version")).unwrap();
+        if cfg!(windows) {
+            // Windows can't replace a running program, only rename it.
+            fs::rename(&exe, exe.with_file_name(".user-memory-was-running")).unwrap();
+        }
+        fs::rename(&then, &exe).unwrap();
+        fs::write(exe.with_file_name("user-memory.version"), then_version).unwrap();
+    }
     let mut command = Command::new(real);
     command.args(args).env("USER_MEMORY_TEST_VERSION", version);
     if let Some(schema) = env::var_os("FAKE_USER_MEMORY_SCHEMA") {

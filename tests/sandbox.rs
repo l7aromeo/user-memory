@@ -119,6 +119,7 @@ fn only_debug_builds_have_the_test_seams() {
         "USER_MEMORY_TEST_SCHEMA_VERSION",
         "USER_MEMORY_TEST_RELAY",
         "USER_MEMORY_TEST_EXEC_FAIL",
+        "USER_MEMORY_TEST_TRACE",
     ] {
         let quoted = format!("\"{seam}\"");
         let uses: Vec<(&PathBuf, usize)> = sources
