@@ -1350,6 +1350,34 @@ fn the_health_check_needs_no_token_and_fails_while_the_store_cannot_open() {
     assert!(!health(&host).status.success());
 }
 
+/// The health check, which needs no token, never creates a missing store or
+/// changes one at another schema version.
+#[test]
+fn the_health_check_never_creates_or_changes_a_store() {
+    let host = Host::start();
+    let moved = host.root.path().join("moved.sqlite3");
+    fs::rename(host.db(), &moved).unwrap();
+    for side in ["-wal", "-shm"] {
+        let _ = fs::remove_file(format!("{}{side}", host.db().display()));
+    }
+    assert_eq!(host.send("GET", "/", "", "").status, 503);
+    assert!(!host.db().exists(), "the check created a store");
+    fs::rename(&moved, host.db()).unwrap();
+
+    let store = Connection::open(host.db()).unwrap();
+    let version: i64 = store
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    store
+        .pragma_update(None, "user_version", version - 1)
+        .unwrap();
+    assert_eq!(host.send("GET", "/", "", "").status, 503);
+    let after: i64 = store
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(after, version - 1, "the check changed the store");
+}
+
 /// A token file an interrupted copy out of the Docker server's volume left
 /// in the store's folder is deleted by the next `host token` and when the
 /// server starts, once it is old enough that no copy can still be reading
