@@ -13,12 +13,16 @@ use uuid::Uuid;
 pub mod backups;
 mod calibration;
 mod changes;
+#[cfg(test)]
+mod delivery;
 pub use changes::{marked, reconcile};
 pub mod embedding;
 mod history;
 mod ids;
 mod index;
 mod links;
+#[cfg(test)]
+mod matcher;
 pub(crate) mod migrate;
 mod overview;
 mod page;
@@ -282,7 +286,11 @@ fn without_port(host: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{project_key, remote_project_key};
+    use super::{
+        delivery::{self, DeliveryIndex},
+        matcher::{self, Action, Kind, Window},
+        project_key, remote_project_key,
+    };
 
     // Built-in cutoffs win; other models and lengths are calibrated, could
     // not be, or wait to be, as the store records.
@@ -413,5 +421,55 @@ mod tests {
     #[test]
     fn git_root_keys_are_kept_verbatim_apart_from_case() {
         assert_eq!(project_key("git-root:ABC123def"), "git-root:abc123def");
+    }
+
+    /// The delivery index of a real store's scope, written to a file and loaded,
+    /// matches a passage whose text is then cut from the store; another
+    /// project's memory and an observation about the user stay out of it.
+    #[test]
+    fn a_store_s_scope_is_indexed_and_its_passage_cut_from_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("memories.sqlite3");
+        let record = |title: &str, content: &str, project: &str, kind: &str, source: &str| {
+            let input = serde_json::json!({
+                "type": kind, "category": "build", "title": title, "content": content,
+                "scope": "project", "project": project, "source": source,
+                "evidence": "seen in the build log", "user_confirmed": true,
+            });
+            let out = super::record(&db, serde_json::from_value(input).unwrap()).unwrap();
+            assert_eq!(out["stored"], true, "{out}");
+        };
+        let ours = "github.com/example/ledger";
+        let door = "The zeppelin hangar's glacier door sticks in winter.";
+        record("Hangar door", door, ours, "fact", "explicit");
+        record(
+            "Crossing log",
+            "Pilots write every zeppelin glacier crossing into the flight ledger by hand.",
+            "github.com/example/other",
+            "fact",
+            "explicit",
+        );
+        record(
+            "Map habit",
+            "Before a zeppelin trip the user studies glacier maps over breakfast.",
+            ours,
+            "behavior",
+            "observed",
+        );
+        let file = dir.path().join("delivery.index");
+        let sources = delivery::sources(&db, &[ours.to_owned()]).unwrap();
+        std::fs::write(&file, DeliveryIndex::write(&sources).unwrap()).unwrap();
+        let index = DeliveryIndex::load(&file).unwrap();
+        assert_eq!(index.len(), 1, "only this project's stated memory");
+        let mut window = Window::default();
+        window.push(&Action {
+            kind: Kind::Prompt,
+            text: "zeppelin glacier".into(),
+            failed: false,
+        });
+        let found = index.rank(&window).unwrap();
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let cut = matcher::text(&conn, index.id(found[0].memory).unwrap(), &found[0]).unwrap();
+        assert_eq!(cut, door);
     }
 }
