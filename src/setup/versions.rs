@@ -583,6 +583,11 @@ mod tests {
         ),
         (
             "index",
+            "fit_rules_room",
+            "it comes with fit_room, asking for the project rules before the index; a server from before it sends the index with the project rules in its Rules, as it did before",
+        ),
+        (
+            "index",
             "stamps_since",
             "only user-memory's own session hook sends it, with the position from its last stamps reply; a server from before it sends the v1 stamps reply, which the hook reads as a full list, as it did before",
         ),
