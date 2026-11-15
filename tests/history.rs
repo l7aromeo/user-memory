@@ -389,7 +389,15 @@ const CASES: &[Case] = &[
 #[test]
 fn every_operation_writes_its_event() {
     let store = Store::new();
-    let covered: BTreeSet<String> = CASES.iter().map(|case| case(&store).to_owned()).collect();
+    let covered: BTreeSet<String> = CASES
+        .iter()
+        .map(|case| {
+            let op = case(&store).to_owned();
+            // A write clears the row naming its client before committing.
+            assert_eq!(writer_rows(&store), 0, "{op} left its writer row");
+            op
+        })
+        .collect();
     assert_eq!(covered, operations(&store));
 }
 
@@ -411,11 +419,15 @@ fn a_write_that_names_no_client_still_writes_an_event() {
     assert!(event.get("client").is_none(), "{event}");
     assert_eq!(event["before"], json!({"content":"Drives an electric car"}));
     // Nothing of the writer's row is left behind by the command line.
-    let rows: i64 = store
+    assert_eq!(writer_rows(&store), 0);
+}
+
+/// Rows left in the table naming a write's client.
+fn writer_rows(store: &Store) -> i64 {
+    store
         .sql()
         .query_row("SELECT count(*) FROM memory_writer", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(rows, 0);
+        .unwrap()
 }
 
 /// Longest client name an event holds (`NAME_LIMIT` in history.rs).
@@ -446,6 +458,37 @@ fn a_server_names_the_client_of_each_write() {
         let id = reply["id"].as_str().unwrap();
         assert_eq!(last(&store, id)["client"], recorded.as_str(), "{sent:?}");
     }
+}
+
+// A writer row left behind, as another program or SQL run by hand could
+// leave one, would name other programs' writes: doctor and repair report
+// it, and repair clears it.
+#[test]
+fn a_writer_row_left_behind_is_damage_repair_clears() {
+    let store = Store::new();
+    let id = store.record("cars", "Drives an electric car", &[]);
+    store
+        .sql()
+        .execute(
+            "INSERT INTO memory_writer(id,client) VALUES (1,'stray')",
+            [],
+        )
+        .unwrap();
+    let out = store.output(&["repair"]);
+    assert!(
+        String::from_utf8_lossy(&out.stdout)
+            .contains("history: a write's client is left in memory_writer"),
+        "{out:?}"
+    );
+    assert_eq!(writer_rows(&store), 0);
+    store
+        .sql()
+        .execute(
+            "UPDATE memories SET content='Drives a hybrid car' WHERE id=?1",
+            [&id],
+        )
+        .unwrap();
+    assert!(last(&store, &id).get("client").is_none());
 }
 
 // An import that brings only a later confirmation records an import event
