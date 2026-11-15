@@ -54,7 +54,7 @@ pub struct Index {
     #[serde(default)]
     #[schemars(skip)]
     pub origin_links: Option<String>,
-    /// Used by user-memory's own session hook; leave unset. The whole index in one reply, shortened to this many characters as the session start shows it. An older server ignores it and lists the index page by page.
+    /// Used by user-memory's own session hook; leave unset. The whole index in one reply, shortened to this size, in fit_unit, as the session start shows it. An older server ignores it and lists the index page by page.
     #[arg(skip)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(skip)]
@@ -64,6 +64,33 @@ pub struct Index {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[schemars(skip)]
     pub fit_whole_projects: Vec<String>,
+    /// Used by user-memory's own session hook with fit_room; leave unset. What fit_room counts: utf8_bytes, the default, or utf16_units, as the client the index is for counts its hook text. An older server ignores it, and the hook shortens the index itself.
+    #[arg(skip)]
+    #[serde(default)]
+    #[schemars(skip)]
+    pub fit_unit: FitUnit,
+}
+
+/// What a client counts its hook text in, so the session start's index fits
+/// that client's own limit in that client's own unit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FitUnit {
+    /// UTF-8 bytes, as Codex counts: the strictest unit, so the default.
+    #[default]
+    Utf8Bytes,
+    /// UTF-16 code units, the length of a JavaScript string.
+    Utf16Units,
+}
+
+impl FitUnit {
+    /// How long `text` is in this unit.
+    pub fn len(self, text: &str) -> usize {
+        match self {
+            Self::Utf8Bytes => text.len(),
+            Self::Utf16Units => text.encode_utf16().count(),
+        }
+    }
 }
 
 /// Memories a topic may pull to the front by meaning alone: enough to surface
@@ -129,13 +156,13 @@ pub fn index(db: &Path, input: &Index) -> Result<String> {
         return super::stamps::stamps(&conn, &filter);
     }
     match input.fit_room {
-        Some(chars) => fitted(&conn, input, &selection, &filter, chars),
+        Some(room) => fitted(&conn, input, &selection, &filter, room),
         None => render(&conn, input, &filter, Some(&input.paging)),
     }
 }
 
-/// The whole index of `selection` (whose filter is `filter`) within `chars`
-/// characters, built once here so the session hook asks for it in one call:
+/// The whole index of `selection` (whose filter is `filter`) within `room`
+/// in `input.fit_unit`, built once here so the session hook asks for it in one call:
 /// [`shorten`] when it fits with every project or the session sees only the
 /// folder's own (`input.fit_whole_projects`), else [`tiered`], with the global memories
 /// and the folder's projects listed whole and every other project in part.
@@ -144,16 +171,17 @@ fn fitted(
     input: &Index,
     selection: &Selection,
     filter: &Filter,
-    chars: usize,
+    room: usize,
 ) -> Result<String> {
+    let unit = input.fit_unit;
     let whole = render(conn, input, filter, None)?;
     let others: Vec<&String> = selection
         .projects
         .iter()
         .filter(|p| !input.fit_whole_projects.contains(p))
         .collect();
-    if whole.chars().count() <= chars || others.is_empty() {
-        return Ok(shorten(&whole, chars));
+    if unit.len(&whole) <= room || others.is_empty() {
+        return Ok(shorten(&whole, room, unit));
     }
     let part = |selection: Selection, without_global_rules: bool| {
         let index = Index {
@@ -187,7 +215,7 @@ fn fitted(
             index,
         });
     }
-    Ok(tiered(&whole, &core, &projects, chars))
+    Ok(tiered(&whole, &core, &projects, room, unit))
 }
 
 /// The index of `filter`'s memories as `input` asks for it: the page
@@ -455,12 +483,12 @@ impl Rendered {
     }
 }
 
-/// Characters `lines` take, each with its line break.
-fn width<S: AsRef<str>>(lines: &[S]) -> usize {
-    lines.iter().map(|l| l.as_ref().chars().count() + 1).sum()
+/// The room `lines` take in `unit`, each with its line break.
+fn width<S: AsRef<str>>(unit: FitUnit, lines: &[S]) -> usize {
+    lines.iter().map(|l| unit.len(l.as_ref()) + 1).sum()
 }
 
-/// `text` (an index) within `budget` characters, filled line by line: rules
+/// `text` (an index) within `budget` in `unit`, filled line by line: rules
 /// first, then other memories. Within each, every group (a rule category,
 /// another memory type) gets an equal share of the room, and room a small
 /// group does not use goes to the others. A group that does not fit its
@@ -468,8 +496,8 @@ fn width<S: AsRef<str>>(lines: &[S]) -> usize {
 /// that lists them; a group with no room is only that line. Every group's
 /// count line is kept free, so every memory is listed or counted. Text that
 /// is not an index, or already fits, is returned as it is.
-pub fn shorten(text: &str, budget: usize) -> String {
-    if text.chars().count() <= budget {
+pub fn shorten(text: &str, budget: usize, unit: FitUnit) -> String {
+    if unit.len(text) <= budget {
         return text.to_owned();
     }
     let mut head = Vec::new();
@@ -503,9 +531,10 @@ pub fn shorten(text: &str, budget: usize) -> String {
         }
     }
     let titles: Vec<&str> = parts.iter().map(|(title, _)| *title).collect();
-    let counted = |group: &Rendered| width(&[group.counted(group.count, false)]);
-    let mut room =
-        budget.saturating_sub(width(&head) + width(&[SHORTENED]) + width(&titles) + width(&tail));
+    let counted = |group: &Rendered| width(unit, &[group.counted(group.count, false)]);
+    let mut room = budget.saturating_sub(
+        width(unit, &head) + width(unit, &[SHORTENED]) + width(unit, &titles) + width(unit, &tail),
+    );
     // Each section in turn, rules first, keeping a count line free for every
     // group of the sections after it.
     let mut later: usize = parts.iter().flat_map(|(_, g)| g).map(counted).sum();
@@ -518,14 +547,14 @@ pub fn shorten(text: &str, budget: usize) -> String {
         // left, so room one does not use goes to those after it, and never
         // so much that a later group lacks room for its count line.
         let mut order: Vec<usize> = (0..groups.len()).collect();
-        order.sort_by_key(|&g| width(&groups[g].lines));
+        order.sort_by_key(|&g| width(unit, &groups[g].lines));
         for (done, &g) in order.iter().enumerate() {
             let rest: usize = order[done + 1..].iter().map(|&o| counted(&groups[o])).sum();
             let share = (left / (order.len() - done)).min(left.saturating_sub(rest));
-            lines[g] = fit(&groups[g], share);
-            left = left.saturating_sub(width(&lines[g]));
+            lines[g] = fit(&groups[g], share, unit);
+            left = left.saturating_sub(width(unit, &lines[g]));
         }
-        room = room.saturating_sub(lines.iter().map(|l| width(l)).sum());
+        room = room.saturating_sub(lines.iter().map(|l| width(unit, l)).sum());
         shown.push(lines);
     }
     let mut lines = head;
@@ -538,23 +567,23 @@ pub fn shorten(text: &str, budget: usize) -> String {
     lines.join("\n")
 }
 
-/// `group` within `room` characters: whole if it fits, else its header,
+/// `group` within `room` in `unit`: whole if it fits, else its header,
 /// the memory lines that fit and a line counting the rest, or that count
 /// line alone when no memory line fits.
-fn fit(group: &Rendered, room: usize) -> Vec<String> {
-    if width(&group.lines) <= room {
+fn fit(group: &Rendered, room: usize, unit: FitUnit) -> Vec<String> {
+    if width(unit, &group.lines) <= room {
         return group.lines.clone();
     }
     let memories = &group.lines[1..];
     let mut lines = vec![group.lines[0].clone()];
-    let mut used = width(&lines);
+    let mut used = width(unit, &lines);
     for line in memories {
         let rest = memories.len() - (lines.len() - 1) - 1;
-        let more = width(&[group.counted(rest, true)]);
-        if used + width(&[line]) + more > room {
+        let more = width(unit, &[group.counted(rest, true)]);
+        if used + width(unit, &[line]) + more > room {
             break;
         }
-        used += width(&[line]);
+        used += width(unit, &[line]);
         lines.push(line.clone());
     }
     let listed = lines.len() - 1;
@@ -586,7 +615,7 @@ fn memory_lines(index: &str) -> Vec<&str> {
     index.lines().filter(|l| l.starts_with("    ")).collect()
 }
 
-/// The session index within `budget` characters when `whole`, the index of
+/// The session index within `budget` in `unit` when `whole`, the index of
 /// every project the session sees, does not fit. The header comes from
 /// `whole`; `core`, the index of global memories and the folder's own
 /// projects, is listed whole, as [`shorten`] shortens it only when it alone
@@ -594,8 +623,14 @@ fn memory_lines(index: &str) -> Vec<&str> {
 /// given an equal share, a project needing less leaves the rest to the
 /// others, and each lists its memory lines, rules first, while they fit,
 /// then counts the rest in one line. Every memory is listed or counted.
-pub fn tiered(whole: &str, core: &str, projects: &[ProjectIndex], budget: usize) -> String {
-    let size = |lines: &[String]| -> usize { lines.iter().map(|l| l.chars().count() + 1).sum() };
+pub fn tiered(
+    whole: &str,
+    core: &str,
+    projects: &[ProjectIndex],
+    budget: usize,
+    unit: FitUnit,
+) -> String {
+    let size = |lines: &[String]| width(unit, lines);
     let section = |l: &&str| *l != RULES && *l != OTHERS;
     let mut head: Vec<String> = whole
         .lines()
@@ -630,7 +665,7 @@ pub fn tiered(whole: &str, core: &str, projects: &[ProjectIndex], budget: usize)
             .collect::<Vec<_>>()
             .join("\n");
         let room = budget.saturating_sub(size(&counts));
-        let mut lines = vec![shorten(&core_text, room)];
+        let mut lines = vec![shorten(&core_text, room, unit)];
         lines.extend(counts);
         return lines.join("\n");
     }
@@ -638,37 +673,31 @@ pub fn tiered(whole: &str, core: &str, projects: &[ProjectIndex], budget: usize)
     // room one project does not use goes to those after it.
     let mut room = budget - size(&fixed);
     let mut order: Vec<usize> = (0..parts.len()).collect();
-    order.sort_by_key(|&i| {
-        parts[i]
-            .1
-            .iter()
-            .map(|l| l.chars().count() + 1)
-            .sum::<usize>()
-    });
+    order.sort_by_key(|&i| parts[i].1.iter().map(|l| unit.len(l) + 1).sum::<usize>());
     let mut rendered: Vec<Vec<String>> = vec![Vec::new(); parts.len()];
     for (done, &i) in order.iter().enumerate() {
         let (p, memories) = &parts[i];
         let share = room / (order.len() - done);
         let mut lines = vec![p.label.clone()];
-        let mut used = p.label.chars().count() + 1;
+        let mut used = unit.len(&p.label) + 1;
         let mut listed = 0;
         for line in memories {
             let rest = memories.len() - listed - 1;
             let after = if rest == 0 {
                 0
             } else {
-                more_line(&p.key, rest).chars().count() + 1
+                unit.len(&more_line(&p.key, rest)) + 1
             };
-            if used + line.chars().count() + 1 + after > share {
+            if used + unit.len(line) + 1 + after > share {
                 break;
             }
             lines.push((*line).to_owned());
-            used += line.chars().count() + 1;
+            used += unit.len(line) + 1;
             listed += 1;
         }
         if listed < memories.len() {
             let more = more_line(&p.key, memories.len() - listed);
-            used += more.chars().count() + 1;
+            used += unit.len(&more) + 1;
             lines.push(more);
         }
         room = room.saturating_sub(used);
@@ -719,7 +748,12 @@ mod tests {
     #[test]
     fn a_fitting_index_is_untouched() {
         let text = index_text(&[(RULES, &[("workflow", 2)])]);
-        assert_eq!(shorten(&text, text.chars().count()), text);
+        // In bytes: the header's `×` is two.
+        assert_eq!(shorten(&text, text.len(), FitUnit::Utf8Bytes), text);
+        assert_ne!(
+            shorten(&text, text.chars().count(), FitUnit::Utf8Bytes),
+            text
+        );
     }
 
     /// Each group's name with the memories it lists and those it counts,
@@ -752,7 +786,7 @@ mod tests {
         ]);
         // Room for every rule and part of the other memories.
         let budget = text.chars().count() - 1200;
-        let short = shorten(&text, budget);
+        let short = shorten(&text, budget, FitUnit::Utf8Bytes);
         assert!(short.chars().count() <= budget, "{short}");
         assert!(short.chars().count() * 10 > budget * 9, "{short}");
         assert_eq!(short.lines().nth(HEADER.len()), Some(SHORTENED));
@@ -783,7 +817,7 @@ mod tests {
     #[test]
     fn rules_too_many_to_fit_are_listed_in_part_and_other_memories_counted() {
         let text = index_text(&[(RULES, &[("workflow", 60)]), (OTHERS, &[("fact", 30)])]);
-        let short = shorten(&text, 1500);
+        let short = shorten(&text, 1500, FitUnit::Utf8Bytes);
         assert!(short.chars().count() <= 1500, "{short}");
         let found = tally(&short);
         assert!(found[0].1 > 0 && found[0].1 + found[0].2 == 60, "{short}");
@@ -798,7 +832,7 @@ mod tests {
             (RULES, &[("workflow", 60), ("docs", 2), ("programming", 60)]),
             (OTHERS, &[("fact", 10)]),
         ]);
-        let short = shorten(&text, 2500);
+        let short = shorten(&text, 2500, FitUnit::Utf8Bytes);
         assert!(short.chars().count() <= 2500, "{short}");
         let found = tally(&short);
         // The small category fits whole; the two large ones split the rest
@@ -817,7 +851,7 @@ mod tests {
             (RULES, &[("workflow", 3), ("programming", 1)]),
             (OTHERS, &[("goal", 1), ("fact", 4)]),
         ]);
-        let all = shorten(&text, 0);
+        let all = shorten(&text, 0, FitUnit::Utf8Bytes);
         for counted in [
             "  workflow: 3 rules — read(category=\"workflow\")",
             "  programming: 1 rule — read(category=\"programming\")",
@@ -882,7 +916,7 @@ mod tests {
             },
         ];
         let budget = 1500;
-        let text = tiered(&whole, &core, &projects, budget);
+        let text = tiered(&whole, &core, &projects, budget, FitUnit::Utf8Bytes);
         assert!(text.chars().count() <= budget, "{text}");
         assert!(text.chars().count() * 10 > budget * 9, "{text}");
         assert!(text.contains(SHORTENED_PROJECTS));
@@ -925,7 +959,7 @@ mod tests {
             .map(|l| l.chars().count() + 1)
             .sum::<usize>();
         assert!(core.chars().count() > room * 2);
-        let text = tiered(&core, &core, &projects, room);
+        let text = tiered(&core, &core, &projects, room, FitUnit::Utf8Bytes);
         assert!(text.chars().count() <= room, "{text}");
         assert!(text.contains(SHORTENED), "{text}");
         assert!(!text.contains(" big memory number "), "{text}");

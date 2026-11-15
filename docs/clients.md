@@ -201,9 +201,13 @@ existing category for a new memory (`workflow`, not a new `process`). With
 - It finishes within five seconds and, on any failure, prints a single "User
   memory unavailable" line and exits successfully, so a broken store or an
   unreachable server never interrupts a session.
-- The `Projects:` line and the hook's copy of the index keep within 9,000
-  characters (the whole output within 9,500, under the clients' cap of about
-  10,000), and a line after the header says when it shortened. Every memory
+- The `Projects:` line and the hook's copy of the index keep within 9,000,
+  and the whole output within 9,500, counted as the client counts a hook's
+  text: Codex shows the agent only the start and end of more than 2,500
+  tokens, which it counts as UTF-8 bytes over four, and Claude Code a
+  preview of more than 10,000 UTF-16 units. So an index whose titles are
+  not in English lists fewer lines than one in English, and none is cut. A
+  line after the header says when it shortened. Every memory
   is listed or counted, never both; the `index` tool always lists every
   line.
   - When the session sees listed or linked projects, global memories and
@@ -263,7 +267,9 @@ lost as `<` lines with their title and `(project no longer loaded)`: they
 are still active, only no longer loaded here. `+` is a new memory, `~` one
 whose title, status or content changed, and `-` one no longer active
 (forgotten, superseded or stale). Ten changes are listed;
-more are counted, with a pointer to `index`. Global rules are never repeated
+more are counted, with a pointer to `index`. The projects line names 20
+projects at most and counts the rest, and the notice keeps to the same
+limits as session start. Global rules are never repeated
 wholesale: the notice lists only changes, which the agent reads before
 applying. It finishes within about a second and prints nothing on any
 failure, so a slow or unreachable store never delays a prompt. A session

@@ -16,6 +16,10 @@ use std::{
 
 /// Changes listed in one notice; the rest are counted, as the index lists them.
 const NOTICE_LINES: usize = 10;
+/// The most projects a notice names, the rest counted, as session start names
+/// at most 20 repositories: a conversation that links many at once still
+/// gets a notice well within its client's limit.
+const NOTICE_PROJECTS: usize = 20;
 /// Snapshots untouched this long belong to sessions long over; writing any
 /// snapshot removes them.
 const SNAPSHOT_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
@@ -306,7 +310,14 @@ fn projects_changed(old: Option<&[Project]>, new: Option<&[Project]>) -> Option<
                 .map(|p| format!("- {} ({})", p.key, dropped(&p.source))),
         )
         .collect();
-    (!parts.is_empty()).then(|| format!("Projects changed: {}", parts.join("; ")))
+    if parts.is_empty() {
+        return None;
+    }
+    let listed = parts[..parts.len().min(NOTICE_PROJECTS)].join("; ");
+    Some(match parts.len().checked_sub(NOTICE_PROJECTS) {
+        Some(rest @ 1..) => format!("Projects changed: {listed}; and {rest} more"),
+        _ => format!("Projects changed: {listed}"),
+    })
 }
 
 /// The notice for a session that last saw `old` and now sees `new`, or
