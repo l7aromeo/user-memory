@@ -33,6 +33,7 @@ mod stamps;
 mod titles;
 mod transfer;
 mod undo;
+mod words;
 mod write;
 
 pub use history::{CLI, acting_as, client_name, set_default_client};

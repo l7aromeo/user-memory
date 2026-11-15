@@ -1,7 +1,7 @@
 //! Similarity primitives shared by recall, recording and review: the text a
-//! memory is embedded as, keyword tokens and category aliases, a bounded
-//! document embedding for a memory about to be recorded, and the search for
-//! memories that may say the same thing.
+//! memory is embedded as, category groups, a bounded document embedding for
+//! a memory about to be recorded, and the search for memories that may say
+//! the same thing.
 //!
 //! The server never decides that two memories mean the same: `similar` only
 //! lists candidates, and the caller makes the agent choose.
@@ -10,34 +10,12 @@ use super::{
     Memory, Scope, clean,
     index::embed,
     schema::{SELECT, row},
+    words::{CATEGORY_ALIASES, tokenize},
 };
 use anyhow::Result;
 use rusqlite::{Connection, params};
 use std::{cmp::Ordering, collections::BTreeSet, collections::HashMap, time::Duration};
 use uuid::Uuid;
-
-/// Category labels that mean the same at query time. Stored labels are kept
-/// as the user gave them; unlisted labels match only themselves.
-pub(super) const CATEGORY_ALIASES: &[&[&str]] = &[
-    &[
-        "programming",
-        "coding",
-        "software development",
-        "development",
-    ],
-    &["communication", "comms", "writing style"],
-    &["workflow", "process"],
-];
-
-/// Function words carry no topic; one shared "in" must not make two memories
-/// look alike or outrank a semantic match.
-pub(super) const STOP: &[&str] = &[
-    "a", "an", "and", "are", "as", "at", "be", "but", "by", "can", "could", "do", "does", "for",
-    "from", "how", "i", "if", "in", "into", "is", "it", "its", "me", "my", "of", "on", "or", "our",
-    "should", "so", "than", "that", "the", "their", "them", "then", "there", "these", "they",
-    "this", "to", "was", "we", "were", "what", "when", "where", "which", "who", "why", "will",
-    "with", "would", "you", "your",
-];
 
 /// How long recording waits for an embedding. Covers a local model's cold
 /// start (measured 4.9 s for qwen3-embedding:4b); a slower endpoint falls back
@@ -154,14 +132,6 @@ pub(super) fn thresholds(
         }
         _ => None,
     })
-}
-
-pub(super) fn tokenize(text: &str) -> BTreeSet<String> {
-    text.to_lowercase()
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| !w.is_empty() && !STOP.contains(w))
-        .map(str::to_owned)
-        .collect()
 }
 
 /// `label` and every label sharing its alias group. The label is never cut,

@@ -12,8 +12,9 @@ use super::{
     selection::refuse_local_paths,
     similar::{
         DUPLICATE_OVERLAP, Draft, RELATED_OVERLAP, Thresholds, category_group, cosine, document,
-        overlap, stored_vectors, thresholds, tokenize,
+        overlap, stored_vectors, thresholds,
     },
+    words::tokenize,
     write::mark_pair,
 };
 use anyhow::{Result, bail};

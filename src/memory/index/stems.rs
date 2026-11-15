@@ -3,7 +3,7 @@
 
 use crate::memory::{
     Memory,
-    similar::{CATEGORY_ALIASES, STOP, tokenize},
+    words::{CATEGORY_ALIASES, STOP, tokenize},
 };
 use rust_stemmers::{Algorithm, Stemmer};
 use std::collections::{BTreeSet, HashMap};
