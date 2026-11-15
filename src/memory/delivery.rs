@@ -128,6 +128,22 @@ pub(crate) struct Action {
 pub(in crate::memory) struct Terms {
     pub(in crate::memory) stems: BTreeSet<String>,
     pub(in crate::memory) anchors: BTreeSet<String>,
+    /// Per command, the program paired with each word argument in order:
+    /// with [`Subcommand::Noted`], the first pair the index holds is the
+    /// subcommand's anchor, else the first pair.
+    pub(in crate::memory) choices: Vec<Vec<String>>,
+}
+
+/// Which word argument of a command names its subcommand, as an anchor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Subcommand {
+    /// Every word argument.
+    Every,
+    /// The first word argument that is no path.
+    First,
+    /// The first word argument, no path, that some memory pairs with the
+    /// program; else the first.
+    Noted,
 }
 
 impl Terms {
@@ -194,7 +210,13 @@ fn assignment(word: &str) -> bool {
 /// a pair no memory names has no holders and weighs nothing. With `pairs`,
 /// each two adjacent words are an anchor too, so a wrapper no table names
 /// (`npx`, a proxy) still yields the command it runs.
-fn command_terms(line: &str, stems: &mut Stems, terms: &mut Terms, pairs: bool, first_word: bool) {
+fn command_terms(
+    line: &str,
+    stems: &mut Stems,
+    terms: &mut Terms,
+    pairs: bool,
+    subcommand: Subcommand,
+) {
     for words in segments(line) {
         let mut rest = words
             .iter()
@@ -212,18 +234,25 @@ fn command_terms(line: &str, stems: &mut Stems, terms: &mut Terms, pairs: bool, 
         if let Some(sub) = sub {
             terms.words(stems, sub);
         }
-        // With `first_word`, only the first word argument that is no path.
+        let pair = |arg: &&str| format!("{name} {arg}").to_lowercase();
         let words_after = args.iter().filter(|arg| word_argument(arg));
-        let named: Vec<&&str> = if first_word {
-            words_after
-                .filter(|arg| !arg.contains('/'))
-                .take(1)
-                .collect()
-        } else {
-            words_after.collect()
-        };
-        for arg in named {
-            terms.anchors.insert(format!("{name} {arg}").to_lowercase());
+        match subcommand {
+            Subcommand::Every => terms.anchors.extend(words_after.map(pair)),
+            Subcommand::First => terms.anchors.extend(
+                words_after
+                    .filter(|arg| !arg.contains('/'))
+                    .take(1)
+                    .map(pair),
+            ),
+            Subcommand::Noted => {
+                let choices: Vec<String> = words_after
+                    .filter(|arg| !arg.contains('/'))
+                    .map(pair)
+                    .collect();
+                if !choices.is_empty() {
+                    terms.choices.push(choices);
+                }
+            }
         }
         if pairs {
             for pair in words.windows(2) {
@@ -285,11 +314,11 @@ pub(in crate::memory) fn terms(
     action: &Action,
     stems: &mut Stems,
     pairs: bool,
-    first_word: bool,
+    subcommand: Subcommand,
 ) -> Terms {
     let mut terms = Terms::default();
     match action.kind {
-        Kind::Command => command_terms(&action.text, stems, &mut terms, pairs, first_word),
+        Kind::Command => command_terms(&action.text, stems, &mut terms, pairs, subcommand),
         Kind::File => file_terms(&action.text, stems, &mut terms),
         Kind::Prompt | Kind::Task | Kind::Plan | Kind::Message | Kind::Search => {
             terms.words(stems, &action.text);
@@ -308,8 +337,8 @@ pub(crate) struct Tuning {
     pub(crate) credit: f64,
     /// Adjacent words of a command are anchors too (see `command_terms`).
     pub(crate) pairs: bool,
-    /// Only a command's first word argument names its subcommand.
-    pub(crate) first_word: bool,
+    /// Which word argument of a command names its subcommand.
+    pub(crate) subcommand: Subcommand,
 }
 
 impl Default for Tuning {
@@ -319,7 +348,7 @@ impl Default for Tuning {
             half_life: WINDOW_HALF_LIFE,
             credit: OTHER_PASSAGE_CREDIT,
             pairs: false,
-            first_word: false,
+            subcommand: Subcommand::Every,
         }
     }
 }
@@ -355,7 +384,7 @@ impl Window {
             action,
             &mut self.stems,
             self.tuning.pairs,
-            self.tuning.first_word,
+            self.tuning.subcommand,
         );
         self.actions.push_back((action.kind, terms, action.failed));
         while self.actions.len() > self.tuning.window_actions {
@@ -798,11 +827,28 @@ impl DeliveryIndex {
             let age = (newest - i) as f64;
             let fired = i == newest;
             let weight = 0.5f64.powf(age / window.tuning.half_life);
+            let mut chosen = Vec::with_capacity(terms.choices.len());
+            for choices in &terms.choices {
+                let mut pick = None;
+                for choice in choices {
+                    if self.postings(&key(true, choice))?.is_some() {
+                        pick = Some(choice);
+                        break;
+                    }
+                }
+                chosen.extend(pick.or(choices.first()));
+            }
             let keys = terms
                 .stems
                 .iter()
                 .map(|stem| (key(false, stem), false))
-                .chain(terms.anchors.iter().map(|anchor| (key(true, anchor), true)));
+                .chain(
+                    terms
+                        .anchors
+                        .iter()
+                        .chain(chosen)
+                        .map(|anchor| (key(true, anchor), true)),
+                );
             for (key, anchor) in keys {
                 let w = wanted.entry(key).or_default();
                 w.weight = w.weight.max(weight);
@@ -1112,7 +1158,12 @@ mod tests {
     }
 
     fn of_with(kind: Kind, text: &str, pairs: bool) -> Terms {
-        terms(&action(kind, text), &mut Stems::new(), pairs, false)
+        terms(
+            &action(kind, text),
+            &mut Stems::new(),
+            pairs,
+            Subcommand::Every,
+        )
     }
 
     fn stems(text: &str) -> BTreeSet<String> {
@@ -1201,7 +1252,7 @@ mod tests {
             ),
             &mut Stems::new(),
             false,
-            true,
+            Subcommand::First,
         );
         for anchor in ["cargo run", "git commit"] {
             assert!(first.anchors.contains(anchor), "{anchor}: {first:?}");
@@ -1395,6 +1446,40 @@ mod tests {
             by_id(&index, &found, 40).is_none_or(|m| !m.push() && !m.hold()),
             "{found:?}"
         );
+    }
+
+    #[test]
+    fn the_noted_rule_takes_the_first_word_a_memory_names() {
+        let notes = [
+            (
+                "Applying manifests",
+                "Run `kubectl apply` only after the diff is reviewed.",
+            ),
+            ("Testing", "Run `cargo test` with the database up."),
+        ];
+        let index = store("deploy", &notes);
+        let noted = Tuning {
+            subcommand: Subcommand::Noted,
+            ..Tuning::default()
+        };
+        let ranked = |text: &str, tuning: Tuning| {
+            let mut window = Window::with(tuning);
+            window.push(&action(Kind::Command, text));
+            index.rank(&window).unwrap()
+        };
+        let first = Tuning {
+            subcommand: Subcommand::First,
+            ..Tuning::default()
+        };
+        // A flag's word value comes first: only the noted rule finds `apply`.
+        let apply = |found: &[Matched]| by_id(&index, found, 40).is_some_and(|m| m.command);
+        assert!(apply(&ranked("kubectl -n prod apply", noted)));
+        assert!(!apply(&ranked("kubectl -n prod apply", first)));
+        // Its mirror: `cargo run test` runs `cargo run`, which no memory
+        // names, so the noted rule takes `test` and names `cargo test`.
+        let test = |found: &[Matched]| by_id(&index, found, 41).is_some_and(|m| m.command);
+        assert!(test(&ranked("cargo run test", noted)));
+        assert!(!test(&ranked("cargo run test", first)));
     }
 
     #[test]
