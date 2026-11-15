@@ -157,19 +157,22 @@ fn touch(path: &Path) -> io::Result<()> {
 /// at each tick a due poll asks `index` for the stamps of the global
 /// memories changed since the marker's position, which is a small reply,
 /// and keeps the position the server answers. A server that knows no
-/// positions (an older one sends every stamp and none) gets no marker, so
-/// the hooks ask it as before, and is polled only at the quiet interval.
+/// positions (an older one sends every global stamp, about 800 KB at 10,000
+/// memories, and none) gets no marker, so the hooks ask it as before; it is
+/// asked again only at the quiet interval, and then only for its version
+/// in a handshake, until that version changes.
 pub async fn poll(connection: Connection) {
     let Some(files) = Files::of(&connection.url) else {
         return;
     };
-    let mut knows_positions = true;
+    // The version of a server that answered with no position.
+    let mut without_positions: Option<serde_json::Value> = None;
     let mut last_asked: Option<tokio::time::Instant> = None;
     loop {
         tokio::time::sleep(poll_every() / TICKS_PER_POLL).await;
         // Never sooner than a poll after its own last ask, answered or not,
         // so an unreachable server is not asked at every tick.
-        let wait = if knows_positions {
+        let wait = if without_positions.is_none() {
             poll_every()
         } else {
             poll_every() * QUIET_POLLS
@@ -179,6 +182,12 @@ pub async fn poll(connection: Connection) {
         }
         last_asked = Some(tokio::time::Instant::now());
         let _ = touch(&files.claim);
+        if let Some(old) = &without_positions {
+            if version(&connection).await.is_none_or(|now| &now == old) {
+                continue;
+            }
+            without_positions = None;
+        }
         let input = serde_json::json!({
             "stamps": true,
             "stamps_since": files.position().unwrap_or_default(),
@@ -193,16 +202,22 @@ pub async fn poll(connection: Connection) {
             // the server themselves.
             continue;
         };
-        knows_positions = reply.since.is_some();
         match reply.since {
             Some(position) => {
                 let _ = files.write(&position);
             }
             None => {
                 let _ = fs::remove_file(&files.marker);
+                without_positions = Some(version(&connection).await.unwrap_or_default());
             }
         }
     }
+}
+
+/// The version the server names in its handshake.
+async fn version(connection: &Connection) -> Option<serde_json::Value> {
+    let handshake = connection.handshake().await.ok()?;
+    crate::setup::versions::server_version(&handshake).cloned()
 }
 
 #[cfg(test)]
