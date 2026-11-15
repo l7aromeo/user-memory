@@ -104,6 +104,15 @@ source out.
   schema must match its committed snapshot, and a store built from every
   earlier snapshot must migrate to exactly the current schema while keeping
   all of its rows.
+- `tests/mcp.rs` — the MCP server as a client meets it, and the size of what
+  a session loads: the server instructions within `INSTRUCTIONS_LIMIT`
+  (checked in `src/main.rs`), the tool descriptions within
+  `DESCRIPTIONS_LIMIT`, and the whole `tools/list` reply within
+  `TOOLS_LIST_LIMIT`. Each limit's comment gives the measurement behind it.
+  The tools' fields, types, defaults and values must match
+  `tests/fixtures/tools/shape.json`, the reply with its descriptions
+  removed: a reworded doc keeps it, and a meant change copies the shape the
+  failing test writes.
 - `tests/docs.rs` — the docs, the skill and the newest release note against
   the binary: every user-memory command they show runs as written, and every
   message they quote is one the code prints. A quote in double backticks may

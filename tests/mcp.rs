@@ -30,6 +30,24 @@ use tempfile::tempdir;
 /// such as one on search (about 70). Raise it only with a new measurement.
 const DESCRIPTIONS_LIMIT: usize = 3400;
 
+/// Most bytes the whole `tools/list` reply may take, as the line a client
+/// receives: the tool descriptions and every field's schema and doc. Claude
+/// Code sends these definitions to the model at session start when it loads
+/// the tools then, so each such session pays for all of them; Codex in code
+/// mode loads a tool's definition when the agent looks the tool up.
+///
+/// Codex does not show the server instructions to the model, so a field's
+/// doc is where a rule reaches a Codex agent at that call. Shortening a doc
+/// never drops a rule it carries (the user's yes, what forget deletes,
+/// import's apply), even when the server instructions say it too.
+///
+/// The reply measured 29,210 bytes at this limit's start. The room above
+/// it is one more field, counted as `"name":{schema}` and its comma: the
+/// larger of the largest field (record's type, 724 bytes) and a filter
+/// added to the five tools that share them (5 × 138, the median of their
+/// filter fields). Raise it only with a new measurement.
+const TOOLS_LIST_LIMIT: usize = 29_934;
+
 /// A `user-memory serve` in `folder`, over the store in `home`.
 /// An empty git config file in `dir`, for GIT_CONFIG_GLOBAL: the user's own
 /// git settings never reach a test, and a file works on every platform,
@@ -1073,5 +1091,15 @@ fn only_description_strings_leave_the_shape() {
                 "status": {"oneOf": [{"const": "all"}]},
             },
         })
+    );
+}
+
+#[test]
+fn the_tool_definitions_stay_within_their_budget() {
+    let (line, _) = tools_list();
+    let size = line.len();
+    assert!(
+        size <= TOOLS_LIST_LIMIT,
+        "the tools/list reply grew to {size} bytes, over TOOLS_LIST_LIMIT ({TOOLS_LIST_LIMIT}): shorten a field doc or tool description, or raise the limit with a new measurement"
     );
 }
