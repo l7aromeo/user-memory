@@ -1119,6 +1119,7 @@ impl Front {
         self.stdout.flush().await?;
         self.stop().await;
         self.session.identity = wanted;
+        self.session.from = versions::running().to_owned();
         if relays() {
             let session = Session {
                 relayed: true,

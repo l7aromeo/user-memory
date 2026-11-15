@@ -950,6 +950,14 @@ fn an_upgrade_landing_as_the_new_code_starts_is_handed_over_to() {
         let (stderr, _) = session.finish();
         if matches!(way, Way::Exec) {
             assert_eq!(first, Some(LATER.into()), "{way:?}: {stderr}");
+            // After an `exec` the newer build handed the session on; a relay
+            // starts each child itself.
+            assert!(
+                stderr.contains(&format!(
+                    "user-memory {LATER}: took over this session from {NEWER}"
+                )),
+                "{way:?}: {stderr}"
+            );
         }
         assert_eq!(second, Some(LATER.into()), "{way:?}: {stderr}");
         assert!(
