@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 pub mod backups;
 mod calibration;
+mod changes;
 pub mod embedding;
 mod history;
 mod ids;

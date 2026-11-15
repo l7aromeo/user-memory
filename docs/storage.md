@@ -20,7 +20,11 @@ The store is one SQLite database: the `memories` table, `memory_origins`,
 `memory_distinct`, `conversation_projects` (each conversation's
 [links](tools.md#conversation-links)), `embedding_cutoffs` (cutoffs computed for an
 embedding model and vector length without built-in ones, since schema
-version 5), and derived search tables that `reindex` can always rebuild: the
+version 5), `store_changes` and `memory_changes` (the store's count of its
+own changes, since schema version 10: the store's id, the number of its
+latest change, and for each memory changed since the number of its latest
+change, with the time it was removed for a forgotten one; no text), and
+derived search tables that `reindex` can always rebuild: the
 [keyword index](#the-keyword-index) (`search_keys`, `search_words`,
 `search_pending`, `search_state` and `search_changes`, since schema version
 6) and

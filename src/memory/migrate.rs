@@ -88,7 +88,59 @@ const STEPS: &[Step] = &[
         check: always,
         apply: to_v9,
     },
+    Step {
+        check: always,
+        apply: to_v10,
+    },
 ];
+
+/// Version 10 counts the store's changes: the store's id and its latest
+/// change, one row per memory changed since, and the triggers that count
+/// each change in the commit that makes it (`changes.rs`). No memory is
+/// written: a migrated store has changed nothing yet, and its new id makes
+/// every session read it whole once. The SQL is written out as it was at
+/// version 10.
+fn to_v10(conn: &Connection, _: Option<&Titles>) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE store_changes (
+    id INTEGER PRIMARY KEY CHECK(id=1),
+    store_id TEXT NOT NULL CHECK(length(store_id)=32),
+    last_change INTEGER NOT NULL DEFAULT 0 CHECK(last_change>=0),
+    pruned_through INTEGER NOT NULL DEFAULT 0 CHECK(pruned_through>=0)
+);
+CREATE TABLE memory_changes (
+    memory_id TEXT PRIMARY KEY NOT NULL,
+    change INTEGER NOT NULL,
+    removed_at TEXT
+) WITHOUT ROWID;
+CREATE INDEX memory_changes_by_change ON memory_changes(change);
+CREATE TRIGGER memory_change_recorded AFTER INSERT ON memories BEGIN
+    UPDATE store_changes SET last_change=last_change+1 WHERE id=1;
+    INSERT OR REPLACE INTO memory_changes(memory_id,change,removed_at) SELECT NEW.id,last_change,NULL FROM store_changes WHERE id=1;
+END;
+CREATE TRIGGER memory_change_updated AFTER UPDATE OF memory_type,category,context,title,content,reason,scope,project,source,status,evidence,evidence_ids,superseded_by ON memories
+WHEN (OLD.memory_type,OLD.category,OLD.context,OLD.title,OLD.content,OLD.reason,OLD.scope,OLD.project,OLD.source,OLD.status,OLD.evidence,OLD.evidence_ids,OLD.superseded_by) IS NOT (NEW.memory_type,NEW.category,NEW.context,NEW.title,NEW.content,NEW.reason,NEW.scope,NEW.project,NEW.source,NEW.status,NEW.evidence,NEW.evidence_ids,NEW.superseded_by) BEGIN
+    UPDATE store_changes SET last_change=last_change+1 WHERE id=1;
+    INSERT OR REPLACE INTO memory_changes(memory_id,change,removed_at) SELECT NEW.id,last_change,NULL FROM store_changes WHERE id=1;
+END;
+CREATE TRIGGER memory_change_forgotten AFTER DELETE ON memories BEGIN
+    UPDATE store_changes SET last_change=last_change+1 WHERE id=1;
+    INSERT OR REPLACE INTO memory_changes(memory_id,change,removed_at) SELECT OLD.id,last_change,CURRENT_TIMESTAMP FROM store_changes WHERE id=1;
+END;
+CREATE TRIGGER link_change_added AFTER INSERT ON conversation_projects BEGIN
+    UPDATE store_changes SET last_change=last_change+1 WHERE id=1;
+END;
+CREATE TRIGGER link_change_removed AFTER DELETE ON conversation_projects BEGIN
+    UPDATE store_changes SET last_change=last_change+1 WHERE id=1;
+END;
+CREATE TRIGGER link_change_moved AFTER UPDATE OF origin,project ON conversation_projects
+WHEN (OLD.origin,OLD.project) IS NOT (NEW.origin,NEW.project) BEGIN
+    UPDATE store_changes SET last_change=last_change+1 WHERE id=1;
+END;
+INSERT INTO store_changes(id,store_id) VALUES (1,lower(hex(randomblob(16))));",
+    )?;
+    Ok(())
+}
 
 /// Version 9 indexes each memory by passage: the keyword index gains its
 /// anchors and each passage's place, and numbers a memory's rows from its
