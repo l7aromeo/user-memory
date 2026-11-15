@@ -116,16 +116,16 @@ CREATE TABLE memory_changes (
 CREATE INDEX memory_changes_by_change ON memory_changes(change);
 CREATE TRIGGER memory_change_recorded AFTER INSERT ON memories BEGIN
     UPDATE store_changes SET last_change=last_change+1 WHERE id=1;
-    INSERT OR REPLACE INTO memory_changes(memory_id,change,removed_at) SELECT NEW.id,last_change,NULL FROM store_changes WHERE id=1;
+    INSERT INTO memory_changes(memory_id,change,removed_at) SELECT NEW.id,last_change,NULL FROM store_changes WHERE id=1 ON CONFLICT(memory_id) DO UPDATE SET change=excluded.change,removed_at=excluded.removed_at;
 END;
 CREATE TRIGGER memory_change_updated AFTER UPDATE OF memory_type,category,context,title,content,reason,scope,project,source,status,evidence,evidence_ids,superseded_by ON memories
 WHEN (OLD.memory_type,OLD.category,OLD.context,OLD.title,OLD.content,OLD.reason,OLD.scope,OLD.project,OLD.source,OLD.status,OLD.evidence,OLD.evidence_ids,OLD.superseded_by) IS NOT (NEW.memory_type,NEW.category,NEW.context,NEW.title,NEW.content,NEW.reason,NEW.scope,NEW.project,NEW.source,NEW.status,NEW.evidence,NEW.evidence_ids,NEW.superseded_by) BEGIN
     UPDATE store_changes SET last_change=last_change+1 WHERE id=1;
-    INSERT OR REPLACE INTO memory_changes(memory_id,change,removed_at) SELECT NEW.id,last_change,NULL FROM store_changes WHERE id=1;
+    INSERT INTO memory_changes(memory_id,change,removed_at) SELECT NEW.id,last_change,NULL FROM store_changes WHERE id=1 ON CONFLICT(memory_id) DO UPDATE SET change=excluded.change,removed_at=excluded.removed_at;
 END;
 CREATE TRIGGER memory_change_forgotten AFTER DELETE ON memories BEGIN
     UPDATE store_changes SET last_change=last_change+1 WHERE id=1;
-    INSERT OR REPLACE INTO memory_changes(memory_id,change,removed_at) SELECT OLD.id,last_change,CURRENT_TIMESTAMP FROM store_changes WHERE id=1;
+    INSERT INTO memory_changes(memory_id,change,removed_at) SELECT OLD.id,last_change,CURRENT_TIMESTAMP FROM store_changes WHERE id=1 ON CONFLICT(memory_id) DO UPDATE SET change=excluded.change,removed_at=excluded.removed_at;
 END;
 CREATE TRIGGER link_change_added AFTER INSERT ON conversation_projects BEGIN
     UPDATE store_changes SET last_change=last_change+1 WHERE id=1;

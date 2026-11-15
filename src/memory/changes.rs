@@ -98,12 +98,15 @@ pub(super) fn schema() -> String {
     let old: Vec<String> = columns.iter().map(|c| format!("OLD.{c}")).collect();
     let new: Vec<String> = columns.iter().map(|c| format!("NEW.{c}")).collect();
     // One row per memory: a memory forgotten and then recorded again under
-    // the same id, as an import can, is live again, so its row is replaced
-    // and loses its removal time.
+    // the same id, as an import can, is live again, so its row is updated
+    // and loses its removal time. An upsert, since a statement's own OR
+    // clause (INSERT OR IGNORE, UPDATE OR ROLLBACK) replaces the conflict
+    // clause of the statements in its triggers, and an OR REPLACE here then
+    // left the row stale or failed the write.
     let count = |id: &str, removed: &str| {
         format!(
             "    UPDATE store_changes SET last_change=last_change+1 WHERE id=1;
-    INSERT OR REPLACE INTO memory_changes(memory_id,change,removed_at) SELECT {id},last_change,{removed} FROM store_changes WHERE id=1;"
+    INSERT INTO memory_changes(memory_id,change,removed_at) SELECT {id},last_change,{removed} FROM store_changes WHERE id=1 ON CONFLICT(memory_id) DO UPDATE SET change=excluded.change,removed_at=excluded.removed_at;"
         )
     };
     let links = "    UPDATE store_changes SET last_change=last_change+1 WHERE id=1;";
