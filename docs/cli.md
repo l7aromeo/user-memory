@@ -60,14 +60,14 @@ check](memory-model.md#what-the-server-can-and-cannot-check)). `--scope` is
 required:
 
 ```bash
-user-memory record --type preference --category programming --scope global \
-  --title 'Prefer Rust over Python' --content 'Prefer Rust over Python' \
-  --reason 'Performance and strict safety'
+user-memory record --type preference --category communication --scope global \
+  --title 'Answer in short paragraphs' --content 'Answer in short paragraphs' \
+  --reason 'Easier to read'
 ```
 
 ```bash
 user-memory record --type constraint --category programming --scope project --project github.com/you/app \
-  --title 'Use Python in this repository' --content 'Use Python for this project'
+  --title 'Use Python 3.13 in this repository' --content 'Use Python 3.13 in this repository'
 ```
 
 | Option | Meaning |
@@ -96,7 +96,7 @@ only the fields that change; the rest stay, including the evidence, often
 your own words, which `--evidence` replaces:
 
 ```bash
-user-memory update e0000001-0000-4000-8000-000000000001 --title 'Ask before every push'
+user-memory update e0000001-0000-4000-8000-000000000001 --title 'Ask before every git push'
 ```
 
 ```bash

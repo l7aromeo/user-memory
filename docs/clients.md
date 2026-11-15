@@ -162,7 +162,7 @@ Categories: workflow 3, communication 1, programming 1, work 1 · Types: prefere
 The user's global rules are in your instruction files (USER MEMORY); project rules and other memories follow.
 Rules
   programming (1)
-    e0000002 Use Python in this repository [project]
+    e0000002 Use Python 3.13 in this repository [project]
 Other memories
   goal (1)
     e0000003 Ship the parser by November [project] (tentative)

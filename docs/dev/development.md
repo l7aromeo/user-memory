@@ -444,8 +444,9 @@ skill, help texts, tests, fixtures and evals use these memories.
 | `e0000006-0000-4000-8000-000000000006` | `e0000006` | Indent with tabs |
 
 A further example continues the count: `e0000007-0000-4000-8000-000000000007`.
-The content is the title unless the passage needs more. Tests may use other
-titles too, as long as they describe nobody in particular.
+The docs, the skill and help texts use only these titles; the content is
+the title unless the passage needs more. Tests may use other titles too,
+as long as they are plainly generic and describe nobody in particular.
 
 Two other families stay where they are:
 
