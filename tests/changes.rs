@@ -698,3 +698,28 @@ fn a_statement_with_its_own_conflict_clause_still_counts_its_change() {
         assert_eq!(row(id), (last(), None), "{what}");
     }
 }
+
+// The store's count of its changes is internal: no export names its tables
+// or what they hold.
+#[test]
+fn an_export_holds_nothing_of_the_count_of_changes() {
+    let s = Store::new();
+    let kept = s.record("Use a serif font", &[]);
+    s.value(&["update", &kept, "--content", "Use a sans font"]);
+    let gone = s.record("Eats vegetarian", &[]);
+    s.value(&["forget", &gone]);
+    let (id, _) = s.state();
+    let file = s.root.path().join("export.json");
+    s.output(&["export", file.to_str().unwrap()]);
+    let text = fs::read_to_string(&file).unwrap();
+    for internal in [
+        "store_changes",
+        "memory_changes",
+        "store_id",
+        "last_change",
+        "pruned_through",
+        id.as_str(),
+    ] {
+        assert!(!text.contains(internal), "the export names {internal}");
+    }
+}
