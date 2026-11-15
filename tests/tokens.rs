@@ -692,3 +692,348 @@ fn a_read_only_clients_hooks_work_links_included() {
         "{notice}{said}"
     );
 }
+
+/// What the client tells for each refusal reason, given its server's URL.
+fn sentences(url: &str) -> [(&'static str, String); 3] {
+    let fix = format!(
+        "Ask its operator for a new token file, then run the installer with --url {url} --token-file FILE."
+    );
+    [
+        (
+            "revoked",
+            format!("The memory server at {url} revoked this machine's token. {fix}"),
+        ),
+        (
+            "unused",
+            format!("This machine's token for {url} expired after 90 days unused. {fix}"),
+        ),
+        (
+            "expired",
+            format!("This machine's token for {url} expired on the date its operator set. {fix}"),
+        ),
+    ]
+}
+
+/// A token named `name` refused for `reason`: revoked, unused for 91 days,
+/// or past its `--expires` date. Returns its file.
+fn refused_token(host: &Host, name: &str, reason: &str) -> PathBuf {
+    host.add(name, &["--expires", "30"]);
+    refused_token_now(host, name, reason)
+}
+
+/// The CLI as a client of `host` with the token in `file`.
+fn client(host: &Host, file: &std::path::Path, args: &[&str], stdin: &[u8]) -> Output {
+    let mut command = host.command(args);
+    as_client(host, &mut command, file);
+    command
+        .env(time::HOOK_ROOM.0, time::HOOK_ROOM.1)
+        .current_dir(host.root.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    child.stdin.take().unwrap().write_all(stdin).unwrap();
+    child.wait_with_output().unwrap()
+}
+
+/// The revoked and expired sentences reach the user on every path that
+/// meets the refusal: doctor's probe, a hook's call, the CLI's calls, and
+/// export and import.
+#[test]
+fn each_refusal_reason_is_told_on_every_cli_path() {
+    let host = Host::start();
+    let url = format!("http://{}/mcp", host.address);
+    for (reason, sentence) in sentences(&url) {
+        let file = refused_token(&host, &format!("cli-{reason}"), reason);
+        let payload =
+            json!({"session_id":"s","cwd":host.root.path(),"hook_event_name":"SessionStart"})
+                .to_string();
+        let exported = host.root.path().join(format!("{reason}.json"));
+        for (path, args, stdin) in [
+            // Doctor reads the endpoint from its flags, as the installer
+            // passes it.
+            (
+                "doctor",
+                vec![
+                    "doctor",
+                    "--url",
+                    &url,
+                    "--token-file",
+                    file.to_str().unwrap(),
+                ],
+                String::new(),
+            ),
+            (
+                "the session hook",
+                vec!["session-start", "--client", "claude"],
+                payload,
+            ),
+            ("a call", vec!["index"], String::new()),
+            (
+                "export",
+                vec!["export", exported.to_str().unwrap()],
+                String::new(),
+            ),
+            (
+                "import",
+                vec!["import", exported.to_str().unwrap()],
+                String::new(),
+            ),
+        ] {
+            if path == "import" {
+                fs::write(
+                    &exported,
+                    r#"{"format":"user-memory-export","format_version":3,"memories":[]}"#,
+                )
+                .unwrap();
+            }
+            let out = client(&host, &file, &args, stdin.as_bytes());
+            let said = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(said.contains(&sentence), "{reason}, {path}:\n{said}");
+            assert!(!said.contains("login"), "{reason}, {path}:\n{said}");
+        }
+    }
+    // A token the server does not know, as from a server too old to give a
+    // reason: today's message.
+    let stranger = host.root.path().join("stranger.token");
+    fs::write(&stranger, "x".repeat(56)).unwrap();
+    let out = client(&host, &stranger, &["index"], b"");
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("Cannot connect to memory server"), "{said}");
+    assert!(!said.contains("operator"), "{said}");
+}
+
+/// The bridge an agent app talks to answers a refused call with the
+/// sentence, as a tool error, and stays up: for a token revoked while the
+/// session runs, and for one refused from the start.
+#[test]
+fn the_bridge_tells_each_refusal_and_stays_up() {
+    let host = Host::start();
+    let url = format!("http://{}/mcp", host.address);
+    for (reason, sentence) in sentences(&url) {
+        // Revoked (or expired) while the session runs.
+        host.add(&format!("live-{reason}"), &["--expires", "30"]);
+        let file = host.root.path().join(format!("live-{reason}.token"));
+        let mut bridge = Bridge::start(&host, &file);
+        bridge.send(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"app","version":"1"}}}));
+        assert!(bridge.reply().get("result").is_some());
+        bridge.send(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+        let (failed, text) = bridge.call(2, "index");
+        assert!(!failed, "{text}");
+        let _ = refused_token_now(&host, &format!("live-{reason}"), reason);
+        for id in [3, 4] {
+            let (failed, text) = bridge.call(id, "index");
+            assert!(failed, "{reason}: {text}");
+            assert!(text.contains(&sentence), "{reason}: {text}");
+            assert!(text.contains("don't open the token file"), "{text}");
+        }
+        drop(bridge);
+
+        // Refused from the start: the session opens, and its first call is
+        // told why.
+        let file = refused_token(&host, &format!("start-{reason}"), reason);
+        let mut bridge = Bridge::start(&host, &file);
+        bridge.send(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"app","version":"1"}}}));
+        let _ = bridge.reply();
+        bridge.send(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+        let (failed, text) = bridge.call(2, "index");
+        assert!(failed, "{reason}: {text}");
+        assert!(text.contains(&sentence), "{reason}: {text}");
+    }
+}
+
+/// Makes the token `name`, already in use, refused for `reason`.
+fn refused_token_now(host: &Host, name: &str, reason: &str) -> PathBuf {
+    match reason {
+        "revoked" => {
+            host.token(&["revoke", name]);
+        }
+        "unused" => {
+            host.registry_conn()
+                .execute(
+                    "UPDATE client_tokens SET created_at = ?1, last_used_at = ?1, expires_at = NULL WHERE name = ?2",
+                    rusqlite::params![now() - 91 * DAY, name],
+                )
+                .unwrap();
+        }
+        _ => {
+            host.registry_conn()
+                .execute(
+                    "UPDATE client_tokens SET expires_at = ?1 WHERE name = ?2",
+                    rusqlite::params![now() - 1, name],
+                )
+                .unwrap();
+        }
+    }
+    host.root.path().join(format!("{name}.token"))
+}
+
+/// `user-memory connect`, the stdio bridge, as an agent app runs it.
+struct Bridge {
+    child: Child,
+    input: std::process::ChildStdin,
+    output: std::sync::mpsc::Receiver<String>,
+}
+
+impl Bridge {
+    fn start(host: &Host, file: &std::path::Path) -> Self {
+        let mut child = host
+            .command(&[
+                "connect",
+                "--url",
+                &format!("http://{}/mcp", host.address),
+                "--token-file",
+                file.to_str().unwrap(),
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let input = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (tx, output) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        Self {
+            child,
+            input,
+            output,
+        }
+    }
+
+    fn send(&mut self, message: &Value) {
+        writeln!(self.input, "{message}").unwrap();
+        self.input.flush().unwrap();
+    }
+
+    fn reply(&self) -> Value {
+        let line = self
+            .output
+            .recv_timeout(STUCK)
+            .expect("the bridge sent no reply");
+        serde_json::from_str(&line).unwrap()
+    }
+
+    /// Calls `tool` with no input: whether it was a tool error, and its text.
+    fn call(&mut self, id: u64, tool: &str) -> (bool, String) {
+        self.send(&json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":tool,"arguments":{}}}));
+        loop {
+            let reply = self.reply();
+            if reply["id"] == id {
+                let result = &reply["result"];
+                return (
+                    result["isError"] == true,
+                    result["content"][0]["text"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_owned(),
+                );
+            }
+        }
+    }
+}
+
+impl Drop for Bridge {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// A stand-in memory server on loopback that answers every handshake and
+/// refuses every tool call with 401 `revoked`, as a server does when the
+/// token is revoked between a call's handshake and its call. Returns its
+/// address.
+fn refusing_after_the_handshake() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { continue };
+            std::thread::spawn(move || answer_as_stand_in(stream));
+        }
+    });
+    address
+}
+
+fn answer_as_stand_in(stream: TcpStream) {
+    let mut reader = BufReader::new(stream);
+    let mut length = 0;
+    let mut line = String::new();
+    let Ok(_) = reader.read_line(&mut line) else {
+        return;
+    };
+    let method = line.split_whitespace().next().unwrap_or("").to_owned();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+            break;
+        }
+        if let Some((key, value)) = line.split_once(':')
+            && key.eq_ignore_ascii_case("content-length")
+        {
+            length = value.trim().parse().unwrap_or(0);
+        }
+    }
+    let mut body = vec![0; length];
+    if reader.read_exact(&mut body).is_err() {
+        return;
+    }
+    let message: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let (status, extra, body) = match (method.as_str(), message["method"].as_str()) {
+        ("POST", Some("initialize")) => (
+            "200 OK",
+            "Content-Type: application/json\r\n".to_owned(),
+            json!({"jsonrpc":"2.0","id":message["id"],"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"user-memory","version":env!("CARGO_PKG_VERSION")}}}).to_string(),
+        ),
+        ("POST", _) if message.get("id").is_none() => ("202 Accepted", String::new(), String::new()),
+        ("POST", _) => (
+            "401 Unauthorized",
+            "WWW-Authenticate: Bearer error=\"invalid_token\", error_description=\"revoked\"\r\n"
+                .to_owned(),
+            String::new(),
+        ),
+        ("GET", _) => ("405 Method Not Allowed", String::new(), String::new()),
+        _ => ("200 OK", String::new(), String::new()),
+    };
+    let mut stream = reader.into_inner();
+    let _ = write!(
+        stream,
+        "HTTP/1.1 {status}\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+}
+
+/// A token revoked after a call's handshake and before its call, as a long
+/// call or an import meets it: the call is told why.
+#[test]
+fn a_token_revoked_between_the_handshake_and_the_call_is_told() {
+    let address = refusing_after_the_handshake();
+    let url = format!("http://{address}/mcp");
+    let root = tempdir().unwrap();
+    let file = root.path().join("client.token");
+    fs::write(&file, "a".repeat(64)).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_user-memory"))
+        .arg("index")
+        .sandboxed(root.path())
+        .env("USER_MEMORY_URL", &url)
+        .env("USER_MEMORY_TOKEN_FILE", &file)
+        .env_remove("USER_MEMORY_DB")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(said.contains(&sentences(&url)[0].1), "{said}");
+}
