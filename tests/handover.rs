@@ -464,13 +464,15 @@ fn a_replacement_with_the_old_size_and_time_is_noticed_by_its_file_id() {
             .join(format!("copy{}", std::env::consts::EXE_SUFFIX));
         fs::copy(place.binary(), &copy).unwrap();
         let before = fs::metadata(place.binary()).unwrap();
+        place.replace_with(&copy);
+        // Set after the rename: a copy keeps the old time on macOS but not
+        // on Linux.
         fs::File::options()
             .write(true)
-            .open(&copy)
+            .open(place.binary())
             .unwrap()
             .set_modified(before.modified().unwrap())
             .unwrap();
-        place.replace_with(&copy);
         let after = fs::metadata(place.binary()).unwrap();
         assert_eq!(
             (after.len(), after.modified().unwrap()),
