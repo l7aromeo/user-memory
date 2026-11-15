@@ -372,6 +372,7 @@ pub async fn start(
                             origin.clone(),
                             rules_elsewhere,
                             unit.len(&listed) + 1,
+                            false,
                         );
                         match tokio::time::timeout_at(deadline, again).await {
                             Ok(Ok((_, index))) => index,
@@ -827,6 +828,7 @@ async fn changes(
                 origin.clone(),
                 false,
                 0,
+                false,
             )
             .await
             .map(|(lines, index)| format!("{lines}\n{index}"))
@@ -1051,7 +1053,16 @@ async fn start_index(
         .and_then(Result::ok)
         .unwrap_or_default();
     let rules_elsewhere = client.is_some_and(|client| current.contains(&client.installed()));
-    let (lines, index) = index(path, client, context_limit, origin, rules_elsewhere, 0).await?;
+    let (lines, index) = index(
+        path,
+        client,
+        context_limit,
+        origin,
+        rules_elsewhere,
+        0,
+        false,
+    )
+    .await?;
     Ok((lines, index, rules_elsewhere))
 }
 
@@ -1060,7 +1071,9 @@ async fn start_index(
 /// store, in the rooms [`rooms`] gives them after `new_rules` (the room the
 /// list of new rules takes, 0 for none), shortened so that the index still
 /// lists or counts each memory; without the global rules when
-/// `rules_elsewhere`.
+/// `rules_elsewhere`; only the project rules, with no index after them,
+/// when `rules_only` (a released server without the rules part sends an
+/// index as short as their room).
 async fn index(
     path: PathBuf,
     client: Option<HookClient>,
@@ -1068,6 +1081,7 @@ async fn index(
     origin: Option<String>,
     rules_elsewhere: bool,
     new_rules: usize,
+    rules_only: bool,
 ) -> anyhow::Result<(String, String)> {
     let remote = setup::configured_remote()?;
     let here = path.clone();
@@ -1109,12 +1123,18 @@ async fn index(
             None => Ok(page),
         }
     };
+    // The rules alone are asked with a room no larger than theirs.
+    let room = if rules_only {
+        rules_room
+    } else {
+        rules_room + index_room
+    };
     let index = fitted(
         &mut fetch,
         &seen,
         origin.as_deref(),
         rules_elsewhere,
-        (rules_room + index_room, rules_room),
+        (room, rules_room),
         unit,
     )
     .await?;

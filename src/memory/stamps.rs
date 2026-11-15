@@ -73,17 +73,6 @@ fn printed() -> String {
         .join("||char(31)||")
 }
 
-/// An SQL condition over a row of `memories` that holds for a standing
-/// rule, as `read::standing_rule` decides.
-fn rule_condition() -> String {
-    let types = super::read::RULE_TYPES
-        .iter()
-        .map(|t| format!("'{t}'"))
-        .collect::<Vec<_>>()
-        .join(",");
-    format!("(source='explicit' AND status='confirmed' AND memory_type IN ({types}))")
-}
-
 /// The conversation origin of the latest change to the memory `{id}` names,
 /// empty when none was given: a confirmation, a distinct pair or a removed
 /// conversation changes nothing a session is told of.
@@ -231,7 +220,7 @@ pub(super) fn stamps_since(
     let (condition, mut values) = condition(filter)?;
     // A rule's print and writer are read for rules alone, so the other
     // memories pay only for their kind.
-    let rule = rule_condition();
+    let rule = super::read::rule_condition();
     let ruled = if prints {
         format!(
             ",CASE WHEN {rule} THEN '{RULE}' WHEN source<>'explicit' THEN '{AGENT}' ELSE '' END,CASE WHEN {rule} THEN {} END,CASE WHEN {rule} THEN {} END,CASE WHEN {rule} OR source<>'explicit' THEN project END",

@@ -5,6 +5,7 @@
 
 use super::{
     Memory, Source, clean, project_key,
+    read::rule_condition,
     schema::{SELECT, row},
     similar::category_group,
 };
@@ -326,9 +327,83 @@ pub(super) fn candidates(conn: &Connection, filter: &Filter) -> Result<Vec<Memor
         .collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+/// The project rules among the memories the filter covers, as
+/// [`super::read::standing_rule`] decides: narrowed in the query, so the
+/// rules of a large store are read without its other memories.
+pub(super) fn project_rule_candidates(conn: &Connection, filter: &Filter) -> Result<Vec<Memory>> {
+    let (condition, values) = condition(filter)?;
+    Ok(conn
+        .prepare(&format!(
+            "{SELECT} WHERE {condition} AND scope='project' AND {}",
+            rule_condition()
+        ))?
+        .query_map(params_from_iter(values), row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The project rules read with the narrowed query are those every
+    /// candidate the filter covers would give, filtered by `standing_rule`:
+    /// over every type, source, status and scope.
+    #[test]
+    fn the_narrowed_rules_query_finds_every_project_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = super::super::schema::connect(&dir.path().join("m.sqlite3")).unwrap();
+        let key = "github.com/acme/app";
+        let mut n = 0;
+        for memory_type in [
+            "preference",
+            "constraint",
+            "value",
+            "decision",
+            "fact",
+            "goal",
+            "behavior",
+            "pattern",
+        ] {
+            for source in ["explicit", "observed", "inferred"] {
+                for status in ["confirmed", "tentative", "stale", "superseded"] {
+                    for (scope, project) in [("global", ""), ("project", key)] {
+                        n += 1;
+                        conn.execute(
+                            "INSERT INTO memories (id,memory_type,category,title,content,source,status,evidence,scope,project,superseded_by) VALUES (?1,?2,'tooling','A title','Some content',?3,?4,CASE ?3 WHEN 'explicit' THEN '' ELSE 'Seen' END,?5,?6,CASE ?4 WHEN 'superseded' THEN 'e0000001-0000-4000-8000-000000000001' END)",
+                            rusqlite::params![
+                                format!("e{n:07}-0000-4000-8000-{n:012}"),
+                                memory_type,
+                                source,
+                                status,
+                                scope,
+                                project
+                            ],
+                        )
+                        .unwrap();
+                    }
+                }
+            }
+        }
+        let filter = Selection {
+            projects: vec![key.to_owned()],
+            status: StatusFilter::All,
+            ..Selection::default()
+        }
+        .filter()
+        .unwrap();
+        let ids = |memories: Vec<Memory>| -> Vec<String> {
+            let mut ids: Vec<String> = memories
+                .iter()
+                .filter(|m| super::super::read::standing_rule(m) && m.scope == "project")
+                .map(|m| m.id.to_string())
+                .collect();
+            ids.sort();
+            ids
+        };
+        let every = ids(candidates(&conn, &filter).unwrap());
+        assert_eq!(every.len(), 3);
+        assert_eq!(ids(project_rule_candidates(&conn, &filter).unwrap()), every);
+    }
 
     #[test]
     fn local_paths_are_told_apart_from_project_keys() {
