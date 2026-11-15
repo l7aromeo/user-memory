@@ -82,6 +82,7 @@ It checks the store or server and everything setup installed
 | The upgrade stops and lists memories without titles | An upgrade from 0.3. See [titles](upgrade.md#upgrade-from-03-titles). |
 | ``… is damaged`` | Nothing was changed. Run `user-memory repair`, then upgrade again. |
 | ``… needs schema version … Move it aside`` | The store is too old to upgrade in place. Ask your agent: "upgrade my memory store". The skill walks you through export, a fresh store and import. |
+| On Windows, the upgrade or setup stops with Cannot install and the binary's path, caused by: The process cannot access the file because it is being used by another process. (os error 32) | Another program, such as an antivirus or a backup tool, kept the user-memory binary open longer than the 5 seconds the replacement waits. The earlier version is still installed. Run `user-memory upgrade` or setup again; if it keeps happening, close the program that holds the file. If the message also says the earlier binary could not be put back, rename the file it names as it says, then run setup. |
 
 ## When uninstalling on Windows
 
