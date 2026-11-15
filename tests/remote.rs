@@ -3520,6 +3520,11 @@ struct Counting {
 
 impl Counting {
     fn to(host: &str) -> Self {
+        Self::slowed(host, std::time::Duration::ZERO)
+    }
+    /// A relay that holds each connection's reply back by `delay` before
+    /// passing it on, as a slow server or network does.
+    fn slowed(host: &str, delay: std::time::Duration) -> Self {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap().to_string();
         let taken = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -3534,19 +3539,21 @@ impl Counting {
                 let Ok(server) = TcpStream::connect(&host) else {
                     continue;
                 };
-                for (mut from, mut to, keep) in [
+                for (mut from, mut to, keep, mut wait) in [
                     (
                         client.try_clone().unwrap(),
                         server.try_clone().unwrap(),
                         Some(kept.clone()),
+                        std::time::Duration::ZERO,
                     ),
-                    (server, client, None),
+                    (server, client, None, delay),
                 ] {
                     std::thread::spawn(move || {
                         let mut buffer = [0; 8192];
                         while let Ok(n) = from.read(&mut buffer)
                             && n > 0
                         {
+                            std::thread::sleep(std::mem::take(&mut wait));
                             if let Some(keep) = &keep {
                                 keep.lock().unwrap().extend_from_slice(&buffer[..n]);
                             }
@@ -3781,23 +3788,67 @@ fn connectors_on_one_machine_share_their_polls() {
         env: vec![("USER_MEMORY_MARKER_POLL_MS", poll.as_millis().to_string())],
     };
     machine.hook("session-start");
+    // Bounded by the interval, not by one connector's measured rate: late
+    // ticks under load only slow the polls down.
     let window = poll * 8;
-    let asked = |connectors: usize| {
-        let running: Vec<ChildGuard> = (0..connectors).map(|_| machine.connector()).collect();
-        machine.marker();
-        // Sessions rarely start in the same instant; connectors that do may
-        // each poll once before the claim of the first is in place.
-        std::thread::sleep(poll * 2);
-        let start = proxy.taken();
-        std::thread::sleep(window);
-        let taken = proxy.taken() - start;
-        drop(running);
-        taken
+    let five = polls(&machine, &proxy, 5, poll, window);
+    assert!(five > 0);
+    assert!(
+        five <= window.as_millis() / poll.as_millis() + POLL_SLACK,
+        "five connectors in {window:?}: {five}"
+    );
+}
+
+// A poll still waiting for a slow server's answer holds the claim: the
+// other connectors wait for it instead of each asking the server again.
+#[test]
+fn connectors_wait_for_a_poll_a_slow_server_has_not_answered() {
+    let poll = std::time::Duration::from_millis(500);
+    let slow = poll * 2;
+    let host = Host::start(root());
+    let proxy = Counting::slowed(&host.address, slow);
+    let machine = Machine {
+        home: tempdir().unwrap(),
+        url: format!("http://{}/mcp", proxy.address),
+        token: host.root.path().join("token"),
+        env: vec![("USER_MEMORY_MARKER_POLL_MS", poll.as_millis().to_string())],
     };
-    let one = asked(1);
-    let five = asked(5);
-    assert!(one > 0);
-    assert!(five <= one + one / 2, "one connector: {one}; five: {five}");
+    machine.hook("session-start");
+    // One poll at a time: each waits for its answer, then a poll's interval.
+    let window = poll * 12;
+    let five = polls(&machine, &proxy, 5, poll, window);
+    assert!(five > 0);
+    assert!(
+        five <= window.as_millis() / (slow + poll).as_millis() + POLL_SLACK,
+        "five connectors in {window:?}, answers taking {slow:?}: {five}"
+    );
+}
+
+/// Polls that may start beyond the window's share: one under way as the
+/// window opens, and one starting as it closes.
+const POLL_SLACK: u128 = 2;
+
+/// The polls `connectors` connectors on `machine` send through `proxy` in
+/// `window`, once they are running: a poll is a request for stamps since a
+/// position, and may take more than one connection.
+fn polls(
+    machine: &Machine,
+    proxy: &Counting,
+    connectors: usize,
+    poll: std::time::Duration,
+    window: std::time::Duration,
+) -> u128 {
+    let running: Vec<ChildGuard> = (0..connectors).map(|_| machine.connector()).collect();
+    machine.marker();
+    // Counting starts once every connector is past its start and a poll
+    // begun then has its answer, so the window holds the polls' steady pace.
+    std::thread::sleep(poll * 2);
+    let asked = || proxy.sent().matches("\"stamps_since\"").count();
+    let start = asked();
+    std::thread::sleep(window);
+    let taken = asked() - start;
+    drop(running);
+    taken as u128
 }
 
 // A write one session's connector relays reaches the other sessions on the

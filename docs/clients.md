@@ -294,7 +294,8 @@ one a session on this machine makes through its connector, at the other
 sessions' next prompt: once the server has answered the write, the
 connector sets the position aside as old, so those prompts ask the server,
 and polls again at once. Several connectors on one machine share the
-polls. A position older than
+polls: one asks at a time, and the others wait for its answer, however
+slow the server is, for up to three polls. A position older than
 three polls, as with no connector running or after a quiet spell, counts
 as moved: the prompt asks the server itself, and the connector goes back to
 polling every 5 seconds. A server too old to give positions gets no
