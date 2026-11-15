@@ -34,9 +34,7 @@ mod memory {
 }
 
 use clap::{Parser, Subcommand};
-use memory::delivery::{
-    self, Action, DeliveryIndex, Kind, Matched, Subcommand as SubcommandWord, Tuning, Window,
-};
+use memory::delivery::{self, Action, DeliveryIndex, Kind, Matched, Tuning, Window};
 use rusqlite::{Connection, OpenFlags};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -107,11 +105,6 @@ struct TuningArgs {
     /// Adjacent words of a command are anchors too.
     #[arg(long)]
     pairs: bool,
-    /// Which word argument of a command names its subcommand: every, the
-    /// first, the first some memory pairs with the program, or the first
-    /// unless it may be a flag's value (after-flag).
-    #[arg(long, value_parser = ["every", "first", "noted", "after-flag"])]
-    subcommand: Option<String>,
 }
 
 impl TuningArgs {
@@ -122,13 +115,6 @@ impl TuningArgs {
             half_life: self.half_life.unwrap_or(base.half_life),
             credit: self.credit.unwrap_or(base.credit),
             pairs: self.pairs || base.pairs,
-            subcommand: match self.subcommand.as_deref() {
-                Some("first") => SubcommandWord::First,
-                Some("noted") => SubcommandWord::Noted,
-                Some("after-flag") => SubcommandWord::AfterFlag,
-                Some(_) => SubcommandWord::Every,
-                None => base.subcommand,
-            },
         }
     }
 }

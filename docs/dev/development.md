@@ -643,14 +643,16 @@ Commands:
     just delivery-bench --cost           # one lookup's time, 10,000 memories
 
 The bars and window are set on the tuning seeds (`--sweep`) and reported on
-others, so the report isn't graded on what set them. The sweep tries the
-bars on the store's score and on quantities free of the store's size, such
-as each term's worth by how many memories hold it alone. `--bars` reports at
+others, so the report isn't graded on what set them. The report uses the
+matcher's own bars: a command's passages on their share of what the
+command could score, every other action's on a score where an anchor's
+worth falls with the square root of the memories holding it, and every
+push needing an anchor of the action. The sweep tries single bars on the
+store's score and on quantities free of the store's size, such as each
+term's worth by how many memories hold it alone. `--bars` reports at
 other bars, on any of those quantities with `scale=NAME` (repeat it to
 compare several on the same stores), `--credit` with credit for a memory's
-other passages, `--subcommand` with another rule for which word of a
-command names its subcommand, `--prompt-curve` at several prompt bars on
-stems alone,
+other passages, `--prompt-curve` at several prompt bars on stems alone,
 `--failure-curve` at several failure bars with and without an anchor, and
 `--keep DIR` keeps the built stores. `--presence` adds how often session
 start already lists what the tasks need: today's, from `user-memory

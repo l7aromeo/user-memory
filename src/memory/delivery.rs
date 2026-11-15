@@ -46,21 +46,44 @@ pub(crate) const WINDOW_HALF_LIFE: f64 = 5.0;
 /// in one. The delivery benchmark measures whether credit helps.
 pub(crate) const OTHER_PASSAGE_CREDIT: f64 = 0.0;
 
-/// The score a passage needs to be pushed after an action, with at least
-/// one matched term from that action (#117). Absolute: rank orders what
-/// passes and never makes a passage pass. A starting value; the delivery
-/// benchmark measures it.
-pub(crate) const PUSH_BAR: f64 = 2.0;
+// The bars. Every push and hold needs an anchor of the action that fired,
+// and rank orders what passes but never makes a passage pass. A shell
+// command's passages are tested on [`Matched::share`]; every other action's
+// on [`Matched::mixed`]. Both are free of the store's size, so the bars hold
+// from 50 to 10,000 memories. Share alone never pushes on a prompt, whose
+// many words no passage covers, so other actions keep `mixed`. The delivery
+// benchmark (#125) set them on synthetic stores; the figures are at 1,000
+// memories, with "about" counting a passage that belongs to the action
+// whether or not the task needs it then. Together they give 0.91 of
+// deliveries needed then, 0.99 about the action, and 0.87 of the needs
+// that share an anchor with the work found (0.88 at 10,000). A single bar on `mixed` for
+// every action finds 0.44 to 0.73 of those needs where a command has 8 to
+// 12 notes; these keep 0.76 to 0.88.
 
-/// The lower score that lets a passage matching a failed action's own
-/// terms be pushed after it (#117): a trap is worth showing once the
-/// command it names has just failed. A starting value, like [`PUSH_BAR`].
-pub(crate) const FAILURE_BAR: f64 = 1.0;
+/// The share of what a command could score at most that a passage needs
+/// to be pushed after it (#117). 0.6 keeps a busy command's notes (band 6+
+/// recall 0.98) where a bar on `mixed` loses them.
+pub(crate) const COMMAND_PUSH_BAR: f64 = 0.6;
 
-/// The score a passage needs to hold a shell command back (#118), with one
-/// of its anchors in the command line: above [`PUSH_BAR`], as a hold
-/// interrupts the agent. A starting value, like [`PUSH_BAR`].
-pub(crate) const HOLD_BAR: f64 = 2.5;
+/// The share a passage needs to be pushed after a command that failed
+/// (#117). Equal to [`COMMAND_PUSH_BAR`] for now: the failure way was
+/// measured with its anchor rule at that bar, not with a lower one.
+pub(crate) const COMMAND_FAILURE_BAR: f64 = 0.6;
+
+/// The share a passage needs to hold a shell command back (#118): above
+/// [`COMMAND_PUSH_BAR`], as a hold interrupts the agent. At 0.75 a task
+/// sees 1.69 holds at 1,000 memories, 0.91 of held passages needed then;
+/// at 1.0 it would see 1.14 and lose 0.09 of anchored recall.
+pub(crate) const HOLD_BAR: f64 = 0.75;
+
+/// The `mixed` score a passage needs to be pushed after any action but a
+/// command (#117): a prompt, a file, a message. 0.4 pushes on a rare
+/// anchor and never on common words alone.
+pub(crate) const PUSH_BAR: f64 = 0.4;
+
+/// The `mixed` score a passage needs to be pushed after any action but a
+/// command that failed (#117). Equal to [`PUSH_BAR`], as for commands.
+pub(crate) const FAILURE_BAR: f64 = 0.4;
 
 /// Programs that run the command after them, which is the one a memory
 /// names: `sudo cargo publish` is `cargo publish`.
@@ -128,26 +151,6 @@ pub(crate) struct Action {
 pub(in crate::memory) struct Terms {
     pub(in crate::memory) stems: BTreeSet<String>,
     pub(in crate::memory) anchors: BTreeSet<String>,
-    /// Per command, the program paired with each word argument in order:
-    /// with [`Subcommand::Noted`], the first pair the index holds is the
-    /// subcommand's anchor, else the first pair.
-    pub(in crate::memory) choices: Vec<Vec<String>>,
-}
-
-/// Which word argument of a command names its subcommand, as an anchor.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Subcommand {
-    /// Every word argument.
-    Every,
-    /// The first word argument that is no path.
-    First,
-    /// The first word argument, no path, that some memory pairs with the
-    /// program; else the first.
-    Noted,
-    /// The first word argument, no path; when it directly follows a flag,
-    /// so it may be that flag's value, and no memory pairs it with the
-    /// program, the next word argument if a memory pairs that one.
-    AfterFlag,
 }
 
 impl Terms {
@@ -208,19 +211,19 @@ fn assignment(word: &str) -> bool {
 
 /// A shell command's terms: each segment's program with its subcommand,
 /// as a memory's code span names them (`cargo publish`), and its path
-/// arguments, as anchors and as words. Any word argument may be the
-/// subcommand, as a program's own flags and their values can come first
-/// (`git -C repo status`), so the program is paired with each as an anchor;
-/// a pair no memory names has no holders and weighs nothing. With `pairs`,
-/// each two adjacent words are an anchor too, so a wrapper no table names
-/// (`npx`, a proxy) still yields the command it runs.
-fn command_terms(
-    line: &str,
-    stems: &mut Stems,
-    terms: &mut Terms,
-    pairs: bool,
-    subcommand: Subcommand,
-) {
+/// arguments, as anchors and as words. The subcommand is the first word
+/// argument after the program and its flags that is no path, so
+/// `cargo --locked test` names `cargo test` and `git -C ../repo push`
+/// names `git push`. A flag's word value is taken for the subcommand
+/// (`kubectl -n prod apply` names `kubectl prod`): the delivery benchmark
+/// (#125) found this rule's deliveries 0.90 needed then and 0.98 about the
+/// action at 1,000 memories, against 0.85 and 0.92 for taking the first
+/// word some memory names, and 0.86 and 0.94 for the word after a flag,
+/// which mistake a later argument for the subcommand more often than they
+/// find a flag's value. With `pairs`, each two adjacent words are an
+/// anchor too, so a wrapper no table names (`npx`, a proxy) still yields
+/// the command it runs.
+fn command_terms(line: &str, stems: &mut Stems, terms: &mut Terms, pairs: bool) {
     for words in segments(line) {
         let mut rest = words
             .iter()
@@ -238,45 +241,13 @@ fn command_terms(
         if let Some(sub) = sub {
             terms.words(stems, sub);
         }
-        let pair = |arg: &&str| format!("{name} {arg}").to_lowercase();
-        let words_after = args.iter().filter(|arg| word_argument(arg));
-        match subcommand {
-            Subcommand::Every => terms.anchors.extend(words_after.map(pair)),
-            Subcommand::First => terms.anchors.extend(
-                words_after
-                    .filter(|arg| !arg.contains('/'))
-                    .take(1)
-                    .map(pair),
-            ),
-            Subcommand::AfterFlag => {
-                let at = args
-                    .iter()
-                    .position(|arg| word_argument(arg) && !arg.contains('/'));
-                if let Some(at) = at {
-                    let flagged =
-                        at > 0 && args[at - 1].starts_with('-') && !args[at - 1].contains('=');
-                    let next = args[at + 1..]
-                        .iter()
-                        .find(|arg| word_argument(arg) && !arg.contains('/'));
-                    match next {
-                        Some(next) if flagged => {
-                            terms.choices.push(vec![pair(&args[at]), pair(next)])
-                        }
-                        _ => {
-                            terms.anchors.insert(pair(&args[at]));
-                        }
-                    }
-                }
-            }
-            Subcommand::Noted => {
-                let choices: Vec<String> = words_after
-                    .filter(|arg| !arg.contains('/'))
-                    .map(pair)
-                    .collect();
-                if !choices.is_empty() {
-                    terms.choices.push(choices);
-                }
-            }
+        if let Some(word) = args
+            .iter()
+            .find(|arg| word_argument(arg) && !arg.contains('/'))
+        {
+            terms
+                .anchors
+                .insert(format!("{name} {word}").to_lowercase());
         }
         if pairs {
             for pair in words.windows(2) {
@@ -334,15 +305,10 @@ fn file_terms(path: &str, stems: &mut Stems, terms: &mut Terms) {
 }
 
 /// The terms `action` adds to the window; `pairs` as in [`command_terms`].
-pub(in crate::memory) fn terms(
-    action: &Action,
-    stems: &mut Stems,
-    pairs: bool,
-    subcommand: Subcommand,
-) -> Terms {
+pub(in crate::memory) fn terms(action: &Action, stems: &mut Stems, pairs: bool) -> Terms {
     let mut terms = Terms::default();
     match action.kind {
-        Kind::Command => command_terms(&action.text, stems, &mut terms, pairs, subcommand),
+        Kind::Command => command_terms(&action.text, stems, &mut terms, pairs),
         Kind::File => file_terms(&action.text, stems, &mut terms),
         Kind::Prompt | Kind::Task | Kind::Plan | Kind::Message | Kind::Search => {
             terms.words(stems, &action.text);
@@ -361,8 +327,6 @@ pub(crate) struct Tuning {
     pub(crate) credit: f64,
     /// Adjacent words of a command are anchors too (see `command_terms`).
     pub(crate) pairs: bool,
-    /// Which word argument of a command names its subcommand.
-    pub(crate) subcommand: Subcommand,
 }
 
 impl Default for Tuning {
@@ -372,7 +336,6 @@ impl Default for Tuning {
             half_life: WINDOW_HALF_LIFE,
             credit: OTHER_PASSAGE_CREDIT,
             pairs: false,
-            subcommand: Subcommand::Every,
         }
     }
 }
@@ -404,12 +367,7 @@ impl Window {
     /// Adds `action`, the one that fires the next match; the oldest past
     /// [`WINDOW_ACTIONS`] falls out.
     pub(crate) fn push(&mut self, action: &Action) {
-        let terms = terms(
-            action,
-            &mut self.stems,
-            self.tuning.pairs,
-            self.tuning.subcommand,
-        );
+        let terms = terms(action, &mut self.stems, self.tuning.pairs);
         self.actions.push_back((action.kind, terms, action.failed));
         while self.actions.len() > self.tuning.window_actions {
             self.actions.pop_front();
@@ -476,22 +434,36 @@ pub(crate) struct Matched {
     pub(crate) anchored: bool,
     /// It holds an anchor of the command that fired.
     pub(crate) command: bool,
+    /// The action that fired is a shell command, so the command bars apply.
+    pub(crate) on_command: bool,
 }
 
 impl Matched {
-    /// Pushed after the action: past [`PUSH_BAR`] with one of its terms.
+    /// Pushed after the action: an anchor of it, and past
+    /// [`COMMAND_PUSH_BAR`] after a command or [`PUSH_BAR`] after anything
+    /// else. Stems alone never push.
     pub(crate) fn push(&self) -> bool {
-        self.fired && self.score >= PUSH_BAR
+        self.fired && self.anchored && self.passes(COMMAND_PUSH_BAR, PUSH_BAR)
     }
-    /// Pushed after a failed action: past [`FAILURE_BAR`] with one of its
-    /// terms.
+    /// Pushed after a failed action: an anchor of it, and past
+    /// [`COMMAND_FAILURE_BAR`] or [`FAILURE_BAR`]. Stems alone never push
+    /// after a failure: they made three wrong pushes for each right one.
     pub(crate) fn failure(&self) -> bool {
-        self.failed && self.score >= FAILURE_BAR
+        self.failed && self.anchored && self.passes(COMMAND_FAILURE_BAR, FAILURE_BAR)
     }
     /// Holds the command: one of its anchors, and past [`HOLD_BAR`].
     /// Stems alone never hold.
     pub(crate) fn hold(&self) -> bool {
-        self.command && self.score >= HOLD_BAR
+        self.command && self.share >= HOLD_BAR
+    }
+    /// Past `command` on the share after a command, else past `other` on
+    /// the mixed score.
+    fn passes(&self, command: f64, other: f64) -> bool {
+        if self.on_command {
+            self.share >= command
+        } else {
+            self.mixed >= other
+        }
     }
 }
 
@@ -847,32 +819,19 @@ impl DeliveryIndex {
     pub(crate) fn rank(&self, window: &Window) -> Result<Vec<Matched>, Error> {
         let mut wanted: BTreeMap<Vec<u8>, Wanted> = BTreeMap::new();
         let newest = window.actions.len().saturating_sub(1);
+        let on_command = window
+            .actions
+            .back()
+            .is_some_and(|(kind, _, _)| *kind == Kind::Command);
         for (i, (kind, terms, failed)) in window.actions.iter().enumerate() {
             let age = (newest - i) as f64;
             let fired = i == newest;
             let weight = 0.5f64.powf(age / window.tuning.half_life);
-            let mut chosen = Vec::with_capacity(terms.choices.len());
-            for choices in &terms.choices {
-                let mut pick = None;
-                for choice in choices {
-                    if self.postings(&key(true, choice))?.is_some() {
-                        pick = Some(choice);
-                        break;
-                    }
-                }
-                chosen.extend(pick.or(choices.first()));
-            }
             let keys = terms
                 .stems
                 .iter()
                 .map(|stem| (key(false, stem), false))
-                .chain(
-                    terms
-                        .anchors
-                        .iter()
-                        .chain(chosen)
-                        .map(|anchor| (key(true, anchor), true)),
-                );
+                .chain(terms.anchors.iter().map(|anchor| (key(true, anchor), true)));
             for (key, anchor) in keys {
                 let w = wanted.entry(key).or_default();
                 w.weight = w.weight.max(weight);
@@ -1015,6 +974,7 @@ impl DeliveryIndex {
                 failed: flags.failed,
                 anchored: flags.anchored,
                 command: flags.command,
+                on_command,
                 fewest: flags.fewest,
             });
         }
@@ -1182,12 +1142,7 @@ mod tests {
     }
 
     fn of_with(kind: Kind, text: &str, pairs: bool) -> Terms {
-        terms(
-            &action(kind, text),
-            &mut Stems::new(),
-            pairs,
-            Subcommand::Every,
-        )
+        terms(&action(kind, text), &mut Stems::new(), pairs)
     }
 
     fn stems(text: &str) -> BTreeSet<String> {
@@ -1198,24 +1153,24 @@ mod tests {
     fn a_command_adds_each_program_with_its_subcommand_and_its_paths() {
         let terms = of(
             Kind::Command,
-            "RUST_LOG=1 cargo publish --dry-run --registry internal && git -C repo status | sudo ./scripts/release.sh 'docs/notes.md'",
+            "RUST_LOG=1 cargo publish --dry-run --registry internal && git -C ../repo status | sudo ./scripts/release.sh 'docs/notes.md'",
         );
         for anchor in [
             "cargo",
             "cargo publish",
             "git",
+            "git status",
             "release.sh",
             "./scripts/release.sh",
             "docs/notes.md",
         ] {
             assert!(terms.anchors.contains(anchor), "{anchor}: {terms:?}");
         }
-        // A flag is no subcommand, but a word after it may be: each word
-        // argument pairs with the program, so `git -C repo status` names
-        // `git status` (and `git repo`, which no memory holds). Neither the
-        // variable nor `sudo` is the program.
-        for anchor in ["git status", "git repo", "cargo internal"] {
-            assert!(terms.anchors.contains(anchor), "{anchor}: {terms:?}");
+        // The subcommand is the first word after the program and its flags,
+        // never a path: a later word names nothing. Neither the variable nor
+        // `sudo` is the program.
+        for anchor in ["cargo internal", "git ../repo", "git repo"] {
+            assert!(!terms.anchors.contains(anchor), "{anchor}: {terms:?}");
         }
         assert!(
             !terms
@@ -1236,11 +1191,9 @@ mod tests {
         assert!(
             terms
                 .stems
-                .is_superset(&stems("cargo publish release scripts docs notes"))
+                .is_superset(&stems("cargo publish release scripts docs notes repo"))
         );
-        for word in [
-            "dri", "registri", "intern", "repo", "status", "rust_log", "sudo",
-        ] {
+        for word in ["dri", "registri", "intern", "status", "rust_log", "sudo"] {
             assert!(!terms.stems.contains(word), "{word}: {terms:?}");
         }
     }
@@ -1249,11 +1202,19 @@ mod tests {
     fn a_subcommand_after_a_flag_or_behind_a_wrapper_is_still_named() {
         let terms = of(
             Kind::Command,
-            "cargo --locked test && kubectl -n prod apply -f deploy.yml",
+            "cargo --locked test && cargo run --bin test && git -C . commit -m fix",
         );
-        for anchor in ["cargo test", "kubectl apply", "kubectl prod"] {
+        for anchor in ["cargo test", "cargo run", "git commit"] {
             assert!(terms.anchors.contains(anchor), "{anchor}: {terms:?}");
         }
+        for anchor in ["cargo bin", "git fix"] {
+            assert!(!terms.anchors.contains(anchor), "{anchor}: {terms:?}");
+        }
+        // The rule's known limit: a flag's word value reads as the
+        // subcommand, so `kubectl -n prod apply` names `kubectl prod`.
+        let flagged = of(Kind::Command, "kubectl -n prod apply -f deploy.yml");
+        assert!(flagged.anchors.contains("kubectl prod"), "{flagged:?}");
+        assert!(!flagged.anchors.contains("kubectl apply"), "{flagged:?}");
         // A wrapper no table names hides the command, unless adjacent
         // words are anchors too.
         let line = "npx --yes prettier check && proxychains git push";
@@ -1267,23 +1228,6 @@ mod tests {
             !paired.anchors.iter().any(|a| a.contains("--yes")),
             "{paired:?}"
         );
-        // With only the first word argument as the subcommand, an argument
-        // that is another subcommand's word names nothing.
-        let first = super::terms(
-            &action(
-                Kind::Command,
-                "cargo run --bin test && git -C . commit -m fix",
-            ),
-            &mut Stems::new(),
-            false,
-            Subcommand::First,
-        );
-        for anchor in ["cargo run", "git commit"] {
-            assert!(first.anchors.contains(anchor), "{anchor}: {first:?}");
-        }
-        for anchor in ["cargo test", "git fix", "cargo bin"] {
-            assert!(!first.anchors.contains(anchor), "{anchor}: {first:?}");
-        }
     }
 
     #[test]
@@ -1473,52 +1417,7 @@ mod tests {
     }
 
     #[test]
-    fn the_noted_rule_takes_the_first_word_a_memory_names() {
-        let notes = [
-            (
-                "Applying manifests",
-                "Run `kubectl apply` only after the diff is reviewed.",
-            ),
-            ("Testing", "Run `cargo test` with the database up."),
-        ];
-        let index = store("deploy", &notes);
-        let noted = Tuning {
-            subcommand: Subcommand::Noted,
-            ..Tuning::default()
-        };
-        let ranked = |text: &str, tuning: Tuning| {
-            let mut window = Window::with(tuning);
-            window.push(&action(Kind::Command, text));
-            index.rank(&window).unwrap()
-        };
-        let first = Tuning {
-            subcommand: Subcommand::First,
-            ..Tuning::default()
-        };
-        // A flag's word value comes first: only the noted rule finds `apply`.
-        let apply = |found: &[Matched]| by_id(&index, found, 40).is_some_and(|m| m.command);
-        assert!(apply(&ranked("kubectl -n prod apply", noted)));
-        assert!(!apply(&ranked("kubectl -n prod apply", first)));
-        // Its mirror: `cargo run test` runs `cargo run`, which no memory
-        // names, so the noted rule takes `test` and names `cargo test`.
-        let test = |found: &[Matched]| by_id(&index, found, 41).is_some_and(|m| m.command);
-        assert!(test(&ranked("cargo run test", noted)));
-        assert!(!test(&ranked("cargo run test", first)));
-        // After a flag only: `apply` behind `-n prod`, but `run` follows no
-        // flag, so `cargo run test` stays `cargo run`. Its own mirror is a
-        // flag, an unnamed subcommand, then a named word.
-        let after_flag = Tuning {
-            subcommand: Subcommand::AfterFlag,
-            ..Tuning::default()
-        };
-        assert!(apply(&ranked("kubectl -n prod apply", after_flag)));
-        assert!(!test(&ranked("cargo run test", after_flag)));
-        assert!(test(&ranked("cargo --offline run test", after_flag)));
-        assert!(!test(&ranked("cargo --offline run test", first)));
-    }
-
-    #[test]
-    fn stems_alone_never_hold_a_command() {
+    fn stems_alone_never_push_or_hold_even_after_a_failure() {
         let index = store(
             "deploy",
             &[(
@@ -1526,9 +1425,12 @@ mod tests {
                 "Publishing a crate burns its version number, so publishing waits for review.",
             )],
         );
-        let found = rank(&index, &[action(Kind::Command, "cargo publish")]);
+        let mut publish = action(Kind::Command, "cargo publish");
+        publish.failed = true;
+        let found = rank(&index, &[publish]);
         let hit = by_id(&index, &found, 40).unwrap();
-        assert!(!hit.command && !hit.hold(), "{hit:?}");
+        assert!(hit.fired && hit.failed && !hit.anchored, "{hit:?}");
+        assert!(!hit.push() && !hit.failure() && !hit.hold(), "{hit:?}");
     }
 
     #[test]
@@ -1552,7 +1454,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_action_lowers_the_bar_for_its_own_terms() {
+    fn a_failed_command_pushes_its_anchored_passage_as_a_failure() {
         let index = store(
             "deploy",
             &[(
@@ -1567,8 +1469,56 @@ mod tests {
         failed.failed = true;
         let found = rank(&index, &[failed]);
         let hit = by_id(&index, &found, 40).unwrap();
-        assert!(hit.failed && hit.score >= FAILURE_BAR, "{hit:?}");
+        assert!(hit.failed && hit.share >= COMMAND_FAILURE_BAR, "{hit:?}");
         assert!(hit.failure(), "{hit:?}");
+    }
+
+    #[test]
+    fn other_actions_are_tested_on_the_mixed_score() {
+        let index = store(
+            "deploy",
+            &[(
+                "Dry run before publishing",
+                "Run `cargo publish --dry-run` before `cargo publish`; a failed upload burns the version number.",
+            )],
+        );
+        // A prompt naming the command in a code span: many words, so its
+        // share is low, but the rare anchor passes on `mixed`.
+        let found = rank(
+            &index,
+            &[action(
+                Kind::Prompt,
+                "Get the release out today and run `cargo publish` once the notes are written",
+            )],
+        );
+        let hit = by_id(&index, &found, 40).unwrap();
+        assert!(!hit.on_command && hit.share < COMMAND_PUSH_BAR, "{hit:?}");
+        assert!(
+            hit.mixed >= PUSH_BAR && hit.push() && !hit.hold(),
+            "{hit:?}"
+        );
+    }
+
+    #[test]
+    fn rare_words_without_an_anchor_are_never_pushed() {
+        let index = store(
+            "deploy",
+            &[(
+                "Quokka cabinet",
+                "The quokka cabinet squeaks whenever the zeppelin lands.",
+            )],
+        );
+        // Words rare enough to pass the bar on their own, and a failed
+        // action naming them: still no push, as no anchor matched.
+        let mut words = action(Kind::Message, "quokka cabinet zeppelin squeaks");
+        words.failed = true;
+        let found = rank(&index, &[words]);
+        let hit = by_id(&index, &found, 40).unwrap();
+        assert!(
+            hit.mixed >= PUSH_BAR && hit.failed && !hit.anchored,
+            "{hit:?}"
+        );
+        assert!(!hit.push() && !hit.failure(), "{hit:?}");
     }
 
     #[test]
