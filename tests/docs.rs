@@ -6,7 +6,7 @@
 //! - Every `user-memory …` command in a code block or inline code span must
 //!   name subcommands the built binary has, with flags its `--help` lists.
 //! - Every quoted output must come from a string in src/, install.sh or
-//!   uninstall.sh.
+//!   uninstall.sh. Strings in test code don't count.
 //!
 //! Marking quoted output, for whoever writes the docs:
 //!
@@ -14,7 +14,10 @@
 //! - An inline span in double backticks (``like this``) is a quoted message;
 //!   it renders as plain code. A double-backtick span that holds a backtick
 //!   is ordinary inline code, as Markdown means it, and is not checked.
-//! - In a quote, `…` and `<placeholder>` stand for text left out.
+//! - In a quote, `…` and `<placeholder>` stand for text left out. A word
+//!   joined to one, such as `/.git` in `…/.git`, is checked only when a
+//!   string in the code holds it: the rest of a path the code builds is in
+//!   none.
 //! - A line of an output block that shows a memory (an 8-character id) or a
 //!   group heading (`  workflow (3)`) is data, not a message.
 //! - Anything else in backticks or a fenced block is code: its
@@ -33,6 +36,8 @@ use std::{
     rc::Rc,
 };
 
+use proc_macro2::{Delimiter, TokenStream, TokenTree};
+
 const BINARY: &str = env!("CARGO_BIN_EXE_user-memory");
 
 /// A pattern's text must hold a word this long, so a pattern of holes and
@@ -45,8 +50,8 @@ const FRAGMENT_CHARS: usize = 3;
 
 /// The most matching work one quote may take, in matcher steps. Counted,
 /// not timed, so a slow machine fails nothing: a doc's quotes take at most
-/// about 17,000 steps, and the longest No-project line the code can print
-/// about 260,000. A matcher that backtracks over hole boundaries, or that
+/// about 12,000 steps, and the longest No-project line the code can print
+/// about 240,000. A matcher that backtracks over hole boundaries, or that
 /// matches patterns which cannot change the answer, takes millions on that
 /// line, so a slowdown that size fails here instead of creeping into every
 /// `just check`.
@@ -395,7 +400,9 @@ enum Piece {
 struct Corpus {
     /// Each distinct pattern once. The code prints many alike, such as
     /// `{}.{}.{}` for each version, and matching a copy again finds nothing
-    /// new: kept, each copy would add its work to every quote.
+    /// new: kept, each copy would add its work to every quote. A pattern of
+    /// holes and spaces alone is left out (see `substantive`): inside a
+    /// hole, `{} {} {}` would print any three words.
     patterns: Vec<Vec<Piece>>,
     /// Each pattern's text pieces, as strings.
     texts: Vec<Vec<String>>,
@@ -431,7 +438,7 @@ fn corpus() -> Corpus {
 impl Corpus {
     fn new(mut patterns: Vec<Vec<Piece>>) -> Self {
         let mut seen = HashSet::new();
-        patterns.retain(|pattern| seen.insert(pattern.clone()));
+        patterns.retain(|pattern| substantive(pattern) && seen.insert(pattern.clone()));
         let texts: Vec<Vec<String>> = patterns
             .iter()
             .map(|pattern| {
@@ -493,10 +500,11 @@ impl Corpus {
     }
 }
 
-/// Every string literal in src/, install.sh and uninstall.sh, one pattern
-/// per line of each: format holes (`{…}`, and `$…` or `%s` in the scripts)
-/// match any text, and escapes and `\` line continuations are resolved.
-/// Comments are skipped: only what the code prints counts.
+/// Every string literal in src/ outside test code, install.sh and
+/// uninstall.sh, one pattern per line of each: format holes (`{…}`, and
+/// `$…` or `%s` in the scripts) match any text, and escapes and `\` line
+/// continuations are resolved. Comments are skipped: only what the code
+/// prints counts.
 fn source_patterns() -> Vec<Vec<Piece>> {
     let mut files = vec![repo_file("src")];
     let mut patterns = Vec::new();
@@ -505,28 +513,109 @@ fn source_patterns() -> Vec<Vec<Piece>> {
         .map(|name| fs::read_to_string(repo_file(name)).unwrap())
         .join("\n");
     for literal in shell_literals(&scripts) {
-        for line in literal.split('\n') {
-            let pattern = holes(line);
-            if substantive(&pattern) {
-                patterns.push(pattern);
-            }
-        }
+        patterns.extend(literal.split('\n').map(holes));
     }
+    let mut sources = Vec::new();
     while let Some(next) = files.pop() {
         if next.is_dir() {
             files.extend(fs::read_dir(next).unwrap().map(|e| e.unwrap().path()));
         } else if next.extension().is_some_and(|ext| ext == "rs") {
-            for literal in literals(&fs::read_to_string(&next).unwrap()) {
-                for line in literal.split('\n') {
-                    let pattern = holes(line);
-                    if substantive(&pattern) {
-                        patterns.push(pattern);
-                    }
+            let source = fs::read_to_string(&next).unwrap();
+            sources.push((next, source));
+        }
+    }
+    patterns.extend(rust_patterns(&sources));
+    patterns
+}
+
+/// The patterns of Rust source files, given as (path, source).
+fn rust_patterns(sources: &[(PathBuf, String)]) -> Vec<Vec<Piece>> {
+    let mut sources: Vec<(&PathBuf, Literals)> = sources
+        .iter()
+        .map(|(path, source)| (path, literals(source)))
+        .collect();
+    // A test-only module in a file of its own, and the modules inside it.
+    let test_files: Vec<PathBuf> = sources
+        .iter()
+        .flat_map(|(path, found)| {
+            found
+                .test_modules
+                .iter()
+                .map(|module| module_path(path, module))
+        })
+        .collect();
+    sources.retain(|(path, _)| {
+        !test_files
+            .iter()
+            .any(|test| **path == test.with_extension("rs") || path.starts_with(test))
+    });
+    // A name two constants share, as one per platform may, stays a hole.
+    let mut constants: HashMap<String, Option<String>> = HashMap::new();
+    for (name, text) in sources.iter().flat_map(|(_, found)| &found.constants) {
+        constants
+            .entry(name.clone())
+            .and_modify(|known| {
+                if known.as_ref() != Some(text) {
+                    *known = None;
                 }
-            }
+            })
+            .or_insert_with(|| Some(text.clone()));
+    }
+    let mut patterns = Vec::new();
+    for (_, found) in sources {
+        for literal in found.strings {
+            patterns.extend(with_constants(&literal, &constants).split('\n').map(holes));
         }
     }
     patterns
+}
+
+/// A format string with each hole that names a string constant, such as
+/// `{NO_PROJECT}`, replaced by the constant's text, so a line the code joins
+/// from constants is matched against their text, not against any text.
+fn with_constants(format: &str, constants: &HashMap<String, Option<String>>) -> String {
+    let mut out = String::new();
+    let mut rest = format;
+    while let Some(at) = rest.find(['{', '}']) {
+        out.push_str(&rest[..at]);
+        rest = &rest[at..];
+        if rest.starts_with("{{") || rest.starts_with("}}") {
+            out.push_str(&rest[..2]);
+            rest = &rest[2..];
+            continue;
+        }
+        let close = if rest.starts_with('{') {
+            rest.find('}')
+        } else {
+            None
+        };
+        let Some(close) = close else {
+            out.push_str(&rest[..1]);
+            rest = &rest[1..];
+            continue;
+        };
+        match constants.get(&rest[1..close]) {
+            Some(Some(text)) => out.push_str(&braces(text)),
+            _ => out.push_str(&rest[..=close]),
+        }
+        rest = &rest[close + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Where the module `a::b` declared in `file` lives, without the `.rs`: its
+/// own folder, which also holds its own modules.
+fn module_path(file: &Path, module: &str) -> PathBuf {
+    let folder = file.parent().unwrap();
+    let stem = file.file_stem().unwrap();
+    let mut path = if stem == "main" || stem == "lib" {
+        folder.to_path_buf()
+    } else {
+        folder.join(stem)
+    };
+    path.extend(module.split("::"));
+    path
 }
 
 /// The strings a shell script prints, in the format `holes` reads: quoted
@@ -687,100 +776,293 @@ fn expand(text: &str) -> String {
     out
 }
 
-/// The contents of the string literals in Rust source, unescaped.
-fn literals(source: &str) -> Vec<String> {
-    let chars: Vec<char> = source.chars().collect();
-    let mut found = Vec::new();
-    let mut i = 0;
-    while i < chars.len() {
-        match chars[i] {
-            '/' if chars.get(i + 1) == Some(&'/') => {
-                while i < chars.len() && chars[i] != '\n' {
-                    i += 1;
-                }
-            }
-            '/' if chars.get(i + 1) == Some(&'*') => {
-                i += 2;
-                while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
-                    i += 1;
-                }
-                i += 2;
-            }
-            '\'' => {
-                // A char literal ('x', '\n', '"'), or a lifetime ('a).
-                if chars.get(i + 1) == Some(&'\\') {
-                    i += 2;
-                    while i < chars.len() && chars[i] != '\'' {
-                        i += 1;
-                    }
-                    i += 1;
-                } else if chars.get(i + 2) == Some(&'\'') {
-                    i += 3;
-                } else {
-                    i += 1;
-                }
-            }
-            'r' if matches!(chars.get(i + 1), Some('"' | '#'))
-                && (i == 0 || !chars[i - 1].is_alphanumeric() && chars[i - 1] != '_') =>
-            {
-                let hashes = chars[i + 1..].iter().take_while(|&&c| c == '#').count();
-                let open = i + 1 + hashes;
-                if chars.get(open) != Some(&'"') {
-                    i += 1;
-                    continue;
-                }
-                let mut j = open + 1;
-                while j < chars.len() {
-                    if chars[j] == '"'
-                        && chars[j + 1..]
-                            .iter()
-                            .take(hashes)
-                            .filter(|&&c| c == '#')
-                            .count()
-                            == hashes
-                    {
-                        break;
-                    }
-                    j += 1;
-                }
-                found.push(chars[open + 1..j.min(chars.len())].iter().collect());
-                i = j + 1 + hashes;
-            }
-            '"' => {
-                let mut text = String::new();
-                let mut j = i + 1;
-                while j < chars.len() && chars[j] != '"' {
-                    if chars[j] == '\\' {
-                        j += 1;
-                        match chars.get(j) {
-                            Some('n') => text.push('\n'),
-                            Some('t') => text.push('\t'),
-                            Some('\n') => {
-                                while chars.get(j + 1).is_some_and(|c| c.is_whitespace()) {
-                                    j += 1;
-                                }
-                            }
-                            Some('u') => {
-                                let close = chars[j..].iter().position(|&c| c == '}').unwrap();
-                                let hex: String = chars[j + 2..j + close].iter().collect();
-                                text.extend(char::from_u32(u32::from_str_radix(&hex, 16).unwrap()));
-                                j += close;
-                            }
-                            Some(&c) => text.push(c),
-                            None => {}
+/// The strings in Rust source outside test code. Comments and doc comments
+/// are left out: only what the code prints counts. Test code is what
+/// `#[cfg(test)]` or `#[cfg(all(test, …))]` gates: an item, a statement, a
+/// field or an arm, or the whole file under `#![cfg(test)]`. A test's
+/// strings, such as the `{} in {}` an assertion prints, would otherwise
+/// fill a hole with text the binary never prints.
+fn literals(source: &str) -> Literals {
+    let tokens: TokenStream = source
+        .parse()
+        .unwrap_or_else(|error| panic!("not Rust source: {error}"));
+    let mut found = Literals::default();
+    found.collect(tokens, &[]);
+    found
+}
+
+#[derive(Default)]
+struct Literals {
+    /// The strings, unescaped.
+    strings: Vec<String>,
+    /// The test-only modules declared in files of their own
+    /// (`#[cfg(test)] mod tests;`), as `a::b`.
+    test_modules: Vec<String>,
+    /// The string constants, `const NAME: &str = "…";`, by name.
+    constants: Vec<(String, String)>,
+}
+
+/// What an attribute is to the corpus.
+enum Attribute {
+    /// `#[doc = "…"]`, which a `///` comment becomes: not printed.
+    Doc,
+    /// Gates test code: `#[cfg(test)]` before what it gates, or
+    /// `#![cfg(test)]` inside it.
+    Test { inner: bool },
+    /// Any other, such as `#[error("…")]`, whose strings the code prints.
+    Other,
+}
+
+impl Literals {
+    /// Collects the strings in `tokens`, which lie inside the inline module
+    /// `module`.
+    fn collect(&mut self, tokens: TokenStream, module: &[String]) {
+        let tokens: Vec<TokenTree> = tokens.into_iter().collect();
+        let mut i = 0;
+        while i < tokens.len() {
+            if let Some((after, attribute)) = attribute(&tokens, i) {
+                match attribute {
+                    Attribute::Test { inner: true } => return,
+                    Attribute::Test { inner: false } => {
+                        let end = test_item_end(&tokens, after);
+                        if let Some(name) = module_file(&tokens[after..end]) {
+                            self.test_modules
+                                .push([module, std::slice::from_ref(&name)].concat().join("::"));
                         }
-                    } else {
-                        text.push(chars[j]);
+                        i = end;
+                        continue;
                     }
-                    j += 1;
+                    Attribute::Doc => {
+                        i = after;
+                        continue;
+                    }
+                    Attribute::Other => {}
                 }
-                found.push(text);
-                i = j + 1;
             }
-            _ => i += 1,
+            match &tokens[i] {
+                TokenTree::Group(group) => {
+                    let inline_module = match tokens.get(i.wrapping_sub(2)..i) {
+                        Some([TokenTree::Ident(word), TokenTree::Ident(name)])
+                            if word == "mod" && group.delimiter() == Delimiter::Brace =>
+                        {
+                            Some(name.to_string())
+                        }
+                        _ => None,
+                    };
+                    match inline_module {
+                        Some(name) => self.collect(
+                            group.stream(),
+                            &[module, std::slice::from_ref(&name)].concat(),
+                        ),
+                        None => self.collect(group.stream(), module),
+                    }
+                }
+                TokenTree::Ident(word) if word == "const" => {
+                    if let Some(constant) = string_constant(&tokens[i..]) {
+                        self.constants.push(constant);
+                    }
+                }
+                TokenTree::Literal(literal) => match syn::Lit::new(literal.clone()) {
+                    syn::Lit::Str(text) => self.strings.push(text.value()),
+                    syn::Lit::ByteStr(bytes) => self
+                        .strings
+                        .push(String::from_utf8_lossy(&bytes.value()).into_owned()),
+                    _ => {}
+                },
+                TokenTree::Ident(_) | TokenTree::Punct(_) => {}
+            }
+            i += 1;
         }
     }
-    found
+}
+
+/// The name and text of the string constant `const NAME: &str = "…";` that
+/// `tokens` start with, if they do.
+fn string_constant(tokens: &[TokenTree]) -> Option<(String, String)> {
+    let shape: String = tokens
+        .iter()
+        .take(10)
+        .map(|token| match token {
+            TokenTree::Ident(word) if word == "str" || word == "static" => word.to_string(),
+            TokenTree::Ident(_) => "name".to_owned(),
+            TokenTree::Punct(punct) => punct.as_char().to_string(),
+            TokenTree::Literal(_) => "value".to_owned(),
+            TokenTree::Group(_) => "group".to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let value = if shape.starts_with("name name : & str = value ;") {
+        &tokens[6]
+    } else if shape.starts_with("name name : & ' static str = value ;") {
+        &tokens[8]
+    } else {
+        return None;
+    };
+    let (TokenTree::Ident(name), TokenTree::Literal(value)) = (&tokens[1], value) else {
+        return None;
+    };
+    match syn::Lit::new(value.clone()) {
+        syn::Lit::Str(value) => Some((name.to_string(), value.value())),
+        _ => None,
+    }
+}
+
+/// The attribute at `i`, if one starts there (`#[…]` or `#![…]`), with the
+/// index after it.
+fn attribute(tokens: &[TokenTree], i: usize) -> Option<(usize, Attribute)> {
+    let TokenTree::Punct(hash) = tokens.get(i)? else {
+        return None;
+    };
+    if hash.as_char() != '#' {
+        return None;
+    }
+    let inner = matches!(tokens.get(i + 1), Some(TokenTree::Punct(bang)) if bang.as_char() == '!');
+    let at = i + 1 + usize::from(inner);
+    let TokenTree::Group(group) = tokens.get(at)? else {
+        return None;
+    };
+    if group.delimiter() != Delimiter::Bracket {
+        return None;
+    }
+    let body: Vec<TokenTree> = group.stream().into_iter().collect();
+    let attribute = match body.as_slice() {
+        [TokenTree::Ident(doc), ..] if doc == "doc" => Attribute::Doc,
+        [TokenTree::Ident(cfg), TokenTree::Group(predicate)]
+            if cfg == "cfg" && requires_test(predicate.stream()) =>
+        {
+            Attribute::Test { inner }
+        }
+        _ => Attribute::Other,
+    };
+    Some((at + 1, attribute))
+}
+
+/// Whether a `cfg` predicate holds only in a test build: `test`, or `all`
+/// with `test` among its terms.
+fn requires_test(predicate: TokenStream) -> bool {
+    let tokens: Vec<TokenTree> = predicate.into_iter().collect();
+    match tokens.as_slice() {
+        [TokenTree::Ident(test)] => test == "test",
+        [TokenTree::Ident(all), TokenTree::Group(terms)] if all == "all" => terms
+            .stream()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .split(|token| matches!(token, TokenTree::Punct(comma) if comma.as_char() == ','))
+            .any(|term| requires_test(term.iter().cloned().collect())),
+        _ => false,
+    }
+}
+
+/// Words that may come before the keyword of an item.
+const QUALIFIERS: [&str; 6] = ["pub", "unsafe", "async", "extern", "default", "const"];
+
+/// Items that end with their body (or a `;` when they have none). The
+/// commas in their generics end nothing.
+const ITEMS: [&str; 8] = [
+    "fn",
+    "mod",
+    "struct",
+    "enum",
+    "union",
+    "impl",
+    "trait",
+    "macro_rules",
+];
+
+/// Statements that end only with `;`, whatever commas or braces their type
+/// or value holds.
+const DECLARATIONS: [&str; 6] = ["let", "const", "static", "type", "use", "crate"];
+
+/// Expressions whose block ends them, so no `;` need follow; so does a
+/// bare `{ … }` or `unsafe { … }`.
+const BLOCKS: [&str; 5] = ["if", "match", "loop", "while", "for"];
+
+/// Where the item, statement, field or arm that starts at `i` ends: after
+/// its own further attributes, at the `;` or `,` that ends it, or after the
+/// block that does. Braces, brackets and parentheses are groups of their
+/// own, so only what lies at this level can end it.
+fn test_item_end(tokens: &[TokenTree], mut i: usize) -> usize {
+    while let Some((after, _)) = attribute(tokens, i) {
+        i = after;
+    }
+    let word = |at: usize| match tokens.get(at) {
+        Some(TokenTree::Ident(word)) => Some(word.to_string()),
+        _ => None,
+    };
+    let punct = |at: usize| match tokens.get(at) {
+        Some(TokenTree::Punct(punct)) => Some(punct.as_char()),
+        _ => None,
+    };
+    let mut first = i;
+    // `pub(crate)`, `extern "C"`, `const fn`: what comes before the keyword.
+    loop {
+        match (word(first).as_deref(), tokens.get(first + 1)) {
+            (Some("const"), Some(TokenTree::Ident(next)))
+                if !QUALIFIERS.iter().chain(&ITEMS).any(|item| next == item) =>
+            {
+                break;
+            }
+            (Some(qualifier), _) if QUALIFIERS.contains(&qualifier) => first += 1,
+            (None, _)
+                if first > i
+                    && matches!(tokens.get(first), Some(TokenTree::Group(group)) if group.delimiter() == Delimiter::Parenthesis) =>
+            {
+                first += 1;
+            }
+            (None, _) if first > i && matches!(tokens.get(first), Some(TokenTree::Literal(_))) => {
+                first += 1;
+            }
+            _ => break,
+        }
+    }
+    let lead = word(first);
+    let lead = lead.as_deref();
+    let item = lead.is_some_and(|lead| ITEMS.contains(&lead));
+    let declaration = lead.is_some_and(|lead| DECLARATIONS.contains(&lead));
+    let block = lead.is_some_and(|lead| BLOCKS.contains(&lead))
+        || matches!(tokens.get(first), Some(TokenTree::Group(group)) if group.delimiter() == Delimiter::Brace);
+    let mut at = first;
+    while at < tokens.len() {
+        match &tokens[at] {
+            TokenTree::Punct(end) if end.as_char() == ';' => return at + 1,
+            TokenTree::Punct(end) if end.as_char() == ',' && !item && !declaration => {
+                return at;
+            }
+            TokenTree::Group(body) if body.delimiter() == Delimiter::Brace && !declaration => {
+                // A macro called with braces, `name! { … }`, and an arm's
+                // block, `… => { … }`, end with it too.
+                let macro_call = punct(at.wrapping_sub(1)) == Some('!');
+                let arm = punct(at.wrapping_sub(1)) == Some('>')
+                    && punct(at.wrapping_sub(2)) == Some('=');
+                if item || block || macro_call || arm {
+                    if word(at + 1).as_deref() == Some("else") {
+                        at += 2;
+                        continue;
+                    }
+                    return at + 1;
+                }
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+    at
+}
+
+/// The module a test-only `mod name;` puts in a file of its own.
+fn module_file(item: &[TokenTree]) -> Option<String> {
+    let words: Vec<String> = item
+        .iter()
+        .filter_map(|token| match token {
+            TokenTree::Ident(word) => Some(word.to_string()),
+            _ => None,
+        })
+        .collect();
+    let ends_bare = matches!(item.last(), Some(TokenTree::Punct(end)) if end.as_char() == ';');
+    match words.as_slice() {
+        [.., keyword, name] if keyword == "mod" && ends_bare => Some(name.clone()),
+        _ => None,
+    }
 }
 
 /// A format string as text and holes: `{…}` is a hole, `{{` and `}}` are
@@ -825,7 +1107,7 @@ fn holes(line: &str) -> Vec<Piece> {
 /// label, while `{} {}` says nothing about what it prints.
 fn substantive(pattern: &[Piece]) -> bool {
     pattern.iter().any(|piece| match piece {
-        Piece::Text(text) => text.iter().any(|c| !c.is_whitespace()),
+        Piece::Text(text) => has_text(text),
         Piece::Hole => false,
     })
 }
@@ -847,14 +1129,46 @@ fn has_word(text: &[char]) -> bool {
         .any(|word| word.len() >= PATTERN_WORD)
 }
 
+/// Whether text holds anything besides spaces.
+fn has_text(text: &[char]) -> bool {
+    text.iter().any(|c| !c.is_whitespace())
+}
+
+/// Whether every bracket in `text`, round, square or curly, is closed in
+/// order, and none closed that it did not open.
+fn balanced(text: &[char]) -> bool {
+    let mut open = Vec::new();
+    for &c in text {
+        match c {
+            '(' => open.push(')'),
+            '[' => open.push(']'),
+            '{' => open.push('}'),
+            ')' | ']' | '}' if open.pop() != Some(c) => return false,
+            _ => {}
+        }
+    }
+    open.is_empty()
+}
+
 /// Whether a quoted fragment is printed by the code. The fragment must be
 /// covered by source patterns placed end to end; only the first may start,
 /// and only the last may end, partway through its pattern, where the quote
-/// left the rest out. Each window must match a word of the code's text. A
-/// hole stands for one word (a name, a path, a number), or for text the
-/// patterns print in full, piece by piece, such as a list joined with
-/// `, `: any space in a hole must come from the code, so a changed message
-/// cannot hide in a hole.
+/// left the rest out. Each window must match text of its own pattern
+/// besides spaces, and a word of the code's text, its own or a hole's.
+///
+/// A hole stands for one word (a name, a path, a number), or for text the
+/// patterns print in full, one after the other, such as a list joined with
+/// `, `: any space in a hole comes from the code. Unless the quote stops
+/// inside it, what a hole holds closes every bracket it opens. A value that
+/// is itself an unpaired bracket, such as `:(` or a regular expression in
+/// an example, is refused there; no doc quotes one today.
+///
+/// So a message changed in the code fails the quotes of it. What this
+/// cannot tell: a hole that holds a word and then text another message
+/// starts with. With a note `approved in Codex` gone from the code,
+/// `{} session hook: OK - {}` still covers `… OK - approved in Codex`,
+/// through `approved` and the ` in {}` of other messages; in brackets, as
+/// the code prints its notes, the same quote fails.
 struct Matcher<'a> {
     corpus: &'a Corpus,
     patterns: &'a [Vec<Piece>],
@@ -1031,14 +1345,18 @@ impl<'a> Matcher<'a> {
     /// from `at`, to its end at most.
     fn run(&mut self, pieces: &[Piece], o: usize, at: usize, need_word: bool) -> Reach {
         // Each position carries whether the window has matched a word of
-        // the code's text yet, its own or a hole's: a window of holes and
-        // spaces alone proves nothing.
-        let mut positions = vec![(at, false)];
+        // the code's text yet, its own or a hole's, and whether it has
+        // matched text of its own pattern besides spaces. A window needs
+        // both: one of holes and spaces alone proves nothing, and a hole's
+        // text is only as good as the pattern around it. A quote that starts
+        // at a hole of `  rm -f {} {} {}` would otherwise be three words of
+        // anything.
+        let mut positions = vec![(at, false, false)];
         let mut cut = false;
         for (index, piece) in pieces.iter().enumerate() {
             let mut next = Vec::new();
             self.steps += positions.len();
-            for &(p, worded) in &positions {
+            for &(p, worded, own) in &positions {
                 match piece {
                     Piece::Text(text) => {
                         let text = if index == 0 { &text[o..] } else { &text[..] };
@@ -1052,12 +1370,18 @@ impl<'a> Matcher<'a> {
                             // hole; a whole quote may stop there.
                             if (p < limit || (p > at && need_word))
                                 && self.fragment[p..limit] == text[..room]
-                                && (!need_word || worded || has_word(&text[..room]))
+                                && (!need_word
+                                    || (worded || has_word(&text[..room]))
+                                        && (own || has_text(&text[..room])))
                             {
                                 cut = true;
                             }
                         } else if self.fragment[p..p + text.len()] == text[..] {
-                            next.push((p + text.len(), worded || has_word(text)));
+                            next.push((
+                                p + text.len(),
+                                worded || has_word(text),
+                                own || has_text(text),
+                            ));
                         }
                     }
                     Piece::Hole => {
@@ -1082,6 +1406,16 @@ impl<'a> Matcher<'a> {
                         };
                         self.steps += ends.len();
                         for end in ends {
+                            // What a hole holds closes every bracket it
+                            // opens, as a name, a path or a message the
+                            // code prints does, unless the quote stops
+                            // inside it. Otherwise a hole could swallow the
+                            // start of a bracketed note, `(approved`, and
+                            // leave its end to whatever other message ends
+                            // alike.
+                            if end < len && !balanced(&self.fragment[p..end]) {
+                                continue;
+                            }
                             let printed = if end <= word_end {
                                 false
                             } else if p == 0 && end == len {
@@ -1102,7 +1436,7 @@ impl<'a> Matcher<'a> {
                                 }
                                 true
                             };
-                            next.push((end, worded || printed));
+                            next.push((end, worded || printed, own));
                         }
                     }
                 }
@@ -1117,7 +1451,7 @@ impl<'a> Matcher<'a> {
         Reach {
             ends: positions
                 .into_iter()
-                .filter_map(|(p, worded)| (worded || !need_word).then_some(p))
+                .filter_map(|(p, worded, own)| (worded && own || !need_word).then_some(p))
                 .collect(),
             cut,
         }
@@ -1290,9 +1624,18 @@ impl<'a> Matcher<'a> {
     }
 }
 
+/// A part of a quoted line the code must print.
+struct Fragment {
+    text: String,
+    /// Whether the part is one word joined to text left out, such as
+    /// `/.git` in `…/.git`: likely the rest of a value, a path or a file
+    /// name the code builds from parts rather than prints as written.
+    value: bool,
+}
+
 /// The parts of a quoted line the code must print: the text between `…`
 /// and `<placeholder>`s.
-fn fragments(line: &str) -> Vec<String> {
+fn fragments(line: &str) -> Vec<Fragment> {
     let mut parts = Vec::new();
     let mut current = String::new();
     let mut chars = line.chars().peekable();
@@ -1311,10 +1654,20 @@ fn fragments(line: &str) -> Vec<String> {
         }
     }
     parts.push(current);
+    let last = parts.len() - 1;
     parts
-        .into_iter()
-        .map(|part| part.trim().to_owned())
-        .filter(|part| part.chars().filter(|c| c.is_alphanumeric()).count() >= FRAGMENT_CHARS)
+        .iter()
+        .enumerate()
+        .map(|(index, part)| {
+            let text = part.trim();
+            let joined_before = index > 0 && !part.starts_with(char::is_whitespace);
+            let joined_after = index < last && !part.ends_with(char::is_whitespace);
+            Fragment {
+                text: text.to_owned(),
+                value: (joined_before || joined_after) && !text.contains(char::is_whitespace),
+            }
+        })
+        .filter(|part| part.text.chars().filter(|c| c.is_alphanumeric()).count() >= FRAGMENT_CHARS)
         .collect()
 }
 
@@ -1400,7 +1753,11 @@ fn output_errors() -> Vec<String> {
             if let Some(error) = projects_line_error(&quote, &labels) {
                 errors.push(format!("{name}:{line}: {error}"));
             }
-            for fragment in fragments(&quote) {
+            for Fragment {
+                text: fragment,
+                value,
+            } in fragments(&quote)
+            {
                 checked += 1;
                 let mut matcher = Matcher::new(&corpus, &fragment);
                 let covered = matcher.covers();
@@ -1410,7 +1767,10 @@ fn output_errors() -> Vec<String> {
                         matcher.steps
                     ));
                 }
-                if !covered {
+                // A value the code builds from parts is not in its strings,
+                // so only one a string holds part of can be checked.
+                let built = value && !corpus.joined.contains(&fragment);
+                if !covered && !built {
                     errors.push(format!("{name}:{line}: no code prints {fragment:?}"));
                 }
             }
@@ -1545,6 +1905,245 @@ fn a_message_the_code_does_not_print_is_caught() {
     assert!(!covered("(hidden input):"));
 }
 
+/// The patterns with `from` replaced by `to` in their text.
+fn replaced(patterns: &[Vec<Piece>], from: &str, to: &str) -> Vec<Vec<Piece>> {
+    patterns
+        .iter()
+        .map(|pattern| {
+            pattern
+                .iter()
+                .map(|piece| match piece {
+                    Piece::Text(text) => Piece::Text(
+                        text.iter()
+                            .collect::<String>()
+                            .replace(from, to)
+                            .chars()
+                            .collect(),
+                    ),
+                    Piece::Hole => Piece::Hole,
+                })
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn a_value_changed_in_the_code_fails_the_quote_that_shows_it() {
+    // The code prints the note `approved in Codex` into the hole of
+    // `{} session hook: OK ({note})`. Its words are in other messages too,
+    // which must not stand in for it once the code says something else.
+    let quote = "Codex session hook: OK (approved in Codex)";
+    let patterns = source_patterns();
+    assert!(Matcher::new(&Corpus::new(patterns.clone()), quote).covers());
+    let changed = Corpus::new(replaced(&patterns, "approved in Codex", "trusted"));
+    assert!(!Matcher::new(&changed, quote).covers());
+}
+
+#[test]
+fn a_pattern_of_holes_and_spaces_covers_no_quote() {
+    // A quote may start at a hole, the pattern's earlier text left out, so
+    // what is left of `  rm -f {} {} {}` is holes and spaces. The last
+    // probe has text of its own, but past where a quote of it would stop.
+    let misspelt = "Codex sesion hook: OK (approved in Codex)";
+    let patterns = source_patterns();
+    assert!(!Matcher::new(&Corpus::new(patterns.clone()), misspelt).covers());
+    for probe in [
+        "{} {} {}",
+        "  rm -f {} {} {}",
+        "{}: {}",
+        "  rm -f {} {} {} now",
+    ] {
+        let corpus = Corpus::new(patterns.iter().cloned().chain([holes(probe)]).collect());
+        assert!(!Matcher::new(&corpus, misspelt).covers(), "{probe:?}");
+    }
+}
+
+#[test]
+fn a_list_the_code_joins_is_matched() {
+    let corpus = corpus();
+    assert!(
+        Matcher::new(
+            &corpus,
+            "Removed: the global git ignore lines # user-memory, .user-memory, .user-memory-key (~/.config/git/ignore)"
+        )
+        .covers()
+    );
+}
+
+#[test]
+fn a_hole_closes_the_brackets_it_opens() {
+    let corpus = Corpus::new(
+        [
+            "Codex session hook: OK (approved",
+            "{} in Codex); remove it",
+            "Codex session hook: OK (checked)",
+            "{} in Codex, then",
+            "Status: {}",
+        ]
+        .map(holes)
+        .to_vec(),
+    );
+    let covered = |quote: &str| Matcher::new(&corpus, quote).covers();
+    // The hole of `{} in Codex); remove it` would hold the first message,
+    // and leave its bracket for this one to close.
+    assert!(!covered("Codex session hook: OK (approved in Codex)"));
+    assert!(covered("Codex session hook: OK (checked) in Codex, then"));
+    // A quote may stop inside a hole, its brackets open.
+    assert!(covered("Status: Codex session hook: OK (approved"));
+}
+
+#[test]
+fn strings_in_test_code_are_not_the_code_s_output() {
+    let source = r##"
+const SHOWN: &'static str = "shown constant";
+#[cfg(test)]
+const HIDDEN: &str = "hidden constant";
+fn shown(x: u8) {
+    #[cfg(test)]
+    record(|state| {
+        state.push("hidden closure");
+    });
+    #[cfg(all(test, unix))]
+    let probe: HashMap<u8, u8> = probe("hidden let");
+    #[cfg(test)]
+    if x == 1 { "hidden if" } else { "hidden else" }
+    println!("shown statement");
+    match x {
+        #[cfg(test)]
+        1 => { "hidden arm" }
+        _ => "shown arm",
+    }
+}
+/// "doc comment"
+struct Shown {
+    #[cfg(test)]
+    hidden: Field<A, B>,
+    shown: u8,
+}
+#[cfg(test)]
+thread_local! { static HIDDEN: u8 = probe("hidden macro"); }
+#[cfg(test)]
+#[derive(Default)]
+struct Hidden<'a> { text: &'a str }
+#[cfg(test)]
+impl Hidden { fn new() -> Self { Self { text: "hidden impl" } } }
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn t() { assert_eq!(1, 1, "hidden test"); }
+}
+#[cfg(test)]
+pub(crate) mod more_tests;
+#[derive(Debug, thiserror::Error)]
+#[error("shown attribute")]
+struct E;
+#[cfg(not(test))]
+fn outside_tests() -> &'static [u8] { b"shown when not testing" }
+"##;
+    let found = literals(source);
+    assert_eq!(
+        found.strings,
+        [
+            "shown constant",
+            "shown statement",
+            "shown arm",
+            "shown attribute",
+            "shown when not testing"
+        ]
+    );
+    assert_eq!(found.test_modules, ["more_tests"]);
+    assert_eq!(
+        found.constants,
+        [("SHOWN".to_owned(), "shown constant".to_owned())]
+    );
+    let whole_file = literals("#![cfg(test)]\nfn f() { println!(\"hidden file\"); }");
+    assert!(whole_file.strings.is_empty());
+    // A test-only module in a file of its own, and the modules inside it.
+    let text = |patterns: Vec<Vec<Piece>>| -> Vec<String> {
+        patterns
+            .iter()
+            .flatten()
+            .filter_map(|piece| match piece {
+                Piece::Text(text) => Some(text.iter().collect()),
+                Piece::Hole => None,
+            })
+            .collect()
+    };
+    let sources = [
+        (
+            "src/setup.rs",
+            "#[cfg(test)]\nmod tests;\nfn f() { println!(\"shown setup\"); }",
+        ),
+        (
+            "src/setup/tests.rs",
+            "mod deeper; const X: &str = \"hidden tests file\";",
+        ),
+        (
+            "src/setup/tests/deeper.rs",
+            "const X: &str = \"hidden deeper file\";",
+        ),
+        (
+            "src/main.rs",
+            "#[cfg(test)]\nmod checks;\nmod inline { #[cfg(test)] mod nested; }",
+        ),
+        ("src/checks.rs", "const X: &str = \"hidden checks file\";"),
+        (
+            "src/inline/nested.rs",
+            "const X: &str = \"hidden nested file\";",
+        ),
+        ("src/inline.rs", "const X: &str = \"shown inline file\";"),
+    ]
+    .map(|(path, source)| (PathBuf::from(path), source.to_owned()));
+    assert_eq!(
+        text(rust_patterns(&sources)),
+        ["shown setup", "shown inline file"]
+    );
+}
+
+#[test]
+fn a_line_joined_from_constants_is_matched_against_their_text() {
+    let sources = [
+        (
+            "src/a.rs",
+            r#"const SAVED: &str = "Saved the rules."; const TWICE: &str = "Kept here.";
+               fn f(x: &str) -> String { format!("{SAVED} {x} {{SAVED}} {SAVED:?}") }
+               fn g(x: &str) -> String { format!("{TWICE} {x}") }"#,
+        ),
+        ("src/b.rs", r#"const TWICE: &str = "Kept there.";"#),
+    ]
+    .map(|(path, source)| (PathBuf::from(path), source.to_owned()));
+    let patterns = rust_patterns(&sources);
+    assert!(patterns.contains(&holes("Saved the rules. {} {{SAVED}} {}")));
+    // A name two files give different text stays a hole.
+    assert!(patterns.contains(&holes("{} {}")));
+    let corpus = corpus();
+    // The No-project line joins constants: `{NO_PROJECT} {found}`.
+    assert!(
+        Matcher::new(
+            &corpus,
+            "No project: this folder has no git remote and no .user-memory-key. If it holds several repositories"
+        )
+        .covers()
+    );
+}
+
+/// What the matcher cannot tell apart. A hole may hold a word followed by
+/// text another message starts with: here `approved`, then ` in Codex`,
+/// from messages such as `{} in {}`. So a note changed in the code still
+/// matches when the words the docs show are spread over other messages that
+/// way. When the matcher learns to refuse this, the Matcher's comment says
+/// so and this test turns around.
+#[test]
+fn a_note_made_of_other_messages_words_is_a_known_limit() {
+    let patterns: Vec<Vec<Piece>> = source_patterns()
+        .into_iter()
+        .chain([holes("{} session hook: OK - {}")])
+        .collect();
+    let corpus = Corpus::new(replaced(&patterns, "approved in Codex", "trusted"));
+    assert!(Matcher::new(&corpus, "Codex session hook: OK - approved in Codex").covers());
+    assert!(!Matcher::new(&corpus, "Codex session hook: OK - approved by Codex").covers());
+}
+
 /// The longest header line the code prints: the No-project line naming as
 /// many repositories as it lists, then counting the rest.
 fn longest_no_project_line() -> String {
@@ -1578,7 +2177,7 @@ fn longest_no_project_line() -> String {
 fn the_longest_no_project_line_matches_in_time() {
     let longest = longest_no_project_line();
     let corpus = corpus();
-    for fragment in fragments(&longest) {
+    for Fragment { text: fragment, .. } in fragments(&longest) {
         let mut matcher = Matcher::new(&corpus, &fragment);
         assert!(matcher.covers(), "{fragment}");
         assert!(
@@ -1605,6 +2204,7 @@ fn matching_work_does_not_grow_with_the_code_s_patterns() {
     let longest = longest_no_project_line();
     let fragment = fragments(&longest)
         .into_iter()
+        .map(|fragment| fragment.text)
         .max_by_key(String::len)
         .expect("the longest line has a fragment");
     let patterns = source_patterns();
