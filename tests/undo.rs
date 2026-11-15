@@ -588,32 +588,19 @@ fn the_printed_undo_command_runs_as_printed() {
         .unwrap();
     let binary = env!("CARGO_BIN_EXE_user-memory");
     let line = command.replacen("user-memory", &format!("'{binary}'"), 1);
-    let out = s.command(&[]).arg0_shell(&line);
+    // The line run by a shell, with the store's environment.
+    let mut shell = Command::new("sh");
+    shell.arg("-c").arg(&line);
+    for (key, value) in s.command(&[]).get_envs() {
+        match value {
+            Some(value) => shell.env(key, value),
+            None => shell.env_remove(key),
+        };
+    }
+    let out = shell.output().unwrap();
     assert!(out.status.success(), "{line}: {out:?}");
     let reply: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(strings(&reply["ids"]), [id(1)], "{reply}");
-}
-
-/// Runs a shell line with the store's environment.
-trait Shell {
-    fn arg0_shell(self, line: &str) -> std::process::Output;
-}
-
-impl Shell for Command {
-    fn arg0_shell(self, line: &str) -> std::process::Output {
-        let mut shell = Command::new("sh");
-        shell.arg("-c").arg(line);
-        for (key, value) in self.get_envs() {
-            match value {
-                Some(value) => shell.env(key, value),
-                None => shell.env_remove(key),
-            };
-        }
-        if let Some(dir) = self.get_current_dir() {
-            shell.current_dir(dir);
-        }
-        shell.output().unwrap()
-    }
 }
 
 // Whether the import added or replaced a memory is what the import recorded,
