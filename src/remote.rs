@@ -10,7 +10,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
-use clap::Args;
+use clap::{Args, Subcommand};
 use rmcp::{
     RoleClient, RoleServer, ServiceExt,
     service::{RxJsonRpcMessage, TxJsonRpcMessage},
@@ -33,6 +33,7 @@ use std::{
 use subtle::ConstantTimeEq;
 
 pub(crate) mod marker;
+mod tokens;
 mod transfer;
 
 #[derive(Clone, Args, Serialize, Deserialize)]
@@ -45,6 +46,32 @@ pub struct Connection {
     pub token_file: PathBuf,
 }
 
+/// `host`: serve, with its options, or a `host token` command. Without a
+/// subcommand it is the server as it always was.
+#[derive(Args)]
+#[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
+pub struct HostArgs {
+    #[command(subcommand)]
+    command: Option<HostCommand>,
+    #[command(flatten)]
+    options: HostOptions,
+}
+
+#[derive(Subcommand)]
+pub enum HostCommand {
+    /// Issue, list and revoke this server's client tokens: one per client machine, revocable alone and optionally read-only.
+    #[command(subcommand)]
+    Token(tokens::TokenCommand),
+}
+
+/// Runs `host`: the server, or a `host token` command.
+pub async fn run_host(args: HostArgs) -> Result<()> {
+    match args.command {
+        Some(HostCommand::Token(command)) => tokens::run(command),
+        None => host(args.options).await,
+    }
+}
+
 #[derive(Args)]
 pub struct HostOptions {
     /// HTTP bind address; use a TLS reverse proxy for off-machine access.
@@ -54,8 +81,10 @@ pub struct HostOptions {
     #[arg(long)]
     db: Option<PathBuf>,
     /// Server token file. A private random token is created if absent.
-    #[arg(long)]
-    token_file: PathBuf,
+    // Required to serve; an Option so `host token …`, which negates it, can
+    // be parsed without one.
+    #[arg(long, required = true)]
+    token_file: Option<PathBuf>,
     /// Additional hostnames accepted through a reverse proxy.
     #[arg(long)]
     allowed_host: Vec<String>,
@@ -316,7 +345,10 @@ pub async fn host(options: HostOptions) -> Result<()> {
     }
     let backups = crate::memory::backups::watch(&db);
     let held = crate::memory::hold(&db);
-    let token = host_token(&options.token_file)?;
+    let token_file = options
+        .token_file
+        .context("the following required argument was not provided: --token-file")?;
+    let token = host_token(&token_file)?;
     crate::connect(&db)?;
     let listener = tokio::net::TcpListener::bind(options.listen).await?;
     let address = listener.local_addr()?;
@@ -362,7 +394,7 @@ pub async fn host(options: HostOptions) -> Result<()> {
         )
         .fallback(|| async { StatusCode::NOT_FOUND });
     println!("Listening: http://{address}/mcp");
-    eprintln!("Access-token file: {}", options.token_file.display());
+    eprintln!("Access-token file: {}", token_file.display());
     axum::serve(listener, router)
         .with_graceful_shutdown(async move {
             stopped().await;
