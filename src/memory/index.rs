@@ -25,6 +25,8 @@ pub(super) mod stems;
 pub(super) mod vectors;
 pub(super) mod weights;
 
+pub(in crate::memory) use passages::{CONTEXT_SLOT, SLOTS};
+
 use super::{similar::category_group, words::tokenize};
 use stems::{Field, Stems, Text, stamp, token};
 
@@ -121,21 +123,6 @@ END;";
 /// index that can read a deleted entry's tokens back. Part of the stored
 /// schema, as [`SEARCH`] is.
 const WORDS: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS search_words USING fts5(category,title,type,body,anchors,start UNINDEXED,length UNINDEXED,detail=column,tokenize='ascii');";
-
-/// Rows the keyword index numbers for each memory: the memory's rows are
-/// `key * SLOTS` up to the next memory's. Slot 0 holds what counts for the
-/// whole memory, slots from 1 the content's passages, and [`CONTEXT_SLOT`]
-/// the context's. The triggers in [`SEARCH`] write this number out.
-pub(in crate::memory) const SLOTS: i64 = 256;
-
-/// The slot of a memory's context, a passage of its own: it says when the
-/// memory applies.
-pub(in crate::memory) const CONTEXT_SLOT: i64 = SLOTS - 1;
-
-const _: () = assert!(
-    passages::MAX_PASSAGES as i64 + 1 < CONTEXT_SLOT,
-    "every content passage has a slot before the context's"
-);
 
 /// Creates the search tables and triggers where missing, as every open of a
 /// current store does; a store created now gets an empty index stamped as
