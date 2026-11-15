@@ -12,6 +12,7 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior, backup::Backup};
 use std::{
     collections::BTreeMap,
     fs,
+    io::ErrorKind,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -706,8 +707,13 @@ fn run(
     }
     let stamp: String =
         tx.query_row("SELECT strftime('%Y%m%dT%H%M%SZ','now')", [], |r| r.get(0))?;
-    let backup = backup_path(db, &format!("v{from}"), &stamp)?;
-    write_backup(db, &backup, "migrated", memory_rows(&tx)?)?;
+    let backup = write_backup(
+        db,
+        &stamp,
+        beside(db, &format!("v{from}"))?,
+        "migrated",
+        memory_rows(&tx)?,
+    )?;
     let migrated = (|| -> Result<()> {
         for version in from..current {
             (steps[(version - baseline) as usize].apply)(&tx, titles).with_context(|| {
@@ -752,13 +758,25 @@ fn run(
     })
 }
 
-/// `<store>.<LABEL>-<UTC time>.bak` beside the store: `v<FROM>` for a
-/// migration, `repair` for a repair, `move` for a project move. Never
-/// rotated, unlike the automatic backups in `backups/`.
-pub(crate) fn backup_path(db: &Path, label: &str, stamp: &str) -> Result<PathBuf> {
-    let name = db.file_name().context("Invalid memory store path")?;
-    Ok(db.with_file_name(format!("{}.{label}-{stamp}.bak", name.to_string_lossy())))
+/// Names `<store>.<LABEL>-<UTC time>.bak` beside the store, for
+/// `write_backup`: `v<FROM>` for a migration, `repair` for a repair, `move`
+/// for a project move. Never rotated, unlike the automatic backups in
+/// `backups/`.
+pub(crate) fn beside(db: &Path, label: &str) -> Result<impl Fn(&str) -> PathBuf> {
+    let name = db
+        .file_name()
+        .context("Invalid memory store path")?
+        .to_string_lossy()
+        .into_owned();
+    let label = label.to_owned();
+    Ok(move |stamp: &str| db.with_file_name(format!("{name}.{label}-{stamp}.bak")))
 }
+
+/// The names a backup tries within one second, `<time>` then `<time>-2` up
+/// to this: a second holds a few backups at most, such as a migration
+/// rolled back and run again, so finding them all taken means something
+/// else is creating files under these names.
+const BACKUP_NAMES: u32 = 100;
 
 /// The memories in the table itself, counted without any index: a damaged
 /// index can list more or fewer.
@@ -768,32 +786,56 @@ pub(crate) fn memory_rows(conn: &Connection) -> rusqlite::Result<i64> {
     })
 }
 
-/// Copies the store page by page into a new file at `backup`, mode 0600,
-/// never replacing an existing file, and accepts the copy only if it holds
-/// all `memories`. A second connection takes the copy, so it sees exactly
+/// Copies the store page by page into a new file, mode 0600, and returns
+/// its path. `name` gives the path for the UTC time `stamp`; when an
+/// earlier backup holds that name, as one from the same second does, the
+/// next is tried: `<stamp>-2`, `<stamp>-3`. The file is created only where
+/// none exists, in the same call that finds the name free, so two backups
+/// never share a file. The copy is accepted only if it holds all
+/// `memories`. A second connection takes the copy, so it sees exactly
 /// what the caller's open write transaction is about to change. `task`
 /// names that change, as in "nothing was migrated".
-pub(crate) fn write_backup(db: &Path, backup: &Path, task: &str, memories: i64) -> Result<()> {
-    create_private(backup).with_context(|| {
-        format!(
-            "Cannot create the backup {}; nothing was {task}",
-            backup.display()
-        )
-    })?;
-    let copied = copy_into(db, backup).and_then(|copied| {
+pub(crate) fn write_backup(
+    db: &Path,
+    stamp: &str,
+    name: impl Fn(&str) -> PathBuf,
+    task: &str,
+    memories: i64,
+) -> Result<PathBuf> {
+    let mut again = 1;
+    let backup = loop {
+        let backup = if again == 1 {
+            name(stamp)
+        } else {
+            name(&format!("{stamp}-{again}"))
+        };
+        match create_private(&backup) {
+            Ok(_) => break backup,
+            Err(err) if err.kind() == ErrorKind::AlreadyExists && again < BACKUP_NAMES => {
+                again += 1;
+            }
+            Err(err) => {
+                return Err(anyhow::Error::new(err).context(format!(
+                    "Cannot create the backup {}; nothing was {task}",
+                    backup.display()
+                )));
+            }
+        }
+    };
+    let copied = copy_into(db, &backup).and_then(|copied| {
         if copied != memories {
             bail!("the backup holds {copied} of the store's {memories} memories");
         }
         Ok(())
     });
     if let Err(err) = copied {
-        let _ = fs::remove_file(backup);
+        let _ = fs::remove_file(&backup);
         return Err(err.context(format!(
             "Cannot back up {}; nothing was {task}",
             db.display()
         )));
     }
-    Ok(())
+    Ok(backup)
 }
 
 /// Creates the empty file `path`, private, never replacing one.
@@ -1172,33 +1214,66 @@ mod tests {
                 [],
             )
             .unwrap();
-        let taken = tmp.path().join("taken.bak");
-        fs::write(&taken, "keep me").unwrap();
+        let at = |stamp: &str| tmp.path().join(format!("{stamp}.bak"));
+        // Every name a second allows is taken: nothing is replaced.
+        fs::write(at("taken"), "keep me").unwrap();
+        for again in 2..=BACKUP_NAMES {
+            fs::write(at(&format!("taken-{again}")), "keep me").unwrap();
+        }
         let err = format!(
             "{:#}",
-            write_backup(&db, &taken, "migrated", 2).unwrap_err()
+            write_backup(&db, "taken", at, "migrated", 2).unwrap_err()
         );
-        assert!(err.contains("nothing was migrated"), "{err}");
-        assert_eq!(fs::read(&taken).unwrap(), b"keep me");
-        let fresh = tmp.path().join("fresh.bak");
-        write_backup(&db, &fresh, "migrated", 2).unwrap();
+        assert!(
+            err.contains(&format!("taken-{BACKUP_NAMES}.bak; nothing was migrated")),
+            "{err}"
+        );
+        assert_eq!(fs::read(at("taken")).unwrap(), b"keep me");
+        assert_eq!(
+            fs::read(at(&format!("taken-{BACKUP_NAMES}"))).unwrap(),
+            b"keep me"
+        );
+        let fresh = write_backup(&db, "fresh", at, "migrated", 2).unwrap();
+        assert_eq!(fresh, at("fresh"));
         assert_eq!(memory_rows(&Connection::open(&fresh).unwrap()).unwrap(), 2);
         // A copy short of the store's memories is removed.
-        let refused = tmp.path().join("refused.bak");
         let err = format!(
             "{:#}",
-            write_backup(&db, &refused, "repaired", 3).unwrap_err()
+            write_backup(&db, "refused", at, "repaired", 3).unwrap_err()
         );
         assert!(
             err.contains("the backup holds 2 of the store's 3 memories")
                 && err.contains("nothing was repaired"),
             "{err}"
         );
-        assert!(!refused.exists());
+        assert!(!at("refused").exists());
         assert_eq!(
-            backup_path(Path::new("/d/m.sqlite3"), "v2", "20261015T120000Z").unwrap(),
+            beside(Path::new("/d/m.sqlite3"), "v2").unwrap()("20261015T120000Z"),
             Path::new("/d/m.sqlite3.v2-20261015T120000Z.bak")
         );
+    }
+
+    #[test]
+    fn a_second_backup_in_the_same_second_gets_the_next_free_name() {
+        let tmp = tempdir().unwrap();
+        let db = store(tmp.path());
+        let name = beside(&db, "v10").unwrap();
+        let stamp = "20261116T120000Z";
+        let first = write_backup(&db, stamp, &name, "migrated", 1).unwrap();
+        let second = write_backup(&db, stamp, &name, "migrated", 1).unwrap();
+        let third = write_backup(&db, stamp, &name, "migrated", 1).unwrap();
+        let file = |path: &Path| path.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(
+            [file(&first), file(&second), file(&third)],
+            [
+                "memories.sqlite3.v10-20261116T120000Z.bak",
+                "memories.sqlite3.v10-20261116T120000Z-2.bak",
+                "memories.sqlite3.v10-20261116T120000Z-3.bak",
+            ]
+        );
+        for backup in [&first, &second, &third] {
+            assert_eq!(memory_rows(&Connection::open(backup).unwrap()).unwrap(), 1);
+        }
     }
 
     #[test]

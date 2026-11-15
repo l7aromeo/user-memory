@@ -326,17 +326,21 @@ pub fn before_forget(db: &Path, memories: i64) -> Result<String> {
         [],
         |r| r.get(0),
     )?;
-    let mut name = names.forget(&stamp);
-    let mut again = 1;
-    while folder.join(&name).exists() {
-        again += 1;
-        name = names.forget(&format!("{stamp}-{again}"));
-    }
-    write_backup(db, &folder.join(&name), "forgotten", memories)?;
+    let copy = write_backup(
+        db,
+        &stamp,
+        |stamp| folder.join(names.forget(stamp)),
+        "forgotten",
+        memories,
+    )?;
     if let Ok((_, copies)) = scan(db) {
         drop_expired(&copies);
     }
-    Ok(name)
+    Ok(copy
+        .file_name()
+        .expect("a forget copy's path ends in the name it was given")
+        .to_string_lossy()
+        .into_owned())
 }
 
 /// Every file of `db`'s automatic backups: the backups, a failure note and
