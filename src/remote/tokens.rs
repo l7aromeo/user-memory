@@ -41,11 +41,21 @@ pub enum TokenCommand {
         #[command(flatten)]
         store: Store,
     },
-    /// Stop the shared token file letting anyone in: the server refuses its token from the next request, and the file gets a value no client holds. Needs a client token with write access first.
+    /// Stop the shared token file letting anyone in: the server refuses its token from the next request, and the file gets a value no client holds. Needs a client token with write access first; on the installer's Docker server, this machine's client gets its own.
     RetireShared {
-        /// The server's shared token file, as given to `host --token-file`.
+        /// The server's shared token file, as given to `host --token-file`; the installer's Docker server knows its own.
         #[arg(long, value_name = "FILE")]
-        token_file: PathBuf,
+        token_file: Option<PathBuf>,
+        #[command(flatten)]
+        store: Store,
+    },
+    /// Prints, as JSON, whether the shared file is retired, whether the token with this SHA-256 can write, and whether a token not revoked has this name: what the machine of the installer's Docker server asks its container.
+    #[command(hide = true)]
+    State {
+        #[arg(long)]
+        hash: Option<String>,
+        #[arg(long)]
+        name: Option<String>,
         #[command(flatten)]
         store: Store,
     },
@@ -69,8 +79,32 @@ impl Store {
     }
 }
 
-/// Runs a `host token` command on this machine's registry.
+/// Runs a `host token` command on this machine's registry, or in the
+/// container of the installer's Docker server when this machine runs one
+/// and no `--db` names a store here.
 pub fn run(command: TokenCommand) -> Result<()> {
+    let store = match &command {
+        TokenCommand::Add { store, .. }
+        | TokenCommand::List { store }
+        | TokenCommand::Revoke { store, .. }
+        | TokenCommand::RetireShared { store, .. }
+        | TokenCommand::State { store, .. } => store,
+    };
+    if store.db.is_none() {
+        match crate::setup::embedding_home()? {
+            crate::setup::EmbeddingHome::Local => {}
+            crate::setup::EmbeddingHome::Docker(dir) => return in_docker(&dir, command),
+            crate::setup::EmbeddingHome::Remote(url) => {
+                bail!(
+                    "{url} is a memory server on another machine; run user-memory host token there."
+                )
+            }
+        }
+    }
+    let registry_path = store.registry()?;
+    if let Some(folder) = registry_path.parent() {
+        crate::server::tokens::sweep(folder);
+    }
     match command {
         TokenCommand::Add {
             name,
@@ -88,9 +122,107 @@ pub fn run(command: TokenCommand) -> Result<()> {
         TokenCommand::List { store } => list(&store.registry()?),
         TokenCommand::Revoke { name, store } => revoke(&store.registry()?, &name),
         TokenCommand::RetireShared { token_file, store } => {
+            let token_file = token_file.context(
+                "Give --token-file FILE: the shared token file that `host --token-file` names.",
+            )?;
             retire_shared(&store.registry()?, &token_file)
         }
+        TokenCommand::State { hash, name, store } => {
+            state(&store.registry()?, hash.as_deref(), name.as_deref())
+        }
     }
+}
+
+/// Runs `command` in the container of the installer's Docker server in
+/// `dir`. A token reaches this machine only through a file copied out of
+/// the volume, or straight to this terminal.
+fn in_docker(dir: &Path, command: TokenCommand) -> Result<()> {
+    use crate::server::tokens as docker;
+    let compose = crate::server::Compose::new(dir.join("compose.yaml"));
+    match command {
+        TokenCommand::Add {
+            name,
+            read_only,
+            expires,
+            out,
+            store: _,
+        } => match out {
+            Some(out) => {
+                docker::add_to_file(&compose, &name, read_only, expires, &out, false)?;
+                wrote(read_only, &name, &out);
+                Ok(())
+            }
+            None if !std::io::stdout().is_terminal() => bail!(NOT_A_TERMINAL),
+            None => {
+                let expires = expires.map(|days| days.to_string());
+                let mut args = vec!["add", name.as_str()];
+                if read_only {
+                    args.push("--read-only");
+                }
+                if let Some(days) = &expires {
+                    args.extend(["--expires", days]);
+                }
+                docker::on_this_terminal(&compose, &args)
+            }
+        },
+        TokenCommand::List { store: _ } => docker::on_this_terminal(&compose, &["list"]),
+        TokenCommand::Revoke { name, store: _ } => {
+            docker::on_this_terminal(&compose, &["revoke", &name])
+        }
+        TokenCommand::RetireShared {
+            token_file,
+            store: _,
+        } => {
+            if token_file.is_some() {
+                bail!(
+                    "The installer's Docker server retires its own shared token file; run this without --token-file."
+                );
+            }
+            let client = crate::setup::configured_remote()?
+                .context("This machine's client has no saved server to keep its token for")?;
+            docker::retire_shared(&compose, dir, &client.token_file)
+        }
+        TokenCommand::State { .. } => bail!("`host token state` runs in the container"),
+    }
+}
+
+/// Says where `add` wrote a token.
+fn wrote(read_only: bool, name: &str, out: &Path) {
+    let described = if read_only { "read-only" } else { "write" };
+    eprintln!(
+        "Wrote the {described} token for {name} to {}, readable only by you. Copy it to that machine over a private channel and install there with --token-file.",
+        out.display()
+    );
+}
+
+/// Prints what the machine of the installer's Docker server asks: see
+/// [`TokenCommand::State`].
+fn state(registry_path: &Path, hash: Option<&str>, name: Option<&str>) -> Result<()> {
+    let (retired, writer, named) = match registry::open(registry_path)? {
+        None => (false, false, false),
+        Some(conn) => {
+            let now = registry::now();
+            let tokens = registry::tokens(&conn)?;
+            (
+                registry::shared_file_retired(&conn)?,
+                hash.is_some_and(|hash| {
+                    tokens
+                        .iter()
+                        .any(|token| token.hash == hash && token.can_write(now))
+                }),
+                name.is_some_and(|name| {
+                    tokens
+                        .iter()
+                        .any(|token| token.name == name && token.revoked_at.is_none())
+                }),
+            )
+        }
+    };
+    println!(
+        "{}",
+        serde_json::json!({"shared_file_retired": retired, "writer": writer, "named": named})
+    );
+    Ok(())
 }
 
 /// Why `add` shows no token: a token printed into a tool's or a script's
@@ -131,7 +263,6 @@ fn add(
     } else {
         registry::Scope::Write
     };
-    let described = if read_only { "read-only" } else { "write" };
     let conn = registry::create(registry_path)?;
     let token = registry::new_token();
     let hash = registry::hash(&token);
@@ -140,14 +271,12 @@ fn add(
             write_new(out, &token, || {
                 registry::add(&conn, &hash, name, scope, expires_at)
             })?;
-            eprintln!(
-                "Wrote the {described} token for {name} to {}, readable only by you. Copy it to that machine over a private channel and install there with --token-file.",
-                out.display()
-            );
+            wrote(read_only, name, out);
         }
         None => {
             registry::add(&conn, &hash, name, scope, expires_at)?;
             println!("{token}");
+            let described = if read_only { "read-only" } else { "write" };
             eprintln!("The {described} token for {name}, shown only this once.");
         }
     }

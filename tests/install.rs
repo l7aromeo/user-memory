@@ -1030,7 +1030,7 @@ fn the_questions_set_up_a_docker_server_and_a_rerun_upgrades_it() {
         .map(|l| l.replace(&compose, "compose"))
         .collect();
     assert_eq!(
-        calls,
+        calls[..5],
         [
             "compose build",
             "compose run --rm memory migrate --check",
@@ -1038,6 +1038,21 @@ fn the_questions_set_up_a_docker_server_and_a_rerun_upgrades_it() {
             "compose run --rm memory migrate",
             "compose up -d --wait"
         ]
+    );
+    // This machine's token is checked, by its hash, and the shared token,
+    // which it holds, copied again.
+    assert_eq!(calls.len(), 7, "{calls:?}");
+    assert!(
+        calls[5].starts_with("compose exec -T memory user-memory host token state --hash ")
+            && calls[5].ends_with(" --name docker-host"),
+        "{calls:?}"
+    );
+    assert!(
+        calls[6].starts_with(&format!(
+            "compose cp memory:/data/access-token {}.",
+            c.token_file().display()
+        )),
+        "{calls:?}"
     );
 
     // A store that needs titles stops the upgrade before the server is
@@ -1079,8 +1094,9 @@ fn the_questions_set_up_a_docker_server_and_a_rerun_upgrades_it() {
     let titled = c.install(&releases, &[], &["--titles", map.to_str().unwrap()]);
     let (stdout, stderr) = text(&titled);
     assert!(titled.status.success(), "{stdout}\n{stderr}");
+    // Then this machine's token, as above.
     assert_eq!(
-        compose_calls(),
+        compose_calls()[..5],
         [
             "compose build",
             "compose run --rm -T memory migrate --check --titles -",
@@ -1967,6 +1983,10 @@ impl RealDocker {
     }
     fn uninstall(&self, args: &[&str]) -> Output {
         self.real(self.c.uninstall_command(self.c.home.path(), args))
+    }
+    /// The installed `user-memory ARGS` on this machine.
+    fn user_memory(&self, args: &[&str]) -> Output {
+        self.real(self.c.installed_command(&self.releases, args))
     }
     fn compose(&self, args: &[&str], input: Stdio) -> Output {
         Command::new("docker")
@@ -3017,10 +3037,7 @@ fn a_server_only_host_runs_the_server_and_connects_no_agent() {
         "Memory index: OK",
         "Automatic backups: none yet in ",
         &format!("The memory server runs in Docker on 127.0.0.1:{port}"),
-        &format!(
-            "token is in {}; every machine that uses the server needs a copy.",
-            c.token_file().display()
-        ),
+        "machine that uses it its own token: user-memory host token add NAME --out FILE.",
         "this installer again with --allowed-host HOST",
     ] {
         assert!(stdout.contains(shown), "{shown}\n{stdout}");
@@ -3753,4 +3770,320 @@ fn upgrade_says_an_operators_own_host_keeps_its_version_until_it_restarts() {
     let (stdout, stderr) = text(&out);
     assert!(out.status.success(), "{stdout}\n{stderr}");
     assert!(stdout.ends_with(&format!("Upgraded to {BUILD}. The memory server running on this machine (user-memory host) keeps 0.9.0 until it restarts; restart it the way you run it.\n")), "{stdout}");
+}
+
+/// `host token ARGS` on this machine, as the user runs it.
+fn host_token(c: &Client, releases: &Releases, args: &[&str]) -> Output {
+    c.installed_command(releases, &[&["host", "token"], args].concat())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap()
+}
+
+/// The installed CLI's `index` with the token in `file`, against `url`.
+fn index_with(c: &Client, releases: &Releases, url: &str, file: &Path) -> Output {
+    c.installed_command(releases, &["index"])
+        .env("USER_MEMORY_URL", url)
+        .env("USER_MEMORY_TOKEN_FILE", file)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap()
+}
+
+/// Files an interrupted copy could leave: in the volume, or staged beside
+/// a token file.
+fn copy_leftovers(c: &Client) -> Vec<String> {
+    [
+        c.path("server"),
+        c.home.path().to_path_buf(),
+        c.path(".config/user-memory"),
+    ]
+    .iter()
+    .flat_map(|folder| fs::read_dir(folder).into_iter().flatten().flatten())
+    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+    .filter(|name| name.starts_with(".token-add-") || name.contains(".token."))
+    .collect()
+}
+
+/// On the machine of the installer's Docker server, `host token` runs in
+/// its container: a new token reaches a private file and nothing is left
+/// in the volume. retire-shared waits for the token-free healthcheck, gives
+/// this machine's client its own token, then retires the shared file; a
+/// rerun of it, and of the installer, keeps that token.
+#[test]
+fn host_token_runs_in_the_docker_server_and_retires_its_shared_file() {
+    let releases = Releases::start();
+    let c = Client::bare();
+    let _server = FakeServer(&c);
+    let port = closed_port().to_string();
+    let url = format!("http://127.0.0.1:{port}/mcp");
+    let install = || c.install(&releases, &[], &["--local", "docker", "--port", &port]);
+    let out = install();
+    assert!(out.status.success(), "{}", text(&out).1);
+    let shared = fs::read_to_string(c.token_file()).unwrap();
+
+    let laptop = c.path("laptop.token");
+    let out = host_token(
+        &c,
+        &releases,
+        &["add", "laptop", "--out", laptop.to_str().unwrap()],
+    );
+    let (stdout, stderr) = text(&out);
+    assert!(out.status.success(), "{stderr}");
+    let token = fs::read_to_string(&laptop).unwrap();
+    assert!(token.starts_with("umt_"));
+    assert!(!stdout.contains(&token) && !stderr.contains(&token));
+    assert!(
+        stderr.contains(&format!(
+            "Wrote the write token for laptop to {}",
+            laptop.display()
+        )),
+        "{stderr}"
+    );
+    assert_eq!(
+        fs::metadata(&laptop).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(copy_leftovers(&c), Vec::<String>::new());
+    let out = index_with(&c, &releases, &url, &laptop);
+    assert!(out.status.success(), "{}", text(&out).1);
+    // An existing --out is never replaced, and nothing is issued for it.
+    let out = host_token(
+        &c,
+        &releases,
+        &["add", "phone", "--out", laptop.to_str().unwrap()],
+    );
+    assert!(!out.status.success());
+    assert!(
+        text(&out)
+            .1
+            .contains("exists; remove it or give another --out.")
+    );
+    // Without a terminal and without --out, no token is shown.
+    let out = host_token(&c, &releases, &["add", "phone"]);
+    assert!(!out.status.success());
+    assert!(
+        text(&out).1.contains("Not showing the token"),
+        "{}",
+        text(&out).1
+    );
+    let listed = text(&host_token(&c, &releases, &["list"])).0;
+    assert!(
+        listed.contains("laptop") && listed.contains("owner (shared file)"),
+        "{listed}"
+    );
+    assert!(!listed.contains("phone"), "{listed}");
+
+    // The Docker server knows its own shared file.
+    let out = host_token(&c, &releases, &["retire-shared", "--token-file", "/x"]);
+    assert!(!out.status.success());
+    assert!(
+        text(&out).1.contains("run this without --token-file"),
+        "{}",
+        text(&out).1
+    );
+    // An older installer's healthcheck reads the shared file.
+    let compose = c.docker_dir().join("compose.yaml");
+    let written = fs::read_to_string(&compose).unwrap();
+    fs::write(
+        &compose,
+        written.replace(
+            "test: [CMD, user-memory, server, health]",
+            "test: \"USER_MEMORY_URL=http://127.0.0.1:8765/mcp USER_MEMORY_TOKEN_FILE=/data/access-token user-memory index >/dev/null\"",
+        ),
+    )
+    .unwrap();
+    let out = host_token(&c, &releases, &["retire-shared"]);
+    assert!(!out.status.success());
+    assert!(
+        text(&out).1.contains("run the installer again"),
+        "{}",
+        text(&out).1
+    );
+    assert_eq!(fs::read_to_string(c.token_file()).unwrap(), shared);
+    fs::write(&compose, &written).unwrap();
+
+    let out = host_token(&c, &releases, &["retire-shared"]);
+    let stderr = text(&out).1;
+    assert!(out.status.success(), "{stderr}");
+    assert!(stderr.contains("its own token, docker-host"), "{stderr}");
+    let own = fs::read_to_string(c.token_file()).unwrap();
+    assert_ne!(own, shared);
+    assert!(!stderr.contains(&own));
+    assert_eq!(
+        fs::metadata(c.token_file()).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(copy_leftovers(&c), Vec::<String>::new());
+    let out = index_with(&c, &releases, &url, &c.token_file());
+    assert!(out.status.success(), "{}", text(&out).1);
+    let old = c.path("shared.token");
+    fs::write(&old, &shared).unwrap();
+    let out = index_with(&c, &releases, &url, &old);
+    assert!(!out.status.success());
+    assert!(
+        text(&out).1.contains(&format!(
+            "The memory server at {url} revoked this machine's token"
+        )),
+        "{}",
+        text(&out).1
+    );
+    let listed = text(&host_token(&c, &releases, &["list"])).0;
+    assert!(
+        listed.contains("docker-host") && !listed.contains("owner (shared file)"),
+        "{listed}"
+    );
+
+    // A rerun keeps this machine's token; so does the installer.
+    let out = host_token(&c, &releases, &["retire-shared"]);
+    assert!(out.status.success(), "{}", text(&out).1);
+    assert_eq!(fs::read_to_string(c.token_file()).unwrap(), own);
+    let out = install();
+    assert!(out.status.success(), "{}", text(&out).1);
+    assert!(text(&out).0.contains("Remote MCP connection and tools: OK"));
+    assert_eq!(fs::read_to_string(c.token_file()).unwrap(), own);
+
+    // A stop after docker-host was issued and before this machine's file
+    // was replaced: the rerun revokes it and issues another.
+    fs::write(c.token_file(), &shared).unwrap();
+    let out = host_token(&c, &releases, &["retire-shared"]);
+    assert!(out.status.success(), "{}", text(&out).1);
+    let again = fs::read_to_string(c.token_file()).unwrap();
+    assert!(again != own && again != shared);
+    assert!(
+        index_with(&c, &releases, &url, &c.token_file())
+            .status
+            .success()
+    );
+    let refused = c.path("own.token");
+    fs::write(&refused, &own).unwrap();
+    assert!(!index_with(&c, &releases, &url, &refused).status.success());
+
+    // docker-host revoked by hand: the installer issues this machine a new
+    // one rather than keep a token that no longer works.
+    let out = host_token(&c, &releases, &["revoke", "docker-host"]);
+    assert!(out.status.success(), "{}", text(&out).1);
+    let out = install();
+    assert!(out.status.success(), "{}\n{}", text(&out).0, text(&out).1);
+    let renewed = fs::read_to_string(c.token_file()).unwrap();
+    assert_ne!(renewed, again);
+    assert!(
+        index_with(&c, &releases, &url, &c.token_file())
+            .status
+            .success()
+    );
+
+    // Revoked in the container, refused at once.
+    let out = host_token(&c, &releases, &["revoke", "laptop"]);
+    assert!(out.status.success(), "{}", text(&out).1);
+    assert!(!index_with(&c, &releases, &url, &laptop).status.success());
+}
+
+/// A client of another server is told to run `host token` there.
+#[test]
+fn host_token_on_a_client_of_another_server_says_where_to_run_it() {
+    let releases = Releases::start();
+    let s = Server::start();
+    let c = Client::new(&s);
+    let out = c.install(
+        &releases,
+        &[("USER_MEMORY_TOKEN", &s.token())],
+        &["--url", &s.base()],
+    );
+    assert!(out.status.success(), "{}", text(&out).1);
+    let out = host_token(&c, &releases, &["list"]);
+    assert!(!out.status.success());
+    assert!(
+        text(&out).1.contains(&format!(
+            "{}/mcp is a memory server on another machine; run user-memory host token there.",
+            s.base()
+        )),
+        "{}",
+        text(&out).1
+    );
+}
+
+/// With USER_MEMORY_TEST_DOCKER_BINARY set, as above: `host token` on the
+/// machine of a real Docker server issues a token into a private file, with
+/// nothing left in the volume, and revokes it at once.
+#[test]
+fn a_real_docker_server_issues_client_tokens_when_opted_in() {
+    let Some(d) = RealDocker::start("tokens") else {
+        return;
+    };
+    let port = closed_port().to_string();
+    let url = format!("http://127.0.0.1:{port}/mcp");
+    let out = d.install(&["--local", "docker", "--port", &port]);
+    assert!(out.status.success(), "{}", text(&out).1);
+    let laptop = d.c.path("laptop.token");
+    let out = d.user_memory(&[
+        "host",
+        "token",
+        "add",
+        "laptop",
+        "--out",
+        laptop.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{}", text(&out).1);
+    assert_eq!(
+        fs::metadata(&laptop).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let volume = d.compose(
+        &["exec", "-T", "memory", "ls", "-a", "/data"],
+        Stdio::null(),
+    );
+    let listed = String::from_utf8_lossy(&volume.stdout);
+    assert!(
+        volume.status.success() && !listed.contains(".token-add-"),
+        "{listed}"
+    );
+    let index = |file: &Path| {
+        let mut command = d.c.installed_command(&d.releases, &["index"]);
+        command
+            .env("USER_MEMORY_URL", &url)
+            .env("USER_MEMORY_TOKEN_FILE", file);
+        d.real(command)
+    };
+    assert!(index(&laptop).status.success());
+    let listed = text(&d.user_memory(&["host", "token", "list"])).0;
+    assert!(listed.contains("laptop"), "{listed}");
+    let out = d.user_memory(&["host", "token", "revoke", "laptop"]);
+    assert!(out.status.success(), "{}", text(&out).1);
+    let refused = index(&laptop);
+    assert!(!refused.status.success());
+    assert!(
+        text(&refused).1.contains("revoked this machine's token"),
+        "{}",
+        text(&refused).1
+    );
+}
+
+/// With USER_MEMORY_TEST_DOCKER_BINARY set, as above: after retire-shared a
+/// real Docker server stays healthy (the installer's rerun waits for it),
+/// this machine's client connects with its own token, and the shared token
+/// is refused.
+#[test]
+fn a_real_docker_server_retires_its_shared_file_when_opted_in() {
+    let Some(d) = RealDocker::start("retire") else {
+        return;
+    };
+    let port = closed_port().to_string();
+    let out = d.install(&["--local", "docker", "--port", &port]);
+    assert!(out.status.success(), "{}", text(&out).1);
+    let shared = fs::read_to_string(d.c.token_file()).unwrap();
+    let out = d.user_memory(&["host", "token", "retire-shared"]);
+    assert!(out.status.success(), "{}", text(&out).1);
+    let own = fs::read_to_string(d.c.token_file()).unwrap();
+    assert_ne!(own, shared);
+    assert_eq!(d.initialize_as(&port, "127.0.0.1"), "200");
+    let health = d.compose(&["ps", "--format", "{{.Health}}", "memory"], Stdio::null());
+    assert_ne!(String::from_utf8_lossy(&health.stdout).trim(), "unhealthy");
+    // The rerun waits for a healthy container and keeps this machine's token.
+    let out = d.install(&["--local", "docker", "--port", &port]);
+    assert!(out.status.success(), "{}", text(&out).1);
+    assert!(text(&out).0.contains("Remote MCP connection and tools: OK"));
+    assert_eq!(fs::read_to_string(d.c.token_file()).unwrap(), own);
+    fs::write(d.c.token_file(), &shared).unwrap();
+    assert_eq!(d.initialize_as(&port, "127.0.0.1"), "401");
 }

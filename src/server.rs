@@ -6,6 +6,7 @@
 //! checks.
 
 pub mod compose;
+pub mod tokens;
 
 pub use compose::Compose;
 
@@ -87,7 +88,9 @@ pub struct Install {
     /// The titles map for an upgrade from a store before schema version 3.
     #[arg(long)]
     titles: Option<PathBuf>,
-    /// Copy the server's access token here (mode 0600, in a 0700 folder).
+    /// This machine's client token file: kept while its token can write,
+    /// else the server's access token is copied here (mode 0600, in a 0700
+    /// folder), or this machine's own token once that file is retired.
     #[arg(long)]
     token_file: Option<PathBuf>,
 }
@@ -368,7 +371,7 @@ fn install(install: &Install) -> Result<()> {
     }
     compose.run(&["up", "-d", "--wait"])?;
     if let Some(token_file) = &install.token_file {
-        copy_token(&compose, token_file)?;
+        tokens::client_token(&compose, token_file, || copy_token(&compose, token_file))?;
     }
     Ok(())
 }

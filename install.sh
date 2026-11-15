@@ -543,9 +543,9 @@ EOF
     TOKEN_FILE=${XDG_CONFIG_HOME:-$HOME/.config}/user-memory/client-token
     if [ "$UPGRADE" = yes ] && [ -n "$SAVED_TOKEN" ] && [ -r "$SAVED_TOKEN" ]; then
         TOKEN_FILE=$SAVED_TOKEN
-    else
-        set -- "$@" --token-file "$TOKEN_FILE"
     fi
+    # The server keeps a token there that still works, or puts one there.
+    set -- "$@" --token-file "$TOKEN_FILE"
     "$tmp/user-memory" server install "$@" || exit 1
     # What the server now accepts, for the closing summary.
     ALLOWED_HOSTS=$(sed -n 's/^ *- --allowed-host=\(.*\)$/\1/p' "$DOCKER_DIR/compose.yaml")
@@ -916,16 +916,16 @@ EOF
             printf '\nOther machines reach it through your HTTPS proxy, which forwards to http://%s:%s, at:\n' "$BIND" "$PORT"
             printf '%s\n' "$ALLOWED_HOSTS" | sed 's|^|  https://|'
             cat <<EOF
-On each of them, save this machine's access token (from $TOKEN_FILE) in a
-file with mode 0600, then run:
+Give each of them its own token: run user-memory host token add NAME --out FILE
+here, copy FILE to that machine over a private channel, then run there:
   curl -fsSL $releases/latest/download/install.sh | sh -s -- --url https://$first --token-file /path/to/token
 EOF
         fi
         if [ "$server_only" = yes ]; then
             printf '
-This machine runs only the memory server; no agent app here uses it. Its access
-token is in %s; every machine that uses the server needs a copy.
-' "$TOKEN_FILE"
+This machine runs only the memory server; no agent app here uses it. Give each
+machine that uses it its own token: user-memory host token add NAME --out FILE.
+'
             [ -n "$ALLOWED_HOSTS" ] ||
                 printf 'Other machines reach it through an HTTPS proxy: put one in front of it, then run
 this installer again with --allowed-host HOST (and --bind ADDR for a proxy on

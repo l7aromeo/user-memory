@@ -422,6 +422,9 @@ pub async fn host(options: HostOptions) -> Result<()> {
         .context("the following required argument was not provided: --token-file")?;
     let token = host_token(&token_file)?;
     crate::connect(&db)?;
+    if let Some(folder) = db.parent() {
+        crate::server::tokens::sweep(folder);
+    }
     let listener = tokio::net::TcpListener::bind(options.listen).await?;
     let address = listener.local_addr()?;
     let mut allowed_hosts = vec![

@@ -202,6 +202,12 @@ impl ClientToken {
         self.last_used_at.unwrap_or(self.created_at) + INACTIVITY_EXPIRY.as_secs_i64()
     }
 
+    /// Whether the token can change memories at `now`: write scope, not
+    /// revoked, not expired.
+    pub fn can_write(&self, now: i64) -> bool {
+        self.scope == Scope::Write && self.revoked_at.is_none() && self.expired(now).is_none()
+    }
+
     /// Why the token no longer works at `now`, if it has expired: whichever
     /// expiry came first.
     pub fn expired(&self, now: i64) -> Option<Expired> {
@@ -289,9 +295,7 @@ pub fn retire_shared_file(conn: &Connection) -> Result<()> {
 /// Whether a client token can still change memories at `now`: write
 /// scope, not revoked, not expired.
 pub fn has_writer(conn: &Connection, now: i64) -> Result<bool> {
-    Ok(tokens(conn)?.iter().any(|token| {
-        token.scope == Scope::Write && token.revoked_at.is_none() && token.expired(now).is_none()
-    }))
+    Ok(tokens(conn)?.iter().any(|token| token.can_write(now)))
 }
 
 /// The most characters a client name has.

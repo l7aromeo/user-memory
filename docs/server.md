@@ -131,8 +131,8 @@ other than the host connect only through the proxy.
    ```output
    Other machines reach it through your HTTPS proxy, which forwards to http://127.0.0.1:8765, at:
    …
-   On each of them, save this machine's access token (from <token file>) in a
-   file with mode 0600, then run:
+   Give each of them its own token: run user-memory host token add NAME --out FILE
+   here, copy FILE to that machine over a private channel, then run there:
    ```
 
 2. Configure the proxy. The parts that matter for nginx:

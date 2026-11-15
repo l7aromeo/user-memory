@@ -147,6 +147,8 @@ fn the_docker_workflow_runs_the_real_docker_installer_test() {
         [
             "a_real_docker_server_installs_upgrades_and_uninstalls_when_opted_in",
             "a_real_docker_server_only_host_when_opted_in",
+            "a_real_docker_server_issues_client_tokens_when_opted_in",
+            "a_real_docker_server_retires_its_shared_file_when_opted_in",
         ],
         "the workflow's filter {name} must match the real Docker tests"
     );

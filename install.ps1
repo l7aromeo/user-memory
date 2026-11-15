@@ -669,9 +669,9 @@ SHA-256 against the release before running it.
         $state.TokenUsed = $state.TokenPath
         if ($state.Upgrade -and $state.SavedToken -and (Test-Path -LiteralPath $state.SavedToken)) {
             $state.TokenUsed = $state.SavedToken
-        } else {
-            $arguments += @('--token-file', $state.TokenPath)
         }
+        # The server keeps a token there that still works, or puts one there.
+        $arguments += @('--token-file', $state.TokenUsed)
         # The store check may ask about the titles map, so the server
         # command keeps this console's input.
         Invoke-Native { & $state.Downloaded @arguments }
@@ -707,16 +707,16 @@ SHA-256 against the release before running it.
                 Write-Host ''
                 Write-Host "Other machines reach it through your HTTPS proxy, which forwards to http://$($state.Bind):$($state.Port), at:"
                 foreach ($name in $state.Hosts) { Write-Host "  https://$name" }
-                Write-Host "On each of them, save this machine's access token (from $($state.TokenUsed)) in a"
-                Write-Host 'file only you can read, then run, on macOS or Linux:'
+                Write-Host 'Give each of them its own token: run user-memory host token add NAME --out FILE'
+                Write-Host 'here, copy FILE to that machine over a private channel, then run there, on macOS or Linux:'
                 Write-Host "  curl -fsSL $Releases/latest/download/install.sh | sh -s -- --url https://$($state.Hosts[0]) --token-file /path/to/token"
                 Write-Host 'or on Windows:'
                 Write-Host "  & ([scriptblock]::Create((irm $Releases/latest/download/install.ps1))) -Url https://$($state.Hosts[0]) -TokenFile C:\path\to\token"
             }
             if ($ServerOnlyHost) {
                 Write-Host ''
-                Write-Host 'This machine runs only the memory server; no agent app here uses it. Its access'
-                Write-Host "token is in $($state.TokenUsed); every machine that uses the server needs a copy."
+                Write-Host 'This machine runs only the memory server; no agent app here uses it. Give each'
+                Write-Host 'machine that uses it its own token: user-memory host token add NAME --out FILE.'
                 if ($state.Hosts.Count -eq 0) {
                     Write-Host 'Other machines reach it through an HTTPS proxy: put one in front of it, then run'
                     Write-Host 'this installer again with -AllowedHost HOST (and -Bind ADDR for a proxy on'
