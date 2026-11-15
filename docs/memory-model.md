@@ -314,6 +314,16 @@ user-memory import - --apply < backup.json
 user-memory import old-backup.json --titles titles.json   # format version 1
 ```
 
+The preview, and the applied summary, list under `rules` the standing
+rules the import adds (`add`) and the stored ones it replaces (`replace`),
+by id and title: explicit, confirmed preferences, constraints and values,
+the memories the index lists under Rules and the instruction files hold.
+A conflict counts when either version is a rule, under the title of the
+version that is one, the file's when both are. Under `abort`, `replace`
+lists what `use-file` would replace; under `keep-store` it is empty. Each
+list names 20 and counts the rest under `unlisted` (`{"add": 4,
+"replace": 0}`). An import that touches no rule has no `rules`.
+
 An applied import that adds or replaces memories has a name, which its
 summary gives as `import`: the file's name, the time and the start of the
 file's SHA-256, such as `shared.json@2026-11-15T10:42:07Z.3f9a1c2b`. The
