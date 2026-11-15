@@ -155,11 +155,15 @@ impl Position {
         (store == digest(store_id)).then_some((change, seq))
     }
 
+    /// The change this position names, whatever its store.
+    pub fn change(&self) -> Option<i64> {
+        self.parts().map(|(_, change, _)| change)
+    }
+
     /// Whether this position is one of the store `now` is a position of, at
     /// or before `now`: what was read at it holds nothing that store has
     /// not seen. Another store's, or one past `now`, as after a backup was
     /// put back by hand, is not.
-    #[cfg(test)]
     pub fn within(&self, now: &Position) -> bool {
         match (self.parts(), now.parts()) {
             (Some((store, change, _)), Some((now_store, now_change, _))) => {

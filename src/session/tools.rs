@@ -3,11 +3,23 @@
 //! payload and decides by the tool's name, here in the binary, where a
 //! release can change the list with no new review of the client's hooks.
 //! For a tool it does not act on, the hook reads its input and exits,
-//! printing nothing: in Codex it runs before every tool call.
+//! printing nothing: in Codex it runs before every tool call. Before
+//! returning, `post-tool-use` and `pre-tool-use` for the tools it acts on
+//! keep the session's delivery index current (#175), printing nothing.
 
 use super::HookClient;
 use serde::Deserialize;
-use std::io::{IsTerminal, Read};
+use std::{
+    io::{IsTerminal, Read},
+    time::{Duration, Instant},
+};
+
+/// The most a tool hook spends keeping the delivery index current (#117,
+/// #175), from its start: a refresh past it renames nothing. A refresh
+/// costs 5 to 12 ms on macOS at 10,000 memories, process start included;
+/// the rest is room for Windows' slower process start and file scanning,
+/// and a loaded machine.
+pub(crate) const TOOL_HOOK_LIMIT: Duration = Duration::from_millis(100);
 
 /// The tools Claude Code's pre-tool hook acts on: its shells (`Bash`,
 /// `PowerShell` on Windows, and `Monitor`, which runs a command) and the
@@ -59,19 +71,42 @@ pub(crate) fn acts_on(client: HookClient, tool: &str) -> bool {
 /// `context_limit` (the client's default room when `None`): nothing for a
 /// tool it does not act on, and nothing yet for one it does.
 pub fn pre_tool_use(client: HookClient, _context_limit: Option<usize>) -> String {
+    let started = Instant::now();
     let payload = payload();
     let Some(_tool) = tool_name(&payload).filter(|tool| acts_on(client, tool)) else {
         return String::new();
     };
+    keep_current(client, &payload, started);
     String::new()
 }
 
 /// What `client`'s post-tool hook prints for the result on stdin, within
 /// its `context_limit` (the client's default room when `None`): nothing
 /// yet.
-pub fn post_tool_use(_client: HookClient, _context_limit: Option<usize>) -> String {
-    drain();
+pub fn post_tool_use(client: HookClient, _context_limit: Option<usize>) -> String {
+    let started = Instant::now();
+    let payload = payload();
+    keep_current(client, &payload, started);
     String::new()
+}
+
+/// Keeps the session's delivery overlay current (#175): the scope its last
+/// prompt or start gave it, read from its scope file, refreshed under
+/// [`TOOL_HOOK_LIMIT`] from `started`, never waiting for the lock. A session
+/// with no scope file, as one started by an earlier version, or a server's
+/// store, does nothing. Prints nothing.
+fn keep_current(client: HookClient, payload: &[u8], started: Instant) {
+    if !matches!(crate::setup::configured_remote(), Ok(None)) {
+        return;
+    }
+    let Some(snapshot) = super::session_file(client, payload) else {
+        return;
+    };
+    let Some(projects) = super::live::load_scope(&super::live::scope_path(&snapshot)) else {
+        return;
+    };
+    let deadline = started + super::hook_time(TOOL_HOOK_LIMIT);
+    let _ = crate::memory::delivery_files::refresh(&super::db_path(), &projects, deadline, false);
 }
 
 /// Reads a hook's payload whole and keeps nothing of it: for a hook with

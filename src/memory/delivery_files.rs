@@ -26,7 +26,7 @@ use std::{
     fs::{self, File, OpenOptions, TryLockError},
     io::{self, Seek, Write},
     path::{Path, PathBuf},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 /// The folder in the state folder.
@@ -49,6 +49,33 @@ const LOCK_POLL: Duration = Duration::from_millis(5);
 /// never stops either.
 #[cfg(windows)]
 pub(crate) const DELIVERY_REPLACE_WAIT: Duration = Duration::from_secs(2);
+
+/// How long a store's delivery file may go unwritten before session start
+/// deletes it: a scope no session used for a day keeps no copy of its
+/// memories' terms on this machine, and building it again costs about 48 ms
+/// at 10,000 memories.
+pub(crate) const DELIVERY_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// The most memories an overlay holds the rows of. Overlays of 100, 500 and
+/// 2,000 memories measured 61, 238 and 746 KiB at 10,000 memories; a lookup
+/// in one of 1,000 costs a few milliseconds more than in an empty one.
+/// Memories past it are hidden from the base and wait for session start's
+/// new base: late, never wrong.
+pub(crate) const OVERLAY_MEMORIES: usize = 1_000;
+
+/// [`OVERLAY_MEMORIES`], which debug builds take from
+/// `USER_MEMORY_TEST_OVERLAY_MEMORIES`, so a test reaches the bound with a
+/// few memories.
+fn overlay_memories() -> usize {
+    #[cfg(debug_assertions)]
+    if let Some(bound) = std::env::var("USER_MEMORY_TEST_OVERLAY_MEMORIES")
+        .ok()
+        .and_then(|bound| bound.parse().ok())
+    {
+        return bound;
+    }
+    OVERLAY_MEMORIES
+}
 
 /// The extensions of the files.
 const BASE: &str = "index";
@@ -84,6 +111,12 @@ pub(crate) struct Lock {
 }
 
 impl Files {
+    /// The files of the store named `identity` ([`paths::store_identity`]);
+    /// none without a state folder.
+    pub(crate) fn of(identity: &str) -> Option<Self> {
+        Some(Self::in_dir(paths::state_dir()?.join(FOLDER), identity))
+    }
+
     fn in_dir(dir: PathBuf, identity: &str) -> Self {
         Self {
             dir,
@@ -162,6 +195,7 @@ impl Files {
         Lock { _file: file }
     }
 
+    #[cfg(test)]
     /// The process id the lock's holder wrote; none when the file holds
     /// none, or cannot be read while held, as on Windows.
     pub(crate) fn holder(&self) -> Option<u32> {
@@ -217,6 +251,72 @@ impl Files {
         remove(path)
     }
 
+    /// Deletes `scope`'s base, then its overlay; a file that cannot be
+    /// deleted is named in the void mark, so no reader uses it.
+    pub(crate) fn clear(&self, lock: &Lock, scope: &[String]) -> io::Result<()> {
+        let mut left = self.voided();
+        for path in [self.base(scope), self.overlay(scope)] {
+            match self.remove(lock, &path) {
+                Ok(()) => {}
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(_) => {
+                    let name = path.file_name().unwrap_or_default().to_string_lossy();
+                    if !left.iter().any(|v| *v == name) {
+                        left.push(name.into_owned());
+                    }
+                }
+            }
+        }
+        self.void(lock, &left)
+    }
+
+    /// This store's files in the folder, by name.
+    fn own(&self) -> Vec<(String, PathBuf)> {
+        let Ok(entries) = fs::read_dir(&self.dir) else {
+            return Vec::new();
+        };
+        let (scoped, single) = (format!("{}-", self.key), format!("{}.", self.key));
+        entries
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                (name.starts_with(&scoped) || name.starts_with(&single))
+                    .then(|| (name, entry.path()))
+            })
+            .collect()
+    }
+
+    /// What a writer holding the lock clears before its own work: the files
+    /// the void mark names, then the mark once none is left; every file
+    /// being written, since only the holder can have one under way, so any
+    /// other was left by a writer that was killed; and, when `aged` is
+    /// given, every base and overlay not written for [`DELIVERY_AGE`]
+    /// before it. A file that cannot be deleted stays named in the mark.
+    pub(crate) fn tidy(&self, lock: &Lock, aged: Option<SystemTime>) {
+        let mut left = Vec::new();
+        for name in self.voided() {
+            match self.remove(lock, &self.dir.join(&name)) {
+                Err(err) if err.kind() != io::ErrorKind::NotFound => left.push(name),
+                _ => {}
+            }
+        }
+        let _ = self.void(lock, &left);
+        for (name, path) in self.own() {
+            let partial = name.ends_with(&format!(".{PARTIAL}"));
+            let old = aged.is_some_and(|now| {
+                let scoped = path.extension().is_some_and(|e| e == BASE || e == OVERLAY);
+                let written = fs::metadata(&path).and_then(|m| m.modified());
+                scoped
+                    && written.is_ok_and(|written| {
+                        now.duration_since(written).unwrap_or_default() > DELIVERY_AGE
+                    })
+            });
+            if partial || old {
+                let _ = self.remove(lock, &path);
+            }
+        }
+    }
+
     /// The base of `scope` and the overlay made for it, as a reader takes
     /// them, the store being at `now`: none when the base is missing,
     /// voided, damaged, of another scope, or of another store or a position
@@ -245,6 +345,177 @@ impl Files {
         View::new(base, overlay)
     }
 }
+
+/// What session start did with its scope's delivery index.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Started {
+    /// The base was there for the store's position, with no overlay to fold.
+    Current,
+    /// A new base was built and renamed into place.
+    Built,
+    /// Another writer kept the lock past the deadline, the store's keyword
+    /// index was not current, or the build ended past the deadline: nothing
+    /// was renamed, and the next prompt or session start builds it.
+    Left,
+}
+
+/// Session start's part (#175), for the local store at `db` and the
+/// session's `projects`: under the store's lock, waited for until
+/// `deadline`, clears what [`Files::tidy`] clears, then builds the scope's
+/// base again when it is missing, unusable, or has an overlay that holds a
+/// change, and puts an empty overlay made for the new base beside it. The build reads the store; it
+/// is never renamed into place past `deadline`.
+pub(crate) fn at_session_start(
+    db: &Path,
+    projects: &[String],
+    deadline: Instant,
+) -> io::Result<Started> {
+    let Some(files) = Files::of(&paths::store_identity(None, db)) else {
+        return Ok(Started::Left);
+    };
+    let scope = scope(projects);
+    let Some(lock) = files.lock_until(deadline)? else {
+        return Ok(Started::Left);
+    };
+    files.tidy(&lock, Some(SystemTime::now()));
+    let Some(now) = super::changes::position(db) else {
+        return Ok(Started::Left);
+    };
+    let current = files.open(&scope, &now).is_some_and(|view| {
+        view.overlay
+            .as_ref()
+            .is_none_or(|overlay| overlay.len() == 0 && overlay.header.skip.is_empty())
+    });
+    if current {
+        return Ok(Started::Current);
+    }
+    let Ok(built) = super::delivery::build(db, &scope, |id, change| {
+        Position::at(id, change, 0).as_str().to_owned()
+    }) else {
+        return Ok(Started::Left);
+    };
+    if Instant::now() > deadline {
+        return Ok(Started::Left);
+    }
+    let header = DeliveryIndex::read(built.clone())
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?
+        .header;
+    let empty = super::delivery::empty_overlay(&header)
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+    files.write(&lock, &files.base(&scope), &built)?;
+    files.write(&lock, &files.overlay(&scope), &empty)?;
+    Ok(Started::Built)
+}
+
+/// What a hook's refresh of its scope's overlay did.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Refreshed {
+    /// The overlay already holds the store's latest change.
+    Unchanged,
+    /// A new overlay was renamed into place.
+    Done,
+    /// Another writer holds the lock: nothing was written, and the files
+    /// are used as they are.
+    Busy,
+    /// There is no usable base: the next prompt or session start builds
+    /// one.
+    NoBase,
+    /// The store no longer says what changed since the base, or its keyword
+    /// index is not current: nothing was written, and the next prompt or
+    /// session start builds the base again.
+    Behind,
+    /// The deadline passed before the rename: nothing was renamed.
+    Late,
+    /// The base held words a removal took out, so it and its overlay were
+    /// deleted.
+    Cleared,
+}
+
+/// A hook's refresh of its scope's overlay (#175), for the local store at
+/// `db` and the scope `projects`: when the store's marker names a change
+/// the overlay does not hold, takes the store's lock (once, unless `wait`,
+/// then until `deadline`), reads the old files again under it, and renames
+/// a new overlay of the memories changed since the base's position into
+/// place, unless `deadline` has passed. A base holding words a removal took
+/// out is deleted with its overlay instead. Never builds a base.
+pub(crate) fn refresh(
+    db: &Path,
+    projects: &[String],
+    deadline: Instant,
+    wait: bool,
+) -> io::Result<Refreshed> {
+    let Some(files) = Files::of(&paths::store_identity(None, db)) else {
+        return Ok(Refreshed::NoBase);
+    };
+    let scope = scope(projects);
+    // Before the lock: one small read says whether there is anything to do.
+    let marked = super::changes::marked(db);
+    let held = DeliveryIndex::load(&files.overlay(&scope)).ok();
+    let unchanged = marked
+        .as_ref()
+        .zip(held.as_ref())
+        .is_some_and(|(marked, overlay)| {
+            Position::kept(overlay.header.position.clone()).same_change(marked)
+        });
+    if unchanged && files.voided().is_empty() {
+        return Ok(Refreshed::Unchanged);
+    }
+    let lock = if wait {
+        files.lock_until(deadline)?
+    } else {
+        files.try_lock()?
+    };
+    let Some(lock) = lock else {
+        return Ok(Refreshed::Busy);
+    };
+    #[cfg(debug_assertions)]
+    super::hold_for_tests(HOLD_REFRESH);
+    files.tidy(&lock, None);
+    let Some(now) = super::changes::position(db) else {
+        return Ok(Refreshed::NoBase);
+    };
+    let Some(view) = files.open(&scope, &now) else {
+        return Ok(Refreshed::NoBase);
+    };
+    if view
+        .overlay
+        .as_ref()
+        .is_some_and(|overlay| Position::kept(overlay.header.position.clone()).same_change(&now))
+    {
+        return Ok(Refreshed::Unchanged);
+    }
+    let since = Position::kept(view.base.header.position.clone())
+        .change()
+        .unwrap_or_default();
+    let overlay =
+        match super::delivery::overlay(db, &view.base, since, overlay_memories(), |id, change| {
+            Position::at(id, change, 0).as_str().to_owned()
+        }) {
+            Ok(overlay) => overlay,
+            Err(super::delivery::Error::Pruned | super::delivery::Error::NotCurrent) => {
+                return Ok(Refreshed::Behind);
+            }
+            Err(super::delivery::Error::Store(_) | super::delivery::Error::File(_)) => {
+                return Ok(Refreshed::Busy);
+            }
+            Err(super::delivery::Error::Format) => return Ok(Refreshed::NoBase),
+        };
+    if overlay.stale {
+        files.clear(&lock, &scope)?;
+        return Ok(Refreshed::Cleared);
+    }
+    if Instant::now() > deadline {
+        return Ok(Refreshed::Late);
+    }
+    files.write(&lock, &files.overlay(&scope), &overlay.bytes)?;
+    Ok(Refreshed::Done)
+}
+
+/// Names, in debug builds only, the file that holds a hook's refresh after
+/// it took the lock and before it reads the old files again, so a test can
+/// run a removal against a hook holding the lock.
+#[cfg(debug_assertions)]
+pub(crate) const HOLD_REFRESH: &str = "USER_MEMORY_HOLD_REFRESH";
 
 /// Renames `from` over `to`, on Windows trying again for up to
 /// [`DELIVERY_REPLACE_WAIT`] while another program holds either file.

@@ -210,7 +210,7 @@ fallback() {
     state=${XDG_STATE_HOME:-$HOME/.local/state}/user-memory
     if [ -d "$state" ] && ! is_link "$state"; then
         [ "$dry_run" = yes ] || rm -rf "$state"
-        removed "session snapshots ($state)"
+        removed "session snapshots and the delivery index ($state)"
     fi
     token=${XDG_CONFIG_HOME:-$HOME/.config}/user-memory/client-token
     if [ -f "$token" ] && ! is_link "$token"; then

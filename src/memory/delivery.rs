@@ -13,18 +13,11 @@ use crate::memory::index::{
     passages::SLOTS,
     stems::{Field, stamp, token},
 };
-use rusqlite::{Connection, OpenFlags, params_from_iter};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params_from_iter};
 use std::{collections::HashMap, fmt, fs, path::Path};
 
-/// How the index keys a term: a stem or an anchor, as its hex token.
-pub(in crate::memory) fn key(anchor: bool, term: &str) -> Vec<u8> {
-    let mut key = vec![prefix(anchor)];
-    key.extend(token(term).into_bytes());
-    key
-}
-
 /// The first byte of a term's key: an anchor's sorts before a stem's.
-fn prefix(anchor: bool) -> u8 {
+pub(in crate::memory) fn prefix(anchor: bool) -> u8 {
     if anchor { b'a' } else { b's' }
 }
 
@@ -85,6 +78,9 @@ pub(crate) enum Error {
     /// The store's keyword index is missing, stale or has memories queued,
     /// or the store counts no changes.
     NotCurrent,
+    /// The store no longer says which memories changed since the base's
+    /// position: it pruned the record of removals made before it.
+    Pruned,
     /// The file isn't a delivery index this code wrote, or was cut short.
     Format,
 }
@@ -99,6 +95,7 @@ impl fmt::Display for Error {
                 "the store's keyword index isn't current for this code; run `user-memory reindex`"
             ),
             Error::Format => write!(f, "the delivery index file is not one this code wrote"),
+            Error::Pruned => write!(f, "the store no longer counts the changes since this base"),
         }
     }
 }
@@ -180,6 +177,11 @@ impl Builder {
 
     /// Adds the term keyed `key` to the last row, held there in `field`.
     fn term(&mut self, key: &[u8], field: Field) -> Result<(), Error> {
+        self.term_field(key, field as u8)
+    }
+
+    /// [`Builder::term`] with the field as its byte.
+    fn term_field(&mut self, key: &[u8], field: u8) -> Result<(), Error> {
         let row = self.rows.len().checked_sub(1).ok_or(Error::Format)?;
         let memory = self.rows[row].memory;
         let term = match self.numbers.get(key) {
@@ -194,7 +196,7 @@ impl Builder {
         self.postings.push(Posting {
             term,
             row: u32::try_from(row).map_err(|_| Error::Format)?,
-            field: field as u8,
+            field,
             memory,
         });
         Ok(())
@@ -368,10 +370,10 @@ impl DeliveryIndex {
             for row in &memory.rows {
                 built.row(m, row.slot, row.start, row.length)?;
                 for (stem, field) in &row.stems {
-                    built.term(&key(false, stem), *field)?;
+                    built.term(&super::matcher::key(false, stem), *field)?;
                 }
                 for anchor in &row.anchors {
-                    built.term(&key(true, anchor), Field::Body)?;
+                    built.term(&super::matcher::key(true, anchor), Field::Body)?;
                 }
             }
         }
@@ -503,6 +505,70 @@ impl DeliveryIndex {
         })
     }
 
+    /// The rows of each memory in `memories`, by memory, each with its terms
+    /// (key and field) sorted: one pass over every posting, marking the
+    /// rows sought, whatever their number.
+    fn terms_of(&self, memories: &[usize]) -> Result<HashMap<usize, Vec<Terms>>, Error> {
+        let mut sought = vec![None; self.rows];
+        let mut found: HashMap<usize, Vec<Terms>> = HashMap::new();
+        for &m in memories {
+            // A memory's rows are contiguous, in memory order.
+            let (mut low, mut high) = (0, self.rows);
+            while low < high {
+                let mid = (low + high) / 2;
+                if (self.row(mid)?.memory as usize) < m {
+                    low = mid + 1;
+                } else {
+                    high = mid;
+                }
+            }
+            let rows = found.entry(m).or_default();
+            let mut r = low;
+            while r < self.rows && self.row(r)?.memory as usize == m {
+                let row = self.row(r)?;
+                sought[r] = Some((m, rows.len()));
+                rows.push(Terms {
+                    slot: i64::from(row.slot),
+                    start: row.start,
+                    length: row.length,
+                    keys: Vec::new(),
+                });
+                r += 1;
+            }
+        }
+        for e in 0..self.entries {
+            let (key, _, first, count) = self.entry(e)?;
+            for p in first..first + count {
+                let at = self.postings_at + p * POSTING_BYTES;
+                let row = u32_at(&self.bytes, at)? as usize;
+                if let Some(Some((m, i))) = sought.get(row).copied() {
+                    let field = *self.bytes.get(at + 4).ok_or(Error::Format)?;
+                    if let Some(rows) = found.get_mut(&m) {
+                        rows[i].keys.push((key.to_vec(), field));
+                    }
+                }
+            }
+        }
+        for rows in found.values_mut() {
+            for row in rows {
+                row.keys.sort();
+            }
+        }
+        Ok(found)
+    }
+
+    /// The position of memory `id` in the file, if it holds it.
+    fn find(&self, ids: &HashMap<String, usize>, id: &str) -> Option<usize> {
+        ids.get(id).copied()
+    }
+
+    /// Every memory's id, with its position in the file.
+    fn ids(&self) -> Result<HashMap<String, usize>, Error> {
+        (0..self.memories)
+            .map(|m| Ok((self.id(m)?.to_owned(), m)))
+            .collect()
+    }
+
     /// Entry `e` of the directory: its key, how many memories hold it, and
     /// its first posting and their count.
     pub(in crate::memory) fn entry(&self, e: usize) -> Result<(&[u8], usize, usize, usize), Error> {
@@ -520,6 +586,220 @@ impl DeliveryIndex {
             u32_at(&self.bytes, at + 16)? as usize,
         ))
     }
+}
+
+/// One row of a memory with its terms, as a file holds them or as the store
+/// holds them now: compared to tell a reworded memory.
+#[derive(Debug, PartialEq, Eq)]
+struct Terms {
+    slot: i64,
+    start: u32,
+    length: u32,
+    /// Each term's key and the field holding it there, sorted.
+    keys: Vec<(Vec<u8>, u8)>,
+}
+
+/// An overlay file, and whether its read found the base holding words it
+/// should not.
+pub(crate) struct Overlay {
+    pub(crate) bytes: Vec<u8>,
+    /// The base holds a memory removed since its position, or one whose
+    /// terms differ from the memory's current ones: a writer that knew
+    /// nothing of these files, or one killed before it rewrote them, left
+    /// words a removal took out. Such a base is deleted, never used.
+    pub(crate) stale: bool,
+}
+
+/// The memories changed since a position that a scope can see, in key
+/// order: [`CANDIDATES`] for the ids in `?2`.
+const CHANGED_CANDIDATES: &str = "SELECT k.key,m.id FROM search_keys k JOIN memories m ON m.id=k.id \
+     WHERE m.status IN ('confirmed','tentative') AND m.source!='inferred' \
+     AND m.memory_type NOT IN ('behavior','pattern') \
+     AND (m.scope='global' OR (m.scope='project' AND m.project IN (SELECT value FROM json_each(?1)))) \
+     AND m.id IN (SELECT value FROM json_each(?2)) \
+     ORDER BY k.key";
+
+/// A JSON array of `items`, for `json_each`.
+fn json_array(items: &[String]) -> String {
+    format!(
+        "[{}]",
+        items
+            .iter()
+            .map(|p| format!("\"{}\"", p.replace('\\', "\\\\").replace('"', "\\\"")))
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+/// The rows of the memory keyed `key` in the store's keyword index, with
+/// their terms.
+fn current_rows(conn: &Connection, key: i64) -> Result<Vec<Terms>, Error> {
+    let mut statement = conn.prepare_cached(
+        "SELECT rowid,category,title,type,body,anchors,start,length FROM search_words \
+         WHERE rowid BETWEEN ?1 AND ?2 ORDER BY rowid",
+    )?;
+    let mut found = statement.query([key * SLOTS, key * SLOTS + SLOTS - 1])?;
+    let (mut term, mut raw) = (Vec::new(), Vec::new());
+    let mut rows = Vec::new();
+    while let Some(r) = found.next()? {
+        let number: i64 = r.get(0)?;
+        let start: Option<i64> = r.get(6)?;
+        let length: Option<i64> = r.get(7)?;
+        let mut keys = Vec::new();
+        for (c, field) in Field::ALL.into_iter().enumerate() {
+            for token in column(r, c + 1)?.split_whitespace() {
+                stored_key(false, token, &mut term, &mut raw);
+                keys.push((term.clone(), field as u8));
+            }
+        }
+        for token in column(r, 5)?.split_whitespace() {
+            stored_key(true, token, &mut term, &mut raw);
+            keys.push((term.clone(), Field::Body as u8));
+        }
+        rows.push(Terms {
+            slot: number.rem_euclid(SLOTS),
+            start: u32::try_from(start.unwrap_or(0)).map_err(|_| Error::Format)?,
+            length: u32::try_from(length.unwrap_or(0)).map_err(|_| Error::Format)?,
+            keys,
+        });
+    }
+    Ok(rows)
+}
+
+/// The overlay of `base` from the store at `db`, read without writing in
+/// one transaction: the rows of at most `limit` memories the scope can see
+/// that changed after the base's change `since`, each as it is now, and
+/// every memory changed since in its skip list, so the base's older rows
+/// of it are never used. A memory past `limit` is in the skip list alone,
+/// and waits for the next base. With the position `position` makes of the
+/// store's id and latest change, and whether the base holds words a removal
+/// took out ([`Overlay::stale`]).
+pub(crate) fn overlay(
+    db: &Path,
+    base: &DeliveryIndex,
+    since: i64,
+    limit: usize,
+    position: impl FnOnce(&str, i64) -> String,
+) -> Result<Overlay, Error> {
+    let mut conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let conn = conn.transaction()?;
+    let (store_id, change, pruned): (String, i64, i64) = conn
+        .query_row(
+            "SELECT store_id,last_change,pruned_through FROM store_changes WHERE id=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .map_err(|_| Error::NotCurrent)?;
+    if since < pruned {
+        return Err(Error::Pruned);
+    }
+    let current: Option<String> = conn
+        .query_row("SELECT stemmed_by FROM search_state WHERE id=1", [], |r| {
+            r.get(0)
+        })
+        .ok();
+    let queued: i64 = conn.query_row("SELECT count(*) FROM search_pending", [], |r| r.get(0))?;
+    if current.as_deref() != Some(stamp().as_str()) || queued > 0 {
+        return Err(Error::NotCurrent);
+    }
+    let mut changed: Vec<(String, bool)> = Vec::new();
+    let mut statement = conn.prepare(
+        "SELECT memory_id,removed_at IS NOT NULL FROM memory_changes WHERE change>?1 ORDER BY change",
+    )?;
+    let mut rows = statement.query([since])?;
+    while let Some(r) = rows.next()? {
+        changed.push((r.get(0)?, r.get(1)?));
+    }
+    drop(rows);
+    let skip: Vec<String> = changed.iter().map(|(id, _)| id.clone()).collect();
+    let stale = !changed.is_empty() && holds_removed(&conn, base, &changed)?;
+    let mut ids: Vec<String> = Vec::new();
+    let mut built = Builder::default();
+    let mut statement = conn.prepare(CHANGED_CANDIDATES)?;
+    let mut found = statement.query(params_from_iter([
+        json_array(&base.header.projects),
+        json_array(&skip),
+    ]))?;
+    while let Some(r) = found.next()?
+        && ids.len() < limit
+    {
+        let key: i64 = r.get(0)?;
+        let m = ids.len();
+        ids.push(r.get(1)?);
+        for row in current_rows(&conn, key)? {
+            built.row(m, row.slot, row.start as usize, row.length as usize)?;
+            for (term, field) in &row.keys {
+                built.term_field(term, *field)?;
+            }
+        }
+    }
+    let position = position(&store_id, change);
+    let header = Header {
+        part: Part::Overlay,
+        position,
+        made_for: base.header.position.clone(),
+        projects: base.header.projects.clone(),
+        skip,
+    };
+    Ok(Overlay {
+        bytes: built.bytes(&header, ids.iter().map(String::as_str))?,
+        stale,
+    })
+}
+
+/// Whether `base` holds a memory of `changed` (each id, and whether it was
+/// removed) that was removed, or whose terms now differ from the base's.
+fn holds_removed(
+    conn: &Connection,
+    base: &DeliveryIndex,
+    changed: &[(String, bool)],
+) -> Result<bool, Error> {
+    let ids = base.ids()?;
+    let mut held = Vec::new();
+    for (id, removed) in changed {
+        let Some(m) = base.find(&ids, id) else {
+            continue;
+        };
+        if *removed {
+            return Ok(true);
+        }
+        held.push((m, id));
+    }
+    if held.is_empty() {
+        return Ok(false);
+    }
+    let then = base.terms_of(&held.iter().map(|(m, _)| *m).collect::<Vec<_>>())?;
+    for (m, id) in held {
+        let key: Option<i64> = conn
+            .query_row("SELECT key FROM search_keys WHERE id=?1", [id], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        let Some(key) = key else {
+            return Ok(true);
+        };
+        let mut now = current_rows(conn, key)?;
+        for row in &mut now {
+            row.keys.sort();
+        }
+        if then.get(&m).map(Vec::as_slice) != Some(now.as_slice()) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The overlay of no change made for the base whose header is `base`: what
+/// a writer puts beside a base it built.
+pub(crate) fn empty_overlay(base: &Header) -> Result<Vec<u8>, Error> {
+    let header = Header {
+        part: Part::Overlay,
+        position: base.position.clone(),
+        made_for: base.position.clone(),
+        projects: base.projects.clone(),
+        skip: Vec::new(),
+    };
+    Builder::default().bytes(&header, std::iter::empty())
 }
 
 /// A scope's base and the overlay made for it, as a reader takes them: the
@@ -586,14 +866,7 @@ pub(crate) fn build(
     if current.as_deref() != Some(stamp().as_str()) || queued > 0 {
         return Err(Error::NotCurrent);
     }
-    let scope = format!(
-        "[{}]",
-        projects
-            .iter()
-            .map(|p| format!("\"{}\"", p.replace('\\', "\\\\").replace('"', "\\\"")))
-            .collect::<Vec<_>>()
-            .join(",")
-    );
+    let scope = json_array(projects);
     let mut keys: HashMap<i64, usize> = HashMap::new();
     let mut ids: Vec<String> = Vec::new();
     let mut statement = conn.prepare(CANDIDATES)?;
@@ -737,7 +1010,11 @@ mod tests {
         ] {
             for anchor in [false, true] {
                 stored_key(anchor, token, &mut stored, &mut raw);
-                assert_eq!(stored, key(anchor, &decode(token)), "{token:?}");
+                assert_eq!(
+                    stored,
+                    crate::memory::matcher::key(anchor, &decode(token)),
+                    "{token:?}"
+                );
             }
         }
     }

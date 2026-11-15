@@ -190,7 +190,7 @@ enum Command {
         #[command(flatten)]
         limit: ContextLimit,
     },
-    /// Read a tool call before it runs, for the client's tool hook; always exits successfully.
+    /// Read a tool call before it runs, for the client's tool hook, and keep the session's delivery index current; always exits successfully.
     PreToolUse {
         /// Client running the hook, with its JSON payload on stdin.
         #[arg(long, value_enum)]
@@ -198,7 +198,7 @@ enum Command {
         #[command(flatten)]
         limit: ContextLimit,
     },
-    /// Read a tool call's result, for the client's tool hook; always exits successfully.
+    /// Read a tool call's result, for the client's tool hook, and keep the session's delivery index current; always exits successfully.
     PostToolUse {
         /// Client running the hook, with its JSON payload on stdin.
         #[arg(long, value_enum)]

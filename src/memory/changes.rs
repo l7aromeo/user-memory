@@ -223,7 +223,6 @@ pub fn marked(db: &Path) -> Option<super::Position> {
     read_marker(db).map(|state| super::Position::at(&state.store_id, state.last_change, 0))
 }
 
-#[cfg(test)]
 /// The position the store at `db` is at, read from the store itself and not
 /// its marker, which a store put back by hand leaves as it was; none when
 /// it cannot be read or counts no changes.

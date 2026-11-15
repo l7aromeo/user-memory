@@ -367,8 +367,10 @@ existing category for a new memory (`workflow`, not a new `process`). With
   one per store or server the session used, the key a hash of the store's
   path or the server's address (mode 0600, directory 0700; on Windows
   `%LOCALAPPDATA%\user-memory\state\sessions\`, with an access list allowing
-  only the user). Snapshots untouched for 30 days are removed
-  when any is written.
+  only the user). Beside it, a `.scope` file of the same name repeats the
+  session's project keys, one per line, for the tool hooks. Snapshots and
+  their `.scope` files untouched for 30 days are removed when any is
+  written.
 
 ### Changes during a session
 

@@ -46,14 +46,16 @@ On each machine running the client:
 |---|---|
 | `~/.config/user-memory/client-token` | The access token, readable only by you. |
 | `~/.local/bin/.user-memory.json` | Setup's choices: the server address or store path, clients, hooks, skill. |
-| `~/.local/state/user-memory/sessions/` | For each recent session, the id, last change, status and title of each memory it saw, so the change notice can compare. A file's name holds a key made from the store's path or the server's address (a hash, not the path or address itself). Files unused for 30 days are removed. |
+| `~/.local/state/user-memory/sessions/` | For each recent session, the id, last change, status and title of each memory it saw, so the change notice can compare, and in a second file the keys of its projects, which the first already holds, for the tool hooks. A file's name holds a key made from the store's path or the server's address (a hash, not the path or address itself). Files unused for 30 days are removed. |
 | `~/.local/state/user-memory/handover-*.json` | Only while an open session moves to a new binary after an upgrade: the session's handshake, the tools it was given and the input read but not yet answered, which can hold a memory being recorded. Readable only by you. The new binary deletes it as it starts; if a dying process leaves one behind, the next session to start deletes it once it is ten minutes old. |
+| `~/.local/state/user-memory/delivery/` | For each store on this machine and each set of projects a session worked in, the delivery index: every word of the global memories and those projects' memories as a stem in hex, which decodes back to the word, and their literal anchors (code spans, paths, names) as written, with each passage's place, but no sentence. Beside it, the changes since, a lock and at times the names of files to ignore. File names hold hashes of the store's path and of the project keys. A file not written for a day is deleted at the next session start of that store. Not yet kept for a memory server's store. |
 | `~/.local/state/user-memory/servers/` | For each memory server this machine uses, the server's position in its count of changes (an opaque string, not its id) as the connector last polled it, and the times a hook last ran and a poll last started. A file's name is a hash of the server's address. |
 | `~/.local/state/user-memory/instructions/` | For each instruction file user-memory last wrote: its path, time, size and a SHA-256 of its text, never the text itself, so the next write can tell nobody has saved it since. |
 | `~/.claude/rules/user-memory.md`, the block in `~/.codex/AGENTS.md` | The titles of your global rules. |
 
 On Windows the token is in `%LOCALAPPDATA%\user-memory\config\client-token`,
 the session files in `%LOCALAPPDATA%\user-memory\state\sessions\`, the
+delivery index in `%LOCALAPPDATA%\user-memory\state\delivery\`, the
 hand-over files in `%LOCALAPPDATA%\user-memory\state\`, the
 write records in `%LOCALAPPDATA%\user-memory\state\instructions\`, and
 `.user-memory.json` in `%LOCALAPPDATA%\Programs\user-memory\bin`. There,

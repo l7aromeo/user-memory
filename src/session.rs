@@ -306,13 +306,14 @@ pub async fn start(
         .flatten()
     };
     let path_again = path.clone();
-    let (seen, index, versions) = tokio::join!(
+    let (seen, index, versions, _) = tokio::join!(
         tokio::time::timeout_at(deadline, snapshot),
         tokio::time::timeout_at(
             deadline,
-            start_index(path, client, context_limit, origin.clone()),
+            start_index(path.clone(), client, context_limit, origin.clone()),
         ),
-        tokio::time::timeout_at(deadline, version_line())
+        tokio::time::timeout_at(deadline, version_line()),
+        tokio::time::timeout_at(deadline, deliver_at_start(path, origin.clone(), deadline))
     );
     if let Some(reconcile) = reconcile {
         // Never past the hook's limit: by then the repair has had all of it.
@@ -711,6 +712,32 @@ fn session_file(client: HookClient, payload: &[u8]) -> Option<PathBuf> {
         payload["session_id"].as_str()?,
         &store_identity()?,
     )
+}
+
+/// Session start's part in keeping the delivery index (#175), beside its
+/// own index so it adds nothing to the start's time on a machine with a
+/// free core: its scope's base, built when missing or behind (see
+/// [`memory::delivery_files::at_session_start`]). Prints nothing. A
+/// server's store has no delivery files here yet.
+async fn deliver_at_start(
+    checkout: PathBuf,
+    origin: Option<String>,
+    deadline: tokio::time::Instant,
+) {
+    if !matches!(setup::configured_remote(), Ok(None)) {
+        return;
+    }
+    let Ok(seen) = look(checkout, origin.as_deref(), None).await else {
+        return;
+    };
+    let projects: Vec<String> = seen.projects.iter().map(|p| p.key.clone()).collect();
+    let db = db_path();
+    let until =
+        std::time::Instant::now() + deadline.saturating_duration_since(tokio::time::Instant::now());
+    let _ = tokio::task::spawn_blocking(move || {
+        memory::delivery_files::at_session_start(&db, &projects, until)
+    })
+    .await;
 }
 
 /// What the session's memories come from, which names its snapshot.

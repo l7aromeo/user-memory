@@ -13,10 +13,8 @@ use uuid::Uuid;
 pub mod backups;
 mod calibration;
 mod changes;
-#[cfg(test)]
 mod delivery;
-#[cfg(test)]
-mod delivery_files;
+pub(crate) mod delivery_files;
 #[cfg(test)]
 pub use changes::position as store_position;
 pub use changes::{marked, reconcile};
@@ -285,6 +283,22 @@ fn without_port(host: &str) -> &str {
     match host.rsplit_once(':') {
         Some((name, port)) if port.chars().all(|c| c.is_ascii_digit()) => name,
         _ => host,
+    }
+}
+
+/// In debug builds, waits here while the file the environment variable `var`
+/// names exists, after creating that name with `.reached` added, so a test
+/// can order one process's step against another's.
+#[cfg(debug_assertions)]
+pub(crate) fn hold_for_tests(var: &str) {
+    let Some(hold) = std::env::var_os(var) else {
+        return;
+    };
+    let mut reached = hold.clone();
+    reached.push(".reached");
+    let _ = std::fs::write(&reached, "");
+    while std::path::Path::new(&hold).exists() {
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
 

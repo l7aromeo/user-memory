@@ -266,7 +266,7 @@ profile (`.claude`, `.codex`, `.agents`) are the same on all of them:
 |---|---|---|
 | Binary and `.user-memory.json` | `~/.local/bin` | `%LOCALAPPDATA%\Programs\user-memory\bin` |
 | Local store | `~/.local/share/user-memory` | `%LOCALAPPDATA%\user-memory` |
-| Session snapshots, rules last shown and write records | `$XDG_STATE_HOME` or `~/.local/state`, then `user-memory` | `%LOCALAPPDATA%\user-memory\state` |
+| Session snapshots, the delivery index, rules last shown and write records | `$XDG_STATE_HOME` or `~/.local/state`, then `user-memory` | `%LOCALAPPDATA%\user-memory\state` |
 | Access token | `$XDG_CONFIG_HOME` or `~/.config`, then `user-memory/client-token` | `%LOCALAPPDATA%\user-memory\config\client-token` |
 | Claude Code hooks | A shell command. | The binary and its arguments, run without a shell. |
 | Codex hooks | A shell command. | A `cmd.exe` command. |
