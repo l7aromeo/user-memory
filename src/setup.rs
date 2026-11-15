@@ -1021,8 +1021,20 @@ const SET_ASIDE: &str = "user-memory.old-";
 /// deleted when no session runs it any more; if the new one cannot take its
 /// place, the earlier one goes back.
 fn replace_aside(new: &Path, destination: &Path) -> io::Result<()> {
+    replace_aside_within(new, destination, RENAME_WAIT)
+}
+
+/// How long each rename of a replacement waits for another program to let
+/// go of the file. A program that opens a new or newly started executable
+/// holds it for well under a second, on a loaded machine too; one that
+/// holds it past this is not passing, and the error says the file is in
+/// use.
+const RENAME_WAIT: Duration = Duration::from_secs(5);
+
+/// [`replace_aside`], each rename waiting up to `wait`.
+fn replace_aside_within(new: &Path, destination: &Path, wait: Duration) -> io::Result<()> {
     if fs::symlink_metadata(destination).is_err() {
-        return fs::rename(new, destination);
+        return rename_waiting(new, destination, wait);
     }
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1032,13 +1044,34 @@ fn replace_aside(new: &Path, destination: &Path) -> io::Result<()> {
         std::process::id(),
         env::consts::EXE_SUFFIX
     ));
-    fs::rename(destination, &aside)?;
-    if let Err(err) = fs::rename(new, destination) {
-        let _ = fs::rename(&aside, destination);
+    rename_waiting(destination, &aside, wait)?;
+    if let Err(err) = rename_waiting(new, destination, wait) {
+        if let Err(back) = rename_waiting(&aside, destination, wait) {
+            return Err(io::Error::new(
+                err.kind(),
+                format!(
+                    "{err}, and the earlier binary could not be put back ({back}): it is {}; rename it to {}",
+                    aside.display(),
+                    destination.display()
+                ),
+            ));
+        }
         return Err(err);
     }
     let _ = fs::remove_file(&aside);
     Ok(())
+}
+
+/// A rename that on Windows waits up to `wait` while another program holds
+/// either file; elsewhere an open file never stops a rename.
+fn rename_waiting(from: &Path, to: &Path, wait: Duration) -> io::Result<()> {
+    #[cfg(windows)]
+    return crate::platform::windows::rename(from, to, wait);
+    #[cfg(not(windows))]
+    {
+        let _ = wait;
+        fs::rename(from, to)
+    }
 }
 
 /// Deletes the binaries earlier upgrades set aside in `dir` once no session
@@ -2230,11 +2263,161 @@ mod tests {
         holder.join().unwrap();
         assert!(replaced.is_ok(), "{held} held: {replaced:?}");
         assert_eq!(fs::read_to_string(&destination).unwrap(), "new");
-        let left: Vec<String> = fs::read_dir(dir.path())
+        assert_eq!(left_in(dir.path()), ["user-memory.exe"]);
+    }
+
+    /// The names of the files in `dir`, sorted.
+    #[cfg(windows)]
+    fn left_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(left, ["user-memory.exe"]);
+        names.sort();
+        names
+    }
+
+    /// The wait a test passes in place of [`RENAME_WAIT`], so a hold that
+    /// never ends costs the suite little.
+    #[cfg(windows)]
+    const SHORT_WAIT: Duration = Duration::from_millis(300);
+
+    /// The wait the put-back tests pass in: the new binary's rename spends
+    /// it all, and [`hold_set_aside`] must find the set-aside file within
+    /// it, on a loaded machine too.
+    #[cfg(windows)]
+    const PUT_BACK_WAIT: Duration = Duration::from_secs(1);
+
+    /// How often [`hold_set_aside`] looks for the set-aside file.
+    #[cfg(windows)]
+    const WATCH_POLL: Duration = Duration::from_millis(1);
+
+    /// Holds the binary a replacement sets aside in `dir` as soon as it is
+    /// there, for `hold_for` or until the returned sender is dropped; the
+    /// thread says whether it held one.
+    #[cfg(windows)]
+    fn hold_set_aside(
+        dir: &Path,
+        hold_for: Duration,
+    ) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<bool>) {
+        use std::sync::mpsc::{TryRecvError, channel};
+        let dir = dir.to_path_buf();
+        let (release, released) = channel::<()>();
+        let watcher = std::thread::spawn(move || {
+            loop {
+                let aside = fs::read_dir(&dir)
+                    .unwrap()
+                    .flatten()
+                    .find(|entry| entry.file_name().to_string_lossy().starts_with(SET_ASIDE));
+                if let Some(aside) = aside {
+                    let _held = hold(&aside.path());
+                    let _ = released.recv_timeout(hold_for);
+                    return true;
+                }
+                if released.try_recv() == Err(TryRecvError::Disconnected) {
+                    return false;
+                }
+                std::thread::sleep(WATCH_POLL);
+            }
+        });
+        (release, watcher)
+    }
+
+    /// A hold that never ends fails the replacement once the wait is over,
+    /// not before, with the sharing violation, and the earlier binary
+    /// stays installed.
+    #[cfg(windows)]
+    #[test]
+    fn a_hold_past_the_wait_fails_the_replacement_and_keeps_the_binary() {
+        use windows::Win32::Foundation::ERROR_SHARING_VIOLATION;
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("user-memory.exe");
+        let new = dir.path().join(".user-memory-1.exe");
+        fs::write(&destination, "old").unwrap();
+        fs::write(&new, "new").unwrap();
+        let _held = hold(&destination);
+        let started = std::time::Instant::now();
+        let error = replace_aside_within(&new, &destination, SHORT_WAIT).unwrap_err();
+        assert!(started.elapsed() >= SHORT_WAIT, "{:?}", started.elapsed());
+        assert_eq!(
+            error.raw_os_error(),
+            Some(ERROR_SHARING_VIOLATION.0 as i32),
+            "{error}"
+        );
+        assert_eq!(fs::read_to_string(&destination).unwrap(), "old");
+        assert_eq!(
+            left_in(dir.path()),
+            [".user-memory-1.exe", "user-memory.exe"]
+        );
+    }
+
+    /// When the new binary can't take the place, the earlier one goes back
+    /// even if it is held for a moment as it does: the hold outlasts the
+    /// new binary's wait and ends within the put-back's.
+    #[cfg(windows)]
+    #[test]
+    fn the_earlier_binary_goes_back_through_a_brief_hold() {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("user-memory.exe");
+        let new = dir.path().join(".user-memory-1.exe");
+        fs::write(&destination, "old").unwrap();
+        fs::write(&new, "new").unwrap();
+        let held = hold(&new);
+        let (release, watcher) = hold_set_aside(dir.path(), PUT_BACK_WAIT * 3 / 2);
+        let replaced = replace_aside_within(&new, &destination, PUT_BACK_WAIT);
+        drop(release);
+        assert!(
+            watcher.join().unwrap(),
+            "the set-aside binary was never held"
+        );
+        drop(held);
+        assert!(replaced.is_err());
+        assert_eq!(fs::read_to_string(&destination).unwrap(), "old");
+        assert_eq!(
+            left_in(dir.path()),
+            [".user-memory-1.exe", "user-memory.exe"]
+        );
+    }
+
+    /// An earlier binary that can't be put back is the one case the user
+    /// must act on: the error says where it is and what to rename it to.
+    #[cfg(windows)]
+    #[test]
+    fn an_earlier_binary_that_cannot_go_back_is_named() {
+        /// Longer than anything here waits: the hold ends when the test
+        /// drops its sender.
+        const FOR_GOOD: Duration = Duration::from_secs(60);
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("user-memory.exe");
+        let new = dir.path().join(".user-memory-1.exe");
+        fs::write(&destination, "old").unwrap();
+        fs::write(&new, "new").unwrap();
+        let held = hold(&new);
+        let (release, watcher) = hold_set_aside(dir.path(), FOR_GOOD);
+        let error = replace_aside_within(&new, &destination, PUT_BACK_WAIT).unwrap_err();
+        drop(release);
+        assert!(
+            watcher.join().unwrap(),
+            "the set-aside binary was never held"
+        );
+        drop(held);
+        let aside = left_in(dir.path())
+            .into_iter()
+            .find(|name| name.starts_with(SET_ASIDE))
+            .expect("the earlier binary is still set aside");
+        let aside = dir.path().join(aside);
+        assert_eq!(fs::read_to_string(&aside).unwrap(), "old");
+        assert!(!destination.exists());
+        let message = error.to_string();
+        assert!(
+            message.contains("the earlier binary could not be put back")
+                && message.contains(&format!(
+                    "it is {}; rename it to {}",
+                    aside.display(),
+                    destination.display()
+                )),
+            "{message}"
+        );
     }
 
     /// The installed binary, held for a moment as a new or newly started

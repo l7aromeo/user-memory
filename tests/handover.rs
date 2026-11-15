@@ -77,6 +77,34 @@ fn ways() -> Vec<Way> {
     }
 }
 
+/// How long a rename of a binary waits for another program to let go of
+/// it: the bound `replace_aside` in src/setup.rs waits.
+const RENAME_WAIT: Duration = Duration::from_secs(5);
+
+/// The pause between two tries of a refused rename.
+const RENAME_PAUSE: Duration = Duration::from_millis(10);
+
+/// Renames `from` to `to` as `replace_aside` does: on Windows it tries
+/// again for up to [`RENAME_WAIT`] while another program has the file open
+/// without sharing delete (error 32), as one may a newly started program.
+fn rename(from: &Path, to: &Path) {
+    /// ERROR_SHARING_VIOLATION.
+    const SHARING_VIOLATION: i32 = 32;
+    let deadline = Instant::now() + RENAME_WAIT;
+    loop {
+        match fs::rename(from, to) {
+            Err(err)
+                if cfg!(windows)
+                    && err.raw_os_error() == Some(SHARING_VIOLATION)
+                    && Instant::now() < deadline =>
+            {
+                thread::sleep(RENAME_PAUSE);
+            }
+            done => return done.unwrap(),
+        }
+    }
+}
+
 /// A folder holding the copy of user-memory a session runs from, its store
 /// and its sandbox.
 struct Place {
@@ -134,9 +162,9 @@ impl Place {
                 ".user-memory-old-{nanos}{}",
                 std::env::consts::EXE_SUFFIX
             ));
-            fs::rename(self.binary(), aside).unwrap();
+            rename(&self.binary(), &aside);
         }
-        fs::rename(&staged, self.binary()).unwrap();
+        rename(&staged, &self.binary());
     }
     /// Replaces the binary with the newer build, reporting `version`.
     fn upgrade(&self) {
