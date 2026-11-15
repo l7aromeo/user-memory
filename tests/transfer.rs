@@ -916,6 +916,65 @@ fn older_backups_need_a_title_for_each_memory_the_store_lacks() {
     assert_eq!(fresh.memories()[0]["title"], "Rust everywhere");
 }
 
+// Two observations from one conversation are one conversation's evidence
+// after an import too: the import brings their conversation and adds none
+// of its own that would make them independent.
+#[test]
+fn imported_observations_from_one_conversation_count_once() {
+    let s = Store::new();
+    for content in ["Indents with tabs", "Wraps at 100 columns"] {
+        let saved = s.value(&[
+            "record",
+            "--type",
+            "habit",
+            "--category",
+            "formatting",
+            "--source",
+            "observed",
+            "--evidence",
+            "Seen in a diff",
+            "--content",
+            content,
+            "--origin",
+            "chat/one",
+        ]);
+        assert_eq!(saved["stored"], true, "{saved}");
+    }
+    let file = s.root.path().join("habits.json");
+    s.ok(&["export", file.to_str().unwrap()]);
+    let fresh = Store::new();
+    let applied = fresh.value(&["import", file.to_str().unwrap(), "--apply"]);
+    assert_eq!(applied["applied"], true, "{applied}");
+    let ids: Vec<String> = fresh
+        .memories()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(ids.len(), 2);
+    let inferred = fresh.value(&[
+        "record",
+        "--type",
+        "pattern",
+        "--category",
+        "formatting",
+        "--source",
+        "inferred",
+        "--content",
+        "Cares about formatting",
+        "--evidence-id",
+        &ids[0],
+        "--evidence-id",
+        &ids[1],
+    ]);
+    assert_eq!(inferred["stored"], false, "{inferred}");
+    assert_eq!(
+        inferred["reason"],
+        "Inferred patterns require at least two independent observations; memories from one conversation count once"
+    );
+}
+
 // Replacing a memory from a file keeps the conversations the file shares
 // with the store, so a pattern built on it does not go stale when only its
 // reason changes, even for a moment while origins are rewritten.
