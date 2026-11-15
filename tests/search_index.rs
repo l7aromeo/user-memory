@@ -461,7 +461,7 @@ fn keyword_index(db: &Path) -> [Vec<String>; 2] {
             "SELECT id||memory_type||category||scope||project||source||status||updated_at FROM search_keys ORDER BY key",
         ),
         rows(
-            "SELECT ifnull(k.id,'none')||' '||s.col||' '||s.term FROM temp.stems s LEFT JOIN search_keys k ON k.key=s.doc ORDER BY 1",
+            "SELECT ifnull(k.id,'none')||' '||(s.doc % 256)||' '||s.col||' '||s.term FROM temp.stems s LEFT JOIN search_keys k ON k.key=s.doc / 256 ORDER BY 1",
         ),
     ]
 }

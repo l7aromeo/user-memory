@@ -7,6 +7,8 @@ plain words, see [how it works](how-it-works.md).
 - [Fields and limits](#fields-and-limits)
 - [Provenance rules](#provenance-rules)
 - [Duplicates and corrections](#duplicates-and-corrections)
+- [History](#history)
+- [Passages](#passages)
 - [Export and import](#export-and-import)
 
 ## Fields and limits
@@ -205,6 +207,27 @@ on the command line) returns them, oldest first:
   import adds them marked as `imported`, skips an event the store already
   holds or one it could not have written, and reports how many under
   `history`. A file without the section imports as before.
+
+## Passages
+
+Search reads a memory's text in passages, so a long memory is found by the
+part that matters and a hit returns that part as `passage`
+([search](tools.md#search)). Nothing changes in what is recorded; the
+passages are worked out again whenever the memory is indexed.
+
+- The content is split at list items, lines and sentence ends, never inside
+  a code span, into passages of at most 400 characters, unless one sentence
+  is longer; a passage under 80 characters takes the next one too. Content
+  of up to 400 characters is one passage.
+- A non-empty `context` is a passage of its own: it says when the memory
+  applies.
+- The category, title, type, reason and evidence count for every passage
+  of the memory, so a passage is found with its subject.
+- A passage's anchors match only as written: code spans, words shaped like
+  a path or file name, identifiers (`snake_case`, `a::b`, `camelCase`), and
+  a command's name with its next word unless that is a flag (`git stash`).
+- The [keyword index](storage.md#the-keyword-index) keeps each passage's
+  place in the text and its stems and anchors, never its text.
 
 ## Export and import
 

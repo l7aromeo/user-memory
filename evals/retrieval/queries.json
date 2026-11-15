@@ -57,6 +57,15 @@
   {"style": "paraphrase", "query": "how terse should replies be", "target": "no-pleasantries", "related": ["plain-prose"]},
   {"style": "paraphrase", "query": "spelling convention for written prose", "target": "british"},
   {"style": "paraphrase", "query": "precision of money values here", "target": "minor-units", "related": ["bankers-rounding"]},
-  {"style": "paraphrase", "query": "cutting a new version of this service", "target": "ledger-release-branch", "related": ["hotfix-tag"]}
+  {"style": "paraphrase", "query": "cutting a new version of this service", "target": "ledger-release-branch", "related": ["hotfix-tag"]},
+  {"style": "direct", "query": "sign release tags", "target": "release-handbook", "passage": "git tag -s"},
+  {"style": "task", "query": "should I run cargo publish --dry-run before tagging", "target": "release-handbook", "passage": "cargo publish --dry-run"},
+  {"style": "paraphrase", "query": "how long to keep old binaries around for rollbacks", "target": "release-handbook", "passage": "ninety days"},
+  {"style": "direct", "query": "copy .env.example to .env", "target": "onboarding-notes", "passage": ".env.example"},
+  {"style": "task", "query": "the build says protoc is missing", "target": "onboarding-notes", "passage": "protoc"},
+  {"style": "paraphrase", "query": "getting into the staging kubernetes cluster", "target": "onboarding-notes", "passage": "kube-login"},
+  {"style": "direct", "query": "incident status update interval", "target": "incident-runbook", "passage": "every thirty minutes"},
+  {"style": "task", "query": "roll back or fix forward after a bad deploy", "target": "incident-runbook", "passage": "rolling back"},
+  {"style": "paraphrase", "query": "when to wake up the database person on call", "target": "incident-runbook", "passage": "database on-call"}
  ]
 }

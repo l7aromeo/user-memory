@@ -3,9 +3,11 @@
 //! Search considers every memory the selection covers (by default the active
 //! global memories and the requested projects'). Keyword relevance stems
 //! the topic's words, weighs each by how rare it is among the candidates and
-//! by the field that holds it (category, title, type, then the text), read
-//! from the keyword index when it is current and from every candidate's own
-//! text otherwise, with the same result; with an embedding endpoint
+//! by the field that holds it (category, title, type, then the text), adds
+//! the topic's literal anchors a memory holds, and scores a memory by its
+//! best passage, read from the keyword index when it is current and from
+//! every candidate's own text otherwise, with the same result; each hit
+//! carries that passage. With an embedding endpoint
 //! configured it is fused with semantic similarity by reciprocal rank. A
 //! project memory's fused score counts [`PROJECT_BONUS`] more, so it wins an
 //! equal match but not a clearly stronger one; without a topic, project
@@ -16,13 +18,12 @@ use super::{
     Memory, history,
     ids::resolve,
     index::{
-        self, Candidates, embed,
-        stems::{Field, Stems},
+        self, CONTEXT_SLOT, Candidates, Hit, embed, passages,
+        stems::{Field, Stems, Text},
     },
     page::{Paging, page},
     schema::{connect, get},
     selection::{Filter, Selection, candidates},
-    similar::{category_group, tokenize},
 };
 use anyhow::{Result, bail};
 use clap::Args;
@@ -31,6 +32,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
+    collections::HashMap,
     path::Path,
     sync::{Mutex, PoisonError},
 };
@@ -135,57 +137,157 @@ fn weight(field: Field) -> f64 {
     }
 }
 
-/// The weight of the strongest field of `m` holding each of `query`'s terms,
-/// in order; 0 where none does.
-fn field_weights(stems: &mut Stems, query: &[String], m: &Memory) -> Vec<f64> {
-    let mut best = vec![0.0; query.len()];
-    let text = format!("{} {} {} {}", m.content, m.context, m.reason, m.evidence);
-    let labels = category_group(&m.category).join(" ");
-    for (field, weight) in [
-        (labels.as_str(), CATEGORY_WEIGHT),
-        (m.title.as_str(), TITLE_WEIGHT),
-        (m.memory_type.as_str(), TYPE_WEIGHT),
-        (text.as_str(), TEXT_WEIGHT),
-    ] {
-        for word in tokenize(field) {
-            let stem = stems.of(word);
-            if let Some(i) = query.iter().position(|term| term == stem) {
-                best[i] = f64::max(best[i], weight);
+/// How much a topic's anchor that a row holds as written (see
+/// `passages::anchors`: a code span, a path, an identifier, a command with
+/// its subcommand) counts beyond the stems it matches too, times its rarity
+/// as a word's weight is. A starting value: whole-task measurements may
+/// change it.
+const ANCHOR_WEIGHT: f64 = 1.0;
+
+/// The arrays keyword scoring fills, kept for the next search with the rest
+/// of [`Buffers`].
+#[derive(Default)]
+struct Scoring {
+    /// For each candidate, a row of the weight of the strongest field
+    /// holding each query term anywhere in the memory, which its rarity
+    /// counts.
+    weights: Vec<f64>,
+    /// The same in slot 0 alone, which counts for every passage.
+    whole: Vec<f64>,
+    /// For each candidate, a row of whether any of its rows holds each
+    /// query anchor, and whether slot 0 does.
+    anchored: Vec<bool>,
+    anchored_whole: Vec<bool>,
+    rarity: Vec<f64>,
+    anchor_rarity: Vec<f64>,
+    scores: Vec<f64>,
+    /// Each candidate's best passage slot; 0 where no passage adds to what
+    /// slot 0 holds.
+    best: Vec<i64>,
+    /// What each candidate's best passage adds.
+    gains: Vec<f64>,
+}
+
+/// BM25's inverse document frequency of a term `holding` of `all`
+/// memories hold.
+fn rarity(all: f64, holding: f64) -> f64 {
+    ((all - holding + 0.5) / (holding + 0.5)).ln_1p()
+}
+
+/// Each memory's keyword relevance, into `s.scores`, and its best passage,
+/// into `s.best`, from `found`: the hits on `terms` query stems and
+/// `anchors` query anchors of the rows of `count` memories. Every stem
+/// counts its field's weight times its rarity among the memories, BM25's
+/// inverse document frequency, so a word most memories share adds little
+/// and one that few hold adds much; an anchor held as written adds
+/// [`ANCHOR_WEIGHT`] times its own rarity. A memory scores what its slot 0
+/// holds plus the best of its passages, so a long memory matching in many
+/// passages does not outrank a short one matching as well in one.
+fn keyword_scores(
+    found: &mut [(usize, i64, Hit)],
+    terms: usize,
+    anchors: usize,
+    count: usize,
+    s: &mut Scoring,
+) {
+    let Scoring {
+        weights,
+        whole,
+        anchored,
+        anchored_whole,
+        rarity: term_rarity,
+        anchor_rarity,
+        scores,
+        best,
+        gains,
+    } = s;
+    for row in [&mut *weights, &mut *whole] {
+        row.clear();
+        row.resize(count * terms, 0.0);
+    }
+    for row in [&mut *anchored, &mut *anchored_whole] {
+        row.clear();
+        row.resize(count * anchors, false);
+    }
+    for &(i, slot, hit) in found.iter() {
+        match hit {
+            Hit::Term(t, field) => {
+                let at = i * terms + t;
+                weights[at] = weights[at].max(weight(field));
+                if slot == 0 {
+                    whole[at] = whole[at].max(weight(field));
+                }
+            }
+            Hit::Anchor(a) => {
+                anchored[i * anchors + a] = true;
+                anchored_whole[i * anchors + a] |= slot == 0;
             }
         }
     }
-    best
-}
-
-/// Each memory's keyword relevance, written into `scores`, from `weights`:
-/// for each of `rows` memories, one row of `terms` weights, that of the
-/// strongest field holding each query term (0 where none does). Among
-/// `candidates` memories every term counts its field's weight times its
-/// rarity, BM25's inverse document frequency, so a word most memories share
-/// adds little and one that few hold adds much. Memories holding no term
-/// may be left out of `weights`; they add nothing.
-fn keyword_scores(
-    weights: &[f64],
-    terms: usize,
-    rows: usize,
-    candidates: usize,
-    rarity: &mut Vec<f64>,
-    scores: &mut Vec<f64>,
-) {
-    let all = candidates as f64;
-    rarity.clear();
-    rarity.extend((0..terms).map(|t| {
-        let holding = (0..rows).filter(|&r| weights[r * terms + t] > 0.0).count() as f64;
-        ((all - holding + 0.5) / (holding + 0.5)).ln_1p()
+    let all = count as f64;
+    term_rarity.clear();
+    term_rarity.extend((0..terms).map(|t| {
+        rarity(
+            all,
+            (0..count).filter(|&i| weights[i * terms + t] > 0.0).count() as f64,
+        )
+    }));
+    anchor_rarity.clear();
+    anchor_rarity.extend((0..anchors).map(|a| {
+        rarity(
+            all,
+            (0..count).filter(|&i| anchored[i * anchors + a]).count() as f64,
+        )
     }));
     scores.clear();
-    scores.extend((0..rows).map(|r| {
-        weights[r * terms..(r + 1) * terms]
+    scores.extend((0..count).map(|i| {
+        let stems: f64 = whole[i * terms..(i + 1) * terms]
             .iter()
-            .zip(rarity.iter())
+            .zip(term_rarity.iter())
             .map(|(weight, idf)| weight * idf)
-            .sum::<f64>()
+            .sum();
+        let literal: f64 = anchored_whole[i * anchors..(i + 1) * anchors]
+            .iter()
+            .zip(anchor_rarity.iter())
+            .filter(|(held, _)| **held)
+            .map(|(_, idf)| ANCHOR_WEIGHT * idf)
+            .sum();
+        stems + literal
     }));
+    best.clear();
+    best.resize(count, 0);
+    // A passage's gain is what its own stems and anchors add to slot 0's;
+    // grouped by memory and slot, the best gain of each memory counts.
+    // Sorted whole, so each gain sums in one order whichever path found the
+    // hits, and equal scores stay equal.
+    found.sort_unstable();
+    gains.clear();
+    gains.resize(count, 0.0);
+    for group in found.chunk_by(|a, b| (a.0, a.1) == (b.0, b.1)) {
+        let (i, slot, _) = group[0];
+        if slot == 0 {
+            continue;
+        }
+        let gain: f64 = group
+            .iter()
+            .map(|&(_, _, hit)| match hit {
+                Hit::Term(t, field) => {
+                    (weight(field) - whole[i * terms + t]).max(0.0) * term_rarity[t]
+                }
+                Hit::Anchor(a) if !anchored_whole[i * anchors + a] => {
+                    ANCHOR_WEIGHT * anchor_rarity[a]
+                }
+                Hit::Anchor(_) => 0.0,
+            })
+            .sum();
+        if gain > gains[i] {
+            gains[i] = gain;
+            best[i] = slot;
+        }
+    }
+    for (score, gain) in scores.iter_mut().zip(gains.iter()) {
+        *score += *gain;
+    }
 }
 
 fn recency(m: &Memory) -> (&str, i64) {
@@ -202,6 +304,9 @@ fn add_ranking(order: &[usize], fused: &mut [f64]) {
 /// the keywords.
 pub(super) struct Ranked {
     pub(super) ids: Vec<Uuid>,
+    /// The slot of each one's best passage (see `index::rows`); 0 where no
+    /// passage matched more than the whole memory did.
+    pub(super) passages: Vec<i64>,
     /// An embeddings endpoint is configured and answered for this topic;
     /// false without a topic, without an endpoint, or when it failed.
     pub(super) semantic: bool,
@@ -228,7 +333,13 @@ fn rank_with(
     buffers: &mut Buffers,
 ) -> Result<Ranked> {
     let mut stems = Stems::new();
+    // Both sorted, as hits look them up.
     let query: Vec<String> = stems.all(topic).into_iter().collect();
+    let anchors: Vec<String> = if query.is_empty() {
+        Vec::new()
+    } else {
+        passages::query_anchors(topic).into_iter().collect()
+    };
     let semantic = if query.is_empty() {
         None
     } else {
@@ -237,9 +348,8 @@ fn rank_with(
     let indexed = index::ready(conn)?;
     let Buffers {
         candidates: covered,
-        weights,
-        rarity,
-        scores,
+        found,
+        scoring,
         matched,
         fused,
         by_keyword,
@@ -249,27 +359,32 @@ fn rank_with(
         values,
     } = buffers;
     let terms = query.len();
+    found.clear();
     if indexed {
         index::covered(conn, filter, covered)?;
-        weights.clear();
-        weights.resize(covered.len() * terms, 0.0);
         if terms > 0 {
-            index::hits(conn, covered, &query, |i, t, field| {
-                weights[i * terms + t] = weight(field);
+            index::hits(conn, covered, &query, &anchors, |i, slot, hit| {
+                found.push((i, slot, hit));
             })?;
         }
     } else {
-        // Without a current keyword index, search stems every candidate's
-        // words itself, so it reads every candidate in full.
+        // Without a current keyword index, search splits and stems every
+        // candidate itself, so it reads every candidate in full.
         covered.clear();
-        weights.clear();
         for m in candidates(conn, filter)? {
+            let i = covered.len();
             covered.push(m.id, m.scope == "project", &m.updated_at, m.sequence);
-            weights.extend(field_weights(&mut stems, &query, &m));
+            if terms > 0 {
+                let rows = index::rows(&mut stems, Text::from(&m));
+                index::row_hits(&rows, i, &query, &anchors, |i, slot, hit| {
+                    found.push((i, slot, hit));
+                });
+            }
         }
     }
     let count = covered.len();
-    keyword_scores(weights, terms, count, count, rarity, scores);
+    keyword_scores(found, terms, anchors.len(), count, scoring);
+    let scores = &scoring.scores;
     matched.clear();
     matched.extend(scores.iter().map(|&s| query.is_empty() || s > 0.0));
     fused.clear();
@@ -327,6 +442,7 @@ fn rank_with(
     });
     Ok(Ranked {
         ids: order.iter().map(|&i| covered.ids[i]).collect(),
+        passages: order.iter().map(|&i| scoring.best[i]).collect(),
         semantic: semantic_ranked,
     })
 }
@@ -336,11 +452,10 @@ fn rank_with(
 #[derive(Default)]
 struct Buffers {
     candidates: Candidates,
-    /// For each candidate, a row of the weight of the strongest field
-    /// holding each query term.
-    weights: Vec<f64>,
-    rarity: Vec<f64>,
-    scores: Vec<f64>,
+    /// Each hit of the topic: the candidate, the row's slot, and what it
+    /// holds.
+    found: Vec<(usize, i64, Hit)>,
+    scoring: Scoring,
     matched: Vec<bool>,
     fused: Vec<f64>,
     by_keyword: Vec<usize>,
@@ -461,19 +576,50 @@ pub fn search(db: &Path, input: &Search) -> Result<Value> {
     };
     let ranked = rank(&conn, &filter, &input.topic, SEMANTIC_MATCHES)?;
     let (shown, next) = page(ranked.ids.clone(), &ranked.ids, &paging)?;
+    let best: HashMap<Uuid, i64> = ranked
+        .ids
+        .iter()
+        .copied()
+        .zip(ranked.passages.iter().copied())
+        .collect();
     // Only the page is read in full. A memory forgotten since it was ranked
     // is left out of the page.
     let mut memories = Vec::with_capacity(shown.len());
     for id in shown {
         memories.extend(get(&conn, id)?);
     }
-    let mut result = json!({ "memories": compact(&memories)? });
+    let mut shown = compact(&memories)?;
+    for (hit, m) in shown.as_array_mut().into_iter().flatten().zip(&memories) {
+        let (text, count) = passage(m, best.get(&m.id).copied().unwrap_or(0));
+        hit["passage"] = json!(text);
+        hit["passages"] = json!(count);
+    }
+    let mut result = json!({ "memories": shown });
     if let Some(next) = next {
         result["next_cursor"] = json!(next);
     }
     // Lets an agent tell "nothing found" from "semantic search is off".
     result["semantic"] = json!(ranked.semantic);
     Ok(result)
+}
+
+/// The passage of `m` in `slot` (see `index::rows`), cut from its text, and
+/// how many passages it has. A memory none of whose passages matched more
+/// than the whole memory shows its first.
+fn passage(m: &Memory, slot: i64) -> (&str, usize) {
+    let parts = passages::split(&m.content);
+    let count = parts.len() + usize::from(!m.context.is_empty());
+    let text = if slot == CONTEXT_SLOT && !m.context.is_empty() {
+        m.context.as_str()
+    } else {
+        usize::try_from(slot)
+            .ok()
+            .and_then(|slot| slot.checked_sub(1))
+            .and_then(|n| parts.get(n))
+            .or(parts.first())
+            .map_or("", |place| &m.content[place.clone()])
+    };
+    (text.trim(), count)
 }
 
 /// The order memories take inside an index group or a category read: project
@@ -639,8 +785,9 @@ mod tests {
         // would leave it only the room it needs.
         let spare = 100_000;
         buffers.candidates.ids.reserve(spare);
-        buffers.weights.reserve(spare);
-        buffers.scores.reserve(spare);
+        buffers.found.reserve(spare);
+        buffers.scoring.weights.reserve(spare);
+        buffers.scoring.scores.reserve(spare);
         buffers.matched.reserve(spare);
         buffers.fused.reserve(spare);
         buffers.by_keyword.reserve(spare);
@@ -648,8 +795,9 @@ mod tests {
         let room = |b: &Buffers| {
             [
                 b.candidates.ids.capacity(),
-                b.weights.capacity(),
-                b.scores.capacity(),
+                b.found.capacity(),
+                b.scoring.weights.capacity(),
+                b.scoring.scores.capacity(),
                 b.matched.capacity(),
                 b.fused.capacity(),
                 b.by_keyword.capacity(),
@@ -667,14 +815,14 @@ mod tests {
         let pool = Pool(Mutex::new(Vec::new()));
         let place = {
             let mut first = pool.take();
-            first.buffers().scores.reserve(1000);
-            first.buffers().scores.as_ptr()
+            first.buffers().scoring.scores.reserve(1000);
+            first.buffers().scoring.scores.as_ptr()
         };
         let mut second = pool.take();
-        assert_eq!(second.buffers().scores.as_ptr(), place);
+        assert_eq!(second.buffers().scoring.scores.as_ptr(), place);
         // Searches at once each take a set of their own.
         let mut third = pool.take();
-        assert_ne!(third.buffers().scores.as_ptr(), place);
+        assert_ne!(third.buffers().scoring.scores.as_ptr(), place);
     }
 
     #[test]

@@ -81,13 +81,18 @@ topic as `topic`, or `query`.
 
 - **Keyword:** every candidate memory is scored. Words are compared by
   their stems, so "releases" finds "release" and "paths" finds "path";
-  common function words are ignored. Each word of the question counts once
-  per memory, by the strongest field holding it (category, then title, then
-  type, then the text), and by how rare it is among the candidates, so a
-  word most memories share adds little. Ties go to the newest. A
-  [keyword index](storage.md#the-keyword-index) of every memory's stems
-  finds the matching memories without reading the others, with the same
-  result. Category synonyms match at query time:
+  common function words are ignored. Each word of the question counts by
+  the strongest field holding it (category, then title, then type, then the
+  text), and by how rare it is among the candidates, so a word most memories
+  share adds little. A word written as an anchor (a code span, a path such
+  as `build.rs`, an identifier such as `parse_entry`, or a command with its
+  subcommand such as `git stash`) and asked for as written counts again.
+  The text is read in [passages](memory-model.md#passages): a memory scores
+  its category, title, type, reason and evidence plus its best passage, so
+  a long memory doesn't outrank a short one by matching in several places.
+  Ties go to the newest. A [keyword index](storage.md#the-keyword-index) of
+  every passage's stems finds the matching memories without reading the
+  others, with the same result. Category synonyms match at query time:
   programming/coding/software development/development,
   communication/comms/writing style, and workflow/process.
 - **Semantic (optional):** an OpenAI-compatible embeddings endpoint finds
@@ -111,6 +116,10 @@ topic as `topic`, or `query`.
   keywords, and `false` without a topic, without an endpoint, or when the
   endpoint failed. A search with no match and `semantic: false` may have
   missed a memory phrased differently.
+- Each result carries `passage`, the text of its best-matching passage,
+  and `passages`, how many the memory has. A memory found by meaning alone,
+  by its title or without a topic shows its first passage. Read the memory
+  for the rest.
 
 ## The index
 

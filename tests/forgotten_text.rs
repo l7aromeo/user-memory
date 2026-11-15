@@ -547,3 +547,63 @@ fn search(store: &Store) -> Vec<Value> {
         .map(|m| m["id"].clone())
         .collect()
 }
+
+/// Records, through `serve`, a long memory with the marker in its third of
+/// five passages, and returns its id and content.
+fn record_the_marker_in_a_passage(serve: &mut Serve) -> (String, String) {
+    let sentence = "and this sentence keeps the item apart from its neighbours, ".repeat(4);
+    let content: Vec<String> = (1..=5)
+        .map(|n| {
+            let word = if n == 3 { MARKER } else { "harbour" };
+            format!("- Item {n} names the {word} {}.", sentence.trim_end())
+        })
+        .collect();
+    let content = content.join(" ");
+    let reply = serve.call(
+        "record",
+        json!({"category":"travel","title":"Harbour list","content":content,"scope":"global","user_confirmed":true}),
+    );
+    assert_eq!(reply["stored"], true, "{reply}");
+    let found = serve.call("search", json!({"topic":MARKER}));
+    assert_eq!(found["memories"][0]["passages"], 5, "{found}");
+    assert!(
+        found["memories"][0]["passage"]
+            .as_str()
+            .unwrap()
+            .contains(MARKER),
+        "{found}"
+    );
+    (reply["id"].as_str().unwrap().to_owned(), content)
+}
+
+// A marker word of one passage of a long memory leaves the store and its
+// log after a forget, and after a correction of that passage once its
+// history is dropped; until then only the history holds it.
+#[test]
+fn a_word_of_one_passage_leaves_the_store_after_a_forget_or_a_correction() {
+    let store = Store::new();
+    let mut serve = store.serve();
+    let (id, _) = record_the_marker_in_a_passage(&mut serve);
+    record_others(&store, 13..=20);
+    assert!(store.indexes_the_marker());
+    let reply: Value = serve.call("forget", json!({"memory_id":id,"user_confirmed":true}));
+    assert_eq!(reply["deleted"], true, "{reply}");
+    assert_eq!(store.holding_the_marker(), Vec::<PathBuf>::new());
+    let (id, content) = record_the_marker_in_a_passage(&mut serve);
+    record_others(&store, 21..=28);
+    let reply: Value = serve.call(
+        "update",
+        json!({"memory_id":id,"content":content.replace(MARKER, "lighthouse"),"user_confirmed":true}),
+    );
+    assert_eq!(reply["updated"], true, "{reply}");
+    assert_eq!(store.indexing_the_marker(), Vec::<PathBuf>::new());
+    // The history keeps the replaced text until the user drops it.
+    assert!(store.history_holds_the_marker(&id));
+    let reply: Value = serve.call(
+        "update",
+        json!({"memory_id":id,"drop_history":true,"user_confirmed":true}),
+    );
+    assert_eq!(reply["updated"], true, "{reply}");
+    assert_eq!(store.holding_the_marker(), Vec::<PathBuf>::new());
+    serve.close();
+}

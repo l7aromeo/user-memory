@@ -273,7 +273,8 @@ fn keyword_index(db: &Path) -> Vec<Vec<String>> {
     .unwrap();
     [
         "SELECT * FROM search_keys ORDER BY key",
-        "SELECT k.id,s.col,s.term FROM temp.stems s JOIN search_keys k ON k.key=s.doc ORDER BY 1,2,3",
+        "SELECT k.id,s.doc % 256,s.col,s.term FROM temp.stems s JOIN search_keys k ON k.key=s.doc / 256 ORDER BY 1,2,3,4",
+        "SELECT k.id,w.rowid % 256,w.start,w.length FROM search_words w JOIN search_keys k ON k.key=w.rowid / 256 ORDER BY 1,2",
         "SELECT COUNT(*),stemmed_by FROM search_pending,search_state",
     ]
     .iter()
@@ -448,11 +449,12 @@ fn every_snapshot_migrates_to_the_current_schema_and_keeps_its_data() {
             Some(events.unwrap_or_default()),
             "v{n} history"
         );
-        assert_eq!(
-            keyword_index(&db),
-            rebuilt_keyword_index(dir.path(), &db),
-            "v{n}"
+        let index = keyword_index(&db);
+        assert!(
+            !index[1].is_empty() && !index[2].is_empty(),
+            "v{n}: the index holds rows"
         );
+        assert_eq!(index, rebuilt_keyword_index(dir.path(), &db), "v{n}");
         let recalled = user_memory(
             dir.path(),
             &db,
