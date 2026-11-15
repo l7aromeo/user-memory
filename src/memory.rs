@@ -288,6 +288,7 @@ fn without_port(host: &str) -> &str {
 mod tests {
     use super::{
         delivery::{self, DeliveryIndex},
+        index,
         matcher::{self, Action, Kind, Window},
         project_key, remote_project_key,
     };
@@ -457,8 +458,7 @@ mod tests {
             "observed",
         );
         let file = dir.path().join("delivery.index");
-        let sources = delivery::sources(&db, &[ours.to_owned()]).unwrap();
-        std::fs::write(&file, DeliveryIndex::write(&sources).unwrap()).unwrap();
+        std::fs::write(&file, delivery::build(&db, &[ours.to_owned()]).unwrap()).unwrap();
         let index = DeliveryIndex::load(&file).unwrap();
         assert_eq!(index.len(), 1, "only this project's stated memory");
         let mut window = Window::default();
@@ -471,5 +471,117 @@ mod tests {
         let conn = rusqlite::Connection::open(&db).unwrap();
         let cut = matcher::text(&conn, index.id(found[0].memory).unwrap(), &found[0]).unwrap();
         assert_eq!(cut, door);
+    }
+
+    /// The rows of the store at `db` for the global scope and `projects`,
+    /// as the delivery index was built before its one pass: each stored
+    /// token decoded to its term, which the writer encodes again.
+    fn delivery_sources(db: &std::path::Path, projects: &[String]) -> Vec<delivery::Source> {
+        let conn = rusqlite::Connection::open(db).unwrap();
+        let scope = serde_json::to_string(projects).unwrap();
+        let mut keys = std::collections::HashMap::new();
+        let mut sources: Vec<delivery::Source> = Vec::new();
+        let mut found = conn.prepare(delivery::CANDIDATES).unwrap();
+        let mut found = found.query([scope]).unwrap();
+        while let Some(r) = found.next().unwrap() {
+            keys.insert(r.get::<_, i64>(0).unwrap(), sources.len());
+            sources.push(delivery::Source {
+                id: r.get(1).unwrap(),
+                rows: Vec::new(),
+            });
+        }
+        let mut rows = conn
+            .prepare("SELECT rowid,category,title,type,body,anchors,start,length FROM search_words ORDER BY rowid")
+            .unwrap();
+        let mut rows = rows.query([]).unwrap();
+        while let Some(r) = rows.next().unwrap() {
+            let number: i64 = r.get(0).unwrap();
+            let Some(&m) = keys.get(&number.div_euclid(index::SLOTS)) else {
+                continue;
+            };
+            let mut stems = Vec::new();
+            for (c, field) in index::stems::Field::ALL.into_iter().enumerate() {
+                let column: String = r.get(c + 1).unwrap();
+                stems.extend(
+                    column
+                        .split_whitespace()
+                        .map(|t| (delivery::decode(t), field)),
+                );
+            }
+            let anchors: String = r.get(5).unwrap();
+            let start: Option<i64> = r.get(6).unwrap();
+            let length: Option<i64> = r.get(7).unwrap();
+            sources[m].rows.push(delivery::SourceRow {
+                slot: number.rem_euclid(index::SLOTS),
+                start: usize::try_from(start.unwrap_or(0)).unwrap(),
+                length: usize::try_from(length.unwrap_or(0)).unwrap(),
+                stems,
+                anchors: anchors.split_whitespace().map(delivery::decode).collect(),
+            });
+        }
+        sources
+    }
+
+    /// The one-pass build of a real store writes, byte for byte, the file
+    /// the writer makes from the same rows decoded: across scripts, code
+    /// spans, paths, every field and memories of several passages.
+    #[test]
+    fn the_delivery_index_built_in_one_pass_is_the_file_its_rows_make() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("memories.sqlite3");
+        let ours = "github.com/example/ledger";
+        let long = [
+            "Run `cargo build --release` before tagging; the archive goes to /srv/releases/ledger, and the checksum file beside it is written by the same step, never by hand, so a release that was rebuilt on another machine is caught before anyone downloads it and before the notes go out to the list.",
+            "Die Größe der Datei prüft `stat -c %s`, nie `ls`; ältere Läufe schrieben falsche Werte, weil `ls` gerundete Größen zeigt und die Prüfsumme danach nicht mehr stimmte, was erst beim Herunterladen auffiel und die ganze Veröffentlichung um einen Tag verzögerte.",
+            "漢字のテストは `just check` で動く。失敗したら /tmp/ledger-ci を消してからもう一度実行する。古いキャッシュが残っていると、文字コードの比較が前回の結果を使ってしまい、正しい失敗が隠れてしまうからだ。これは三回起きた。",
+        ]
+        .join("\n");
+        for (title, content, scope, kind, context) in [
+            (
+                "Release steps",
+                long.as_str(),
+                "project",
+                "procedure",
+                "Asked in a release review.",
+            ),
+            (
+                "Quoting style",
+                "Prefer straight quotes in docs; `sed -i ''` on macOS.",
+                "global",
+                "preference",
+                "",
+            ),
+            (
+                "Ledger owner",
+                "The ledger service belongs to the payments group.",
+                "project",
+                "fact",
+                "From the team page.",
+            ),
+            (
+                "Größe",
+                "Füße und Straßen: Ünïcödé stems stay whole.",
+                "global",
+                "fact",
+                "",
+            ),
+        ] {
+            let input = serde_json::json!({
+                "type": kind, "category": "build", "title": title, "content": content,
+                "context": context, "scope": scope, "project": if scope == "project" { ours } else { "" },
+                "reason": "the user said so", "evidence": "said in a review", "user_confirmed": true,
+            });
+            let out = super::record(&db, serde_json::from_value(input).unwrap()).unwrap();
+            assert_eq!(out["stored"], true, "{out}");
+        }
+        let projects = [ours.to_owned()];
+        let built = delivery::build(&db, &projects).unwrap();
+        let sources = delivery_sources(&db, &projects);
+        assert_eq!(sources.len(), 4);
+        assert!(
+            sources.iter().any(|s| s.rows.len() > 3),
+            "a memory of several passages"
+        );
+        assert!(built == DeliveryIndex::write(&sources).unwrap());
     }
 }

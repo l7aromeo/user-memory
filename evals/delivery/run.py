@@ -67,6 +67,13 @@ PROMPT_PRECISION = 0.9
 LOOKUP_LIMIT_MS = 100
 # Lookups timed per action for the cost, after one warm-up.
 LOOKUPS = 21
+# Budget of #175 for building a scope's delivery index from the store at the
+# largest size: session start builds it beside its own index, which takes 66
+# to 77 ms at 10,000 memories, so a build within this finishes first on a
+# machine with a free core.
+BUILD_LIMIT_MS = 60
+# Builds timed for the cost, after one warm-up.
+BUILDS = 11
 
 
 def sandbox(home):
@@ -378,7 +385,10 @@ def cost(found, seed, size, keep):
         folder.mkdir(parents=True, exist_ok=True)
         db, seconds = build(folder, found["user-memory"], drawn)
         index = folder / "delivery.index"
-        built = json.loads(bench(found["bench"], "index", "--db", db, "--project", world.PROJECT, "--out", index))
+        builds = [json.loads(bench(found["bench"], "index", "--db", db, "--project", world.PROJECT, "--out", index))
+                  for _ in range(BUILDS)]
+        built = builds[-1]
+        build_ms = sorted(b["build_ms"] for b in builds[1:])
         actions = [a for t in drawn["tasks"] for a in t["actions"] if a["kind"] in ("command", "file")][:10]
         times = {"index only": [], "with text": []}
         for action in actions:
@@ -391,6 +401,9 @@ def cost(found, seed, size, keep):
                         times[mode].append((time.perf_counter() - started) * 1000)
         print(f"\nlookup cost: {size} memories (store built in {seconds:.1f} s; delivery index "
               f"{built['bytes'] / 1e6:.1f} MB), {len(actions)} actions x {LOOKUPS - 1} runs, {sys.platform}")
+        build_median = statistics.median(build_ms)
+        print(f"  build       median {build_median:6.1f} ms, largest {build_ms[-1]:6.1f} ms "
+              f"({BUILDS - 1} builds, limit {BUILD_LIMIT_MS} ms)")
         worst = 0.0
         for mode, samples in times.items():
             samples.sort()
@@ -399,7 +412,7 @@ def cost(found, seed, size, keep):
             worst = max(worst, median)
             print(f"  {mode:<11} median {median:6.1f} ms, 95th percentile {p95:6.1f} ms, "
                   f"largest {samples[-1]:6.1f} ms")
-        return worst
+        return worst, build_median
 
 
 def main():
@@ -408,7 +421,8 @@ def main():
     parser.add_argument("--seeds", help="seeds to report on (default: the report seeds)")
     parser.add_argument("--sweep", action="store_true", help="sweep bars and window on the tuning seeds")
     parser.add_argument("--cost", action="store_true", help="time one lookup on the largest size")
-    parser.add_argument("--check-cost", action="store_true", help="fail when the lookup's median is over its limit")
+    parser.add_argument("--check-cost", action="store_true",
+                        help="fail when the lookup's or the build's median is over its limit")
     parser.add_argument("--bars", action="append",
                         help="PUSH,FAILURE,HOLD[,anchor][,scale=NAME] to report at instead of the matcher's; "
                              "NAME is what the bars test (score, share, mixed); repeatable")
@@ -424,11 +438,15 @@ def main():
     sizes = [int(s) for s in args.sizes.split(",")]
     tuning = {}
     if args.cost or args.check_cost:
-        worst = cost(found, REPORT_SEEDS[0], max(sizes), args.keep)
+        worst, build_median = cost(found, REPORT_SEEDS[0], max(sizes), args.keep)
+        over = False
         if args.check_cost and worst > LOOKUP_LIMIT_MS:
-            print(f"over the {LOOKUP_LIMIT_MS} ms limit")
-            return 1
-        return 0
+            print(f"a lookup is over the {LOOKUP_LIMIT_MS} ms limit")
+            over = True
+        if args.check_cost and build_median > BUILD_LIMIT_MS:
+            print(f"the build is over the {BUILD_LIMIT_MS} ms limit")
+            over = True
+        return 1 if over else 0
     if args.sweep:
         sweep(found, sizes, [int(s) for s in args.seeds.split(",")] if args.seeds else TUNING_SEEDS,
               tuning, args.keep)

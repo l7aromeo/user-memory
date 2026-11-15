@@ -9,7 +9,8 @@
 //! outside the mirror breaks this binary's build, which `just check` builds
 //! (`--all-targets`); see docs/dev/development.md.
 //!
-//! - `index`: builds a store's delivery index for a scope into a file.
+//! - `index`: builds a store's delivery index for a scope into a file, and
+//!   prints the time the build took.
 //! - `match`: runs tasks' actions through a window, one action at a time,
 //!   and prints each action's matched passages as JSON lines.
 //! - `lookup`: loads the index file and matches one action, as one hook
@@ -173,12 +174,14 @@ fn matched(index: &DeliveryIndex, m: &Matched) -> Result<Value, String> {
 fn run(cli: Cli) -> Result<(), String> {
     match cli.command {
         Command::Index { db, projects, out } => {
-            let sources = delivery::sources(&db, &projects).map_err(|e| e.to_string())?;
-            let bytes = DeliveryIndex::write(&sources).map_err(|e| e.to_string())?;
+            let started = std::time::Instant::now();
+            let bytes = delivery::build(&db, &projects).map_err(|e| e.to_string())?;
+            let build_ms = started.elapsed().as_secs_f64() * 1e3;
             fs::write(&out, &bytes).map_err(|e| format!("{}: {e}", out.display()))?;
+            let memories = DeliveryIndex::read(bytes).map_err(|e| e.to_string())?.len();
             println!(
                 "{}",
-                json!({"memories": sources.len(), "bytes": bytes.len()})
+                json!({"memories": memories, "bytes": fs::metadata(&out).map_err(|e| e.to_string())?.len(), "build_ms": build_ms})
             );
         }
         Command::Match {
