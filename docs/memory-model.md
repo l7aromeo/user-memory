@@ -279,10 +279,13 @@ passages are worked out again whenever the memory is indexed.
 - **Import** always shows a preview first: what would be added or left
   unchanged, conversations merged into identical memories, conflicts by field
   name, invalid rows, and inferred patterns that would go stale. Nothing is
-  written without `--apply`. To predict exactly which patterns go stale, a
-  `use-file` preview tries its replacements in a transaction and rolls them
-  back: it changes nothing stored, but holds the store's write lock meanwhile,
-  so other writers wait, and a large one takes about as long as applying.
+  written without `--apply`. A preview that applying would carry out says, in
+  its `next`, to show it to the user and wait for their answer: the server
+  never sees the conversation, so it cannot tell a yes from an agent's own.
+  To predict exactly which patterns go stale, a `use-file` preview tries its
+  replacements in a transaction and rolls them back: it changes nothing
+  stored, but holds the store's write lock meanwhile, so other writers wait,
+  and a large one takes about as long as applying.
   Applying from the CLI counts as your confirmation of every explicit memory
   in the file. Conflicts abort by default;
   `keep-store` keeps the store's version and `use-file` takes the file's.

@@ -87,6 +87,9 @@ impl Store {
 }
 
 // The user backs up their memory to a file and restores it on a new machine.
+
+/// What a preview that apply would carry out says to do next.
+const PREVIEWED: &str = "Nothing is imported yet: show the user this preview and wait for their answer before applying.";
 #[test]
 fn a_file_export_restores_into_a_fresh_store_after_a_preview() {
     let s = Store::new();
@@ -116,10 +119,7 @@ fn a_file_export_restores_into_a_fresh_store_after_a_preview() {
     let before = fs::read(&fresh.db).unwrap();
     let preview = fresh.value(&["import", file.to_str().unwrap()]);
     assert_eq!(preview["applied"], false, "{preview}");
-    assert!(
-        preview.get("next").is_none(),
-        "a preview has no next step: {preview}"
-    );
+    assert_eq!(preview["next"], PREVIEWED, "{preview}");
     assert_eq!(
         fs::read(&fresh.db).unwrap(),
         before,

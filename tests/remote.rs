@@ -1750,7 +1750,14 @@ fn a_client_exports_and_imports_through_its_server_as_with_a_local_store() {
         next.contains("optionally run `user-memory reindex` on the machine that serves http://"),
         "{next}"
     );
-    assert!(preview.get("next").is_none(), "{preview}");
+    // A preview's next names no command, so it reaches this client as the
+    // server wrote it; one that selects nothing has none.
+    assert_eq!(
+        preview["next"],
+        "Nothing is imported yet: show the user this preview and wait for their answer before applying.",
+        "{preview}"
+    );
+    assert!(filtered.get("next").is_none(), "{filtered}");
     let copied = on_host(&other, &["export", "-"], b"");
     assert_eq!(
         timeless(serde_json::from_slice(&copied.stdout).unwrap()),
