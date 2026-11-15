@@ -207,6 +207,10 @@ impl Loaded {
     /// Writes the token's last use, on the connection the gate reads with:
     /// SQLite moves `data_version` only for other connections' commits, so
     /// this causes no reload. A failed write is left for the next request.
+    /// It runs under the gate's lock and may wait up to the registry's busy
+    /// timeout for a writer, but the only other writers are `host token`
+    /// commands, which hold the file for milliseconds, and it runs at most
+    /// once an hour per token.
     fn used(&mut self, hash: &str, now: i64) {
         if let Some(conn) = &self.conn
             && registry::used(conn, hash, now).is_ok()
