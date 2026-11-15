@@ -49,11 +49,11 @@ pub struct Index {
     #[serde(default)]
     #[schemars(skip)]
     pub stamps: bool,
-    /// Used by user-memory's own session hook with stamps; leave unset. Where the session's snapshot stands in the store's count of changes, so the reply lists only what changed since and says where the store stands. An older server ignores it and lists every memory as before.
+    /// Used by user-memory's own session hook with stamps; leave unset. The position from the last stamps reply, sent back as it is, so the reply lists only what changed since and gives the store's position now; a position the store does not know gets every memory. An older server ignores it and lists every memory as before.
     #[arg(skip)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(skip)]
-    pub stamps_since: Option<super::stamps::Since>,
+    pub stamps_since: Option<super::stamps::Position>,
     /// Used by user-memory's own client to add the projects this conversation origin linked; leave unset.
     #[arg(skip)]
     #[serde(default)]
