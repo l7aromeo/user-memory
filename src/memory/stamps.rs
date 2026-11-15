@@ -154,6 +154,20 @@ impl Position {
         let (store, change, seq) = self.parts()?;
         (store == digest(store_id)).then_some((change, seq))
     }
+
+    /// Whether this position is one of the store `now` is a position of, at
+    /// or before `now`: what was read at it holds nothing that store has
+    /// not seen. Another store's, or one past `now`, as after a backup was
+    /// put back by hand, is not.
+    #[cfg(test)]
+    pub fn within(&self, now: &Position) -> bool {
+        match (self.parts(), now.parts()) {
+            (Some((store, change, _)), Some((now_store, now_change, _))) => {
+                store == now_store && change <= now_change
+            }
+            _ => false,
+        }
+    }
 }
 
 /// What a snapshot records about one memory: what it is, as a digest of the

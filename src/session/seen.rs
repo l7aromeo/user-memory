@@ -54,7 +54,7 @@ pub(super) fn is_seen_file(name: &str) -> bool {
 pub(super) fn path(store: &str) -> Option<PathBuf> {
     Some(
         super::live::sessions_dir()?
-            .join(format!("{PREFIX}{}.json", super::live::store_key(store))),
+            .join(format!("{PREFIX}{}.json", crate::paths::store_key(store))),
     )
 }
 

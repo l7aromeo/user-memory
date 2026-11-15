@@ -118,11 +118,6 @@ pub(super) struct Snapshot {
     pub changes: Option<Position>,
 }
 
-/// Hex characters of the store key in a snapshot's file name: 64 bits of
-/// the SHA-256 of the store's identity, so two stores on one machine never
-/// share a key, without a path or address in the name.
-const STORE_KEY_CHARS: usize = 16;
-
 /// The snapshot's file name for `client`'s session `session_id` of the
 /// store named `store`, or `None` when the id could not safely name a file.
 fn file_name(client: &str, session_id: &str, store: &str) -> Option<String> {
@@ -132,14 +127,8 @@ fn file_name(client: &str, session_id: &str, store: &str) -> Option<String> {
         && session_id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
-    let key = store_key(store);
+    let key = crate::paths::store_key(store);
     safe.then(|| format!("{client}-{session_id}-{key}.json"))
-}
-
-/// The key that names the files of the store named `store` in the state
-/// folder: its session snapshots and the rules it last showed.
-pub(super) fn store_key(store: &str) -> String {
-    crate::setup::sha256(store.as_bytes())[..STORE_KEY_CHARS].to_owned()
 }
 
 /// The folder of the session snapshots and the rules each store last
@@ -561,7 +550,7 @@ mod tests {
     #[test]
     fn snapshots_have_a_safe_name() {
         let store = "store /home/u/.local/share/user-memory/memories.sqlite3";
-        let key = &crate::setup::sha256(store.as_bytes())[..STORE_KEY_CHARS];
+        let key = &crate::setup::sha256(store.as_bytes())[..crate::paths::STORE_KEY_CHARS];
         assert_eq!(
             file_name("claude", "0b9c-41aa_x.1", store),
             Some(format!("claude-0b9c-41aa_x.1-{key}.json"))
