@@ -3447,3 +3447,56 @@ fn a_later_page_is_not_taken_for_the_tool_list() {
     assert_eq!(app.told_changed(), 0, "{:?}", app.others);
     app.close();
 }
+
+// A session that started while its server was down gets the index at the
+// first prompt the server answers, once.
+#[test]
+fn a_session_started_while_its_server_was_down_gets_the_index_when_it_is_back() {
+    let mut host = Host::start(root());
+    host.rpc(initialize(1));
+    host.rpc(call(
+        2,
+        "record",
+        json!({"category":"workflow","context":"Reviewing","title":"Prefer small pull requests","content":"Prefer small pull requests","reason":"Easier review","scope":"global","user_confirmed":true}),
+    ));
+    host.child.kill().unwrap();
+    host.child.wait().unwrap();
+    let home = tempdir().unwrap();
+    let url = format!("http://{}/mcp", host.address);
+    let token = host.root.path().join("token");
+    let hook = |subcommand: &str| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_user-memory"))
+            .args([subcommand, "--client", "claude"])
+            .current_dir(home.path())
+            .sandboxed(home.path())
+            .env("USER_MEMORY_URL", &url)
+            .env("USER_MEMORY_TOKEN_FILE", &token)
+            .env_remove("USER_MEMORY_DB")
+            .env(time::HOOK_ROOM.0, time::HOOK_ROOM.1)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let payload = json!({"session_id":"s","cwd":home.path(),"hook_event_name":subcommand});
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload.to_string().as_bytes())
+            .unwrap();
+        let out = time::finish(child, "the hook");
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let start = hook("session-start");
+    assert!(start.contains("User memory unavailable"), "{start}");
+    host.restart();
+    let back = hook("prompt-submit");
+    assert!(
+        back.contains("User memory is reachable again.")
+            && back.contains("Prefer small pull requests"),
+        "{back}"
+    );
+    assert_eq!(hook("prompt-submit"), "", "told once");
+}

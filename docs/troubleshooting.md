@@ -19,7 +19,7 @@ It checks the store or server and everything setup installed
 
 | You see | Meaning and fix |
 |---|---|
-| ``User memory unavailable: … Work without memory for now; tell the user once, and suggest they run user-memory doctor.`` | The server could not be reached or refused the request. The session continues without memory, and the agent tells you once. Run `user-memory doctor` for the reason. On a client of a memory server, the session still has its memory tools: once the server answers, the next call reaches it, and the agent calls `index` itself to load the memories session start could not. |
+| ``User memory unavailable: … Work without memory for now; tell the user once, and suggest they run user-memory doctor.`` | The server could not be reached or refused the request. The session continues without memory, and the agent tells you once. Run `user-memory doctor` for the reason. On a client of a memory server, the session still has its memory tools: once the server answers, the next call reaches it, and the first prompt after that gives the session the index session start could not (or a line saying to call `index`), once. |
 | The agent does not mention user-memory | The session was resumed from before the install or an upgrade. Start a new session. Restart the agent once after an install. |
 | The agent lacks a newer tool or option | The session started before an upgrade. Start a new session. |
 | ``No project: this folder has no git remote and no .user-memory-key.`` | The folder has no project. Give it a key, list its repositories, or let the agent link them ([projects](projects.md)). |

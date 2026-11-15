@@ -137,6 +137,16 @@ const NO_PROJECT_NEW: &str = "If it is one new project, run `user-memory project
 /// file, so it goes on with the task and leaves the checks to the user.
 const UNAVAILABLE_NEXT: &str =
     "Work without memory for now; tell the user once, and suggest they run user-memory doctor.";
+/// Opens the index a prompt gives a session whose start could not read
+/// memory, once memory answers: the agent's last word on memory was to work
+/// without it.
+const BACK_INDEX: &str = "User memory is reachable again. Session start could not read it, so here is the index it would have given:";
+/// Said instead of that index when it does not come in the prompt's time.
+const BACK_CALL: &str =
+    "User memory is reachable again. Session start could not read it: call index before going on.";
+/// The prompt's time kept after the index for such a session, for the
+/// snapshot's save and the reply.
+const LATE_INDEX_MARGIN: Duration = Duration::from_millis(250);
 /// The most repositories the No-project line names; the rest are counted,
 /// so a folder of many checkouts keeps the header short.
 const REPOSITORIES_LISTED: usize = 20;
@@ -164,6 +174,15 @@ pub async fn start(path: PathBuf, client: Option<HookClient>) -> String {
         )
         .await;
     }
+    // Marked before memory is asked and cleared once the index is in hand,
+    // so a start that fails, or is cut off before it hears, is marked.
+    let missed = client
+        .zip(payload.as_deref())
+        .and_then(|(client, payload)| session_file(client, payload))
+        .map(|path| live::missed_path(&path));
+    if let Some(missed) = &missed {
+        let _ = live::mark_missed(missed);
+    }
     let checkout = path.clone();
     let snapshot = async {
         if let (Some(client), Some(payload)) = (client, &payload) {
@@ -178,11 +197,14 @@ pub async fn start(path: PathBuf, client: Option<HookClient>) -> String {
     };
     let (_, index, versions) = tokio::join!(
         tokio::time::timeout_at(deadline, snapshot),
-        tokio::time::timeout_at(deadline, index(path, client, origin.clone())),
+        tokio::time::timeout_at(deadline, start_index(path, client, origin.clone())),
         tokio::time::timeout_at(deadline, version_line())
     );
     let index = match index {
         Ok(Ok(text)) => {
+            if let Some(missed) = &missed {
+                let _ = std::fs::remove_file(missed);
+            }
             let (limit, unit) = hook_limit(client);
             capped(text, limit - ADDED_ROOM, unit, INDEX_CUT)
         }
@@ -235,12 +257,7 @@ async fn remember(
     checkout: PathBuf,
     origin: Option<String>,
 ) -> Option<()> {
-    let payload: Value = serde_json::from_slice(payload).ok()?;
-    let path = live::snapshot_path(
-        client.name(),
-        payload["session_id"].as_str()?,
-        &store_identity()?,
-    )?;
+    let path = session_file(client, payload)?;
     let (snapshot, _) = snapshot(checkout, origin, None).await.ok()?;
     // On a blocking thread, so the snapshot's share of the limit bounds the
     // save too.
@@ -248,6 +265,16 @@ async fn remember(
         .await
         .ok()?
         .ok()
+}
+
+/// The snapshot file of the session the hook payload `payload` names.
+fn session_file(client: HookClient, payload: &[u8]) -> Option<PathBuf> {
+    let payload: Value = serde_json::from_slice(payload).ok()?;
+    live::snapshot_path(
+        client.name(),
+        payload["session_id"].as_str()?,
+        &store_identity()?,
+    )
 }
 
 /// What the session's memories come from, which names its snapshot.
@@ -275,24 +302,38 @@ fn identity(server: Option<&str>, db: &Path) -> String {
 pub async fn prompt_submit(client: HookClient) -> String {
     let deadline = tokio::time::Instant::now() + hook_time(PROMPT_LIMIT);
     let landing = std::sync::Arc::new(live::Landing::default());
-    let notice = match tokio::time::timeout_at(deadline, changes(client, landing.clone())).await {
-        Ok(Some((notice, saved))) => match tokio::time::timeout_at(deadline, saved).await {
-            Ok(_) => notice,
-            // Told only with the snapshot that records it: a save abandoned
-            // in time leaves the change for the next prompt.
+    let mut missed = None;
+    let notice =
+        match tokio::time::timeout_at(deadline, changes(client, landing.clone(), deadline)).await {
+            Ok(Some(found)) => match tokio::time::timeout_at(deadline, found.saved).await {
+                Ok(_) => {
+                    missed = found.missed;
+                    found.notice
+                }
+                // Told only with the snapshot that records it: a save abandoned
+                // in time leaves the change for the next prompt.
+                Err(_) => {
+                    stopped();
+                    #[cfg(debug_assertions)]
+                    live::hold_for_tests(live::HOLD_ABANDON);
+                    if landing.abandon() {
+                        missed = found.missed;
+                        found.notice
+                    } else {
+                        None
+                    }
+                }
+            },
+            Ok(None) => None,
             Err(_) => {
                 stopped();
-                #[cfg(debug_assertions)]
-                live::hold_for_tests(live::HOLD_ABANDON);
-                landing.abandon().then_some(notice).flatten()
+                None
             }
-        },
-        Ok(None) => None,
-        Err(_) => {
-            stopped();
-            None
-        }
-    };
+        };
+    // Told once: the mark goes with the text that answers it.
+    if let (Some(_), Some(missed)) = (&notice, &missed) {
+        let _ = std::fs::remove_file(missed);
+    }
     let (limit, unit) = hook_limit(Some(client));
     notice
         .map(|text| capped(text, limit, unit, NOTICE_CUT))
@@ -310,39 +351,79 @@ fn stopped() {
     eprintln!("user-memory: the prompt hook stopped at its time limit");
 }
 
+/// What a prompt found: its notice, the save of what the session sees now,
+/// and the mark of a start without memory that the notice answers.
+struct Found {
+    notice: Option<String>,
+    saved: tokio::task::JoinHandle<std::io::Result<()>>,
+    missed: Option<PathBuf>,
+}
+
 /// What changed since the session in the hook payload last looked, and the
 /// save of what it sees now, under way on a blocking thread so the prompt's
 /// limit bounds it and `landing` can abandon it. A session without a
-/// snapshot gets one and no notice.
+/// snapshot gets one and no notice. A session whose start could not read
+/// memory gets, once memory answers, the index it missed, or when that does
+/// not come before `deadline`, a line saying to ask for it.
 async fn changes(
     client: HookClient,
     landing: std::sync::Arc<live::Landing>,
-) -> Option<(Option<String>, tokio::task::JoinHandle<std::io::Result<()>>)> {
+    deadline: tokio::time::Instant,
+) -> Option<Found> {
     let bytes = payload().await?;
     let origin = origin(client, &bytes);
+    let path = session_file(client, &bytes)?;
     let payload: Value = serde_json::from_slice(&bytes).ok()?;
-    let path = live::snapshot_path(
-        client.name(),
-        payload["session_id"].as_str()?,
-        &store_identity()?,
-    )?;
-    let checkout = payload["cwd"].as_str().unwrap_or(".");
+    let checkout = PathBuf::from(payload["cwd"].as_str().unwrap_or("."));
     let before = live::load(&path);
-    let (now, origins) = snapshot(PathBuf::from(checkout), origin.clone(), before.as_ref())
-        .await
-        .ok()?;
+    let missed = Some(live::missed_path(&path)).filter(|missed| missed.exists());
+    let late_index = async {
+        missed.as_ref()?;
+        let index = async {
+            #[cfg(debug_assertions)]
+            let _ =
+                tokio::task::spawn_blocking(|| live::hold_for_tests(live::HOLD_LATE_INDEX)).await;
+            // The global rules come too: a session that started without
+            // memory may hold none, or an old copy, in its instruction files.
+            index(checkout.clone(), Some(client), origin.clone(), false).await
+        };
+        tokio::time::timeout_at(deadline - hook_time(LATE_INDEX_MARGIN), index)
+            .await
+            .ok()?
+            .ok()
+    };
+    let (seen, late_index) = tokio::join!(
+        snapshot(checkout.clone(), origin.clone(), before.as_ref()),
+        late_index
+    );
+    let (now, origins) = seen.ok()?;
     // What this conversation changed last, it knows already.
     let own: BTreeSet<String> = origins
         .into_iter()
         .filter(|(_, by)| origin.as_ref() == Some(by))
         .map(|(id, _)| id)
         .collect();
-    let notice = match &before {
-        Some(before) => told(before, &now, &own).await,
-        None => None,
+    let notice = match (&missed, late_index) {
+        // The index says what the session sees now, changes and all.
+        (Some(_), Some(index)) => Some(format!("{BACK_INDEX}\n{index}")),
+        (missed, _) => {
+            let notice = match &before {
+                Some(before) => told(before, &now, &own).await,
+                None => None,
+            };
+            match (missed, notice) {
+                (Some(_), Some(notice)) => Some(format!("{BACK_CALL}\n{notice}")),
+                (Some(_), None) => Some(BACK_CALL.to_owned()),
+                (None, notice) => notice,
+            }
+        }
     };
     let saved = tokio::task::spawn_blocking(move || live::save(&path, &now, &landing));
-    Some((notice, saved))
+    Some(Found {
+        notice,
+        saved,
+        missed,
+    })
 }
 
 /// The notice for a session that last saw `before` and now sees `now`.
@@ -473,12 +554,10 @@ async fn stamps(
     memory::parse_stamps_reply(&reply).context("The memory server sent no stamps; update it")
 }
 
-/// The lines naming the projects the session in `path` sees, then the index
-/// of them, from the shared server or the local store, shortened to the
-/// hook's share of the output so that it still lists or counts each memory.
-/// When the client's instruction file holds the global rules, they are left
-/// out rather than repeated.
-async fn index(
+/// Session start's index: [`index`], after the instruction files are
+/// brought up to date. When the client's instruction file then holds the
+/// global rules, they are left out rather than repeated.
+async fn start_index(
     path: PathBuf,
     client: Option<HookClient>,
     origin: Option<String>,
@@ -491,6 +570,19 @@ async fn index(
         .and_then(Result::ok)
         .unwrap_or_default();
     let rules_elsewhere = client.is_some_and(|client| current.contains(&client.installed()));
+    index(path, client, origin, rules_elsewhere).await
+}
+
+/// The lines naming the projects the session in `path` sees, then the index
+/// of them, from the shared server or the local store, shortened to the
+/// hook's share of the output so that it still lists or counts each memory;
+/// without the global rules when `rules_elsewhere`.
+async fn index(
+    path: PathBuf,
+    client: Option<HookClient>,
+    origin: Option<String>,
+    rules_elsewhere: bool,
+) -> anyhow::Result<String> {
     let remote = setup::configured_remote()?;
     let here = path.clone();
     // Links the store cannot list leave the folder's projects to show.

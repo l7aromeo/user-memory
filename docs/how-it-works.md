@@ -206,6 +206,11 @@ key and end, when they do not all fit, with a count such as
 If the server cannot be reached, the hook prints one line,
 ``User memory unavailable: …``, ending with what the agent does: work
 without memory, tell the user once, and suggest `user-memory doctor`.
+At the first prompt where memory answers again, the session gets the index
+it missed, under ``User memory is reachable again. Session start could not
+read it, so here is the index it would have given:``, or, when that index
+does not come in the prompt's time, one line telling the agent to call
+`index`. It is said once.
 
 ## Change notices during a session
 

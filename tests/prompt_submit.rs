@@ -794,3 +794,58 @@ fn a_session_is_not_told_of_its_own_changes() {
         Some(format!("+ {} Signs every commit", id8(&theirs)).as_str())
     );
 }
+
+/// Opens what a prompt gives a session whose start could not read memory.
+const BACK: &str = "User memory is reachable again. Session start could not read it";
+
+// A session that started while its store could not be opened gets the index
+// at the first prompt that can read it, once; a session that started
+// normally never does.
+#[test]
+fn a_session_started_without_its_store_gets_the_index_once_it_is_back() {
+    let home = Home::new();
+    let db = home.path().join("memory.sqlite3");
+    std::fs::write(&db, "not a database").unwrap();
+    let start = home.hook("SessionStart", "s", &[]);
+    assert!(
+        String::from_utf8_lossy(&start.stdout).contains("User memory unavailable"),
+        "{start:?}"
+    );
+    assert_eq!(home.notice("s"), "", "still unreachable");
+    std::fs::remove_file(&db).unwrap();
+    let added = home.record("Prefer Rust for tools");
+    let notice = home.notice("s");
+    assert!(notice.starts_with(BACK), "{notice:?}");
+    assert!(
+        notice.contains(&format!("{} Prefer Rust for tools", id8(&added))),
+        "{notice:?}"
+    );
+    assert_eq!(home.notice("s"), "", "told once");
+    home.hook("SessionStart", "t", &[]);
+    assert_eq!(home.notice("t"), "");
+}
+
+// Where the index does not come in the prompt's time, one line says to ask
+// for it, once.
+#[test]
+fn a_session_started_without_memory_is_told_to_ask_when_the_index_is_late() {
+    let home = Home::new();
+    let db = home.path().join("memory.sqlite3");
+    std::fs::write(&db, "not a database").unwrap();
+    home.hook("SessionStart", "s", &[]);
+    std::fs::remove_file(&db).unwrap();
+    home.record("Prefer Rust for tools");
+    let hold = home.path().join("hold");
+    std::fs::write(&hold, "").unwrap();
+    let notice = home.notice_with(
+        "s",
+        &[("USER_MEMORY_HOLD_LATE_INDEX", hold.to_str().unwrap())],
+    );
+    std::fs::remove_file(&hold).unwrap();
+    assert_eq!(
+        notice,
+        format!("{BACK}: call index before going on."),
+        "{notice:?}"
+    );
+    assert_eq!(home.notice("s"), "", "told once");
+}

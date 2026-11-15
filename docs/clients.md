@@ -200,7 +200,9 @@ existing category for a new memory (`workflow`, not a new `process`). With
   [projects playbook](#the-user-memory-skill) says when to do which.
 - It finishes within five seconds and, on any failure, prints a single "User
   memory unavailable" line and exits successfully, so a broken store or an
-  unreachable server never interrupts a session.
+  unreachable server never interrupts a session. The first prompt at which
+  memory answers again gives that session the index (or, when it does not
+  come in the prompt's time, a line saying to call `index`), once.
 - The `Projects:` line and the hook's copy of the index keep within 9,000,
   and the whole output within 9,500, counted as the client counts a hook's
   text: Codex shows the agent only the start and end of more than 2,500
