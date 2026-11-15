@@ -134,6 +134,12 @@ pub(super) struct Group {
     pub(super) memories: Vec<Memory>,
 }
 
+/// Names, in debug builds only, the variable that has the store answer a
+/// stamps request as a server from before positions did, ignoring
+/// `stamps_since`, for tests of the client's side against such a server.
+#[cfg(debug_assertions)]
+const TEST_NO_POSITIONS: &str = "USER_MEMORY_TEST_NO_POSITIONS";
+
 /// The index of the memories `input.selection` covers: by default every
 /// active global memory and those of the requested projects.
 pub fn index(db: &Path, input: &Index) -> Result<String> {
@@ -158,7 +164,11 @@ pub fn index(db: &Path, input: &Index) -> Result<String> {
     }
     let filter = selection.filter()?;
     if input.stamps {
-        return match &input.stamps_since {
+        let since = input.stamps_since.as_ref();
+        // A debug build told so answers as a server from before positions.
+        #[cfg(debug_assertions)]
+        let since = since.filter(|_| std::env::var_os(TEST_NO_POSITIONS).is_none());
+        return match since {
             Some(since) => super::stamps::stamps_since(&conn, &filter, since),
             None => super::stamps::stamps(&conn, &filter),
         };

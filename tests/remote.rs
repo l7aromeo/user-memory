@@ -69,10 +69,15 @@ impl Host {
     /// Starts a host, as the debug build of `version` when given: a server
     /// of another release.
     fn start_as(root: TempDir, version: Option<&str>) -> Self {
+        Self::start_with(root, version, &[])
+    }
+    /// [`Host::start_as`], with `env` added.
+    fn start_with(root: TempDir, version: Option<&str>, env: &[(&str, &str)]) -> Self {
         let mut command = Command::new(env!("CARGO_BIN_EXE_user-memory"));
         if let Some(version) = version {
             command.env("USER_MEMORY_TEST_VERSION", version);
         }
+        command.envs(env.iter().copied());
         let mut child = command
             .args(["host", "--listen", "127.0.0.1:0", "--db"])
             .arg(root.path().join("shared.sqlite3"))
@@ -3858,4 +3863,41 @@ fn a_write_through_one_connector_reaches_another_sessions_next_prompt() {
         "{asked}"
     );
     assert!(!asked.contains("\"stamps_since\":\"\""), "{asked}");
+}
+
+// A server that answers without positions, as one from before them does,
+// gets no marker and is asked only for its version once a quiet interval;
+// once its version changes, the poll asks for stamps again and the marker
+// comes.
+#[test]
+fn a_server_without_positions_is_asked_only_for_its_version_until_it_changes() {
+    // 300 ms polls: one a quiet interval of 3.6 s, as no hook runs.
+    let mut host = Host::start_with(
+        root(),
+        Some("0.9.3"),
+        &[("USER_MEMORY_TEST_NO_POSITIONS", "1")],
+    );
+    let proxy = Counting::to(&host.address);
+    let machine = Machine {
+        home: tempdir().unwrap(),
+        url: format!("http://{}/mcp", proxy.address),
+        token: host.root.path().join("token"),
+        env: vec![("USER_MEMORY_MARKER_POLL_MS", "300".to_owned())],
+    };
+    let count = |text: &str, what: &str| text.matches(what).count();
+    let _connector = machine.connector();
+    time::until("the first poll", || {
+        count(&proxy.sent(), "\"name\":\"index\"") == 1
+    });
+    let first = proxy.sent().len();
+    time::until("two quiet polls", || {
+        count(&proxy.sent()[first..], "\"method\":\"initialize\"") >= 3
+    });
+    let quiet = proxy.sent()[first..].to_owned();
+    assert_eq!(count(&quiet, "\"name\":\"index\""), 0, "{quiet}");
+    assert!(find(machine.home.path(), "changed").is_none(), "no marker");
+    host.child.kill().unwrap();
+    host.child.wait().unwrap();
+    host.restart_as(Some("0.10.0"));
+    machine.marker();
 }
