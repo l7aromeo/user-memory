@@ -2193,6 +2193,66 @@ mod tests {
         assert_eq!(names(dir.path()), ["notes.txt", "user-memory.exe"]);
     }
 
+    /// How long another program holds a file in the tests below: long
+    /// enough that a rename tried at once meets the hold.
+    #[cfg(windows)]
+    const BRIEF_HOLD: Duration = Duration::from_millis(300);
+
+    /// Opens `path` as another program may for a moment: sharing reads
+    /// only, so the file can't be renamed while the handle is open.
+    #[cfg(windows)]
+    fn hold(path: &Path) -> fs::File {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows::Win32::Storage::FileSystem::FILE_SHARE_READ;
+        fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ.0)
+            .open(path)
+            .unwrap()
+    }
+
+    /// Replaces an installed binary while another program holds `held`,
+    /// one of the two files, for [`BRIEF_HOLD`]: the new binary must be the
+    /// installed one afterwards, and nothing else left in the folder.
+    #[cfg(windows)]
+    fn replace_while_held(held: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("user-memory.exe");
+        let new = dir.path().join(".user-memory-1.exe");
+        fs::write(&destination, "old").unwrap();
+        fs::write(&new, "new").unwrap();
+        let handle = hold(if held == "new" { &new } else { &destination });
+        let holder = std::thread::spawn(move || {
+            std::thread::sleep(BRIEF_HOLD);
+            drop(handle);
+        });
+        let replaced = replace_aside(&new, &destination);
+        holder.join().unwrap();
+        assert!(replaced.is_ok(), "{held} held: {replaced:?}");
+        assert_eq!(fs::read_to_string(&destination).unwrap(), "new");
+        let left: Vec<String> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(left, ["user-memory.exe"]);
+    }
+
+    /// The installed binary, held for a moment as a new or newly started
+    /// program may be, is still set aside.
+    #[cfg(windows)]
+    #[test]
+    fn a_replacement_waits_out_a_brief_hold_on_the_installed_binary() {
+        replace_while_held("installed");
+    }
+
+    /// The new binary, held for a moment just after its download, still
+    /// takes the installed one's place.
+    #[cfg(windows)]
+    #[test]
+    fn a_replacement_waits_out_a_brief_hold_on_the_new_binary() {
+        replace_while_held("new");
+    }
+
     #[test]
     fn windows_finds_a_client_through_its_pathext_extensions() {
         use std::ffi::OsStr;
