@@ -3,7 +3,7 @@
 //! state directory, written at session start and after each prompt.
 
 use crate::{
-    memory::{Since, Stamp, Stamps},
+    memory::{Position, Stamp, Stamps},
     paths, private,
 };
 use serde::{Deserialize, Serialize};
@@ -111,10 +111,11 @@ pub(super) fn gone(old: &Snapshot, new: &Snapshot) -> Vec<String> {
 pub(super) struct Snapshot {
     pub projects: Option<Vec<Project>>,
     pub stamps: Stamps,
-    /// Where the stamps stand in the store's count of changes; none from a
-    /// server that knows no count, or in a snapshot saved before it.
+    /// The store's position for these stamps, kept as the store wrote it;
+    /// none from a server that knows no positions, or in a snapshot saved
+    /// before them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub changes: Option<Since>,
+    pub changes: Option<Position>,
 }
 
 /// Hex characters of the store key in a snapshot's file name: 64 bits of

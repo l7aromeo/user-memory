@@ -15,8 +15,8 @@ use std::collections::{BTreeMap, BTreeSet};
 /// an older server's index, for one.
 pub const STAMPS: &str = "user-memory stamps v1";
 
-/// Opens a stamps reply for a client that asks with [`Since`]: the store's
-/// id and latest change, then `full` when it lists every memory in scope or
+/// Opens a stamps reply for a client that asks with a [`Position`]: the
+/// store's position now, then `full` when it lists every memory in scope or
 /// `delta` when it lists only those changed since, with `-` and the id of
 /// each changed memory no longer in scope. Each memory's line holds the
 /// conversation origin of its latest change, so a session is not told of
@@ -28,13 +28,38 @@ pub const STAMPS_SINCE: &str = "user-memory stamps v2";
 /// conversation changes nothing a session is told of.
 const LATEST_ORIGIN: &str = "coalesce((SELECT origin FROM memory_events WHERE memory_id={id} AND op NOT IN ('confirm','distinct','origin_removed') ORDER BY seq DESC LIMIT 1),'')";
 
-/// Where a session's snapshot stands in the store's count of its changes:
-/// the store's id and the latest change it has seen. The default, an empty
-/// id, asks for every memory in scope.
+/// Where a session's snapshot stands in the store's count of its changes,
+/// as the store wrote it: a string a hook keeps and sends back as it is,
+/// like a paging cursor. Only the store reads what is inside, and its
+/// format may change between versions; a position the store does not know,
+/// whether empty, from another store or a restored one, in another format
+/// or no position at all, gets every memory in scope.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
-pub struct Since {
-    pub store_id: String,
-    pub change: i64,
+#[serde(transparent)]
+pub struct Position(String);
+
+/// Opens each position this version writes, so a store tells its own
+/// format from another version's or from text that is no position.
+const POSITION_FORMAT: &str = "1";
+
+impl Position {
+    /// The position at `change` of the store whose id is `store_id`: the
+    /// format, a digest of the id, so the id itself never leaves the store,
+    /// and the change.
+    pub(super) fn at(store_id: &str, change: i64) -> Self {
+        Self(format!("{POSITION_FORMAT}.{}.{change}", digest(store_id)))
+    }
+
+    /// The change this position names in the store whose id is `store_id`;
+    /// none for another store's position or one this version does not write.
+    fn change_in(&self, store_id: &str) -> Option<i64> {
+        let rest = self.0.strip_prefix(POSITION_FORMAT)?.strip_prefix('.')?;
+        let (store, change) = rest.split_once('.')?;
+        if store != digest(store_id) {
+            return None;
+        }
+        change.parse().ok()
+    }
 }
 
 /// What a snapshot records about one memory: what it is, as a digest of the
@@ -53,8 +78,10 @@ pub struct Stamp {
 /// session's notice.
 const DIGEST_BYTES: usize = 8;
 
-/// The digest a stamp holds for a memory whose counted columns, quoted and
-/// joined as [`super::changes::digested`] does, read `values`.
+/// The first [`DIGEST_BYTES`] of the SHA-256 of `values`, in hex: what a
+/// stamp holds for a memory whose counted columns, quoted and joined as
+/// [`super::changes::digested`] does, read `values`, and what a position
+/// holds for the store id.
 fn digest(values: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let hash = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, values.as_bytes());
@@ -67,30 +94,34 @@ fn digest(values: &str) -> String {
 }
 
 /// The stamps of the memories `filter` selects, as [`STAMPS_SINCE`] says:
-/// only those changed after `since` when the store has counted every change
-/// since then under the same id, else all of them. One read, so the state
-/// it reports is the state of what it lists.
-pub(super) fn stamps_since(conn: &Connection, filter: &Filter, since: &Since) -> Result<String> {
+/// only those changed after `since` when it is this store's position and
+/// the store still counts every change since then, else all of them. One
+/// read, so the position it reports is that of what it lists.
+pub(super) fn stamps_since(conn: &Connection, filter: &Filter, since: &Position) -> Result<String> {
     let read = conn.unchecked_transaction()?;
     let (store_id, last, pruned): (String, i64, i64) = read.query_row(
         "SELECT store_id,last_change,pruned_through FROM store_changes WHERE id=1",
         [],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
-    let delta = since.store_id == store_id && (pruned..=last).contains(&since.change);
+    let after = since
+        .change_in(&store_id)
+        .filter(|change| (pruned..=last).contains(change));
+    let delta = after.is_some();
     let (condition, mut values) = condition(filter)?;
     let mut sql = format!(
         "SELECT id,status,title,{},{} FROM memories WHERE {condition}",
         super::changes::digested(),
         LATEST_ORIGIN.replace("{id}", "memories.id"),
     );
-    if delta {
+    if let Some(after) = after {
         sql.push_str(" AND id IN (SELECT memory_id FROM memory_changes WHERE change>?)");
-        values.push(Sql::Integer(since.change));
+        values.push(Sql::Integer(after));
     }
     sql.push_str(" ORDER BY id");
     let kind = if delta { "delta" } else { "full" };
-    let mut lines = vec![format!("{STAMPS_SINCE}\t{store_id}\t{last}\t{kind}")];
+    let now = Position::at(&store_id, last);
+    let mut lines = vec![format!("{STAMPS_SINCE}\t{}\t{kind}", now.0)];
     let mut listed = BTreeSet::new();
     let mut statement = read.prepare(&sql)?;
     let mut rows = statement.query(params_from_iter(values))?;
@@ -106,12 +137,12 @@ pub(super) fn stamps_since(conn: &Connection, filter: &Filter, since: &Since) ->
         ));
         listed.insert(id);
     }
-    if delta {
+    if let Some(after) = after {
         let mut changed = read.prepare(&format!(
             "SELECT memory_id,{} FROM memory_changes WHERE change>?1 ORDER BY memory_id",
             LATEST_ORIGIN.replace("{id}", "memory_changes.memory_id")
         ))?;
-        let rows = changed.query_map([since.change], |r| {
+        let rows = changed.query_map([after], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
         })?;
         for row in rows {
@@ -128,8 +159,8 @@ pub(super) fn stamps_since(conn: &Connection, filter: &Filter, since: &Since) ->
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct StampsReply {
     /// Where the store stood when it answered; none from a server that knows
-    /// no [`Since`].
-    pub since: Option<Since>,
+    /// no [`Position`].
+    pub since: Option<Position>,
     /// Whether `stamps` holds only the memories changed since what was asked.
     pub delta: bool,
     pub stamps: Stamps,
@@ -140,7 +171,7 @@ pub struct StampsReply {
     pub origins: BTreeMap<String, String>,
 }
 
-/// The reply to a stamps request with [`Since`], or a [`STAMPS`] reply from
+/// The reply to a stamps request with a [`Position`], or a [`STAMPS`] reply from
 /// a server that knows none; `None` for any other text.
 pub fn parse_stamps_reply(text: &str) -> Option<StampsReply> {
     let (head, body) = text.split_once('\n').unwrap_or((text, ""));
@@ -151,10 +182,7 @@ pub fn parse_stamps_reply(text: &str) -> Option<StampsReply> {
         });
     };
     let mut fields = state.strip_prefix('\t')?.split('\t');
-    let since = Since {
-        store_id: fields.next()?.to_owned(),
-        change: fields.next()?.parse().ok()?,
-    };
+    let since = Position(fields.next()?.to_owned());
     let delta = match fields.next()? {
         "delta" => true,
         "full" => false,
@@ -259,7 +287,7 @@ mod tests {
     }
 
     /// The reply for global memories since `since`.
-    fn reply(conn: &Connection, since: &Since) -> StampsReply {
+    fn reply(conn: &Connection, since: &Position) -> StampsReply {
         let filter = super::super::selection::Selection::default()
             .filter()
             .unwrap();
@@ -269,7 +297,7 @@ mod tests {
     #[test]
     fn a_reply_since_a_change_lists_only_what_changed_after_it() {
         let (_dir, conn) = store();
-        let full = reply(&conn, &Since::default());
+        let full = reply(&conn, &Position::default());
         assert!(!full.delta);
         assert_eq!(full.stamps.keys().collect::<Vec<_>>(), [A, B]);
         let at = full.since.clone().unwrap();
@@ -306,46 +334,41 @@ mod tests {
             (moved.stamps.len(), moved.gone.clone()),
             (0, vec![C.to_owned()])
         );
-        // Another store's id, a change it has not counted yet, or one below
-        // what it dropped: the whole list.
+        // The position names the store and its change, never the raw id.
+        let (id, change): (String, i64) = conn
+            .query_row("SELECT store_id,last_change FROM store_changes", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
         let now = moved.since.unwrap();
+        assert_eq!(now, Position::at(&id, change));
+        assert!(!now.0.contains(&id), "{now:?}");
+        // A position the store does not know gets the whole list: another
+        // store's, one ahead of what it counted, another format's, a
+        // made-up one or none.
         for (case, since) in [
+            ("another store", Position::at(&"0".repeat(32), change)),
+            ("ahead", Position::at(&id, change + 1)),
             (
-                "another id",
-                Since {
-                    store_id: "other".into(),
-                    change: now.change,
-                },
+                "another format",
+                Position(now.0.replacen(POSITION_FORMAT, "2", 1)),
             ),
-            (
-                "ahead",
-                Since {
-                    change: now.change + 1,
-                    ..now.clone()
-                },
-            ),
+            ("made up", Position("not a position".into())),
+            ("empty", Position::default()),
         ] {
             assert!(!reply(&conn, &since).delta, "{case}");
         }
-        conn.execute("UPDATE store_changes SET pruned_through=?1", [now.change])
+        // One below what the store dropped too.
+        conn.execute("UPDATE store_changes SET pruned_through=?1", [change])
             .unwrap();
-        assert!(
-            !reply(
-                &conn,
-                &Since {
-                    change: now.change - 1,
-                    ..now.clone()
-                }
-            )
-            .delta
-        );
+        assert!(!reply(&conn, &Position::at(&id, change - 1)).delta);
         assert!(reply(&conn, &now).delta, "at the pruned change itself");
     }
 
     #[test]
     fn a_digest_moves_with_a_counted_column_and_with_nothing_else() {
         let (_dir, conn) = store();
-        let digest = |conn: &Connection| reply(conn, &Since::default()).stamps[A].digest.clone();
+        let digest = |conn: &Connection| reply(conn, &Position::default()).stamps[A].digest.clone();
         let first = digest(&conn);
         conn.execute(
             "UPDATE memories SET updated_at='2030-01-01 00:00:00',last_confirmed_at='2030-01-01 00:00:00' WHERE id=?1",

@@ -211,14 +211,12 @@ fn read_marker(db: &Path) -> Option<State> {
     })
 }
 
-/// Where the store at `db` stands as its marker says, for a session hook
-/// that compares it with its snapshot without opening the store; none when
-/// the marker is missing or unreadable.
-pub fn marked(db: &Path) -> Option<super::Since> {
-    read_marker(db).map(|state| super::Since {
-        store_id: state.store_id,
-        change: state.last_change,
-    })
+/// The position the marker beside the store at `db` says the store is at,
+/// as a stamps reply names it, so a session hook can compare its snapshot's
+/// position with it, whole, without opening the store; none when the marker
+/// is missing or unreadable.
+pub fn marked(db: &Path) -> Option<super::Position> {
+    read_marker(db).map(|state| super::Position::at(&state.store_id, state.last_change))
 }
 
 /// At session start, for the store at `db` on this machine: when its

@@ -454,7 +454,7 @@ async fn stamps(
     remote: Option<&crate::remote::Connection>,
     projects: &[String],
     origin: Option<&str>,
-    since: Option<memory::Since>,
+    since: Option<memory::Position>,
 ) -> anyhow::Result<memory::StampsReply> {
     let input = json!({
         "projects": projects,
