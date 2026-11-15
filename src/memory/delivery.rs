@@ -62,8 +62,12 @@ pub(crate) const WINDOW_HALF_LIFE: f64 = 5.0;
 pub(crate) const COMMAND_PUSH_BAR: f64 = 0.6;
 
 /// The share a passage needs to be pushed after a command that failed
-/// (#117). Equal to [`COMMAND_PUSH_BAR`] for now: the failure way was
-/// measured with its anchor rule at that bar, not with a lower one.
+/// (#117). Equal to [`COMMAND_PUSH_BAR`], as a lower bar gains nothing.
+/// Measured with the anchor rule where half the commands fail, at 1,000
+/// and 10,000 memories: at 0.5, 0.4 and 0.3 a failure pushes 2 to 9 more
+/// passages on the tuning seeds, every one needed then, but finds one
+/// more failure need of 75 at most, and on the report seeds none (85 of
+/// 168 at 0.6 and at 0.4). Where 15% fail, a lower bar changes nothing.
 pub(crate) const COMMAND_FAILURE_BAR: f64 = 0.6;
 
 /// The share a passage needs to hold a shell command back (#118): above
@@ -78,7 +82,9 @@ pub(crate) const HOLD_BAR: f64 = 0.75;
 pub(crate) const PUSH_BAR: f64 = 0.4;
 
 /// The `mixed` score a passage needs to be pushed after any action but a
-/// command that failed (#117). Equal to [`PUSH_BAR`], as for commands.
+/// command that failed (#117). Equal to [`PUSH_BAR`]: the delivery
+/// benchmark cannot measure it, as only commands fail in its worlds, and
+/// at 0.2 to 0.4 it decides the same.
 pub(crate) const FAILURE_BAR: f64 = 0.4;
 
 /// Programs that run the command after them, which is the one a memory
