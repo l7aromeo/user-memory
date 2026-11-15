@@ -105,6 +105,9 @@ struct TuningArgs {
     /// Adjacent words of a command are anchors too.
     #[arg(long)]
     pairs: bool,
+    /// Only a command's first word argument names its subcommand.
+    #[arg(long)]
+    first_word: bool,
 }
 
 impl TuningArgs {
@@ -115,6 +118,7 @@ impl TuningArgs {
             half_life: self.half_life.unwrap_or(base.half_life),
             credit: self.credit.unwrap_or(base.credit),
             pairs: self.pairs || base.pairs,
+            first_word: self.first_word || base.first_word,
         }
     }
 }

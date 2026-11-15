@@ -175,6 +175,7 @@ class Evaluate(unittest.TestCase):
                            {"kind": "command", "busy": True, "repeat": 1}]
         c = metrics.evaluate(task, [[], matched[1], matched[1]], self.memories, BARS)
         self.assertEqual((c["repeat runs"], c["repeat held"], c["repeat nothing"], c["busy runs"]), (1, 0, 1, 2))
+        self.assertEqual((c["busy delivered"], c["busy delivered now"]), (1, 0))
 
 
 class Classes(unittest.TestCase):
@@ -387,7 +388,8 @@ class Generator(unittest.TestCase):
             if a["spelled"] in ("alias", "wrapper"):
                 program, sub = a["about"][1:]
                 self.assertNotIn(f"{program} {sub}", a["text"], a)
-            elif a["spelled"] == "flag first":
+            elif a["spelled"] in ("flag first", "flag with a word value"):
+                self.assertEqual(a["spelled"] == "flag with a word value", a["about"][1] in world.WORD_VALUED, a)
                 self.assertIn(world.FLAG_FIRST[a["about"][1]], a["text"], a)
             elif a["spelled"] == "prefix":
                 self.assertTrue(a["text"].startswith(tuple(world.PREFIXES)), a)

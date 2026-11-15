@@ -115,7 +115,9 @@ def match(bench_binary, index, drawn, folder, tuning):
     tasks.write_text(json.dumps([{"id": t["id"], "actions": t["actions"]} for t in drawn["tasks"]]))
     args = ["match", "--index", index, "--tasks", tasks]
     for flag, value in tuning.items():
-        if value is not None:
+        if value is True:
+            args.append(f"--{flag}")
+        elif value is not None and value is not False:
             args += [f"--{flag}", value]
     matched = {}
     for line in bench(bench_binary, *args).splitlines():
