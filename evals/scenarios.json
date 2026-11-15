@@ -574,7 +574,7 @@
     {"answer": {"step": 0, "matches": "2\\.3"}},
     {"answer": {"step": 0, "matches": "user-memory doctor"}},
     {"called": {"step": 3, "tools": ["search", "index", "read"]}},
-    {"memory": {"where": {"content": "start with the problem"}, "count": "1"}},
+    {"memory": {"where": {"content": "descriptions.*problem"}, "count": "1"}},
     {"memory": {"where": {"content": "under 50 characters"}, "count": "1"}},
     {"answer": {"step": 4, "matches": "token"}},
     {"reads_not": {"matches": "client-token"}},

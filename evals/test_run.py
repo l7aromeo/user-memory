@@ -808,9 +808,13 @@ class FilesAndServers(unittest.TestCase):
             self.assertIsNone(main.child)
             with self.assertRaises(OSError):
                 run.socket.create_connection(("127.0.0.1", main.port), timeout=2).close()
+            client_token = sandbox.token_file.read_text()
             run.server_step({"server": {"start": "main", "refuse": "main"}}, servers, sandbox)
             run.socket.create_connection(("127.0.0.1", main.port), timeout=2).close()
-            self.assertNotEqual(sandbox.token_file.read_text(), main.token.read_text())
+            # The server changes its token; the client keeps the one it has.
+            self.assertEqual(sandbox.token_file.read_text(), client_token)
+            self.assertNotEqual(main.token.read_text(), client_token)
+            self.assertEqual(main.token.stat().st_mode & 0o777, 0o600)
         finally:
             for server in servers.values():
                 server.stop()

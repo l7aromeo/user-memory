@@ -244,8 +244,9 @@ and log in the trial's `servers/<name>/`; they start before the first
 session and stop after the last. The client connects to the one `connect`
 names (by default the only one), whose store takes the seeds, with its own
 copy of the token. A step's `server` acts on them before its turn: `stop`
-or `start` a server, or `refuse`, which puts a token the server doesn't
-accept in the client's token file.
+or `start` a server, or `refuse`, which gives the server a new token, so
+it refuses the one the client holds (a bridge keeps the token it started
+with, so only the server's side can refuse it mid-session).
 
 A step's `while_working` is a second user message, sent once the agent's
 first tool call in the turn shows, as a user types while the agent works:
