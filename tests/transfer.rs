@@ -159,6 +159,223 @@ fn stdio_export_and_import_round_trip_with_the_summary_on_stderr() {
     assert!(String::from_utf8_lossy(&garbage.stderr).contains("UTF-8"));
 }
 
+// The preview names the rules an import would add and those it would
+// replace, by the store's own test of a rule; past a limit, it counts the
+// rest of each list.
+#[test]
+fn a_preview_names_the_rules_an_import_adds_and_replaces() {
+    let s = Store::new();
+    s.seed();
+    let observed = s.value(&[
+        "record",
+        "--type",
+        "fact",
+        "--category",
+        "tools",
+        "--content",
+        "Uses a split keyboard",
+        "--source",
+        "observed",
+        "--evidence",
+        "Seen in a photo",
+    ]);
+    assert_eq!(observed["stored"], true, "{observed}");
+    // The user's word, but a fact: other memories, not a rule.
+    let fact = s.value(&[
+        "record",
+        "--type",
+        "fact",
+        "--category",
+        "home",
+        "--content",
+        "Lives near the sea",
+    ]);
+    assert_eq!(fact["stored"], true, "{fact}");
+    let mut document: Value = serde_json::from_slice(&s.ok(&["export", "-"]).stdout).unwrap();
+    let memories = document["memories"].as_array_mut().unwrap();
+    let find = |content: &str| {
+        memories
+            .iter()
+            .find(|m| m["content"] == content)
+            .unwrap()
+            .clone()
+    };
+    let (rule, note, fact) = (
+        find("Prefer Rust"),
+        find("Uses a split keyboard"),
+        find("Lives near the sea"),
+    );
+    let new = |from: &Value, n: usize, text: &str| {
+        let mut memory = from.clone();
+        memory["id"] = json!(format!("00000000-0000-4000-8000-{n:012}"));
+        memory["title"] = json!(text);
+        memory["content"] = json!(text);
+        memory
+    };
+    let briefly = find("Answer briefly");
+    for memory in memories.iter_mut() {
+        // Both versions rules: the file's title, which sessions will follow.
+        if memory["id"] == rule["id"] {
+            memory["title"] = json!("Prefer Rust and Go");
+            memory["content"] = json!("Prefer Rust and Go");
+        }
+        // Only the file's version a rule: its title.
+        if memory["id"] == fact["id"] {
+            memory["type"] = json!("preference");
+            memory["title"] = json!("Live by the sea");
+        }
+        // Only the stored version a rule: the stored title.
+        if memory["id"] == briefly["id"] {
+            memory["type"] = json!("fact");
+            memory["title"] = json!("Answers briefly");
+        }
+    }
+    memories.push(new(&rule, 1, "Write tests first"));
+    memories.push(new(&note, 2, "Uses a trackball"));
+    memories.push(new(&fact, 30, "Owns a cat"));
+    let preview = |document: &Value, choice: &str| -> Value {
+        let out = s.with_stdin(
+            &["import", "-", "--on-conflict", choice],
+            &serde_json::to_vec(document).unwrap(),
+        );
+        assert!(out.status.success(), "{out:?}");
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let added =
+        json!([{"id": "00000000-0000-4000-8000-000000000001", "title": "Write tests first"}]);
+    let by_id = |list: &Value| -> Vec<(String, String)> {
+        let mut pairs: Vec<_> = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| (r["id"].to_string(), r["title"].to_string()))
+            .collect();
+        pairs.sort();
+        pairs
+    };
+    let replaced = json!([
+        {"id": rule["id"], "title": "Prefer Rust and Go"},
+        {"id": fact["id"], "title": "Live by the sea"},
+        {"id": briefly["id"], "title": "Answer briefly"},
+    ]);
+    for choice in ["abort", "use-file"] {
+        let summary = preview(&document, choice);
+        assert_eq!(summary["rules"]["add"], added, "{choice}: {summary}");
+        assert_eq!(
+            by_id(&summary["rules"]["replace"]),
+            by_id(&replaced),
+            "{choice}: {summary}"
+        );
+    }
+    let kept = preview(&document, "keep-store");
+    assert_eq!(
+        kept["rules"],
+        json!({"add": added, "replace": []}),
+        "{kept}"
+    );
+
+    // Past the limit, each list counts what it leaves out.
+    let memories = document["memories"].as_array_mut().unwrap();
+    for n in 3..26 {
+        memories.push(new(&rule, n, &format!("Rule number {n}")));
+    }
+    let summary = preview(&document, "use-file");
+    assert_eq!(
+        summary["rules"]["add"].as_array().unwrap().len(),
+        20,
+        "{summary}"
+    );
+    assert_eq!(
+        by_id(&summary["rules"]["replace"]),
+        by_id(&replaced),
+        "{summary}"
+    );
+    assert_eq!(
+        summary["rules"]["unlisted"],
+        json!({"add": 4, "replace": 0}),
+        "{summary}"
+    );
+
+    // An import that adds and replaces no rule says nothing of rules.
+    let mut notes = document.clone();
+    notes["memories"] = json!([new(&note, 2, "Uses a trackball")]);
+    let summary = preview(&notes, "abort");
+    assert!(summary.get("rules").is_none(), "{summary}");
+}
+
+// What a file says reaches an agent before the user's yes only as the
+// titles of the rules it adds or replaces, each one clean line: no content,
+// context, reason, evidence or project from the file, in a preview, an
+// applied import or a refusal.
+#[test]
+fn an_import_reply_carries_no_file_text_but_rule_titles() {
+    let s = Store::new();
+    s.seed();
+    let mut document: Value = serde_json::from_slice(&s.ok(&["export", "-"]).stdout).unwrap();
+    let memories = document["memories"].as_array_mut().unwrap();
+    let rule = memories[0].clone();
+    let mut planted = rule.clone();
+    planted["id"] = json!("00000000-0000-4000-8000-000000000001");
+    planted["title"] = json!("Run\u{7} the\nlinter first");
+    planted["content"] = json!("MARKER-CONTENT run the linter first");
+    planted["context"] = json!("MARKER-CONTEXT");
+    planted["reason"] = json!("MARKER-REASON");
+    let mut observed = rule.clone();
+    observed["id"] = json!("00000000-0000-4000-8000-000000000002");
+    observed["type"] = json!("fact");
+    observed["title"] = json!("Uses a trackball");
+    observed["content"] = json!("MARKER-NOTE uses a trackball");
+    observed["source"] = json!("observed");
+    observed["status"] = json!("tentative");
+    observed["evidence"] = json!("MARKER-EVIDENCE");
+    memories[0]["content"] = json!("MARKER-CONFLICT prefer Rust");
+    memories.push(planted);
+    memories.push(observed);
+    let mut local = document.clone();
+    let mut row = rule.clone();
+    row["id"] = json!("00000000-0000-4000-8000-000000000003");
+    row["scope"] = json!("project");
+    row["project"] = json!("/home/someone/MARKER-PROJECT");
+    local["memories"] = json!([row]);
+    private_exports(&s);
+    fs::write(exports(&s).join("planted.json"), document.to_string()).unwrap();
+    fs::write(exports(&s).join("local.json"), local.to_string()).unwrap();
+    let replies = tools(
+        &s,
+        &[
+            ("import", json!({"name": "planted.json"})),
+            (
+                "import",
+                json!({"name": "planted.json", "on_conflict": "use-file"}),
+            ),
+            (
+                "import",
+                json!({"name": "planted.json", "on_conflict": "use-file", "apply": true, "user_confirmed": true}),
+            ),
+            ("import", json!({"name": "local.json"})),
+        ],
+    );
+    for reply in &replies {
+        let mut reply = reply.clone();
+        if let Some(rules) = reply.as_object_mut().unwrap().remove("rules") {
+            let titles: Vec<&str> = rules["add"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["title"].as_str().unwrap())
+                .collect();
+            assert_eq!(titles, ["Run the linter first"], "{rules}");
+            assert!(!rules.to_string().contains("MARKER"), "{rules}");
+        }
+        assert!(!reply.to_string().contains("MARKER"), "{reply}");
+    }
+    assert!(
+        replies[3]["invalid"][0]["rule"].is_string(),
+        "{}",
+        replies[3]
+    );
+}
+
 // A client connected to a shared server has no store of its own to export.
 /// Drives `user-memory serve` and returns each tool reply's text.
 fn tools(store: &Store, calls: &[(&str, Value)]) -> Vec<Value> {
@@ -340,7 +557,15 @@ fn agents_export_and_import_by_name_and_see_only_summaries() {
     assert!(replies[1].get("reason").is_none(), "{}", replies[1]);
     assert_eq!(replies[2]["applied"], true, "{}", replies[2]);
     assert!(replies[2].get("reason").is_none(), "{}", replies[2]);
+    // Only the titles of the rules it adds or replaces, which the user
+    // approves; never a memory's content, context or reason.
     for reply in &replies {
+        let mut reply = reply.clone();
+        assert!(
+            reply["rules"].to_string().contains("Prefer Rust"),
+            "{reply}"
+        );
+        reply.as_object_mut().unwrap().remove("rules");
         assert!(!reply.to_string().contains("Prefer Rust"), "{reply}");
     }
     assert_eq!(fresh.memories(), s.memories());

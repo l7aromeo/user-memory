@@ -745,9 +745,13 @@ fn add_history(conn: &Connection, result: &mut Value) -> Result<()> {
 const RULE_TYPES: [&str; 3] = ["preference", "constraint", "value"];
 
 pub(super) fn standing_rule(m: &Memory) -> bool {
-    m.source == "explicit"
-        && m.status == "confirmed"
-        && RULE_TYPES.contains(&m.memory_type.as_str())
+    is_rule(&m.source, &m.status, &m.memory_type)
+}
+
+/// Whether a memory with these fields is a standing rule: what reaches the
+/// index's Rules section, the instruction files and an import's preview.
+pub(super) fn is_rule(source: &str, status: &str, memory_type: &str) -> bool {
+    source == "explicit" && status == "confirmed" && RULE_TYPES.contains(&memory_type)
 }
 
 #[cfg(test)]

@@ -20,12 +20,15 @@
 //!   leave a support behind. Stale and superseded inferences keep theirs.
 //!
 //! Agents reach files only inside `exports_dir`, and results never contain
-//! memory contents, file contents or the store's path.
+//! memory contents, file contents or the store's path. An import's reply
+//! holds no memory text except the titles of the rules it adds or replaces,
+//! each one line, at most 20 per list: the user reads them before approving.
 
 use super::{
     Memory, Scope, clean, history, ids,
+    read::is_rule as standing,
     schema::{SCHEMA_VERSION, SELECT, connect, row, scratch, write},
-    selection::{Filter, Subset, candidates},
+    selection::{Filter, Subset, candidates, local_path},
     similar::{Draft, Pool, similar},
     titles::{self, Titles},
     write::{Missing, Record, check_support, normalize},
@@ -62,6 +65,10 @@ const ORIGIN_LIMIT: usize = 240;
 /// and type back to undo the import: long enough for any real file name,
 /// short enough to stay on one line.
 const IMPORT_NAME_CHARS: usize = 80;
+/// Rules each list of an import's `rules` names, by id and title, before it
+/// counts the rest: twenty titles are a list the user reads before
+/// approving, about 1.5 KB, and the agent pays for them once.
+const RULES_LISTED: usize = 20;
 /// Hex characters of the file's SHA-256 in an import's name: 32 bits tell
 /// two versions of one file apart, and the time tells imports of the same.
 const IMPORT_HASH_CHARS: usize = 8;
@@ -554,6 +561,13 @@ fn parse_entry(index: usize, value: &Value) -> std::result::Result<(Entry, bool)
     if !matches!(scope.as_str(), "global" | "project") {
         return Err(fail("scope must be global or project"));
     }
+    // Before normalize, whose refusal quotes the path: a reply carries no
+    // text from the file.
+    if local_path(&project) {
+        return Err(fail(
+            "project is a local path; give a project key or git remote URL",
+        ));
+    }
     let allowed: &[&str] = match source.as_str() {
         "explicit" => &["confirmed", "superseded"],
         "observed" => &["tentative", "superseded"],
@@ -798,6 +812,65 @@ pub fn import_document(
         subset,
         Untitled::WithContent,
     )
+}
+
+/// The standing rules an import of `rows` would add, and the stored ones
+/// it would replace or, under `abort`, that `use-file` would replace, by id
+/// and title; each list names [`RULES_LISTED`] and counts the rest under
+/// `unlisted`. None when both are empty. A conflict counts when either
+/// version is a rule, since either way a rule changes, and is titled as the
+/// version that is a rule: the file's when both are, since that is the one
+/// every session will follow.
+fn rules_named(
+    rows: &[Entry],
+    plans: &[Plan],
+    store: &HashMap<Uuid, Entry>,
+    on_conflict: OnConflict,
+) -> Option<Value> {
+    let rule = |e: &Entry| standing(&e.source, &e.status, &e.memory_type);
+    let mut add = Vec::new();
+    let mut replace = Vec::new();
+    for (entry, plan) in rows.iter().zip(plans) {
+        match plan {
+            Plan::Add if rule(entry) => add.push(entry),
+            Plan::Conflict if on_conflict != OnConflict::KeepStore => {
+                if rule(entry) {
+                    replace.push(entry);
+                } else if let Some(old) = store.get(&entry.id)
+                    && rule(old)
+                {
+                    replace.push(old);
+                }
+            }
+            _ => {}
+        }
+    }
+    if add.is_empty() && replace.is_empty() {
+        return None;
+    }
+    let listed = |rules: &[&Entry]| -> Vec<Value> {
+        rules
+            .iter()
+            .take(RULES_LISTED)
+            .map(|e| json!({"id": e.id, "title": one_line(&e.title)}))
+            .collect()
+    };
+    let mut rules = json!({"add": listed(&add), "replace": listed(&replace)});
+    let unlisted = |rules: &[&Entry]| rules.len().saturating_sub(RULES_LISTED);
+    if unlisted(&add) + unlisted(&replace) > 0 {
+        rules["unlisted"] = json!({"add": unlisted(&add), "replace": unlisted(&replace)});
+    }
+    Some(rules)
+}
+
+/// `title` as one line of visible text: a file can hold control characters
+/// in a title, and the reply that shows it is read by an agent and the user.
+fn one_line(title: &str) -> String {
+    let visible: String = title
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    clean(&visible, usize::MAX)
 }
 
 /// The name of the import being written in `conn`: the cleaned name of
@@ -1139,11 +1212,15 @@ fn import(
             .filter(|(_, plan)| matches!(plan, Plan::Add))
             .map(|(entry, _)| entry.status.as_str()),
     );
+    let rules = rules_named(&rows, &plans, &store, on_conflict);
     let blocked =
         !problems.is_empty() || (!conflicts.is_empty() && on_conflict == OnConflict::Abort);
     let mut summary = Map::new();
     summary.insert("applied".into(), json!(false));
     summary.insert("added".into(), added);
+    if let Some(rules) = rules {
+        summary.insert("rules".into(), rules);
+    }
     summary.insert("unchanged".into(), json!(unchanged));
     summary.insert("origins_merged".into(), json!(origins_merged));
     // Only the rows being imported, in the file's order.

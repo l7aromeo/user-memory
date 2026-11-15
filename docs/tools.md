@@ -25,7 +25,7 @@ The tools agents call, their filters, search, the index and paging. The
 | `link` | Keep projects loaded for one conversation origin: its session start and change notices include them, after resume and compaction too; returns the linked projects' index lines; `unlink` removes. See [Conversation links](#conversation-links) |
 | `review` | On the user's request only: groups of duplicates, cross-scope copies, overlaps and stale patterns; `keep` marks a group the user leaves as is |
 | `export` | On the user's request: write every memory, or those the [filters](memory-model.md#exporting-or-importing-part-of-the-store) select, to a JSON file in the exports directory; returns a summary only, whose `next` says in words, never as a path, whether the file is beside the store on this machine or on the memory server |
-| `import` | On the user's request: preview an export file from the exports directory, or the memories the filters select from it; writes only with `apply` and `user_confirmed` after the user approves; `apply` without `user_confirmed` previews, and its reply's `reason` says it was not applied |
+| `import` | On the user's request: preview an export file from the exports directory, or the memories the filters select from it; writes only with `apply` and `user_confirmed` after the user approves; `apply` without `user_confirmed` previews, and its reply's `reason` says it was not applied; an import's reply holds no memory text except the titles of the rules it adds or replaces, each one line, at most 20 per list (`rules`) |
 
 ## Replies and errors
 
