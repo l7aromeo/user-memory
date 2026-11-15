@@ -102,6 +102,9 @@ struct TuningArgs {
     /// Share of a term only other passages hold (OTHER_PASSAGE_CREDIT).
     #[arg(long)]
     credit: Option<f64>,
+    /// Adjacent words of a command are anchors too.
+    #[arg(long)]
+    pairs: bool,
 }
 
 impl TuningArgs {
@@ -111,6 +114,7 @@ impl TuningArgs {
             window_actions: self.window.unwrap_or(base.window_actions),
             half_life: self.half_life.unwrap_or(base.half_life),
             credit: self.credit.unwrap_or(base.credit),
+            pairs: self.pairs || base.pairs,
         }
     }
 }
