@@ -28,6 +28,8 @@ mod server;
 mod session;
 mod setup;
 mod shell;
+#[cfg(test)]
+mod tool_inputs;
 
 #[derive(Parser)]
 #[command(
@@ -454,6 +456,29 @@ impl UserMemoryServer {
 
 #[tool_handler(router = self.router())]
 impl rmcp::ServerHandler for UserMemoryServer {
+    /// The router's dispatch, behind one check: a call over HTTP with a
+    /// read-only client token that would change memories is refused before
+    /// any tool runs (src/remote/scope.rs). `tools/list` and every allowed
+    /// call are the router's own.
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::CallToolResponse, rmcp::ErrorData> {
+        if let Some(refused) = remote::scope::refusal(
+            &request.name,
+            request.arguments.as_ref(),
+            &context.extensions,
+        ) {
+            return Ok(
+                rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(refused)])
+                    .into(),
+            );
+        }
+        let call = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        self.router().call(call).await
+    }
+
     fn get_info(&self) -> rmcp::model::ServerConfig {
         let mut capabilities = rmcp::model::ServerCapabilities::builder()
             .enable_tools()

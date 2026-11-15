@@ -146,7 +146,7 @@ fn only_debug_builds_have_the_test_seams() {
             at + 1
         );
     }
-    for (marker, count) in [("debug_router", 2)] {
+    for (marker, count) in [("debug_router", 3)] {
         let mut seen = 0;
         for (path, text) in &sources {
             let lines: Vec<&str> = text.lines().collect();

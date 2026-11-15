@@ -31,6 +31,7 @@ use std::{
 
 mod gate;
 pub(crate) mod marker;
+pub(crate) mod scope;
 mod tokens;
 mod transfer;
 

@@ -3,7 +3,7 @@
 //! Revocation is live: the registry is read again only when another
 //! process has committed to it, which `PRAGMA data_version` tells.
 
-use crate::registry::{self, ClientToken, SecondsI64};
+use crate::registry::{self, ClientToken, Scope, SecondsI64};
 use axum::{
     extract::{Request, State},
     http::{StatusCode, header},
@@ -22,6 +22,7 @@ use subtle::ConstantTimeEq;
 /// read from the request's extensions.
 #[derive(Clone, Copy, Debug)]
 pub struct Access {
+    pub scope: Scope,
     /// The client token's SHA-256; `None` for the shared token file.
     pub hash: Option<[u8; 32]>,
 }
@@ -86,7 +87,10 @@ impl Gate {
             return Ok(if state.shared_retired {
                 Err(Refusal::Revoked)
             } else {
-                Ok(Access { hash: None })
+                Ok(Access {
+                    scope: Scope::Write,
+                    hash: None,
+                })
             });
         }
         let hash = registry::hash(provided);
@@ -109,6 +113,7 @@ impl Gate {
             state.used(&hash, now);
         }
         Ok(Ok(Access {
+            scope: token.scope,
             hash: Some(digest(&hash)),
         }))
     }

@@ -14,7 +14,7 @@ mod time;
 use time::STUCK;
 
 use rusqlite::Connection;
-use serde_json::json;
+use serde_json::{Value, json};
 use std::{
     fs,
     io::{BufRead, BufReader, Read, Write},
@@ -394,4 +394,301 @@ fn a_damaged_or_newer_registry_refuses_every_request_until_moved_aside() {
     );
     let log = host.stop();
     assert_eq!(log.matches(&message).count(), 1, "said once:\n{log}");
+}
+
+/// An MCP session with the server over HTTP, as a client with `token`.
+struct Session<'a> {
+    host: &'a Host,
+    token: String,
+    id: String,
+}
+
+impl<'a> Session<'a> {
+    fn open(host: &'a Host, token: &str) -> Self {
+        let message = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}});
+        let mut socket = TcpStream::connect(&host.address).unwrap();
+        socket.set_read_timeout(Some(STUCK)).unwrap();
+        let body = message.to_string();
+        write!(
+            socket,
+            "POST /mcp HTTP/1.1\r\nHost: {}\r\nAccept: application/json, text/event-stream\r\nContent-Type: application/json\r\nMCP-Protocol-Version: 2025-06-18\r\nAuthorization: Bearer {token}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+            host.address,
+            body.len()
+        )
+        .unwrap();
+        let mut response = String::new();
+        socket.read_to_string(&mut response).unwrap();
+        let id = response
+            .lines()
+            .find_map(|line| {
+                let (key, value) = line.split_once(':')?;
+                key.eq_ignore_ascii_case("mcp-session-id")
+                    .then(|| value.trim().to_owned())
+            })
+            .expect("a session id");
+        let session = Self {
+            host,
+            token: token.to_owned(),
+            id,
+        };
+        session.post(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+        session
+    }
+
+    fn post(&self, message: &Value) -> String {
+        let mut socket = TcpStream::connect(&self.host.address).unwrap();
+        socket.set_read_timeout(Some(STUCK)).unwrap();
+        let body = message.to_string();
+        write!(
+            socket,
+            "POST /mcp HTTP/1.1\r\nHost: {}\r\nAccept: application/json, text/event-stream\r\nContent-Type: application/json\r\nMCP-Protocol-Version: 2025-06-18\r\nMcp-Session-Id: {}\r\nAuthorization: Bearer {}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+            self.host.address,
+            self.id,
+            self.token,
+            body.len()
+        )
+        .unwrap();
+        let mut response = String::new();
+        socket.read_to_string(&mut response).unwrap();
+        let (head, body) = response.split_once("\r\n\r\n").unwrap_or(("", ""));
+        let head = head.to_ascii_lowercase();
+        let body = if head.contains("transfer-encoding: chunked") {
+            unchunked(body)
+        } else {
+            body.to_owned()
+        };
+        // An event stream's reply is the data line that holds the answer.
+        body.lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .find(|line| serde_json::from_str::<Value>(line).is_ok_and(|v| v.get("id").is_some()))
+            .map_or(body.clone(), str::to_owned)
+    }
+
+    /// Calls `tool`: whether the server answered with a tool error, and its
+    /// text.
+    fn call(&self, tool: &str, arguments: Value) -> (bool, String) {
+        let body = self.post(&json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":tool,"arguments":arguments}}));
+        let reply: Value =
+            serde_json::from_str(&body).unwrap_or_else(|err| panic!("{tool}: {err}: {body}"));
+        let result = &reply["result"];
+        (
+            result["isError"] == true,
+            result["content"][0]["text"]
+                .as_str()
+                .unwrap_or("")
+                .to_owned(),
+        )
+    }
+
+    fn tools(&self) -> Value {
+        let body = self.post(&json!({"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}}));
+        serde_json::from_str::<Value>(&body).unwrap()["result"]["tools"].clone()
+    }
+}
+
+/// A chunked HTTP body, joined.
+fn unchunked(mut body: &str) -> String {
+    let mut joined = String::new();
+    while let Some((size, rest)) = body.split_once("\r\n") {
+        let size = usize::from_str_radix(size.split(';').next().unwrap().trim(), 16).unwrap_or(0);
+        if size == 0 {
+            break;
+        }
+        joined.push_str(&rest[..size]);
+        body = rest[size..].strip_prefix("\r\n").unwrap_or(&rest[size..]);
+    }
+    joined
+}
+
+/// The client's environment for this server and the token in `file`.
+fn as_client(host: &Host, command: &mut Command, file: &std::path::Path) {
+    command
+        .env("USER_MEMORY_URL", format!("http://{}/mcp", host.address))
+        .env("USER_MEMORY_TOKEN_FILE", file)
+        .env_remove("USER_MEMORY_DB");
+}
+
+fn record_args(title: &str) -> Value {
+    json!({"type":"preference","category":"workflow","title":title,"content":title,"scope":"global","user_confirmed":true})
+}
+
+#[test]
+fn a_read_only_token_reads_and_searches_but_changes_nothing() {
+    let host = Host::start();
+    let writer = Session::open(&host, SHARED);
+    let (failed, stored) = writer.call("record", record_args("Prefer tabs"));
+    assert!(!failed, "{stored}");
+    let id = serde_json::from_str::<Value>(&stored).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let reader_token = host.add("reader", &["--read-only"]);
+    let reader = Session::open(&host, &reader_token);
+    // The tool list is the server's own, whatever the token.
+    assert_eq!(reader.tools(), writer.tools());
+    let refusal = format!(
+        "This machine's token for http://{}/mcp is read-only; this needs a token with write access from the server's operator.",
+        host.address
+    );
+    for (tool, arguments) in [
+        ("record", record_args("Prefer spaces")),
+        (
+            "update",
+            json!({"memory_id":id,"content":"Prefer spaces","user_confirmed":true}),
+        ),
+        ("forget", json!({"memory_id":id,"user_confirmed":true})),
+        ("import", json!({"name":"backup.json"})),
+        ("review", json!({"keep":[&id[..8]],"user_confirmed":true})),
+        ("export", json!({"name":"backup.json","overwrite":true})),
+    ] {
+        let (failed, text) = reader.call(tool, arguments);
+        assert!(failed, "{tool} was let through: {text}");
+        assert_eq!(text, refusal, "{tool}");
+    }
+    for (tool, arguments) in [
+        ("index", json!({})),
+        // The connector's poll for changes.
+        ("index", json!({"stamps":true,"stamps_since":""})),
+        // A session hook's index, fitted to its client's limit.
+        (
+            "index",
+            json!({"projects":["github.com/acme/tools"],"fit_room":4000,"fit_whole_projects":["github.com/acme/tools"],"fit_unit":"utf16_units"}),
+        ),
+        ("read", json!({"ids":[&id[..8]]})),
+        ("search", json!({"query":"tabs"})),
+        ("review", json!({})),
+        ("export", json!({"name":"reader.json"})),
+        (
+            "link",
+            json!({"origin":"claude:session/r","projects":["github.com/acme/tools"]}),
+        ),
+    ] {
+        let (failed, text) = reader.call(tool, arguments);
+        assert!(!failed && !text.contains("read-only"), "{tool}: {text}");
+    }
+    // Nothing changed: the memory is as recorded.
+    let (_, read) = writer.call("read", json!({"ids":[&id[..8]]}));
+    assert!(
+        read.contains("Prefer tabs") && !read.contains("Prefer spaces"),
+        "{read}"
+    );
+
+    // /import, preview or not, is refused before anything is read.
+    let answer = host.send("POST", "/import", &reader_token, "{}");
+    assert_eq!(answer.status, 403);
+    assert_eq!(answer.body, refusal);
+    // And through the CLI: export and search work, record and import don't.
+    let file = host.root.path().join("reader.token");
+    let run = |args: &[&str]| {
+        let mut command = host.command(args);
+        as_client(&host, &mut command, &file);
+        command.output().unwrap()
+    };
+    let exported = host.root.path().join("exported.json");
+    let out = run(&["export", exported.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        fs::read_to_string(&exported)
+            .unwrap()
+            .contains("Prefer tabs")
+    );
+    let out = run(&["search", "tabs"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    for args in [
+        vec![
+            "record",
+            "--type",
+            "preference",
+            "--category",
+            "workflow",
+            "--title",
+            "Prefer x",
+            "--content",
+            "Prefer x",
+            "--scope",
+            "global",
+        ],
+        vec!["import", exported.to_str().unwrap()],
+    ] {
+        let out = run(&args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains(&refusal),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+/// A machine with a read-only token still starts sessions: the hooks only
+/// read, and the projects a conversation linked load with it.
+#[test]
+fn a_read_only_clients_hooks_work_links_included() {
+    let host = Host::start();
+    let writer = Session::open(&host, SHARED);
+    let (failed, text) = writer.call(
+        "record",
+        json!({"type":"preference","category":"workflow","title":"Tools use tabs","content":"Tools use tabs","scope":"project","project":"github.com/acme/tools","user_confirmed":true}),
+    );
+    assert!(!failed, "{text}");
+    host.add("reader", &["--read-only"]);
+    let file = host.root.path().join("reader.token");
+    let reader = Session::open(&host, &fs::read_to_string(&file).unwrap());
+    let (failed, text) = reader.call(
+        "link",
+        json!({"origin":"claude:session/s","projects":["github.com/acme/tools"]}),
+    );
+    assert!(!failed, "{text}");
+    let home = tempdir().unwrap();
+    let hook = |args: &[&str], event: &str| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_user-memory"));
+        command
+            .args(args)
+            .current_dir(home.path())
+            .sandboxed(home.path())
+            .env(time::HOOK_ROOM.0, time::HOOK_ROOM.1)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        as_client(&host, &mut command, &file);
+        let mut child = command.spawn().unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(
+                json!({"session_id":"s","cwd":home.path(),"hook_event_name":event})
+                    .to_string()
+                    .as_bytes(),
+            )
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success(), "{out:?}");
+        (
+            String::from_utf8(out.stdout).unwrap(),
+            String::from_utf8(out.stderr).unwrap(),
+        )
+    };
+    let (started, said) = hook(&["session-start", "--client", "claude"], "SessionStart");
+    assert!(
+        started.contains("Tools use tabs"),
+        "the linked project loads:\n{started}\n{said}"
+    );
+    assert!(
+        !started.contains("read-only") && !said.contains("read-only"),
+        "{started}{said}"
+    );
+    let (notice, said) = hook(&["prompt-submit", "--client", "claude"], "UserPromptSubmit");
+    assert!(
+        !notice.contains("read-only") && !said.contains("read-only"),
+        "{notice}{said}"
+    );
 }
