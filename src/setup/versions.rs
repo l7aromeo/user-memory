@@ -164,6 +164,84 @@ pub(crate) fn server_version(result: &serde_json::Value) -> Option<&serde_json::
         .or_else(|| result.pointer(&format!("{DISCOVER_SERVER_INFO}/version")))
 }
 
+/// A tool input that a server reads only from the release `since` on. An
+/// older server ignores an input it doesn't know and answers as though it
+/// had not been given, so a request that sets it is refused instead.
+pub(crate) struct OptionFloor {
+    pub(crate) tool: &'static str,
+    pub(crate) field: &'static str,
+    pub(crate) since: Version,
+    /// What a server before `since` lacks, as the refusal says it after
+    /// "which".
+    pub(crate) lacks: &'static str,
+    /// What the bridge adds for the agent: that nothing was done, and what
+    /// the request without the input would and would not say.
+    pub(crate) for_agent: &'static str,
+}
+
+/// Every tool input newer than [`MIN_SERVER`] that an older server's
+/// silence would make misleading, with the release that adds it. The CLI
+/// and the bridge both refuse by this table. A newer input an older server
+/// may ignore without misleading anyone goes in `IGNORED_SAFELY` beside the
+/// tests instead, with its reason; a test fails for an input in neither.
+pub(crate) const OPTION_FLOORS: &[OptionFloor] = &[OptionFloor {
+    tool: "read",
+    field: "history",
+    since: Version {
+        major: 0,
+        minor: 10,
+        patch: 0,
+    },
+    lacks: "keeps no history",
+    for_agent: "Nothing was read. Tell the user this memory server is too old to show history. A read without history still returns the memory, but says nothing about whether it changed.",
+}];
+
+/// The floor this build applies for an input from release `since`: that
+/// release, or this build's own version when it is lower. A tree reports
+/// the release before until the version is bumped for the release that
+/// adds the input, and a server of this tree has every input its client
+/// sends; a released build's floors are never above its own version.
+fn applied_floor(since: Version) -> Version {
+    Version::parse(running()).map_or(since, |own| since.min(own))
+}
+
+/// Whether a request sets an input: present and not null, false, "" or [].
+/// This is the rule for today's row (`history: true`); a future input
+/// whose meaningful value is false or empty needs its own test in its row.
+fn sets(value: Option<&serde_json::Value>) -> bool {
+    match value {
+        None | Some(serde_json::Value::Null | serde_json::Value::Bool(false)) => false,
+        Some(serde_json::Value::String(text)) => !text.is_empty(),
+        Some(serde_json::Value::Array(items)) => !items.is_empty(),
+        Some(_) => true,
+    }
+}
+
+/// Why a call of `tool` with `arguments` is not sent to the server at
+/// `url`, whose handshake named `server`: the sentence the CLI prints, and
+/// the floor's row, whose `for_agent` the bridge adds. `None` when the
+/// server is new enough, or its version is not a release.
+pub(crate) fn refused_option(
+    url: &str,
+    server: &str,
+    tool: &str,
+    arguments: &serde_json::Value,
+) -> Option<(String, &'static OptionFloor)> {
+    let version = Version::parse(server)?;
+    let floor = OPTION_FLOORS.iter().find(|floor| {
+        floor.tool == tool
+            && sets(arguments.get(floor.field))
+            && version < applied_floor(floor.since)
+    })?;
+    Some((
+        format!(
+            "The memory server at {url} runs user-memory {server}, which {} ({} needs {} or newer). Upgrade the server on its machine.",
+            floor.lacks, floor.field, floor.since
+        ),
+        floor,
+    ))
+}
+
 /// The server's version as it names it, as a release when it is one, and
 /// the oldest client it supports, from its `initialize` or
 /// `server/discover` result.
@@ -281,9 +359,386 @@ fn quote(line: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::{BTreeMap, BTreeSet};
 
     fn version(text: &str) -> Version {
         Version::parse(text).unwrap()
+    }
+
+    /// Every tool's inputs in v0.8.0 ([`MIN_SERVER`]), as its source names
+    /// them, flattened parts and aliases included: what every supported
+    /// server reads.
+    const AT_MIN_SERVER: &[(&str, &[&str])] = &[
+        (
+            "record",
+            &[
+                "type",
+                "category",
+                "title",
+                "content",
+                "context",
+                "reason",
+                "scope",
+                "project",
+                "source",
+                "evidence",
+                "evidence_ids",
+                "origin",
+                "supersedes",
+                "merge",
+                "confirms",
+                "distinct_from",
+                "user_confirmed",
+            ],
+        ),
+        (
+            "search",
+            &[
+                "topic",
+                "query",
+                "projects",
+                "scope",
+                "category",
+                "type",
+                "source",
+                "status",
+                "origin",
+                "cursor",
+                "page_size",
+                "limit",
+            ],
+        ),
+        (
+            "read",
+            &[
+                "ids",
+                "projects",
+                "scope",
+                "category",
+                "type",
+                "source",
+                "status",
+                "origin",
+                "cursor",
+                "page_size",
+                "limit",
+            ],
+        ),
+        (
+            "review",
+            &["projects", "max_groups", "keep", "user_confirmed"],
+        ),
+        (
+            "export",
+            &[
+                "name",
+                "overwrite",
+                "projects",
+                "scope",
+                "category",
+                "type",
+                "source",
+                "status",
+                "origin",
+            ],
+        ),
+        (
+            "import",
+            &[
+                "name",
+                "apply",
+                "on_conflict",
+                "user_confirmed",
+                "titles",
+                "projects",
+                "scope",
+                "category",
+                "type",
+                "source",
+                "status",
+                "origin",
+            ],
+        ),
+        (
+            "index",
+            &[
+                "projects",
+                "scope",
+                "category",
+                "type",
+                "source",
+                "status",
+                "origin",
+                "topic",
+                "cursor",
+                "page_size",
+                "limit",
+                "instructions",
+                "instructions_max_bytes",
+                "without_global_rules",
+                "stamps",
+                "origin_links",
+            ],
+        ),
+        (
+            "link",
+            &[
+                "origin",
+                "projects",
+                "unlink",
+                "folder_projects",
+                "included_projects",
+            ],
+        ),
+        (
+            "update",
+            &[
+                "memory_id",
+                "type",
+                "category",
+                "title",
+                "content",
+                "context",
+                "reason",
+                "evidence",
+                "scope",
+                "project",
+                "origin",
+                "replace_origins",
+                "distinct_from",
+                "user_confirmed",
+            ],
+        ),
+        ("forget", &["memory_id", "origin", "user_confirmed"]),
+    ];
+
+    /// Inputs newer than [`MIN_SERVER`] that an older server may ignore
+    /// without misleading anyone: the tool, the input and why.
+    const IGNORED_SAFELY: &[(&str, &str, &str)] = &[(
+        "update",
+        "drop_history",
+        "it asks that the replaced value be kept nowhere; a server from before history keeps no history, and its correction removes the replaced text from the store's files the same way, so the store ends as the input asks (backups made before keep it on either version)",
+    )];
+
+    /// The source of user-memory's own files, parsed.
+    fn parsed(path: &str) -> syn::File {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path);
+        let text = std::fs::read_to_string(&path).unwrap();
+        syn::parse_file(&text).unwrap_or_else(|err| panic!("{}: {err}", path.display()))
+    }
+
+    /// Every struct in src/memory.rs and src/memory/, by name.
+    fn memory_structs() -> BTreeMap<String, syn::ItemStruct> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/memory");
+        let mut files = vec!["src/memory.rs".to_owned()];
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            if name.ends_with(".rs") {
+                files.push(format!("src/memory/{name}"));
+            }
+        }
+        files
+            .iter()
+            .flat_map(|file| parsed(file).items)
+            .filter_map(|item| match item {
+                syn::Item::Struct(item) => Some((item.ident.to_string(), item)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The name of the last segment of `ty`'s path: `memory::Read` is `Read`.
+    fn type_name(ty: &syn::Type) -> Option<String> {
+        match ty {
+            syn::Type::Path(path) => path.path.segments.last().map(|s| s.ident.to_string()),
+            _ => None,
+        }
+    }
+
+    /// Each `#[tool]` in src/main.rs with the struct of its `Parameters<…>`.
+    fn tool_structs() -> BTreeMap<String, String> {
+        let mut tools = BTreeMap::new();
+        for item in parsed("src/main.rs").items {
+            let syn::Item::Impl(block) = item else {
+                continue;
+            };
+            for item in block.items {
+                let syn::ImplItem::Fn(function) = item else {
+                    continue;
+                };
+                if !function
+                    .attrs
+                    .iter()
+                    .any(|attr| attr.path().is_ident("tool"))
+                {
+                    continue;
+                }
+                for input in &function.sig.inputs {
+                    let syn::FnArg::Typed(input) = input else {
+                        continue;
+                    };
+                    let syn::Type::Path(path) = &*input.ty else {
+                        continue;
+                    };
+                    let Some(last) = path.path.segments.last() else {
+                        continue;
+                    };
+                    if last.ident != "Parameters" {
+                        continue;
+                    }
+                    let syn::PathArguments::AngleBracketed(arguments) = &last.arguments else {
+                        continue;
+                    };
+                    if let Some(syn::GenericArgument::Type(ty)) = arguments.args.first()
+                        && let Some(name) = type_name(ty)
+                    {
+                        tools.insert(function.sig.ident.to_string(), name);
+                    }
+                }
+            }
+        }
+        tools
+    }
+
+    /// The input names a server reads for `name`'s fields: each field's
+    /// serde name and aliases, with flattened structs' fields in its place
+    /// and skipped fields left out. Fields hidden from the schema count.
+    fn inputs(structs: &BTreeMap<String, syn::ItemStruct>, name: &str) -> BTreeSet<String> {
+        use syn::ext::IdentExt;
+        let item = structs
+            .get(name)
+            .unwrap_or_else(|| panic!("no struct {name} in src/memory"));
+        let mut names = BTreeSet::new();
+        for field in &item.fields {
+            let (mut renamed, mut aliases, mut flatten, mut skip) =
+                (None, Vec::new(), false, false);
+            for attr in field
+                .attrs
+                .iter()
+                .filter(|attr| attr.path().is_ident("serde"))
+            {
+                attr.parse_nested_meta(|meta| {
+                    if meta.path.is_ident("rename") {
+                        renamed = Some(meta.value()?.parse::<syn::LitStr>()?.value());
+                    } else if meta.path.is_ident("alias") {
+                        aliases.push(meta.value()?.parse::<syn::LitStr>()?.value());
+                    } else if meta.path.is_ident("flatten") {
+                        flatten = true;
+                    } else if meta.path.is_ident("skip") || meta.path.is_ident("skip_deserializing")
+                    {
+                        skip = true;
+                    } else if meta.input.peek(syn::Token![=]) {
+                        meta.value()?.parse::<syn::Expr>()?;
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            }
+            if skip {
+                continue;
+            }
+            if flatten {
+                let inner = type_name(&field.ty).expect("a flattened field names its struct");
+                names.extend(inputs(structs, &inner));
+                continue;
+            }
+            let ident = field.ident.as_ref().expect("tool inputs have named fields");
+            names.insert(renamed.unwrap_or_else(|| ident.unraw().to_string()));
+            names.extend(aliases);
+        }
+        names
+    }
+
+    /// Every tool input a server reads that v0.8.0 did not has a floor or a
+    /// reason it is safe to ignore, read from the source so inputs hidden
+    /// from the schema count too; and every floor and reason names a real
+    /// input that is newer.
+    #[test]
+    fn every_input_newer_than_the_oldest_server_has_a_floor_or_a_reason() {
+        let structs = memory_structs();
+        let tools = tool_structs();
+        let old: BTreeMap<&str, BTreeSet<&str>> = AT_MIN_SERVER
+            .iter()
+            .map(|(tool, fields)| (*tool, fields.iter().copied().collect()))
+            .collect();
+        let mut newer = BTreeSet::new();
+        for (tool, name) in &tools {
+            let known = old
+                .get(tool.as_str())
+                .unwrap_or_else(|| panic!("{tool} is newer than {MIN_SERVER}: give it a floor"));
+            for input in inputs(&structs, name) {
+                if !known.contains(input.as_str()) {
+                    newer.insert((tool.clone(), input));
+                }
+            }
+        }
+        let covered: BTreeSet<(String, String)> = OPTION_FLOORS
+            .iter()
+            .map(|floor| (floor.tool.to_owned(), floor.field.to_owned()))
+            .chain(
+                IGNORED_SAFELY
+                    .iter()
+                    .map(|(tool, field, _)| ((*tool).to_owned(), (*field).to_owned())),
+            )
+            .collect();
+        assert_eq!(
+            newer, covered,
+            "inputs newer than {MIN_SERVER} vs floors and reasons"
+        );
+        assert_eq!(tools.len(), AT_MIN_SERVER.len(), "{tools:?}");
+    }
+
+    /// The floor applied is the input's release, or this build's own version
+    /// when that is lower, as in a tree not yet bumped for that release.
+    #[test]
+    fn a_floor_above_this_build_is_applied_as_this_build() {
+        let own = version(running());
+        assert_eq!(applied_floor(version("0.8.0")), version("0.8.0").min(own));
+        let above = Version {
+            major: own.major,
+            minor: own.minor + 1,
+            patch: 0,
+        };
+        assert_eq!(applied_floor(above), own);
+    }
+
+    /// Only a request that sets a floored input is refused, only by a server
+    /// below the floor, with the sentence the CLI prints; one whose version
+    /// isn't a release is not.
+    #[test]
+    fn only_a_set_input_is_refused_by_a_server_below_its_floor() {
+        let url = "https://memory.example.com/mcp";
+        let floor = &OPTION_FLOORS[0];
+        let applied = applied_floor(floor.since);
+        let below = Version {
+            patch: 0,
+            minor: applied.minor.saturating_sub(1),
+            major: applied.major,
+        }
+        .to_string();
+        let set = serde_json::json!({"ids": ["c0ffee01"], floor.field: true});
+        let (sentence, refused) = refused_option(url, &below, floor.tool, &set).unwrap();
+        assert_eq!(
+            sentence,
+            format!(
+                "The memory server at {url} runs user-memory {below}, which {} ({} needs {} or newer). Upgrade the server on its machine.",
+                floor.lacks, floor.field, floor.since
+            )
+        );
+        assert_eq!(refused.field, floor.field);
+        for unset in [
+            serde_json::json!({}),
+            serde_json::json!({floor.field: false}),
+            serde_json::json!({floor.field: null}),
+        ] {
+            assert!(
+                refused_option(url, &below, floor.tool, &unset).is_none(),
+                "{unset}"
+            );
+        }
+        assert!(refused_option(url, &below, "search", &set).is_none());
+        assert!(refused_option(url, &applied.to_string(), floor.tool, &set).is_none());
+        assert!(refused_option(url, "an unknown version", floor.tool, &set).is_none());
     }
 
     #[test]

@@ -305,6 +305,17 @@ and the next call reconnects ([troubleshooting](troubleshooting.md#from-doctor))
 Clients don't restart for a server restart or upgrade, only when their own
 client is upgraded.
 
+A client upgraded before its server still works with it, except for what
+the server is too old for. A server ignores an option it doesn't know, so
+the client asks only for what the server's version has: memory history
+needs 0.10.0 on the server. Asked of an older one, `user-memory history`
+and `read --history` stop, and an agent's `read` with `history` is
+answered with
+``The memory server at … runs user-memory …, which keeps no history (history needs … or newer). Upgrade the server on its machine.``
+Everything else goes on as before. The agent tells you the server is too
+old rather than reading the memory as one that never changed. Once the
+server is upgraded, the next history read reaches it.
+
 A session that starts while the server is down, or while it refuses the
 client's token, still gets its memory tools. If the server hasn't answered
 within 3 seconds, the client answers the agent app's handshake and tool
