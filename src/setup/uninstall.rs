@@ -425,7 +425,7 @@ fn store_files(db: &Path) -> Result<Vec<PathBuf>> {
     else {
         return Ok(Vec::new());
     };
-    let mut files: Vec<PathBuf> = ["", "-wal", "-shm", ".lock"]
+    let mut files: Vec<PathBuf> = ["", "-wal", "-shm", ".lock", ".changed"]
         .iter()
         .map(|suffix| db.with_file_name(format!("{name}{suffix}")))
         .filter(|path| path.is_file())

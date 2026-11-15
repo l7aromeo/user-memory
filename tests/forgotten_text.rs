@@ -505,9 +505,8 @@ fn migrate_leaves_no_word_deleted_under_the_old_keyword_index() {
     // so its rows are not damage, with the marker's word deleted from it.
     // Words of many other rows make it far larger than the new index, so
     // the upgrade cannot overwrite its pages by reusing them.
-    Connection::open(&store.db)
-        .unwrap()
-        .execute_batch(&format!(
+    let conn = Connection::open(&store.db).unwrap();
+    conn.execute_batch(&format!(
             "DROP TABLE search_words;
 CREATE VIRTUAL TABLE search_words USING fts5(category,title,type,body,content='',contentless_delete=1,detail=column,tokenize='ascii');
 UPDATE search_state SET stemmed_by='an earlier version';
@@ -519,6 +518,25 @@ DELETE FROM search_words WHERE rowid=1000;",
             indexed_marker()
         ))
         .unwrap();
+    // Schema version 10's count of changes goes too: version 7 had none.
+    let counting: Vec<String> = conn
+        .prepare(
+            "SELECT name FROM sqlite_schema WHERE type='trigger' AND sql LIKE '%store_changes%'",
+        )
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert!(!counting.is_empty());
+    for trigger in counting {
+        conn.execute_batch(&format!("DROP TRIGGER {trigger}"))
+            .unwrap();
+    }
+    conn.execute_batch("DROP TABLE store_changes; DROP TABLE memory_changes;")
+        .unwrap();
+    // Closed, so its log is copied into the file the check reads.
+    drop(conn);
     assert!(
         holds(&store.db, &indexed_tail()),
         "the old index holds the word"

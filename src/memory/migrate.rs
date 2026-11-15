@@ -637,16 +637,28 @@ fn run(
         Mode::Apply => TransactionBehavior::Immediate,
         Mode::Check => TransactionBehavior::Deferred,
     };
+    // The store's write turn too, as every write takes it, so the marker of
+    // its changes is rewritten before another writer's.
+    let turn = match mode {
+        Mode::Apply => Some(schema::store_turn(db)?),
+        Mode::Check => None,
+    };
     let tx = conn.transaction_with_behavior(behavior)?;
     let from = schema::version(&tx)?;
     let kind = schema::inspect(&tx, from, baseline, current)?;
     match kind {
         Found::Empty => return Ok(Migration::Empty),
         Found::Current => {
-            // A binary that stems words differently rebuilds the keyword
-            // index here, where setup and the installers upgrade the store.
-            if mode == Mode::Apply && super::index::refresh(&tx)? {
+            if let Some(turn) = &turn {
+                // A marker that does not match the store renews its id, as
+                // at any write, before the marker is written for it.
+                turn.begin(&tx)?;
+                // A binary that stems words differently rebuilds the keyword
+                // index here, where setup and the installers upgrade the
+                // store. A commit that changed nothing writes nothing.
+                super::index::refresh(&tx)?;
                 tx.commit()?;
+                turn.publish(&conn);
             }
             return Ok(Migration::Current(from));
         }
@@ -685,6 +697,8 @@ fn run(
         // A step that changes the keyword index leaves it to be built here,
         // once, with this binary's code, however many steps changed it.
         super::index::refresh(&tx)?;
+        // A migrated store is read whole once by every session.
+        super::changes::renew(&tx)?;
         let violations: i64 =
             tx.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| {
                 r.get(0)
@@ -695,7 +709,12 @@ fn run(
         Ok(())
     })();
     match migrated {
-        Ok(()) => tx.commit()?,
+        Ok(()) => {
+            tx.commit()?;
+            if let Some(turn) = &turn {
+                turn.publish(&conn);
+            }
+        }
         Err(err) => {
             drop(tx);
             return Err(err.context(format!(

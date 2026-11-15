@@ -234,7 +234,7 @@ fallback() {
         if [ "$delete_memories" = yes ] && [ "$export_memories" = yes ]; then
             left "your memories at $store were kept: exporting them needs a working user-memory; delete them anyway with --purge --yes --no-export"
         elif [ "$delete_memories" = yes ]; then
-            rm -f "$store" "$store-wal" "$store-shm" "$store.lock" "$store".*.bak
+            rm -f "$store" "$store-wal" "$store-shm" "$store.lock" "$store.changed" "$store".*.bak
             remove_backups "$store"
             rmdir "$(dirname "$store")" 2>/dev/null || :
             removed "your memories ($store)"

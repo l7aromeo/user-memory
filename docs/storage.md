@@ -99,6 +99,16 @@ requests and send replies, so while its writes wait it goes on answering
 other calls, reads at once. The lock file holds nothing: restoring a backup
 leaves it as it is, and uninstall with `--purge` deletes it with the store.
 
+Each write that changes the store, still holding its turn, writes the
+store's id and the number of its latest change to `<store>.changed` beside
+it (owner-only, a few bytes). A session hook reads that file to tell whether
+anything changed since it last looked, without opening the store. A writer
+that finds the file missing or naming other numbers than the store holds,
+as after a restore or a copy, gives the store a new id first, so every
+session reads it whole once. A forgotten memory's row in `memory_changes`
+keeps its id and the time it went for 30 days, as long as an unused session
+file lasts, and is dropped as an automatic backup is made.
+
 ## The keyword index
 
 Search finds the memories holding a word of the question through an index of
@@ -201,7 +211,7 @@ deletes the backups, the note and copies cut short with the store, then the
 folder if nothing else is in it; without `--purge` they stay.
 
 To restore one, stop every client and server using the store, delete
-`<store>-wal` and `<store>-shm`, and copy the backup over the store: `backup
+`<store>-wal`, `<store>-shm` and `<store>.changed`, and copy the backup over the store: `backup
 list` prints both commands, for PowerShell on Windows. As when [undoing an upgrade](upgrade.md#roll-back-an-upgrade), a leftover
 log would be applied to the restored store.
 

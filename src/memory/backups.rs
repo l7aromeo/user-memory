@@ -694,25 +694,38 @@ pub fn describe(db: &Path) -> Result<String> {
 /// How to restore `backup` over the store `db`, for a POSIX shell or, on
 /// Windows, for PowerShell. The log and shared-memory files belong to the
 /// store being replaced: left beside the copy, SQLite would apply that
-/// store's writes to it. Either may be missing, which is no error.
+/// store's writes to it. The marker of its changes goes too, so the next
+/// write gives the restored store a new id and every session reads it whole.
+/// Any may be missing, which is no error.
 fn restore(db: &Path, backup: &Path, windows: bool) -> String {
-    let (wal, shm) = (suffixed(db, "-wal"), suffixed(db, "-shm"));
+    // The files a restore deletes first, each quoted for its shell.
+    let leftovers = [
+        suffixed(db, "-wal"),
+        suffixed(db, "-shm"),
+        super::changes::marker_path(db),
+    ];
     let intro = "To restore one, stop every client and server using the store, then run";
     if windows {
         let quote = shell::powershell_quote;
+        let leftovers = leftovers
+            .iter()
+            .map(|path| quote(path))
+            .collect::<Vec<_>>()
+            .join(", ");
         format!(
-            "{intro} in PowerShell, with the backup you choose:\n  Get-Item -Force -LiteralPath {}, {} -ErrorAction Ignore | Remove-Item -Force\n  Copy-Item -Force -LiteralPath {} -Destination {}",
-            quote(&wal),
-            quote(&shm),
+            "{intro} in PowerShell, with the backup you choose:\n  Get-Item -Force -LiteralPath {leftovers} -ErrorAction Ignore | Remove-Item -Force\n  Copy-Item -Force -LiteralPath {} -Destination {}",
             quote(backup),
             quote(db)
         )
     } else {
         let quote = shell::quote;
+        let leftovers = leftovers
+            .iter()
+            .map(|path| quote(path))
+            .collect::<Vec<_>>()
+            .join(" ");
         format!(
-            "{intro}, with the backup you choose:\n  rm -f {} {}\n  cp {} {}",
-            quote(&wal),
-            quote(&shm),
+            "{intro}, with the backup you choose:\n  rm -f {leftovers}\n  cp {} {}",
             quote(backup),
             quote(db)
         )
@@ -1217,7 +1230,7 @@ mod tests {
                 lines[3..],
                 [
                     "To restore one, stop every client and server using the store, then run, with the backup you choose:".to_owned(),
-                    format!("  rm -f '{store}-wal' '{store}-shm'"),
+                    format!("  rm -f '{store}-wal' '{store}-shm' '{store}.changed'"),
                     format!("  cp '{}' '{store}'", today.path.display()),
                 ]
             );
@@ -1237,7 +1250,7 @@ mod tests {
             restore(db, backup, true),
             [
                 "To restore one, stop every client and server using the store, then run in PowerShell, with the backup you choose:",
-                r"  Get-Item -Force -LiteralPath 'C:\Users\o''neil\AppData\Local\user-memory\memories.sqlite3-wal', 'C:\Users\o''neil\AppData\Local\user-memory\memories.sqlite3-shm' -ErrorAction Ignore | Remove-Item -Force",
+                r"  Get-Item -Force -LiteralPath 'C:\Users\o''neil\AppData\Local\user-memory\memories.sqlite3-wal', 'C:\Users\o''neil\AppData\Local\user-memory\memories.sqlite3-shm', 'C:\Users\o''neil\AppData\Local\user-memory\memories.sqlite3.changed' -ErrorAction Ignore | Remove-Item -Force",
                 r"  Copy-Item -Force -LiteralPath 'C:\Users\o''neil\AppData\Local\user-memory\backups\memories-2026-10-18.sqlite3' -Destination 'C:\Users\o''neil\AppData\Local\user-memory\memories.sqlite3'",
             ]
             .join("\n")

@@ -69,8 +69,11 @@ pub fn move_project(db: &Path, old: &str, new: &str) -> Result<Moved> {
     let mut conn = connect(db)?;
     conn.busy_timeout(crate::memory::BUSY)?;
     // One write lock from the counts to the commit, so no writer slips in
-    // between the backup and the move.
+    // between the backup and the move; the store's write turn too, as every
+    // write takes it, so its marker of changes stays right.
+    let turn = crate::memory::store_turn(db)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    turn.begin(&tx)?;
     let found = problems(&tx)?;
     if !found.is_empty() {
         bail!(
@@ -127,6 +130,7 @@ pub fn move_project(db: &Path, old: &str, new: &str) -> Result<Moved> {
         Ok((memories, links)) => {
             crate::memory::end_writer(&tx)?;
             tx.commit()?;
+            turn.publish(&conn);
             // This transaction is not the store's write turn, whose commit
             // makes the day's backup, so the move makes it here.
             crate::memory::backups::back_up_if_due(db);
