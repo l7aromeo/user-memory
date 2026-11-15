@@ -743,7 +743,7 @@ fn an_import_marks_what_it_adds_and_replaces_with_its_name() {
     let store = Store::new();
     let replaced = store.record("tea", "Drinks green tea", &["--origin", "chat/one"]);
     let same = store.record("dogs", "Walks the dog at seven", &[]);
-    let added = "0b9e2c1e-4f5a-4d7b-9c3e-1a2b3c4d5e6f";
+    let added = "e0000008-0000-4000-8000-000000000008";
     let export = store.root.path().join("export.json");
     store.output(&["export", export.to_str().unwrap()]);
     let mut document: Value = serde_json::from_slice(&fs::read(&export).unwrap()).unwrap();

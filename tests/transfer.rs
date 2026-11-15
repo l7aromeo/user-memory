@@ -809,7 +809,7 @@ fn older_backups_need_a_title_for_each_memory_the_store_lacks() {
         map[id] = title;
         map
     };
-    let stray = "6f1c3a52-7d0e-4c1b-9a2e-3b4c5d6e7f80";
+    let stray = "e0000009-0000-4000-8000-000000000009";
     for (case, map, expected) in [
         (
             "no map",

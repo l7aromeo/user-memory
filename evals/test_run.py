@@ -984,7 +984,7 @@ class CommitsAndSeeds(unittest.TestCase):
         self.assertFalse(grade(["git commit -m x"], ["x"]))
 
     def test_a_seed_can_name_an_earlier_seed(self):
-        ids = {"old": "0f2c6a4e-1111-4222-8333-944455556666"}
+        ids = {"old": "e0000014-0000-4000-8000-000000000014"}
         seed = {"id": "new", "args": ["--title", "t", "--supersedes", "{seed:old}"]}
         self.assertEqual(run.seed_args(seed, ids), ["--title", "t", "--supersedes", ids["old"]])
         with self.assertRaises(ValueError):

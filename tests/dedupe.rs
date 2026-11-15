@@ -326,7 +326,7 @@ fn confirmations_need_an_explicit_statement_about_an_active_explicit_memory_in_p
     for (target, extra) in [
         (local.as_str(), &[][..]),
         (habit.as_str(), &[][..]),
-        ("3d9f829a-c594-45d2-84b6-1469b20d653b", &[][..]),
+        ("e0000007-0000-4000-8000-000000000007", &[][..]),
         (
             rust.as_str(),
             &["--scope", "project", "--project", "repo"][..],
@@ -470,7 +470,7 @@ fn distinct_from_must_cover_todays_top_candidates_and_is_remembered() {
             "--content",
             "Prefer Rust for servers",
             "--distinct-from",
-            "3d9f829a-c594-45d2-84b6-1469b20d653b"
+            "e0000007-0000-4000-8000-000000000007"
         ])["reason"],
         "distinct_from names a memory that does not exist"
     );

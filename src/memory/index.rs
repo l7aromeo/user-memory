@@ -976,7 +976,7 @@ mod tests {
     #[test]
     fn every_change_to_a_memory_or_its_vector_is_logged_in_order() {
         let (_dir, conn) = store();
-        let id = "0bd1ba49-2b63-4aab-8d57-38d9be10a281";
+        let id = "e0000001-0000-4000-8000-000000000001";
         conn.execute(
             "INSERT INTO memories (id,memory_type,category,title,content) VALUES (?1,'fact','tools','Use Helix','Use Helix')",
             [id],
