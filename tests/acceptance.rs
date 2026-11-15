@@ -948,7 +948,7 @@ fn index_lines_mark_scope_and_certainty_and_read_returns_the_conditions() {
     assert!(profile.contains("\n  behavior (1)\n"), "{profile}");
     let observed = line_for(&profile, "Skims long answers");
     assert!(
-        observed.ends_with("Skims long answers (tentative)"),
+        observed.ends_with("Skims long answers (learned in 1 session)"),
         "{observed}"
     );
     assert_eq!(s.read_line(observed)["source"], "observed");
