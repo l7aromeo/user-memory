@@ -42,13 +42,6 @@ pub(crate) const WINDOW_ACTIONS: usize = 30;
 /// every measure at 1,000 memories, so the starting value stands.
 pub(crate) const WINDOW_HALF_LIFE: f64 = 5.0;
 
-/// What a memory's other passages add to its best one's score, per term
-/// that only they hold, as a share of that term's worth: 0 scores a memory
-/// by its best passage alone, as search does (#124), so a long memory
-/// matching in many places does not outrank a short one matching as well
-/// in one. The delivery benchmark measures whether credit helps.
-pub(crate) const OTHER_PASSAGE_CREDIT: f64 = 0.0;
-
 // The bars. Every push and hold needs an anchor of the action that fired,
 // and rank orders what passes but never makes a passage pass. A shell
 // command's passages are tested on [`Matched::share`]; every other action's
@@ -223,10 +216,8 @@ fn assignment(word: &str) -> bool {
 /// action at 1,000 memories, against 0.85 and 0.92 for taking the first
 /// word some memory names, and 0.86 and 0.94 for the word after a flag,
 /// which mistake a later argument for the subcommand more often than they
-/// find a flag's value. With `pairs`, each two adjacent words are an
-/// anchor too, so a wrapper no table names (`npx`, a proxy) still yields
-/// the command it runs.
-fn command_terms(line: &str, stems: &mut Stems, terms: &mut Terms, pairs: bool) {
+/// find a flag's value.
+fn command_terms(line: &str, stems: &mut Stems, terms: &mut Terms) {
     for words in segments(line) {
         let mut rest = words
             .iter()
@@ -251,19 +242,6 @@ fn command_terms(line: &str, stems: &mut Stems, terms: &mut Terms, pairs: bool) 
             terms
                 .anchors
                 .insert(format!("{name} {word}").to_lowercase());
-        }
-        if pairs {
-            for pair in words.windows(2) {
-                if let [first, second] = pair
-                    && word_argument(first)
-                    && word_argument(second)
-                {
-                    let first = first.rsplit('/').next().unwrap_or(first);
-                    terms
-                        .anchors
-                        .insert(format!("{first} {second}").to_lowercase());
-                }
-            }
         }
         for arg in args.iter().filter(|arg| !arg.starts_with('-')) {
             let found = passages::anchors(arg);
@@ -307,11 +285,11 @@ fn file_terms(path: &str, stems: &mut Stems, terms: &mut Terms) {
     }
 }
 
-/// The terms `action` adds to the window; `pairs` as in [`command_terms`].
-pub(in crate::memory) fn terms(action: &Action, stems: &mut Stems, pairs: bool) -> Terms {
+/// The terms `action` adds to the window.
+pub(in crate::memory) fn terms(action: &Action, stems: &mut Stems) -> Terms {
     let mut terms = Terms::default();
     match action.kind {
-        Kind::Command => command_terms(&action.text, stems, &mut terms, pairs),
+        Kind::Command => command_terms(&action.text, stems, &mut terms),
         Kind::File => file_terms(&action.text, stems, &mut terms),
         Kind::Prompt | Kind::Task | Kind::Plan | Kind::Message | Kind::Search => {
             terms.words(stems, &action.text);
@@ -321,15 +299,12 @@ pub(in crate::memory) fn terms(action: &Action, stems: &mut Stems, pairs: bool) 
     terms
 }
 
-/// The window's and the score's settings: the constants above, which the
-/// delivery benchmark varies to measure them.
+/// The window's settings: the constants above, which the delivery
+/// benchmark varies to measure them.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Tuning {
     pub(crate) window_actions: usize,
     pub(crate) half_life: f64,
-    pub(crate) credit: f64,
-    /// Adjacent words of a command are anchors too (see `command_terms`).
-    pub(crate) pairs: bool,
 }
 
 impl Default for Tuning {
@@ -337,8 +312,6 @@ impl Default for Tuning {
         Self {
             window_actions: WINDOW_ACTIONS,
             half_life: WINDOW_HALF_LIFE,
-            credit: OTHER_PASSAGE_CREDIT,
-            pairs: false,
         }
     }
 }
@@ -370,7 +343,7 @@ impl Window {
     /// Adds `action`, the one that fires the next match; the oldest past
     /// [`WINDOW_ACTIONS`] falls out.
     pub(crate) fn push(&mut self, action: &Action) {
-        let terms = terms(action, &mut self.stems, self.tuning.pairs);
+        let terms = terms(action, &mut self.stems);
         self.actions.push_back((action.kind, terms, action.failed));
         while self.actions.len() > self.tuning.window_actions {
             self.actions.pop_front();
@@ -414,17 +387,13 @@ pub(crate) struct Matched {
     pub(crate) start: usize,
     pub(crate) length: usize,
     pub(crate) score: f64,
-    /// The same match scored free of the store's size, for measuring
-    /// bars on: each term's worth by how many memories hold it alone, as
-    /// `1/holders` and as `1/sqrt(holders)`; anchors as `1/sqrt(holders)`,
-    /// `1/(1 + ln holders)` or at full worth however many hold them, with
-    /// stems as `1/holders`; and the score as a share of what the action
-    /// that fired could score at most.
-    pub(crate) holders: f64,
-    pub(crate) root: f64,
+    /// The match scored free of the store's size, which the bars of every
+    /// action but a command test: each term's worth falls with the memories
+    /// holding it, an anchor's as `1/sqrt(holders)` and a word's as
+    /// `1/holders`.
     pub(crate) mixed: f64,
-    pub(crate) mixed_log: f64,
-    pub(crate) flat: f64,
+    /// The score as a share of what the action that fired could score at
+    /// most, which a command's bars test.
     pub(crate) share: f64,
     /// The fewest memories holding an anchor of the action that fired that
     /// this match holds; 0 for none.
@@ -839,11 +808,11 @@ impl DeliveryIndex {
     /// The passages `window` matches, one per memory (its best), strongest
     /// first, each scored as search scores a topic: what slot 0 holds plus
     /// the best passage's own terms, each by its field's weight, its rarity
-    /// among the indexed memories and its age in the window; plus
-    /// [`OTHER_PASSAGE_CREDIT`] of each term only the memory's other
-    /// passages hold. Rarity is divided by the rarest possible, so a bar is
-    /// on one scale whatever the store's size; that changes the scale only,
-    /// not the order, and search's own score is untouched.
+    /// among the indexed memories and its age in the window. A memory's
+    /// other passages add nothing, as in search (#124), so a long memory
+    /// matching in many places does not outrank a short one matching as
+    /// well in one. Rarity is divided by the rarest possible; that changes
+    /// the scale only, not the order, and search's own score is untouched.
     pub(crate) fn rank(&self, window: &Window) -> Result<Vec<Matched>, Error> {
         let mut wanted: BTreeMap<Vec<u8>, Wanted> = BTreeMap::new();
         let newest = window.actions.len().saturating_sub(1);
@@ -871,9 +840,9 @@ impl DeliveryIndex {
         }
         let all = self.memories as f64;
         let rarest = rarity(all, 1.0);
-        /// One passage's hits: its row, its gain, what it holds of the
-        /// firing action, and each matched term's worth.
-        type Passage = (Row, Gain, Wanted, Vec<(usize, Gain)>);
+        /// One passage's hits: its row, its gain and what it holds of the
+        /// firing action.
+        type Passage = (Row, Gain, Wanted);
         /// One memory's hits: slot 0's score and flags, and each passage's.
         #[derive(Default)]
         struct Hits {
@@ -885,7 +854,7 @@ impl DeliveryIndex {
         // What the action that fired could score at most: each of its terms
         // once as text, a term no memory holds as rare as one memory's.
         let mut possible = 0.0;
-        for (term, (key, want)) in wanted.iter().enumerate() {
+        for (key, want) in &wanted {
             let postings = self.postings(key)?;
             let anchor = key.first() == Some(&b'a');
             if want.fired {
@@ -907,18 +876,13 @@ impl DeliveryIndex {
             let worth = |field: Field| {
                 let base = if anchor { ANCHOR_WEIGHT } else { weight(field) } * want.weight;
                 let held = holders.max(1) as f64;
-                let (mixed, mixed_log, flat) = if anchor {
-                    (base / held.sqrt(), base / (1.0 + held.ln()), base)
-                } else {
-                    (base / held, base / held, base / held)
-                };
                 Gain {
                     store: base * rarity(all, held) / rarest,
-                    holders: base / held,
-                    root: base / held.sqrt(),
-                    mixed,
-                    mixed_log,
-                    flat,
+                    mixed: if anchor {
+                        base / held.sqrt()
+                    } else {
+                        base / held
+                    },
                 }
             };
             let mut want = *want;
@@ -929,17 +893,15 @@ impl DeliveryIndex {
             for (row, field) in list {
                 let hits = found.entry(row.memory).or_default();
                 if row.slot == 0 {
-                    hits.whole.add(worth(field), 1.0);
+                    hits.whole.add(worth(field));
                     merge(&mut hits.whole_wanted, want);
                 } else {
                     let entry = hits.passages.entry(row.slot).or_insert((
                         row,
                         Gain::default(),
                         Wanted::default(),
-                        Vec::new(),
                     ));
-                    entry.1.add(worth(field), 1.0);
-                    entry.3.push((term, worth(field)));
+                    entry.1.add(worth(field));
                     merge(&mut entry.2, want);
                 }
             }
@@ -954,25 +916,7 @@ impl DeliveryIndex {
                         _ => Some(candidate),
                     });
             let (row, gain, own) = match best {
-                Some((row, gain, own, terms)) => {
-                    // Terms only the other passages hold, each once at its
-                    // best worth.
-                    let mine: BTreeSet<usize> = terms.iter().map(|(t, _)| *t).collect();
-                    let mut others: BTreeMap<usize, Gain> = BTreeMap::new();
-                    for (_, _, _, terms) in hits.passages.values() {
-                        for &(t, worth) in terms.iter().filter(|(t, _)| !mine.contains(t)) {
-                            let best = others.entry(t).or_default();
-                            if worth.store > best.store {
-                                *best = worth;
-                            }
-                        }
-                    }
-                    let mut gain = *gain;
-                    for worth in others.values() {
-                        gain.add(*worth, window.tuning.credit);
-                    }
-                    (*row, gain, *own)
-                }
+                Some((row, gain, own)) => (*row, *gain, *own),
                 None => match self.first_passage(memory)? {
                     Some(row) => (row, Gain::default(), Wanted::default()),
                     None => continue,
@@ -981,18 +925,14 @@ impl DeliveryIndex {
             let mut flags = hits.whole_wanted;
             merge(&mut flags, &own);
             let mut total = hits.whole;
-            total.add(gain, 1.0);
+            total.add(gain);
             matched.push(Matched {
                 memory: memory as usize,
                 slot: i64::from(row.slot),
                 start: row.start as usize,
                 length: row.length as usize,
                 score: total.store,
-                holders: total.holders,
-                root: total.root,
                 mixed: total.mixed,
-                mixed_log: total.mixed_log,
-                flat: total.flat,
                 share: if possible > 0.0 {
                     total.store / possible
                 } else {
@@ -1012,26 +952,17 @@ impl DeliveryIndex {
 }
 
 /// A match's score by the store's rarity, and free of the store's size
-/// (see [`Matched::holders`]).
+/// (see [`Matched::mixed`]).
 #[derive(Clone, Copy, Default)]
 struct Gain {
     store: f64,
-    holders: f64,
-    root: f64,
     mixed: f64,
-    mixed_log: f64,
-    flat: f64,
 }
 
 impl Gain {
-    /// Adds `share` of `other`.
-    fn add(&mut self, other: Gain, share: f64) {
-        self.store += other.store * share;
-        self.holders += other.holders * share;
-        self.root += other.root * share;
-        self.mixed += other.mixed * share;
-        self.mixed_log += other.mixed_log * share;
-        self.flat += other.flat * share;
+    fn add(&mut self, other: Gain) {
+        self.store += other.store;
+        self.mixed += other.mixed;
     }
 }
 
@@ -1166,11 +1097,7 @@ mod tests {
     }
 
     fn of(kind: Kind, text: &str) -> Terms {
-        of_with(kind, text, false)
-    }
-
-    fn of_with(kind: Kind, text: &str, pairs: bool) -> Terms {
-        terms(&action(kind, text), &mut Stems::new(), pairs)
+        terms(&action(kind, text), &mut Stems::new())
     }
 
     fn stems(text: &str) -> BTreeSet<String> {
@@ -1243,19 +1170,10 @@ mod tests {
         let flagged = of(Kind::Command, "kubectl -n prod apply -f deploy.yml");
         assert!(flagged.anchors.contains("kubectl prod"), "{flagged:?}");
         assert!(!flagged.anchors.contains("kubectl apply"), "{flagged:?}");
-        // A wrapper no table names hides the command, unless adjacent
-        // words are anchors too.
-        let line = "npx --yes prettier check && proxychains git push";
-        let plain = of(Kind::Command, line);
-        assert!(!plain.anchors.contains("git push"), "{plain:?}");
-        let paired = of_with(Kind::Command, line, true);
-        for anchor in ["git push", "proxychains git", "prettier check"] {
-            assert!(paired.anchors.contains(anchor), "{anchor}: {paired:?}");
-        }
-        assert!(
-            !paired.anchors.iter().any(|a| a.contains("--yes")),
-            "{paired:?}"
-        );
+        // And a wrapper no table names hides the command it runs.
+        let wrapped = of(Kind::Command, "proxychains git push");
+        assert!(wrapped.anchors.contains("proxychains git"), "{wrapped:?}");
+        assert!(!wrapped.anchors.contains("git push"), "{wrapped:?}");
     }
 
     #[test]
