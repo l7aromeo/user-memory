@@ -2097,6 +2097,10 @@ fn answer_fake(mut stream: std::net::TcpStream, said: &Shared) {
                     .map_or_else(|| message["params"]["protocolVersion"].clone(), Value::from);
                 json!({"result":{"protocolVersion":protocol,"capabilities":capabilities,"serverInfo":{"name":"user-memory","version":said.version}}})
             }
+            // A later page holds nothing more.
+            Some("tools/list") if message.pointer("/params/cursor").is_some() => {
+                json!({"result":{"tools":[]}})
+            }
             Some("tools/list") => {
                 json!({"result":{"tools":said.tools.clone().unwrap_or_else(|| json!([]))}})
             }
@@ -3060,4 +3064,26 @@ fn connect_never_prints_what_the_bridge_tells_the_front() {
             .starts_with("notifications/user-memory/")),
         "{printed:?}"
     );
+}
+
+/// A reply to a later page of the tool list is not the list the app has:
+/// a reconnect to the same tools tells nothing.
+#[test]
+fn a_later_page_is_not_taken_for_the_tool_list() {
+    let home = tempdir().unwrap();
+    let token = home.path().join("token");
+    fs::write(&token, TOKEN).unwrap();
+    let state = said("0.10.0", None);
+    state.lock().unwrap().tools = Some(json!([{"name":"index","inputSchema":{"type":"object"}}]));
+    let url = versioned_endpoint(&state);
+    let mut app = App::start(home.path(), &url, &token, &[]);
+    app.open();
+    let page =
+        app.ask(&json!({"jsonrpc":"2.0","id":3,"method":"tools/list","params":{"cursor":"2"}}));
+    assert_eq!(page["result"]["tools"], json!([]), "{page}");
+    state.lock().unwrap().fail_next = true;
+    app.ask(&call(4, "index", json!({})));
+    assert_eq!(texts(&app.ask(&call(5, "index", json!({})))), ["served"]);
+    assert_eq!(app.told_changed(), 0, "{:?}", app.others);
+    app.close();
 }
