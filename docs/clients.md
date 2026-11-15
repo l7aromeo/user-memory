@@ -132,7 +132,7 @@ them once:
 | `SessionStart` (startup, resume, clear, compact) | `session-start` | the index, below |
 | `SessionStart` (compact) | `working-set` | nothing at present |
 | `UserPromptSubmit` | `prompt-submit` | a notice when something changed, [below](#changes-during-a-session) |
-| `SubagentStart` | `subagent-start` | nothing at present |
+| `SubagentStart` | `subagent-start` | the project rules, [below](#rules-for-subagents) |
 | `PreToolUse` | `pre-tool-use` | nothing at present |
 | `PostToolUse`, and Claude Code's `PostToolUseFailure` | `post-tool-use` | nothing at present |
 
@@ -156,6 +156,32 @@ entries:
    "hooks": [{"type": "command", "command": "'/Users/you/.local/bin/user-memory' prompt-submit --client claude",
               "timeout": 5}]}]}
 ```
+
+### Rules for subagents
+
+Neither client gives a subagent session start's text, apart from a Codex
+sub-agent forked from its parent. So `subagent-start` prints the project
+rules as session start shows them (the folder's projects and the ones the
+conversation linked, up to 6,000 characters, with the line counting those
+left out). It prints nothing when the projects have no rules.
+
+A Codex sub-agent forked with its parent's history (`fork_turns` all, the
+default) already carries session start's text. Its hook reads the first
+512 KiB of the sub-agent's transcript, where Codex 0.163.0 writes the
+parent's current history, and prints nothing when, for every project it
+would print, the rules' heading is in a message Codex wrote for a hook (a
+developer message). Anything else prints the rules again, so a doubt costs
+a duplicate, never a missing rule:
+
+- the heading only in a user's message, the model's reply or a tool's output;
+- a heading past those 512 KiB;
+- a transcript that is missing, unreadable or compressed;
+- a project key with characters JSON escapes, such as a Windows path's
+  backslashes, whose heading never matches the file's text.
+
+A developer message that quotes session start's text for another reason
+(an instruction file that pastes it, for example) would be taken for the
+hook's.
 
 Codex cuts a hook's text at about 10,000 bytes unless the handler sets
 `additionalContextLimit`, in its tokens of four bytes; a store in a language

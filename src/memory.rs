@@ -44,7 +44,7 @@ pub use links::{Link, link};
 pub use migrate::{Migration, check_migration, migrate};
 pub use overview::{
     FitUnit, INDEX_FLOOR, INDEX_UNAVAILABLE, Index, ProjectIndex, RulesLeftOut, index,
-    index_failure, merge, next_cursor, rules_left_out, shorten, tiered,
+    index_failure, merge, next_cursor, rules_headings, rules_left_out, rules_part, shorten, tiered,
 };
 pub use page::stale_cursor;
 pub use read::{Read, Search, read, search};

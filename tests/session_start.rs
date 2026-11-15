@@ -2213,3 +2213,184 @@ fn rules_that_fit_are_not_told() {
     assert_eq!(message, None);
     assert!(!text.contains("more project rule"), "{text}");
 }
+
+/// What the subagent hook prints for `client` with `payload`, run in
+/// `folder` over the store in `home`.
+fn subagent(home: &Path, folder: &Path, client: &str, payload: &Value) -> String {
+    subagent_with(home, folder, &["--client", client], payload)
+}
+
+/// What the subagent hook prints with `args` and `payload`, run in `folder`
+/// over the store in `home`.
+fn subagent_with(home: &Path, folder: &Path, args: &[&str], payload: &Value) -> String {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_user-memory"));
+    command.arg("subagent-start").args(args);
+    let mut child = in_folder(command, home, folder)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    let out = time::finish(child, "the subagent hook");
+    assert!(out.status.success(), "{out:?}");
+    text(&out)
+}
+
+/// The text a subagent hook's JSON gives the subagent, or "" for none.
+fn subagent_text(out: &str) -> String {
+    if out.is_empty() {
+        return String::new();
+    }
+    let out: Value = serde_json::from_str(out).unwrap();
+    assert_eq!(out["hookSpecificOutput"]["hookEventName"], "SubagentStart");
+    out["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+// A subagent gets the project rules as session start shows them, in both
+// clients; with no project rules it gets nothing.
+#[test]
+fn a_subagent_gets_the_project_rules_session_start_shows() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path();
+    let app = repository(home, "app", "git@github.com:acme/app.git");
+    let web = repository(home, "web", "git@github.com:acme/web.git");
+    with_project_rules(home, "github.com/acme/app", &rules_of_width(3, 120));
+    let shown = rules_part(&started(home, &app, "s", "startup")).join("\n");
+    assert!(shown.starts_with(RULES_OF_APP), "{shown}");
+    for client in ["claude", "codex"] {
+        let payload = json!({"session_id":"s","agent_id":"a1","agent_type":"general","hook_event_name":"SubagentStart","cwd":&app});
+        assert_eq!(
+            subagent_text(&subagent(home, &app, client, &payload)),
+            shown,
+            "{client}"
+        );
+        let elsewhere =
+            json!({"session_id":"s","agent_id":"a2","hook_event_name":"SubagentStart","cwd":&web});
+        assert_eq!(subagent(home, &web, client, &elsewhere), "", "{client}");
+    }
+    // Any context limit a hooks file may carry prints the same rules.
+    for limit in ["1", "100", "7500", LARGEST_LIMIT] {
+        let payload =
+            json!({"session_id":"s","agent_id":"a3","hook_event_name":"SubagentStart","cwd":&app});
+        let args = ["--client", "codex", "--context-limit", limit];
+        assert_eq!(
+            subagent_text(&subagent_with(home, &app, &args, &payload)),
+            shown,
+            "{limit}"
+        );
+    }
+}
+
+/// A Codex transcript line of `kind` with `fields`.
+fn item(kind: &str, payload: Value) -> String {
+    json!({"timestamp":"2026-11-01T00:00:00.000Z","type":kind,"payload":payload}).to_string()
+}
+
+/// A message item of `role` saying `text`.
+fn said(role: &str, text: &str) -> String {
+    item(
+        "response_item",
+        json!({"type":"message","role":role,"content":[{"type":"input_text","text":text}]}),
+    )
+}
+
+// A forked Codex sub-agent whose transcript holds, in a hook's developer
+// message, the session start text that names the project's rules gets
+// nothing more; every other transcript gets the rules: the text in a user
+// message, another project's heading, the heading past the bound, a
+// compressed or missing file, no transcript at all.
+#[test]
+fn a_forked_codex_subagent_that_carries_the_rules_is_skipped() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path();
+    let app = repository(home, "app", "git@github.com:acme/app.git");
+    with_project_rules(home, "github.com/acme/app", &rules_of_width(3, 120));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_user-memory"));
+    command.args(["session-start", "--client", "codex"]);
+    let mut child = in_folder(command, home, &app)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(br#"{"session_id":"thr_parent","source":"startup"}"#)
+        .unwrap();
+    let started = told(&text(&child.wait_with_output().unwrap())).0;
+    assert!(started.contains(RULES_OF_APP), "{started}");
+    let meta = item(
+        "session_meta",
+        json!({"id":"thr_1","instructions":"m".repeat(19_000)}),
+    );
+    let transcript = |name: &str, bytes: Vec<u8>| {
+        let path = home.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        path
+    };
+    let lines = |lines: &[String]| (lines.join("\n") + "\n").into_bytes();
+    let forked = transcript(
+        "forked.jsonl",
+        lines(&[meta.clone(), meta.clone(), said("developer", &started)]),
+    );
+    let pasted = transcript(
+        "pasted.jsonl",
+        lines(&[meta.clone(), meta.clone(), said("user", &started)]),
+    );
+    let other = transcript(
+        "other.jsonl",
+        lines(&[
+            meta.clone(),
+            said(
+                "developer",
+                &started.replace("github.com/acme/app", "github.com/acme/web"),
+            ),
+        ]),
+    );
+    let far = transcript(
+        "far.jsonl",
+        lines(&[
+            meta.clone(),
+            said("developer", &"x".repeat(600_000)),
+            said("developer", &started),
+        ]),
+    );
+    // A compressed file's bytes, then a line a skip without the check
+    // would take for the hook's message.
+    let mut zstd = vec![0x28, 0xb5, 0x2f, 0xfd, b'\n'];
+    zstd.extend(lines(&[said("developer", &started)]));
+    let compressed = transcript("compressed.jsonl.zst", zstd);
+    let payload = |path: Option<&Path>| {
+        let mut payload = json!({"session_id":"thr_child","agent_id":"a1","hook_event_name":"SubagentStart","cwd":&app});
+        if let Some(path) = path {
+            payload["transcript_path"] = json!(path);
+        }
+        payload
+    };
+    assert_eq!(subagent(home, &app, "codex", &payload(Some(&forked))), "");
+    for (case, path) in [
+        ("pasted by the user", Some(pasted.as_path())),
+        ("another project's heading", Some(other.as_path())),
+        ("past the bound", Some(far.as_path())),
+        ("compressed", Some(compressed.as_path())),
+        ("missing", Some(home.join("missing.jsonl").as_path())),
+        ("no transcript", None),
+    ] {
+        let given = subagent_text(&subagent(home, &app, "codex", &payload(path)));
+        assert!(given.starts_with(RULES_OF_APP), "{case}: {given}");
+    }
+    // Claude Code's subagents never carry session start's text.
+    let given = subagent_text(&subagent(home, &app, "claude", &payload(Some(&forked))));
+    assert!(given.starts_with(RULES_OF_APP), "{given}");
+}
