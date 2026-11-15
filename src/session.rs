@@ -209,7 +209,9 @@ pub async fn start(path: PathBuf, client: Option<HookClient>) -> String {
         tokio::time::timeout_at(deadline, version_line())
     );
     if let Some(reconcile) = reconcile {
-        let _ = tokio::time::timeout(hook_time(RECONCILE_GRACE), reconcile).await;
+        // Never past the hook's limit: by then the repair has had all of it.
+        let until = (tokio::time::Instant::now() + hook_time(RECONCILE_GRACE)).min(deadline);
+        let _ = tokio::time::timeout_at(until, reconcile).await;
     }
     let index = match index {
         Ok(Ok(text)) => {
