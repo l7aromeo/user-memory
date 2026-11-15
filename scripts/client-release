@@ -241,9 +241,6 @@ main() {
             die "could not generate the third-party notices; a dependency may have a license about.toml does not accept"
         chmod 644 $out/THIRD_PARTY_NOTICES.txt
     fi
-    local host=
-    [[ -n $binaries ]] || host=$(rustc -vV | sed -n 's/^host: //p')
-
     for target in $targets; do
         print "== $target (v$version, $(<$out/.commit))"
         local name=$(asset $target)
@@ -263,6 +260,10 @@ main() {
                 die "$target builds only on Windows: release.yml builds it on a Windows runner, and the release is assembled with --binaries"
                 ;;
             *-apple-darwin)
+                # Only a macOS build asks the host's Rust: a Linux build uses
+                # its image's, and a runner's rustc would first install
+                # rust-toolchain.toml's toolchain.
+                local host=$(rustc -vV | sed -n 's/^host: //p')
                 [[ $host == *-apple-darwin ]] || die "$target builds only on macOS"
                 rustup target list --installed | grep -qx $target ||
                     die "rustup has no $target; run: rustup target add $target"

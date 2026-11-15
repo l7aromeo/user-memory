@@ -363,7 +363,9 @@ fn commands(value: &serde_json::Value, found: &mut Vec<String>) {
 /// one-off container's shell runs with the store folder `$HOME/server` as
 /// `/data`. `$HOME/docker-down` makes `docker info` fail; `$HOME/docker-ps`
 /// is what `docker ps` prints. `compose exec … user-memory embedding show`
-/// runs a real `$FAKE_HOST embedding show` on that store.
+/// runs a real `$FAKE_HOST embedding show` on that store. `run` with a
+/// folder mounted at `/out`, as scripts/client-release builds for Linux,
+/// writes a binary there.
 fn docker(args: &[String]) -> u8 {
     log(&at("docker.log"), args);
     match args.first().map_or("", String::as_str) {
@@ -385,6 +387,12 @@ fn docker(args: &[String]) -> u8 {
         // The default bridge's gateway, as `docker network inspect bridge` shows it.
         "network" => say("172.17.0.1"),
         "compose" => compose(args),
+        "run" => {
+            if let Some(out) = args.iter().find_map(|arg| arg.strip_suffix(":/out")) {
+                fs::write(Path::new(out).join("user-memory"), "linux binary").unwrap();
+            }
+            0
+        }
         _ => 0,
     }
 }
