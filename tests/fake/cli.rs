@@ -360,11 +360,14 @@ fn commands(value: &serde_json::Value, found: &mut Vec<String>) {
 
 /// A Docker CLI that records every call in `$HOME/docker.log`. `compose up`
 /// starts a real `user-memory host` (`$FAKE_HOST`) on the compose file's
-/// port, `compose stop` and `down` stop it and wait for it to exit, `compose cp` copies its token out, and a
+/// port, `compose stop` and `down` stop it and wait for it to exit, and a
 /// one-off container's shell runs with the store folder `$HOME/server` as
 /// `/data`. `$HOME/docker-down` makes `docker info` fail; `$HOME/docker-ps`
 /// is what `docker ps` prints. `compose exec … user-memory embedding show`
-/// runs a real `$FAKE_HOST embedding show` on that store. `run` with a
+/// runs a real `$FAKE_HOST embedding show` on that store, and `compose exec
+/// … user-memory host token …` a real `host token` there; `compose cp`
+/// copies any file of the store folder out, and `compose exec … rm -f`
+/// deletes one. `run` with a
 /// folder mounted at `/out`, as scripts/client-release builds for Linux,
 /// writes a binary there.
 fn docker(args: &[String]) -> u8 {
@@ -404,6 +407,41 @@ fn compose(args: &[String]) -> u8 {
     let last = args.last().cloned().unwrap_or_default();
     let server = at("server");
     let host = || PathBuf::from(env::var_os("FAKE_HOST").unwrap());
+    let exec_at = args.iter().position(|arg| arg == "exec");
+    let tool_at = exec_at.and_then(|at| {
+        args[at..]
+            .windows(3)
+            .position(|run| run == ["user-memory", "host", "token"])
+            .map(|found| at + found)
+    });
+    if let Some(at) = tool_at {
+        // `host token …` in the container: the real binary on the store
+        // folder, with the container's paths there.
+        let data = format!("{}/", server.display());
+        let status = Command::new(host())
+            .args(
+                args[at + 1..]
+                    .iter()
+                    .map(|arg| arg.replace("/data/", &data)),
+            )
+            .env("USER_MEMORY_DB", server.join("memories.sqlite3"))
+            .env_remove("USER_MEMORY_URL")
+            .env_remove("USER_MEMORY_TOKEN_FILE")
+            .status()
+            .unwrap();
+        return status
+            .code()
+            .and_then(|code| u8::try_from(code).ok())
+            .unwrap_or(1);
+    }
+    if let Some(at) = exec_at
+        && args[at..].windows(2).any(|run| run == ["rm", "-f"])
+    {
+        if let Some(file) = last.strip_prefix("/data/") {
+            let _ = fs::remove_file(server.join(file));
+        }
+        return 0;
+    }
     if all.contains(" embedding sync ") {
         // The container cannot reach the endpoint.
         if at("sync-fails").exists() {
@@ -513,8 +551,15 @@ fn compose(args: &[String]) -> u8 {
             eprintln!("Migrating to schema version 3 needs a title for every memory");
             return 1;
         }
-    } else if all.contains(" cp memory:/data/access-token ") {
-        fs::copy(server.join("access-token"), &last).unwrap();
+    } else if let Some(file) = args
+        .iter()
+        .skip_while(|arg| *arg != "cp")
+        .find_map(|arg| arg.strip_prefix("memory:/data/"))
+    {
+        if fs::copy(server.join(file), &last).is_err() {
+            eprintln!("Error: no such file in the container: /data/{file}");
+            return 1;
+        }
     } else if all.contains(" down ") {
         stop_server();
         // The volume is the fake server's store folder.

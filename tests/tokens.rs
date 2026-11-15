@@ -1297,3 +1297,36 @@ fn the_health_check_needs_no_token_and_fails_while_the_store_cannot_open() {
     // Nothing listening.
     assert!(!health(&host).status.success());
 }
+
+/// A token file an interrupted copy out of the Docker server's volume left
+/// in the store's folder is deleted by the next `host token` and when the
+/// server starts, once it is old enough that no copy can still be reading
+/// it.
+#[test]
+fn a_copy_left_in_the_store_folder_is_deleted_once_no_copy_can_use_it() {
+    let mut host = Host::start();
+    let data = host.root.path().join("data");
+    let leave = |name: &str, age: Duration| {
+        let path = data.join(name);
+        fs::write(&path, "umt_left").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(SystemTime::now() - age)
+            .unwrap();
+        path
+    };
+    let minute = Duration::from_secs(60);
+    let old = leave(".token-add-00000000000000aa", 11 * minute);
+    let fresh = leave(".token-add-00000000000000bb", 9 * minute);
+    let other = leave("notes.txt", 11 * minute);
+    host.token(&["list"]);
+    assert!(!old.exists());
+    assert!(fresh.exists() && other.exists());
+
+    let old = leave(".token-add-00000000000000cc", 11 * minute);
+    host.restart();
+    assert!(!old.exists());
+    assert!(fresh.exists() && other.exists());
+}
