@@ -456,7 +456,8 @@ thread_local! {
     static WAIT_ENDED: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
     /// The latest write's deadline on this thread, each sleep it asked for
     /// with the time left to the deadline then, and when it gave up, so a
-    /// test can check the wait by its deadline rather than the wall clock.
+    /// test can check the wait by its deadline, or that there was none,
+    /// rather than by the wall clock.
     static WAITED: std::cell::RefCell<Waited> = std::cell::RefCell::new(Waited::default());
 }
 
@@ -1103,6 +1104,23 @@ mod tests {
             .unwrap();
     }
 
+    /// Runs `write` and asserts that it never waited for its file to go
+    /// [`QUIET`]: it asked for no sleep. Read from what the write records of
+    /// its wait, not from the clock, which also times the write after the
+    /// wait, and a loaded runner can stall that.
+    #[track_caller]
+    fn at_once<T>(write: impl FnOnce() -> T) -> T {
+        WAITED.take();
+        let done = write();
+        let (ran, asked) = WAITED.with_borrow(|waited| {
+            let asked: Vec<Duration> = waited.sleeps.iter().map(|(asked, _)| *asked).collect();
+            (waited.deadline.is_some(), asked)
+        });
+        assert!(ran, "no write ran");
+        assert!(asked.is_empty(), "it waited, asking for {asked:?}");
+        done
+    }
+
     #[test]
     fn back_to_back_writes_of_ours_do_not_wait() {
         let dir = tempfile::tempdir().unwrap();
@@ -1118,13 +1136,13 @@ mod tests {
                 .unwrap_or(0)
         };
         assert_eq!(records(), 1);
-        let started = Instant::now();
-        assert_eq!(write_codex(&path, &rules("b")).unwrap(), Change::Written);
-        assert!(remove_codex(&path).unwrap());
-        // A missed record makes the write and the remove each wait out
-        // QUIET; anything less is the time the writes take, which a loaded
-        // machine stretches.
-        assert!(started.elapsed() < QUIET, "{:?}", started.elapsed());
+        // A missed record makes the write and the remove each wait for the
+        // file to go quiet.
+        assert_eq!(
+            at_once(|| write_codex(&path, &rules("b"))).unwrap(),
+            Change::Written
+        );
+        assert!(at_once(|| remove_codex(&path)).unwrap());
         assert_eq!(fs::read_to_string(&path).unwrap(), "# Mine\n");
         // Removing the file leaves no record of it behind.
         write_codex(&path, &rules("c")).unwrap();
@@ -1148,14 +1166,12 @@ mod tests {
             (&claude, &|| write_claude(&claude, &rules("b")).unwrap()),
         ];
         for (path, write) in writes {
-            assert_eq!(write(), Change::Written);
+            // The second write to each file comes right after ours, so only
+            // the record lets it go ahead without waiting.
+            assert_eq!(at_once(write), Change::Written, "{}", path.display());
             let meta = fs::metadata(path).unwrap();
             let text = fs::read_to_string(path).unwrap();
             assert!(as_written(path, &meta, &text), "{}", path.display());
-            // Just written, so only the record makes it quiet.
-            let fresh = quiet_after(meta.modified().unwrap(), SystemTime::now());
-            assert!(!fresh.is_zero(), "{fresh:?}");
-            assert_eq!(until_quiet(path, Some(&text)).unwrap(), Duration::ZERO);
         }
     }
 
@@ -1306,9 +1322,10 @@ mod tests {
         let path = dir.path().join("AGENTS.md");
         fs::write(&path, "").unwrap();
         settle(&path);
-        let started = Instant::now();
-        assert_eq!(write_codex(&path, &rules("a")).unwrap(), Change::Written);
-        assert!(started.elapsed() < QUIET / 2, "{:?}", started.elapsed());
+        assert_eq!(
+            at_once(|| write_codex(&path, &rules("a"))).unwrap(),
+            Change::Written
+        );
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
             format!("{}\n", marked(&rules("a")))
@@ -1329,9 +1346,10 @@ mod tests {
         assert_eq!(write_codex(&path, &rules("a")).unwrap(), Change::Written);
         // The file says truly when it changed, for the user's editor and tools.
         assert!(fs::metadata(&path).unwrap().modified().unwrap() >= before);
-        let started = Instant::now();
-        assert_eq!(write_codex(&path, &rules("a")).unwrap(), Change::Unchanged);
-        assert!(started.elapsed() < QUIET / 2, "{:?}", started.elapsed());
+        assert_eq!(
+            at_once(|| write_codex(&path, &rules("a"))).unwrap(),
+            Change::Unchanged
+        );
     }
 
     #[test]
@@ -1349,7 +1367,6 @@ mod tests {
             .unwrap();
             let before = changed(&path);
             WAIT_ENDED.set(None);
-            let started = Instant::now();
             let change = if remove {
                 remove_codex(&path).map(|_| Change::Written)
             } else {
@@ -1357,12 +1374,15 @@ mod tests {
             };
             assert_eq!(change.unwrap(), Change::Written);
             assert_waited(before, if remove { "remove" } else { "write" });
-            // WAIT_LIMIT bounds the wait, not the write after it, which a
-            // loaded runner can stall.
-            let waited = WAIT_ENDED.get().unwrap().duration_since(started);
+            // WAIT_LIMIT bounds the wait, not the work before it or the
+            // write after it, which a loaded runner can stall: the wait
+            // ended before its own deadline.
+            let ended = WAIT_ENDED.get().unwrap();
+            let deadline = WAITED.with_borrow(|waited| waited.deadline.unwrap());
             assert!(
-                waited < WAIT_LIMIT,
-                "stopped waiting {waited:?} after the call"
+                ended < deadline,
+                "stopped waiting {:?} after its deadline",
+                ended - deadline
             );
             let text = fs::read_to_string(&path).unwrap();
             assert!(text.ends_with("# Mine, again\n"), "{text:?}");
@@ -1381,9 +1401,10 @@ mod tests {
             .unwrap()
             .set_modified(SystemTime::now() + Duration::from_secs(3600))
             .unwrap();
-        let started = Instant::now();
-        assert_eq!(write_codex(&path, &rules("a")).unwrap(), Change::Written);
-        assert!(started.elapsed() < QUIET / 2, "{:?}", started.elapsed());
+        assert_eq!(
+            at_once(|| write_codex(&path, &rules("a"))).unwrap(),
+            Change::Written
+        );
     }
 
     #[test]
