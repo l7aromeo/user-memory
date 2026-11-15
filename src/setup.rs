@@ -2282,11 +2282,23 @@ mod tests {
     #[cfg(windows)]
     const SHORT_WAIT: Duration = Duration::from_millis(300);
 
-    /// The wait the put-back tests pass in: the new binary's rename spends
-    /// it all, and [`hold_set_aside`] must find the set-aside file within
-    /// it, on a loaded machine too.
+    /// The wait the put-back tests pass in. The new binary's rename spends
+    /// it all, so [`hold_set_aside`] has this long to find the set-aside
+    /// file before the put-back tries; two seconds survives a stalled
+    /// thread on a loaded runner, which has been seen near one second.
     #[cfg(windows)]
-    const PUT_BACK_WAIT: Duration = Duration::from_secs(1);
+    const PUT_BACK_WAIT: Duration = Duration::from_secs(2);
+
+    /// How long a brief hold on the set-aside file lasts past
+    /// [`PUT_BACK_WAIT`], counted from when the watcher starts holding.
+    /// The put-back's first try comes one wait after the file was set
+    /// aside, no later than the hold started, so it meets the hold unless
+    /// the last pause before it overshoots by this much, when the test
+    /// passes without a second try; it never fails for an overshoot. The
+    /// hold ends before the put-back's own wait does if the watcher stalls
+    /// less than `PUT_BACK_WAIT - BRIEF_HOLD_PAST`, 1.5 s, before holding.
+    #[cfg(windows)]
+    const BRIEF_HOLD_PAST: Duration = Duration::from_millis(500);
 
     /// How often [`hold_set_aside`] looks for the set-aside file.
     #[cfg(windows)]
@@ -2353,7 +2365,8 @@ mod tests {
 
     /// When the new binary can't take the place, the earlier one goes back
     /// even if it is held for a moment as it does: the hold outlasts the
-    /// new binary's wait and ends within the put-back's.
+    /// new binary's wait and ends within the put-back's
+    /// ([`BRIEF_HOLD_PAST`]).
     #[cfg(windows)]
     #[test]
     fn the_earlier_binary_goes_back_through_a_brief_hold() {
@@ -2363,7 +2376,7 @@ mod tests {
         fs::write(&destination, "old").unwrap();
         fs::write(&new, "new").unwrap();
         let held = hold(&new);
-        let (release, watcher) = hold_set_aside(dir.path(), PUT_BACK_WAIT * 3 / 2);
+        let (release, watcher) = hold_set_aside(dir.path(), PUT_BACK_WAIT + BRIEF_HOLD_PAST);
         let replaced = replace_aside_within(&new, &destination, PUT_BACK_WAIT);
         drop(release);
         assert!(
