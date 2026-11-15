@@ -470,7 +470,8 @@ the reason beside it in `SHAPED_IDS` in `tests/docs.rs`:
 | `ffffffff-ffff-4fff-bfff-ffffffffffff`, `ffffffff-0000-4000-8000-ffffffffffff` | Ids that sort after every other |
 
 `every_uuid_is_an_example` in `tests/docs.rs` fails on any other UUID in
-the repository's text, and on any other short id in the docs and the skill:
+any file git tracks that reads as text, scripts and settings included, and
+on any other short id in the docs and the skill:
 8 hex characters with a letter among them, standing alone or cut short as
 `e0000001-…`. A hash or commit id that is not a memory id is written so it
 cannot be taken for one: a commit id at 7 characters or at least 9, and a

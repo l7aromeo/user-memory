@@ -2491,25 +2491,6 @@ fn a_page_missing_from_the_index_is_caught() {
     assert_eq!(unindexed(index, &pages), ["docs/b.md"]);
 }
 
-/// The folders whose text the example-id check reads: every text the
-/// repository holds but the build output. The root's own files are read
-/// too.
-const ID_FOLDERS: [&str; 8] = [
-    "docs",
-    "skills",
-    "release-notes",
-    "src",
-    "tests",
-    "evals",
-    "examples",
-    ".github",
-];
-
-/// The kinds of file those folders hold text in.
-const ID_EXTENSIONS: [&str; 11] = [
-    "md", "rs", "sql", "json", "py", "toml", "yml", "yaml", "sh", "ps1", "addition",
-];
-
 /// Ids that tests need in a particular shape, each plainly made up, beside
 /// the families `example_id` accepts. docs/dev/development.md lists them
 /// with the same reasons.
@@ -2633,26 +2614,32 @@ fn stray_short_ids(text: &str) -> Vec<(usize, String)> {
     found
 }
 
-/// Every text file under `folder`, by its path from the repository root.
-fn texts(folder: &Path, root: &Path, into: &mut Vec<(String, String)>) {
-    for entry in fs::read_dir(folder).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_dir() {
-            if path.file_name().is_some_and(|name| name != "__pycache__") {
-                texts(&path, root, into);
-            }
-        } else if path
-            .extension()
-            .is_some_and(|ext| ID_EXTENSIONS.iter().any(|known| ext == *known))
-        {
-            let name = path
-                .strip_prefix(root)
-                .unwrap()
-                .to_string_lossy()
-                .into_owned();
-            into.push((name, fs::read_to_string(&path).unwrap()));
-        }
-    }
+/// Every file the repository tracks that reads as UTF-8 text, by its path
+/// from the root: the scripts, hooks and settings as much as the docs and
+/// the code, so a stray id has nowhere to sit unread.
+fn tracked_texts() -> Vec<(String, String)> {
+    let root = repo_file("");
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["ls-files", "-z"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git ls-files: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .split('\0')
+        .filter(|name| !name.is_empty())
+        .filter_map(|name| {
+            fs::read_to_string(root.join(name))
+                .ok()
+                .map(|text| (name.to_owned(), text))
+        })
+        .collect()
 }
 
 // Examples use one set of plainly made-up ids, the same few everywhere
@@ -2660,23 +2647,13 @@ fn texts(folder: &Path, root: &Path, into: &mut Vec<(String, String)>) {
 // never takes an example for a stored memory.
 #[test]
 fn every_uuid_is_an_example() {
-    let root = repo_file("");
-    let mut files = Vec::new();
-    for entry in fs::read_dir(&root).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_file()
-            && path
-                .extension()
-                .is_some_and(|ext| ID_EXTENSIONS.iter().any(|known| ext == *known))
-        {
-            let name = path.file_name().unwrap().to_string_lossy().into_owned();
-            files.push((name, fs::read_to_string(&path).unwrap()));
-        }
+    let files = tracked_texts();
+    for read in ["src/main.rs", "justfile", "setup", "scripts/client-release"] {
+        assert!(
+            files.iter().any(|(name, _)| name == read),
+            "{read} was not read"
+        );
     }
-    for folder in ID_FOLDERS {
-        texts(&root.join(folder), &root, &mut files);
-    }
-    assert!(files.iter().any(|(name, _)| name == "src/main.rs"));
     let mut strays: Vec<String> = files
         .iter()
         .flat_map(|(name, text)| {
