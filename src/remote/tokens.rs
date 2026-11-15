@@ -268,8 +268,8 @@ fn add(
     let hash = registry::hash(&token);
     match out {
         Some(out) => {
-            write_new(out, &token, || {
-                registry::add(&conn, &hash, name, scope, expires_at)
+            write_new(out, &token, &conn, |tx| {
+                registry::add(tx, &hash, name, scope, expires_at)
             })?;
             wrote(read_only, name, out);
         }
@@ -283,11 +283,18 @@ fn add(
     Ok(())
 }
 
-/// Writes `token` to the new file `out`, private, after `register`
-/// succeeds: first to a temporary file beside it, which is then linked in
-/// place, so an interrupted add leaves no partial token file and never
-/// replaces a file that appeared meanwhile.
-fn write_new(out: &Path, token: &str, register: impl FnOnce() -> Result<()>) -> Result<()> {
+/// Writes `token` to the new file `out`, private, and `register`s it on
+/// `conn`, as one step: the token is written to a temporary file beside
+/// `out` and placed with [`private::place_new`], which never replaces a file
+/// that appeared meanwhile, inside the transaction that registers it, which
+/// commits only once the file is in place. A failure anywhere leaves neither
+/// a token file nor a registered token.
+fn write_new(
+    out: &Path,
+    token: &str,
+    conn: &rusqlite::Connection,
+    register: impl FnOnce(&rusqlite::Connection) -> Result<()>,
+) -> Result<()> {
     let folder = match out.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
         _ => PathBuf::from("."),
@@ -305,8 +312,14 @@ fn write_new(out: &Path, token: &str, register: impl FnOnce() -> Result<()>) -> 
         .with_context(|| format!("Cannot write {}", temporary.display()))?;
         file.write_all(token.as_bytes())?;
         file.sync_all()?;
-        register()?;
-        fs::hard_link(&temporary, out).with_context(|| format!("Cannot write {}", out.display()))
+        let tx = conn.unchecked_transaction()?;
+        register(&tx)?;
+        private::place_new(&temporary, out)
+            .with_context(|| format!("Cannot write {}", out.display()))?;
+        tx.commit().inspect_err(|_| {
+            let _ = fs::remove_file(out);
+        })?;
+        Ok(())
     })();
     let _ = fs::remove_file(&temporary);
     written

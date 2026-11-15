@@ -59,6 +59,17 @@ impl Server {
     fn path(&self, name: &str) -> PathBuf {
         self.home.path().join(name)
     }
+
+    /// `host token ARGS --db DB` with `name` set to `value` in its
+    /// environment, with no terminal.
+    fn token_with(&self, name: &str, value: &str, args: &[&str]) -> Output {
+        let db = self.db();
+        self.command(&[&["host", "token"], args, &["--db", db.to_str().unwrap()]].concat())
+            .env(name, value)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    }
 }
 
 fn stdout(out: &Output) -> String {
@@ -419,4 +430,56 @@ fn a_damaged_registry_says_how_to_recover() {
         "--out",
         server.path("l.token").to_str().unwrap(),
     ]));
+}
+
+/// `add --out` on a file system without hard links, such as a FAT or exFAT
+/// stick: the token is written as a new private file. When placing the file
+/// fails, nothing stays registered and the name can be used again.
+#[test]
+fn add_out_works_without_hard_links_and_registers_nothing_when_it_fails() {
+    let server = Server::new();
+    let stick = server.path("stick.token");
+    let out = server.token_with(
+        "USER_MEMORY_TEST_LINKS",
+        "none",
+        &["add", "stick", "--out", stick.to_str().unwrap()],
+    );
+    ok(&out);
+    let token = fs::read_to_string(&stick).unwrap();
+    assert!(token.starts_with("umt_"));
+    #[cfg(unix)]
+    assert_eq!(mode(&stick), 0o600);
+    assert!(listed(&server).iter().any(|row| row[0] == "stick"));
+    // An existing file is still never replaced.
+    let out = server.token_with(
+        "USER_MEMORY_TEST_LINKS",
+        "none",
+        &["add", "again", "--out", stick.to_str().unwrap()],
+    );
+    assert!(!out.status.success());
+    assert_eq!(fs::read_to_string(&stick).unwrap(), token);
+
+    let lost = server.path("lost.token");
+    let out = server.token_with(
+        "USER_MEMORY_TEST_LINKS",
+        "fail",
+        &["add", "lost", "--out", lost.to_str().unwrap()],
+    );
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("Cannot write"), "{}", stderr(&out));
+    assert!(!lost.exists());
+    assert!(
+        !listed(&server).iter().any(|row| row[0] == "lost"),
+        "{:?}",
+        listed(&server)
+    );
+    // Nothing beside it either.
+    let beside: Vec<_> = fs::read_dir(server.home.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains("lost"))
+        .collect();
+    assert_eq!(beside, Vec::<String>::new());
+    let out = server.token(&["add", "lost", "--out", lost.to_str().unwrap()]);
+    ok(&out);
 }

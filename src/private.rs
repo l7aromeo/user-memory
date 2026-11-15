@@ -80,6 +80,49 @@ pub fn create_file(options: &mut OpenOptions, path: &Path) -> io::Result<File> {
     }
 }
 
+/// Lets tests stand in for a file system without hard links: with `none`
+/// every hard link fails as there; `fail` also makes the copy that takes
+/// its place fail once its file exists.
+#[cfg(debug_assertions)]
+pub(crate) const TEST_LINKS: &str = "USER_MEMORY_TEST_LINKS";
+
+/// Puts the private file `from` at `to` as well, never replacing a file
+/// there: a hard link, or where the file system has none (FAT, exFAT, some
+/// network mounts), a new private file with the same bytes.
+pub fn place_new(from: &Path, to: &Path) -> io::Result<()> {
+    match hard_link(from, to) {
+        Err(err) if err.kind() != io::ErrorKind::AlreadyExists => copy_new(from, to),
+        linked => linked,
+    }
+}
+
+fn hard_link(from: &Path, to: &Path) -> io::Result<()> {
+    #[cfg(debug_assertions)]
+    if std::env::var_os(TEST_LINKS).is_some() {
+        return Err(io::ErrorKind::Unsupported.into());
+    }
+    fs::hard_link(from, to)
+}
+
+/// Copies `from` to the new private file `to`, removing it if the copy fails.
+fn copy_new(from: &Path, to: &Path) -> io::Result<()> {
+    let mut file = create_file(OpenOptions::new().write(true).create_new(true), to)?;
+    let copied = File::open(from)
+        .and_then(|mut source| {
+            #[cfg(debug_assertions)]
+            if std::env::var(TEST_LINKS).as_deref() == Ok("fail") {
+                return Err(io::Error::other("the copy failed (test)"));
+            }
+            io::copy(&mut source, &mut file)
+        })
+        .and_then(|_| file.sync_all());
+    if copied.is_err() {
+        drop(file);
+        let _ = fs::remove_file(to);
+    }
+    copied
+}
+
 /// Makes the existing file or folder `path` private, such as a file
 /// written elsewhere and renamed into place.
 pub fn restrict(path: &Path) -> io::Result<()> {
@@ -110,6 +153,23 @@ pub fn is_private(path: &Path) -> io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The copy that stands in for a hard link never replaces a file.
+    #[test]
+    fn a_copy_in_place_of_a_link_never_replaces_a_file() {
+        let folder = tempfile::tempdir().unwrap();
+        let from = folder.path().join("new");
+        let to = folder.path().join("there");
+        fs::write(&from, "new").unwrap();
+        fs::write(&to, "kept").unwrap();
+        let err = copy_new(&from, &to).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read_to_string(&to).unwrap(), "kept");
+        let fresh = folder.path().join("fresh");
+        copy_new(&from, &fresh).unwrap();
+        assert_eq!(fs::read_to_string(&fresh).unwrap(), "new");
+        assert!(is_private(&fresh).unwrap());
+    }
 
     #[test]
     fn created_folders_and_files_are_private() {

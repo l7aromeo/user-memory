@@ -3867,9 +3867,40 @@ fn host_token_runs_in_the_docker_server_and_retires_its_shared_file() {
         "{}",
         text(&out).1
     );
+    // Without hard links (a FAT or exFAT stick), the token is still written;
+    // when it cannot be, the container's token is revoked.
+    let stick = c.path("stick.token");
+    let linkless = |name: &str, how: &str| {
+        c.installed_command(
+            &releases,
+            &[
+                "host",
+                "token",
+                "add",
+                name,
+                "--out",
+                stick.to_str().unwrap(),
+            ],
+        )
+        .env("USER_MEMORY_TEST_LINKS", how)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap()
+    };
+    let out = linkless("lost", "fail");
+    assert!(!out.status.success());
+    assert!(!stick.exists());
+    let out = linkless("stick", "none");
+    assert!(out.status.success(), "{}", text(&out).1);
+    assert!(index_with(&c, &releases, &url, &stick).status.success());
+    assert_eq!(copy_leftovers(&c), Vec::<String>::new());
     let listed = text(&host_token(&c, &releases, &["list"])).0;
     assert!(
         listed.contains("laptop") && listed.contains("owner (shared file)"),
+        "{listed}"
+    );
+    assert!(
+        listed.contains("stick") && !listed.contains("lost"),
         "{listed}"
     );
     assert!(!listed.contains("phone"), "{listed}");
