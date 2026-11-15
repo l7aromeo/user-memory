@@ -233,6 +233,28 @@ pub(super) fn save(path: &Path, snapshot: &Snapshot, landing: &Landing) -> io::R
     Ok(())
 }
 
+/// The extension of the file beside a session's snapshot that says its
+/// start could not read memory, so it shares the snapshot's name and age.
+const MISSED: &str = "missed";
+
+/// The file that says the session whose snapshot is at `snapshot` started
+/// without memory and has not had the index since.
+pub(super) fn missed_path(snapshot: &Path) -> PathBuf {
+    snapshot.with_extension(MISSED)
+}
+
+/// Marks at `path` that a session's start has not read memory (an empty
+/// private file).
+pub(super) fn mark_missed(path: &Path) -> io::Result<()> {
+    private::create_dir(path.parent().ok_or(io::ErrorKind::InvalidInput)?)?;
+    private::create_file(fs::OpenOptions::new().write(true).create(true), path).map(drop)
+}
+
+/// Names, in debug builds only, the file that holds the index a prompt asks
+/// for a session that started without memory ([`hold_for_tests`]).
+#[cfg(debug_assertions)]
+pub(crate) const HOLD_LATE_INDEX: &str = "USER_MEMORY_HOLD_LATE_INDEX";
+
 /// Names, in debug builds only, the file that holds a save before it
 /// replaces the snapshot ([`hold_for_tests`]).
 #[cfg(debug_assertions)]
@@ -258,9 +280,9 @@ pub(super) fn hold_for_tests(var: &str) {
     }
 }
 
-/// Removes the snapshots in `dir` last written over [`SNAPSHOT_AGE`] before
-/// `now`, and the temporary files of saves cut off over [`LEFTOVER_AGE`]
-/// before it.
+/// Removes the snapshots and [`MISSED`] marks in `dir` last written over
+/// [`SNAPSHOT_AGE`] before `now`, and the temporary files of saves cut off
+/// over [`LEFTOVER_AGE`] before it.
 fn remove_old(dir: &Path, now: SystemTime) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
@@ -278,7 +300,7 @@ fn remove_old(dir: &Path, now: SystemTime) {
         let old = if name.starts_with('.') && name.ends_with(TEMPORARY) {
             age > LEFTOVER_AGE
         } else {
-            age > SNAPSHOT_AGE && path.extension().is_some_and(|e| e == "json")
+            age > SNAPSHOT_AGE && path.extension().is_some_and(|e| e == "json" || e == MISSED)
         };
         if old {
             let _ = fs::remove_file(path);
