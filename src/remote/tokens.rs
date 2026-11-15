@@ -41,6 +41,14 @@ pub enum TokenCommand {
         #[command(flatten)]
         store: Store,
     },
+    /// Stop the shared token file letting anyone in: the server refuses its token from the next request, and the file gets a value no client holds. Needs a client token with write access first.
+    RetireShared {
+        /// The server's shared token file, as given to `host --token-file`.
+        #[arg(long, value_name = "FILE")]
+        token_file: PathBuf,
+        #[command(flatten)]
+        store: Store,
+    },
 }
 
 #[derive(Args)]
@@ -79,6 +87,9 @@ pub fn run(command: TokenCommand) -> Result<()> {
         ),
         TokenCommand::List { store } => list(&store.registry()?),
         TokenCommand::Revoke { name, store } => revoke(&store.registry()?, &name),
+        TokenCommand::RetireShared { token_file, store } => {
+            retire_shared(&store.registry()?, &token_file)
+        }
     }
 }
 
@@ -253,5 +264,77 @@ fn revoke(registry_path: &Path, name: &str) -> Result<()> {
         bail!("No token named {name}; `user-memory host token list` shows the tokens.");
     }
     eprintln!("Revoked the token for {name}; its next request is refused.");
+    Ok(())
+}
+
+/// Why `retire-shared` does nothing: without a client token that can write,
+/// the shared file would be the only way to change memories.
+const NO_WRITER: &str = "No client token has write access; add one with `user-memory host token add NAME` first, so the shared file is not the only way in.";
+
+/// What a leftover new value of `retire-shared` is named, after the file's
+/// own name and before a random suffix.
+const RETIRE_INFIX: &str = ".retire-";
+
+/// Retires the shared token file `file`: a new value is written beside it,
+/// the registry's setting is committed, and the new value is renamed over
+/// the file. A stop after the first step leaves an unused file that a rerun
+/// deletes; after the second, the server already refuses the shared token
+/// and a rerun replaces the file. A server rolled back to a release without
+/// the registry then accepts only the new value, which no client holds.
+fn retire_shared(registry_path: &Path, file: &Path) -> Result<()> {
+    let conn = match registry::open(registry_path)? {
+        Some(conn) if registry::has_writer(&conn, registry::now())? => conn,
+        _ => bail!(NO_WRITER),
+    };
+    let current = fs::read_to_string(file)
+        .with_context(|| format!("Cannot read the shared token file {}", file.display()))?;
+    let current = registry::hash(current.trim());
+    if registry::tokens(&conn)?
+        .iter()
+        .any(|token| token.hash == current)
+    {
+        bail!(
+            "{} holds a client token; give the shared token file that `host --token-file` names.",
+            file.display()
+        );
+    }
+    let folder = match file.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let name = file
+        .file_name()
+        .with_context(|| format!("{} is not a file name", file.display()))?
+        .to_string_lossy()
+        .into_owned();
+    let leftover = format!(".{name}{RETIRE_INFIX}");
+    for entry in fs::read_dir(&folder)? {
+        let entry = entry?;
+        if entry.file_name().to_string_lossy().starts_with(&leftover) {
+            fs::remove_file(entry.path())?;
+        }
+    }
+    let suffix: u64 = rand::random();
+    let temporary = folder.join(format!("{leftover}{suffix:016x}"));
+    let replaced = (|| -> Result<()> {
+        let mut new = private::create_file(
+            fs::OpenOptions::new().write(true).create_new(true),
+            &temporary,
+        )
+        .with_context(|| format!("Cannot write {}", temporary.display()))?;
+        new.write_all(super::new_shared_token().as_bytes())?;
+        new.sync_all()?;
+        drop(new);
+        registry::retire_shared_file(&conn)?;
+        fs::rename(&temporary, file).with_context(|| format!("Cannot write {}", file.display()))
+    })();
+    if replaced.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    replaced?;
+    eprintln!(
+        "Retired the shared token file {}: the server refuses its token from the next request, and the file now holds a value no client has. A machine still using it needs its own token: `user-memory host token add NAME --out FILE` here, then the installer there with --token-file.",
+        file.display()
+    );
     Ok(())
 }

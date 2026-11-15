@@ -275,6 +275,25 @@ pub fn shared_file_retired(conn: &Connection) -> Result<bool> {
         .is_some_and(|value| value == "1"))
 }
 
+/// Stops the shared token file letting anyone in; setting it again
+/// changes nothing.
+pub fn retire_shared_file(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, '1')
+         ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        [SHARED_FILE_RETIRED],
+    )?;
+    Ok(())
+}
+
+/// Whether a client token can still change memories at `now`: write
+/// scope, not revoked, not expired.
+pub fn has_writer(conn: &Connection, now: i64) -> Result<bool> {
+    Ok(tokens(conn)?.iter().any(|token| {
+        token.scope == Scope::Write && token.revoked_at.is_none() && token.expired(now).is_none()
+    }))
+}
+
 /// The most characters a client name has.
 pub const NAME_MAX: usize = 64;
 
