@@ -29,7 +29,7 @@ Every command has `--help`.
 | `user-memory read --category workflow` | Every memory in one category. |
 | `user-memory history 68da18b4` | A memory's history, oldest first: each change with its operation, time, client and the values it replaced. For a forgotten memory, its tombstones. `read --history` adds the same to each memory it reads. |
 | `user-memory search 'language choice'` | Memories that match a topic, best first. |
-| `user-memory review` | Groups of duplicates, project copies of global memories, one rule stated in several projects, overlaps and stale patterns. Changes nothing; `--keep ID` (repeatable) leaves the memories you name as they are, so review stops grouping them. `--project P` adds projects; `--max-groups N` limits the groups listed. |
+| `user-memory review` | First the rules added or changed and the memories agents recorded in the last 30 days, then groups of duplicates, project copies of global memories, one rule stated in several projects, overlaps and stale patterns. Changes nothing; `--keep ID` (repeatable) leaves the memories you name as they are, so review stops grouping them. `--project P` adds projects; `--max-groups N` limits the groups listed. |
 
 Long results come in pages: 20 memories for `search`, 100 for `index` and
 `read --category`. A page with more to come ends with

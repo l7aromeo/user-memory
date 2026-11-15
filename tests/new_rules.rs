@@ -624,3 +624,105 @@ fn the_file_holds_no_memory_text_or_origin() {
         assert_eq!(mode & 0o777, 0o600);
     }
 }
+
+/// The ids, by their first 8 characters, in review's `recent` group.
+fn recent(home: &Home) -> Vec<String> {
+    let review = home.cli(&["review"]);
+    review["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|group| group["kind"] == "recent")
+        .map(|group| {
+            group["members"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| id8(m["id"].as_str().unwrap()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Writes a copy of the store's export that changes rule `replaced`'s
+/// content and adds a rule; the file's path.
+fn replacing_export(home: &Home, replaced: &str) -> PathBuf {
+    let file = home.path().join("shared.json");
+    home.cli(&["export", file.to_str().unwrap()]);
+    let mut document: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    let memories = document["memories"].as_array_mut().unwrap();
+    let at = memories.iter().position(|m| m["id"] == replaced).unwrap();
+    let mut added = memories[at].clone();
+    added["id"] = json!("00000000-0000-4000-8000-000000000001");
+    added["title"] = json!("Ask before pushing");
+    added["content"] = json!("Ask before pushing");
+    memories[at]["content"] = json!("Prefer Go for tools");
+    memories.push(added);
+    std::fs::write(&file, document.to_string()).unwrap();
+    file
+}
+
+/// Imports `file` over the store's own rules; the import's name.
+fn import_over(home: &Home, file: &Path) -> String {
+    let summary = home.cli(&[
+        "import",
+        file.to_str().unwrap(),
+        "--apply",
+        "--on-conflict",
+        "use-file",
+    ]);
+    summary["import"].as_str().unwrap().to_owned()
+}
+
+/// An undone import reads as if it never ran: a rule it gave back is
+/// compared by its print like any other, names the conversation and client
+/// of the version given back, and is recent only by that version's time.
+#[test]
+fn an_undone_import_reads_as_if_it_never_ran() {
+    let home = Home::new();
+    let here = home.path();
+    let rule = home.record(
+        "Prefer Rust for tools",
+        &[
+            "--type",
+            "preference",
+            "--scope",
+            "global",
+            "--origin",
+            "claude:session/first",
+        ],
+    );
+    // Recorded two months ago: not recent.
+    rusqlite::Connection::open(here.join("memory.sqlite3"))
+        .unwrap()
+        .execute(
+            "UPDATE memory_events SET at=datetime('now','-2 months'),last_at=datetime('now','-2 months') WHERE memory_id=?1",
+            [&rule],
+        )
+        .unwrap();
+    assert_eq!(recent(&home), Vec::<String>::new());
+    home.listed("s1", here);
+    let file = replacing_export(&home, &rule);
+    // Imported and undone between two sessions: nothing changed for them.
+    let named = import_over(&home, &file);
+    home.cli(&["forget", "--import", &named]);
+    assert_eq!(home.listed("s2", here), Vec::<String>::new());
+    assert_eq!(recent(&home), Vec::<String>::new());
+    // Imported, shown, then undone: the rule given back is another print
+    // than the one last shown, so it is listed, as its first writer left it.
+    let named = import_over(&home, &file);
+    assert!(home.listed("s3", here).contains(&id8(&rule)));
+    assert!(recent(&home).contains(&id8(&rule)));
+    home.cli(&["forget", "--import", &named]);
+    let text = home.start("s4", here, "startup");
+    assert_eq!(listed(&text), [id8(&rule)]);
+    let block = block(&text).unwrap();
+    assert!(
+        block.contains(&format!(
+            "  {} Prefer Rust for tools (from claude:session/first, cli)",
+            id8(&rule)
+        )),
+        "{block}"
+    );
+    assert_eq!(recent(&home), Vec::<String>::new());
+}

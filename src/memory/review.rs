@@ -106,8 +106,22 @@ fn keep(db: &Path, input: &Review, kept: &mut usize) -> Result<Option<String>> {
 /// never grow past it.
 const MAX_MEMBERS: usize = 8;
 
+/// How far back the `recent` group looks: the rules and agents' memories a
+/// user may not have seen yet, as long as a month between sessions.
+const RECENT_AGE: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 60 * 60);
+/// Members the `recent` group lists: more than other groups, since session
+/// start sends the user here to read every new rule and agent's memory.
+const RECENT_MEMBERS: usize = 20;
+/// The history operations that add or change a rule: what it says, where
+/// it applies, or that it applies again.
+const RULE_CHANGES: &str = "'record','update','import','merge','revive'";
+/// The history operations that add a memory.
+const ADDITIONS: &str = "'record','import','merge'";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Kind {
+    /// First, since session start's message points the user here.
+    Recent,
     Duplicate,
     Redundant,
     Shared,
@@ -118,6 +132,7 @@ enum Kind {
 impl Kind {
     fn name(self) -> &'static str {
         match self {
+            Self::Recent => "recent",
             Self::Duplicate => "duplicate",
             Self::Redundant => "redundant",
             Self::Shared => "shared",
@@ -127,6 +142,9 @@ impl Kind {
     }
     fn reason(self) -> &'static str {
         match self {
+            Self::Recent => {
+                "Rules added or changed, then memories agents recorded, in the last 30 days. Show them to the user; forget a rule the user did not give, only with their yes."
+            }
             Self::Duplicate => {
                 "These say the same thing. With the user's approval, merge them by recording one memory that supersedes them all, or forget the extras."
             }
@@ -214,6 +232,54 @@ fn compare(
         related,
         score: semantic.map_or(words, |(score, _)| score),
     }
+}
+
+/// The standing rules among `memories` added or changed within
+/// [`RECENT_AGE`], newest first, then the memories agents recorded in that
+/// time: by their history's time, never `created_at` or `updated_at`, which
+/// an import keeps from the file. Changes an undone import cancelled are
+/// passed over, so a memory the undo gave back is as recent as the version
+/// it is. A memory with no event in that time (a history pruned, or no
+/// history) is not listed. At most
+/// [`RECENT_MEMBERS`], with how many were left out.
+fn recent(conn: &rusqlite::Connection, memories: &[Memory]) -> Result<(Vec<usize>, usize)> {
+    let since = format!("-{} seconds", RECENT_AGE.as_secs());
+    let mut when: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
+    let mut statement = conn.prepare(&format!(
+        "SELECT memory_id,max(CASE WHEN op IN ({RULE_CHANGES}) THEN at END),max(CASE WHEN op IN ({ADDITIONS}) THEN at END) FROM memory_events e WHERE at>=datetime('now',?1) AND NOT {} GROUP BY memory_id",
+        super::history::undone("e")
+    ))?;
+    let rows = statement.query_map([since], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?))))?;
+    for row in rows {
+        let (id, at): (String, _) = row?;
+        when.insert(id, at);
+    }
+    let mut found: Vec<(bool, String, usize)> = memories
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.status != "stale")
+        .filter_map(|(i, m)| {
+            let (changed, added) = when.get(&m.id.to_string())?;
+            if super::read::standing_rule(m) {
+                Some((false, changed.clone()?, i))
+            } else if m.source != "explicit" {
+                Some((true, added.clone()?, i))
+            } else {
+                None
+            }
+        })
+        .collect();
+    // Rules first, each part newest first.
+    found.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
+    let left_out = found.len().saturating_sub(RECENT_MEMBERS);
+    Ok((
+        found
+            .into_iter()
+            .take(RECENT_MEMBERS)
+            .map(|(_, _, i)| i)
+            .collect(),
+        left_out,
+    ))
 }
 
 fn recency(m: &Memory) -> (&str, i64) {
@@ -425,6 +491,10 @@ fn review_with(
     if !stale.is_empty() {
         groups.push((Kind::Stale, stale, left_out));
     }
+    let (recent, left_out) = recent(conn, &memories)?;
+    if !recent.is_empty() {
+        groups.push((Kind::Recent, recent, left_out));
+    }
     let newest = |members: &[usize]| members.iter().map(|&i| recency(&memories[i])).max();
     let smallest = |members: &[usize]| members.iter().map(|&i| memories[i].id).min();
     groups.sort_by(|(ka, a, _), (kb, b, _)| {
@@ -523,7 +593,89 @@ mod tests {
             params![id.to_string(), m.memory_type, m.category, m.content, scope, m.project, m.source, m.status, evidence],
         )
         .unwrap();
+        // Recorded long ago: only the tests of the recent group give a
+        // memory a recent history.
+        conn.execute(
+            "UPDATE memory_events SET at=datetime('now','-400 days') WHERE memory_id=?1",
+            [id.to_string()],
+        )
+        .unwrap();
         id
+    }
+
+    /// Gives `id` a history event `op` made `days` ago.
+    fn event(conn: &Connection, id: Uuid, op: &str, days: i64) {
+        conn.execute(
+            "INSERT INTO memory_events (memory_id,op,at) VALUES (?1,?2,datetime('now',?3))",
+            params![id.to_string(), op, format!("-{days} days")],
+        )
+        .unwrap();
+    }
+
+    /// The members of the recent group, or none.
+    fn recent_group(conn: &Connection) -> Vec<Uuid> {
+        groups(conn, None, false)
+            .into_iter()
+            .find(|(kind, _)| kind == "recent")
+            .map(|(_, ids)| ids)
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn the_recent_group_lists_rules_then_agents_memories_by_their_history() {
+        let (_dir, _db, conn) = store();
+        let old_rule = insert(&conn, preference("workflow", "Indent with tabs always"));
+        // A duplicate of it, recorded long ago: a group of another kind.
+        insert(&conn, preference("workflow", "Indent with tabs always"));
+        let new_rule = insert(&conn, preference("tooling", "Prefer the project runner"));
+        let imported = insert(&conn, preference("testing", "Name tests by scenario"));
+        let confirmed = insert(&conn, preference("style", "Write short sentences"));
+        let seen = insert(
+            &conn,
+            New {
+                memory_type: "fact",
+                source: "observed",
+                status: "tentative",
+                ..preference("workflow", "Runs the formatter before commits")
+            },
+        );
+        let stated = insert(
+            &conn,
+            New {
+                memory_type: "fact",
+                ..preference("workflow", "Works in the morning mostly")
+            },
+        );
+        event(&conn, old_rule, "update", 31);
+        event(&conn, new_rule, "update", 2);
+        // An import keeps the file's dates; its event is from today.
+        event(&conn, imported, "import", 1);
+        // A confirmation changes nothing the rule says.
+        event(&conn, confirmed, "confirm", 1);
+        event(&conn, seen, "record", 3);
+        event(&conn, stated, "record", 3);
+        assert_eq!(recent_group(&conn), [imported, new_rule, seen]);
+        let found = review_with(
+            &conn,
+            &Review {
+                projects: Vec::new(),
+                max_groups: 1,
+                keep: Vec::new(),
+                user_confirmed: false,
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(found["groups"][0]["kind"], "recent", "first: {found}");
+        assert!(
+            groups(&conn, None, false)
+                .iter()
+                .any(|(kind, _)| kind == "duplicate"),
+            "another kind to come before"
+        );
+        // History pruned: nothing recent to list.
+        conn.execute("DELETE FROM memory_events", []).unwrap();
+        assert_eq!(recent_group(&conn), Vec::<Uuid>::new());
     }
 
     fn embed_stored(conn: &Connection, id: Uuid, vector: Vec<f32>) {
@@ -1279,7 +1431,13 @@ mod tests {
             [b.to_string()],
         )
         .unwrap();
-        assert!(groups(&conn, None, true).is_empty());
+        // The change is recent; no other group.
+        assert_eq!(recent_group(&conn), [b]);
+        assert!(
+            groups(&conn, None, true)
+                .iter()
+                .all(|(kind, _)| kind == "recent")
+        );
     }
 
     #[test]

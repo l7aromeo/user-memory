@@ -392,7 +392,17 @@ fn surface(root: &TempDir) -> Surface {
         .collect();
     assert_eq!(
         kinds,
-        BTreeSet::from(["duplicate", "overlap", "redundant", "shared", "stale"].map(str::to_owned)),
+        BTreeSet::from(
+            [
+                "duplicate",
+                "overlap",
+                "recent",
+                "redundant",
+                "shared",
+                "stale"
+            ]
+            .map(str::to_owned)
+        ),
         "the seeded store has one group of every kind: {}",
         results[0]
     );

@@ -23,7 +23,7 @@ The tools agents call, their filters, search, the index and paging. The
 | `update` | Correct or confirm a memory on the user's request, or with `distinct_from` mark memories the user calls different; `drop_history` reduces its earlier [history](memory-model.md#history) to tombstones |
 | `forget` | Delete one memory, every memory and link from one conversation origin, or undo one import by its name (`import`): delete what it added and restore what it replaced, keeping memories changed since; invalidate dependent inferences; a forget that deletes names the copy of the store it made first (`backup`); `next` says what to do about `staled` and `left_superseded` when either has entries |
 | `link` | Keep projects loaded for one conversation origin: its session start and change notices include them, after resume and compaction too; returns the linked projects' index lines; `unlink` removes. See [Conversation links](#conversation-links) |
-| `review` | On the user's request only: groups of duplicates, cross-scope copies, overlaps and stale patterns; `keep` marks a group the user leaves as is |
+| `review` | On the user's request only: recent rules and agents' memories, then groups of duplicates, cross-scope copies, overlaps and stale patterns; `keep` marks a group the user leaves as is |
 | `export` | On the user's request: write every memory, or those the [filters](memory-model.md#exporting-or-importing-part-of-the-store) select, to a JSON file in the exports directory; returns a summary only, whose `next` says in words, never as a path, whether the file is beside the store on this machine or on the memory server |
 | `import` | On the user's request: preview an export file from the exports directory, or the memories the filters select from it; writes only with `apply` and `user_confirmed` after the user approves; `apply` without `user_confirmed` previews, and its reply's `reason` says it was not applied; an import's reply holds no memory text except the titles of the rules it adds or replaces, each one line, at most 20 per list (`rules`) |
 
@@ -192,6 +192,17 @@ says where the origin comes from.
 [--keep ID]…`) runs only when the user asks. It changes no memory. It groups
 (each member with its id, title and content):
 
+- **recent** — first: the rules added or changed in the last 30 days, then the
+  memories agents recorded (observed or inferred) in that time, by their
+  history's time, never their dates, which an import keeps from the file. It
+  lists 20 members at most, with `left_out` for the rest. A store imported
+  yesterday lists every imported rule: they are new to this store. An
+  import that was undone counts for nothing: a memory it gave back is as
+  recent as the version it is. A memory whose history was pruned is not
+  listed. Show them to the user, and forget a
+  rule the user did not give only with their yes. Its members are never
+  passed to `keep`, which marks memories that are alike, and the group
+  stays listed for 30 days whatever the user answers;
 - **duplicate** — the same memory recorded more than once in one scope
   (merge with `supersedes` + `merge`);
 - **redundant** — a project memory that repeats a global one (forget the copy);

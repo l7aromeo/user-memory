@@ -524,7 +524,16 @@ fn agents_export_and_import_by_name_and_see_only_summaries() {
             ("review", json!({})),
         ],
     );
-    assert_eq!(replies[4], json!({"groups":[]}));
+    // Nothing to consolidate; only what was just recorded.
+    assert!(
+        replies[4]["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|group| group["kind"] == "recent"),
+        "{}",
+        replies[4]
+    );
     assert_eq!(replies[0]["exported"], true, "{}", replies[0]);
     assert_eq!(replies[0]["file"], "backup.json");
     // Where the file is, in words: the local store's folder, never its path.
@@ -553,7 +562,8 @@ fn agents_export_and_import_by_name_and_see_only_summaries() {
     }
     assert!(dir.join("backup.json").is_file());
     assert!(!s.root.path().join("escape.json").exists());
-    for reply in &replies {
+    // The exports' replies; review shows memories by design.
+    for reply in &replies[..4] {
         let text = reply.to_string();
         assert!(
             !text.contains("Prefer Rust") && !text.contains(s.root.path().to_str().unwrap()),
