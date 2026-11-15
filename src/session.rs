@@ -228,10 +228,7 @@ pub async fn prompt_submit(client: HookClient) -> String {
     let notice = match tokio::time::timeout(hook_time(PROMPT_LIMIT), changes(client)).await {
         Ok(notice) => notice,
         Err(_) => {
-            // Debug builds say so, so tests can tell this cut-off from the
-            // other ways the hook stays silent.
-            #[cfg(debug_assertions)]
-            eprintln!("user-memory: the prompt hook stopped at its time limit");
+            stopped();
             None
         }
     };
@@ -241,6 +238,13 @@ pub async fn prompt_submit(client: HookClient) -> String {
                 .to_string()
         })
         .unwrap_or_default()
+}
+
+/// Says, in a debug build, that the prompt hook stopped at its time limit, so
+/// tests can tell this cut-off from the other ways the hook stays silent.
+fn stopped() {
+    #[cfg(debug_assertions)]
+    eprintln!("user-memory: the prompt hook stopped at its time limit");
 }
 
 /// What changed since the session in the hook payload last looked, saving
