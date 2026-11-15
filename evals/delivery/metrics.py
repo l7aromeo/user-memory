@@ -165,8 +165,8 @@ def evaluate(task, matched, memories, bars, earlier=None):
     counted. `bars["hold cap"]` limits the passages one hold shows, the
     rest pushed after the command (`bars["hold rest"] == "push"`) or
     dropped. With `bars["lesson oracle"]` a lesson is shown only after a
-    failed run of its command: an upper bound, as the matcher cannot know
-    a recovery lesson from a note."""
+    failed run of its command, pushed: an upper bound, as the matcher
+    cannot know a recovery lesson from a note."""
     actions = task["actions"]
     kind_of_work = task.get("kind")
     per_event = bars.get("per_event", PUSH_PER_EVENT)
@@ -201,11 +201,12 @@ def evaluate(task, matched, memories, bars, earlier=None):
             # The way it is delivered: a hold comes before the command, a
             # push after it; a failure push only when the plain bar misses.
             way = "hold" if "hold" in ways else ("push" if "push" in ways else "failure")
-            if bars.get("lesson oracle") and memories[c["id"]]["shape"] == "lesson" and not (
-                    way != "hold" and actions[i].get("failed")
-                    and subject_of(actions[i].get("about"))
-                    == subject_of(memories[c["id"]]["points"][0].get("about"))):
-                continue
+            if bars.get("lesson oracle") and memories[c["id"]]["shape"] == "lesson":
+                if not (actions[i].get("failed") and subject_of(actions[i].get("about"))
+                        == subject_of(memories[c["id"]]["points"][0].get("about"))):
+                    continue
+                # Shown after the failure, so pushed, never held before it.
+                way = "push"
             if way == "hold" and hold_cap is not None and held_count >= hold_cap:
                 if bars.get("hold rest") != "push":
                     continue

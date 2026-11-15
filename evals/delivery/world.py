@@ -157,8 +157,10 @@ PREFIXES = ["npx", "bunx", "proxychains", "caffeinate -i", "dotenv --", "nice -n
 # the world has notes on (`cargo run --bin test` beside notes on `cargo
 # test`): a share of tasks run one, which no memory is about, so whatever
 # it delivers is about something else.
-COLLIDING = {"cargo": "cargo run --bin {sub}", "git": "git log --grep {sub}", "npm": "npm run {sub}",
-             "just": "just --show {sub}", "gh": "gh help {sub}", "docker": "docker logs {sub}",
+# Each runs a subcommand no memory is about, so a rule that picks the
+# first word some note names would wrongly take the later word.
+COLLIDING = {"cargo": "cargo run --bin {sub}", "git": "git show --stat {sub}", "npm": "npm run {sub}",
+             "just": "just --show {sub}", "gh": "gh help {sub}", "docker": "docker inspect {sub}",
              "kubectl": "kubectl explain {sub}", "terraform": "terraform state show {sub}",
              "make": "make -n {sub}"}
 COLLIDING_SHARE = 0.3
