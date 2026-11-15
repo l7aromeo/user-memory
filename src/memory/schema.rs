@@ -234,10 +234,11 @@ pub fn connect(db: &Path) -> Result<Connection> {
 /// being refused. 50 s covers the 45 s budget for v0.10.0's whole upgrade
 /// of 100,000 memories (evals/scale/upgrade.py), which measured 17.6 s
 /// (median of three) from schema 6 to 9 on 100,000 memories with
-/// 2,560-dimension vectors (1.3 GB), release build on an Apple M4 Pro. It
-/// stays under the 60 s Codex gives an MCP tool call by default, so the
-/// call is answered rather than timed out. Past it the call is refused as before: the store is not
-/// being migrated.
+/// 2,560-dimension vectors (1.3 GB), release build on an Apple M4 Pro.
+/// Codex gives an MCP tool call 300 s by default (`DEFAULT_TOOL_TIMEOUT`
+/// in its codex-rs/codex-mcp/src/rmcp_client.rs), so the waiting call is
+/// answered rather than timed out there. Past the wait the call is refused
+/// as before: the store is not being migrated.
 const MIGRATION_WAIT: Duration = Duration::from_secs(50);
 /// How often the waiting `serve` reads the store's version again.
 const MIGRATION_POLL: Duration = Duration::from_millis(100);
