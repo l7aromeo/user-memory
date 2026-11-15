@@ -964,3 +964,33 @@ fn an_upgrade_landing_as_the_new_code_starts_is_handed_over_to() {
         assert_eq!(place.state_files(), Vec::<String>::new(), "{way:?}");
     }
 }
+
+/// A relay whose child ends serves with its own code again, and knows it:
+/// the next call goes to the newer build once more, not to the old code
+/// taken for the new one.
+#[cfg(unix)]
+#[test]
+fn a_relays_child_that_ends_is_started_again_from_the_newer_build() {
+    let place = Place::new();
+    let mut session = place.serve(Way::Relay, &[]);
+    place.upgrade();
+    let first = serving(&mut session, "first");
+    assert_eq!(first["version"], NEWER);
+    let child = first["pid"].as_u64().unwrap();
+    let killed = Command::new("kill")
+        .args(["-KILL", &child.to_string()])
+        .status()
+        .unwrap();
+    assert!(killed.success());
+    let deadline = Instant::now() + REPLY_WAIT;
+    while running(child) {
+        assert!(Instant::now() < deadline, "the child still runs");
+        thread::sleep(Duration::from_millis(20));
+    }
+    // The relay may notice the child's end with this call in flight, which
+    // then gets the restart's error.
+    session.call("noticed", "index");
+    let after = session.version("after");
+    let (stderr, _) = session.finish();
+    assert_eq!(after, Some(NEWER.into()), "{stderr}");
+}
