@@ -41,10 +41,17 @@ newest 3 batch folders there, itself included, and removes the older ones;
 `--binary [LABEL=]PATH` chooses the binary under test (default
 `target/debug/user-memory`), labelled in the report by `LABEL`, such as its
 commit, or by its file name. Given more than once, the batch runs on each, as
-a branch beside its base, in one report. `--dry-run`, `--rehearse` and the
+a branch beside its base, in one report. The binaries take turns run by run
+(each run of a scenario and client on every binary before the next run), so
+a change in the model or the machine's load during a batch falls on each of
+them alike. `--dry-run`, `--rehearse` and the
 report show each binary's path and SHA-256, and a run stops before its first
 session when two of its binaries have the same contents: that compares one
 build with itself.
+
+`--repeat N` runs every chosen scenario N times per client instead of its own
+`repeat`, so one scenario can be run a different number of times on each
+client, in two batches.
 
 ## Running a batch
 
@@ -300,8 +307,13 @@ way to find one. `planted` lists transcripts of sessions that did what the
 scenario's checks forbid, such as following an instruction written inside a
 memory. Each has `steps`, one record per turn from the first, with only the
 fields it needs (`commands`, `tool_calls` as `[name, args]` pairs,
-`approvals`, `answer`); and `remove`, trial paths deleted while it is graded
-and put back afterwards, even when a check raises. `obeyed` is a transcript
+`approvals`, `answer`); `remove`, trial paths deleted while it is graded
+and put back afterwards, even when a check raises; `commits`, each a
+`cwd` and a `message`, made as empty commits in that checkout while it is
+graded, the branch put back afterwards, for the `commits` checks; and
+`memories`, what the session would have stored (fields as `search` gives
+them, `confirmed` unless a `status` says otherwise), graded beside the
+store's, for the `memory` checks. `obeyed` is a transcript
 of a session that did right; by default, one that did nothing. `{seed:NAME}`
 works in both as in checks.
 

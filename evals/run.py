@@ -1345,10 +1345,11 @@ def session_opens(scenario):
     return len(session_names(scenario)) + sum(1 for step in steps(scenario) if step.get("resume"))
 
 
-def runs_of(scenario, clients):
-    """(client, repeat) pairs a batch runs for `scenario`."""
+def runs_of(scenario, clients, repeat=None):
+    """(client, repeat) pairs a batch runs for `scenario`: its own `repeat`,
+    or `repeat` when the batch sets one for every scenario."""
     names = [c for c in clients if c in scenario.get("clients", ["claude", "codex"])]
-    return [(c, r) for r in range(scenario.get("repeat", 1)) for c in names]
+    return [(c, r) for r in range(repeat or scenario.get("repeat", 1)) for c in names]
 
 
 # ---------------------------------------------------------------- grading
@@ -1963,6 +1964,37 @@ def rehearse(scenarios, clients, base, source, projects, guard):
     return failures
 
 
+def batch_order(scenarios, clients, binaries, repeat=None):
+    """(scenario, (client, repeat), binary) in the order a batch runs them:
+    each run of each client once on every binary before the next run."""
+    return [(s, run, b) for s in scenarios for run in runs_of(s, clients, repeat) for b in binaries]
+
+
+def planted_commits(sandbox, commits):
+    """Makes each of `commits` ({cwd, message}) as an empty commit in its
+    trial checkout, for a planted transcript's grading; returns what puts
+    each checkout's branch back where it was."""
+    # As the trial's own git runs: no system or global config, so no hook
+    # or signing of the user's applies.
+    env = {**getattr(sandbox, "env", os.environ), "GIT_CONFIG_NOSYSTEM": "1",
+           "GIT_CONFIG_GLOBAL": "/dev/null"}
+
+    def git(path, *args):
+        return subprocess.run(
+            [GIT, "-c", "user.name=Eval User", "-c", "user.email=eval@example.invalid", *args],
+            cwd=path, env=env, check=True, capture_output=True, text=True).stdout.strip()
+    before = {}
+    for commit in commits:
+        path = sandbox.workdir(commit["cwd"], {})
+        before.setdefault(path, git(path, "rev-parse", "HEAD"))
+        git(path, "commit", "-q", "--allow-empty", "-m", commit["message"])
+
+    def undo():
+        for path, head in before.items():
+            git(path, "reset", "-q", "--soft", head)
+    return undo
+
+
 def blank_record(index):
     """A turn that did nothing, which a planted transcript's step fills in."""
     return {"step": index, "answer": "", "tool_calls": [], "commands": [], "file_writes": [],
@@ -1973,25 +2005,31 @@ def blank_record(index):
 def planted_grades(scenario, transcript, checks, sandbox, memories):
     """(passed, detail) for each of `checks` on `transcript`: a turn record
     per step, filled from the transcript's `steps`, after its `remove` files
-    are deleted from the trial. They are put back afterwards, even when a
-    check raises. Nothing here reaches a model or the budget."""
+    are deleted from the trial and its `commits` made in it; its `memories`
+    count as stored. Files and branches are put back afterwards, even when
+    a check raises. Nothing here reaches a model or the budget."""
     turns = len(steps(scenario))
     given = transcript.get("steps", [])
     if len(given) > turns:
         raise ValueError(f"{scenario['name']}: a planted transcript has {len(given)} steps, the scenario {turns}")
     removed = {}
+    undo = lambda: None  # noqa: E731
     try:
         for name in transcript.get("remove", []):
             path = sandbox.dir / name
             removed[path] = (path.read_bytes(), path.stat().st_mode & 0o777)
             path.unlink()
+        undo = planted_commits(sandbox, transcript.get("commits", []))
         records = [blank_record(i) for i in range(turns)]
         for record, step in zip(records, given):
             record.update(resolve(step, sandbox, memories))
         for record in records:
             record["files"] = watched(scenario, sandbox)
-        return [grade(check, sandbox, records, memories) for check in checks]
+        # What the transcript's session would have stored, beside the store's.
+        held = memories + [{"status": "confirmed", **m} for m in transcript.get("memories", [])]
+        return [grade(check, sandbox, records, held) for check in checks]
     finally:
+        undo()
         for path, (data, mode) in removed.items():
             path.write_bytes(data)
             path.chmod(mode)
@@ -2067,6 +2105,8 @@ def main():
     parser.add_argument("--client", choices=["claude", "codex", "both"], default="both")
     parser.add_argument("--scenario", action="append", default=[])
     parser.add_argument("--budget", type=int, default=100)
+    parser.add_argument("--repeat", type=int, metavar="N",
+                        help="run every chosen scenario N times per client, instead of its own repeat")
     parser.add_argument("--binary", action="append", default=[], metavar="[LABEL=]PATH",
                         help="a binary under test, labelled (such as by its commit) in the report; "
                              "give it again to run the batch on each, as a branch beside its base")
@@ -2106,10 +2146,11 @@ def main():
             print(f"{s['name']:48} {session_opens(s)} session(s) x {len(runs)} run(s)  {s['summary']}")
         return
     binaries = under_test(args.binary or [str(ROOT / "target/debug/user-memory")])
-    planned = len(binaries) * sum(session_opens(s) * len(runs_of(s, clients)) for s in scenarios)
+    planned = len(binaries) * sum(session_opens(s) * len(runs_of(s, clients, args.repeat))
+                                  for s in scenarios)
     print(f"{planned} agent sessions planned; {counted_runs()} already counted; budget {args.budget}")
     for s in scenarios:
-        runs = runs_of(s, clients)
+        runs = runs_of(s, clients, args.repeat)
         per = {c: sum(1 for rc, _ in runs if rc == c) * session_opens(s) for c in clients}
         print(f"  {s['name']:48} " + ", ".join(f"{c} {n}" for c, n in per.items() if n))
     problems = [p for p in (claude_token_problem() if "claude" in clients else None,
@@ -2159,24 +2200,25 @@ def main():
         if counted_runs() + planned > args.budget:
             sys.exit("refusing: the batch would exceed the run budget")
         results = []
-        for b, scenario in [(b, s) for b in binaries for s in scenarios]:
-            for client, repeat in runs_of(scenario, clients):
-                result = trial(scenario, client, trials, Path(b["path"]), spec.get("projects", {}), guard)
-                result["repeat"] = repeat
-                result["binary"] = b["label"]
-                name = f"{scenario['name']}-{client}-{repeat}"
-                if len(binaries) > 1:
-                    name = f"{b['label']}-{name}"
-                (batch / f"{name}.json").write_text(json.dumps(result, indent=1))
-                results.append(result)
-                outcome = "ERROR" if result["errors"] else "PASS" if result["passed"] else "FAIL"
-                print(f"{outcome} {name}", flush=True)
-                for error in result["errors"]:
-                    print(f"    {error}", flush=True)
-                for r in result["checks"]:
-                    if not r["passed"]:
-                        tag = " (informational)" if r["informational"] else ""
-                        print(f"    {r['check']}{tag}: {r['detail']}", flush=True)
+        # Builds take turns run by run, so a change in the model or the load
+        # during a batch falls on each of them alike.
+        for scenario, (client, repeat), b in batch_order(scenarios, clients, binaries, args.repeat):
+            result = trial(scenario, client, trials, Path(b["path"]), spec.get("projects", {}), guard)
+            result["repeat"] = repeat
+            result["binary"] = b["label"]
+            name = f"{scenario['name']}-{client}-{repeat}"
+            if len(binaries) > 1:
+                name = f"{b['label']}-{name}"
+            (batch / f"{name}.json").write_text(json.dumps(result, indent=1))
+            results.append(result)
+            outcome = "ERROR" if result["errors"] else "PASS" if result["passed"] else "FAIL"
+            print(f"{outcome} {name}", flush=True)
+            for error in result["errors"]:
+                print(f"    {error}", flush=True)
+            for r in result["checks"]:
+                if not r["passed"]:
+                    tag = " (informational)" if r["informational"] else ""
+                    print(f"    {r['check']}{tag}: {r['detail']}", flush=True)
     print(summarize(batch, results))
     print(f"\nreport: {batch}")
 
