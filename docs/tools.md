@@ -40,6 +40,14 @@ text such as `reason` or `context`, an empty list such as `origins` or
 `evidence_ids`, and a null such as `superseded_by`. A field left out is empty.
 Exports keep every field.
 
+A tentative memory, an agent's observation or inference, also carries a
+`note`:
+
+``An agent's observation or inference, not the user's rule: don't apply it unasked; you may mention it or ask the user, and only their word makes it a rule.``
+
+`review` and the `similar` list of a refused `record` carry it too. The note
+is not stored, so exports leave it out.
+
 `index` and `link` also accept fields that only user-memory's own client
 sends, for its session hooks and instruction files (`stamps`, `instructions`,
 `folder_projects` and the like). The tools' published schemas leave them out,

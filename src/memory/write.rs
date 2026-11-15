@@ -597,9 +597,11 @@ fn reported(candidate: &Candidate, m: &Memory) -> Value {
         Signal::Semantic => "semantic",
         Signal::Keyword => "keyword",
     };
-    json!({"id":m.id,"content":m.content,"type":m.memory_type,"category":m.category,
+    let mut reported = json!({"id":m.id,"content":m.content,"type":m.memory_type,"category":m.category,
         "scope":m.scope,"project":m.project,"status":m.status,"source":m.source,
-        "match":format!("{signal} {:.2}", candidate.score)})
+        "match":format!("{signal} {:.2}", candidate.score)});
+    super::note_tentative(&mut reported);
+    reported
 }
 
 /// Records the user's restatement of an existing explicit memory: adds this

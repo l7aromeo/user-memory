@@ -371,6 +371,65 @@ fn observed_behavior_requires_concrete_evidence_and_stays_tentative() {
 }
 
 #[test]
+fn an_observation_says_what_it_is_wherever_its_text_is_given() {
+    const NOTE: &str = "An agent's observation or inference, not the user's rule: don't apply it unasked; you may mention it or ask the user, and only their word makes it a rule.";
+    let s = Store::new();
+    let rule = s.add("preference", "Write commit subjects in the imperative");
+    let observed = s.value(&[
+        "record",
+        "--type",
+        "behavior",
+        "--category",
+        "workflow",
+        "--content",
+        "Ended commit subjects with the tag [cmp]",
+        "--source",
+        "observed",
+        "--evidence",
+        "Committed 'Fix the lexer [cmp]' on 2026-10-17",
+    ]);
+    let observed = observed["id"].as_str().unwrap();
+    let note = |memories: &Value, id: &str| {
+        let memory = memories
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == id)
+            .unwrap_or_else(|| panic!("{id} missing from {memories}"));
+        memory.get("note").cloned()
+    };
+    for reply in [
+        s.value(&["read", observed, &rule])["memories"].clone(),
+        s.value(&["search", "commit subjects"]),
+    ] {
+        assert_eq!(note(&reply, observed), Some(json!(NOTE)), "{reply}");
+        assert_eq!(note(&reply, &rule), None, "{reply}");
+    }
+    let refused = s.value(&[
+        "record",
+        "--type",
+        "preference",
+        "--category",
+        "workflow",
+        "--content",
+        "Ended commit subjects with the tag [cmp]",
+    ]);
+    assert_eq!(refused["stored"], false, "{refused}");
+    assert_eq!(note(&refused["similar"], observed), Some(json!(NOTE)));
+    let review = s.value(&["review"]);
+    let members: Vec<Value> = review["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|g| g["members"].as_array().unwrap().clone())
+        .collect();
+    assert_eq!(note(&json!(members), observed), Some(json!(NOTE)));
+    assert_eq!(note(&json!(members), &rule), None);
+    let export = s.value(&["export", "-"]);
+    assert_eq!(note(&export["memories"], observed), None, "{export}");
+}
+
+#[test]
 fn inferred_patterns_require_distinct_grounded_evidence_and_invalidate_after_forgetting_support() {
     let s = Store::new();
     let a = s.add("preference", "Prefer concrete examples");

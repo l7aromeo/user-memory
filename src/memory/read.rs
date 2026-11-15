@@ -481,6 +481,7 @@ fn compact(memories: &[Memory]) -> Result<Value> {
                 _ => true,
             });
         }
+        super::note_tentative(memory);
     }
     Ok(memories)
 }

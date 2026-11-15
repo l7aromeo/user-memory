@@ -24,7 +24,7 @@ plain words, see [how it works](how-it-works.md).
 | `source` | Explicit user statement, observed action, or inferred pattern |
 | `evidence`, `evidence_ids` | Concrete observation note, or the user's own words for an explicit memory; only inferred patterns cite supporting memory IDs |
 | `origins`, `confirmations` | Conversations that stated it, such as `claude:session/<id>` (empty when unknown), and how many; `last_confirmed_at` records the latest restatement |
-| `status` | Confirmed, tentative, stale after supporting evidence changes, or superseded after the user replaced it |
+| `status` | Confirmed, tentative, stale after supporting evidence changes, or superseded after the user replaced it; a reply gives a tentative memory a `note` saying not to apply it unasked |
 | `superseded_by` | ID of the replacing memory when superseded, otherwise null |
 | `id`, timestamps | Stable UUID v4 identity and creation/update time |
 
