@@ -726,3 +726,142 @@ fn an_undone_import_reads_as_if_it_never_ran() {
     );
     assert_eq!(recent(&home), Vec::<String>::new());
 }
+
+/// The rows of session start's table of parts, in the order it prints them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Row {
+    /// The conversation origin, a version line, the projects lines.
+    Head,
+    NewRules,
+    ProjectRules,
+    Index,
+}
+
+/// Each line of session start's `text` with the row it belongs to; a line
+/// that belongs to no row, or a row out of order, fails the test.
+fn rows(text: &str) -> Vec<(Row, &str)> {
+    let mut row = Row::Head;
+    let mut rows = Vec::new();
+    for line in text.lines() {
+        let next = if line == NEW_RULES {
+            Row::NewRules
+        } else if line.starts_with("Project rules of ") && row < Row::Index {
+            Row::ProjectRules
+        } else if line.starts_with("USER MEMORY INDEX") {
+            Row::Index
+        } else {
+            row
+        };
+        assert!(next >= row, "{next:?} after {row:?}: {line:?}\n{text}");
+        row = next;
+        let belongs = match row {
+            Row::Head => ["Conversation origin: ", "Projects: "]
+                .iter()
+                .any(|start| line.starts_with(start)),
+            Row::NewRules => line == NEW_RULES || line == REMOVE || line.starts_with("  "),
+            Row::ProjectRules => line.starts_with("Project rules of ") || line.starts_with("  "),
+            Row::Index => true,
+        };
+        assert!(belongs, "a line in no row of the table: {line:?}\n{text}");
+        rows.push((row, line));
+    }
+    rows
+}
+
+/// The room `row`'s lines take, in Claude Code's unit, with their breaks.
+fn width(rows: &[(Row, &str)], row: Row) -> usize {
+    rows.iter()
+        .filter(|(r, _)| *r == row)
+        .map(|(_, line)| line.encode_utf16().count() + 1)
+        .sum()
+}
+
+/// Adds `count` facts of `project` to `home`'s store, enough to fill the
+/// index.
+fn facts(home: &Home, project: &str, count: usize) {
+    let conn = rusqlite::Connection::open(home.path().join("memory.sqlite3")).unwrap();
+    for i in 0..count {
+        let id = format!(
+            "{:08x}-0000-4000-8000-{:012x}",
+            0xf000_0000_u32 as usize + i,
+            i + 1
+        );
+        let title = format!("Fact {i:03} about how this project builds and ships");
+        conn.execute(
+            "INSERT INTO memories (id,memory_type,category,title,content,scope,project) VALUES (?1,'fact','tools',?2,?2,'project',?3)",
+            rusqlite::params![id, title, project],
+        )
+        .unwrap();
+    }
+}
+
+// Every part full: the list of new rules, the project rules and the index,
+// in that order, each within its ceiling and above its floor, every line in
+// one row of the table, and the whole within Claude Code's room.
+#[test]
+fn every_part_full_keeps_its_order_floor_and_ceiling() {
+    let home = Home::new();
+    let key = "github.com/acme/app";
+    let app = home.project(key);
+    for n in 0..60 {
+        home.project_rule(&unlike(n), key);
+    }
+    facts(&home, key, 150);
+    assert!(block(&home.start("s1", &app, "startup")).is_none());
+    for n in 60..80 {
+        home.project_rule(&unlike(n), key);
+    }
+    let text = home.start("s2", &app, "startup");
+    let rows = rows(&text);
+    for row in [Row::Head, Row::NewRules, Row::ProjectRules, Row::Index] {
+        assert!(rows.iter().any(|(r, _)| *r == row), "no {row:?}:\n{text}");
+    }
+    let new_rules = width(&rows, Row::NewRules);
+    assert!(
+        (300..=1_000 + 1).contains(&new_rules),
+        "{new_rules}\n{text}"
+    );
+    let project_rules = width(&rows, Row::ProjectRules);
+    assert!(
+        (4_000..=6_000 + 1).contains(&project_rules),
+        "{project_rules}\n{text}"
+    );
+    // The index's floor holds its header, its counts line and its map.
+    let index: Vec<&str> = rows
+        .iter()
+        .filter(|(row, _)| *row == Row::Index)
+        .map(|(_, line)| *line)
+        .collect();
+    assert!(
+        index.iter().any(|line| line.starts_with("Categories: ")),
+        "{text}"
+    );
+    assert!(
+        index.last().unwrap().contains(" listed. Not listed: "),
+        "{text}"
+    );
+    assert!(index.iter().any(|line| line.starts_with("    ")), "{text}");
+    assert!(text.encode_utf16().count() <= 9_500, "{}", text.len());
+    assert!(!text.contains("(index cut to fit"), "{text}");
+}
+
+// A part with nothing to print takes no room: with no rules, new or
+// standing, the index fills what the parts share.
+#[test]
+fn a_part_with_nothing_takes_no_room() {
+    let home = Home::new();
+    let key = "github.com/acme/app";
+    let app = home.project(key);
+    home.rule(&unlike(0));
+    facts(&home, key, 300);
+    home.start("s1", &app, "startup");
+    let text = home.start("s2", &app, "startup");
+    let rows = rows(&text);
+    assert!(
+        rows.iter()
+            .all(|(row, _)| matches!(row, Row::Head | Row::Index)),
+        "{text}"
+    );
+    let length = text.encode_utf16().count();
+    assert!(length * 10 > 9_500 * 9 && length <= 9_500, "{length}");
+}

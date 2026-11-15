@@ -248,12 +248,23 @@ existing category for a new memory (`workflow`, not a new `process`). With
   unreachable server never interrupts a session. The first prompt at which
   memory answers again gives that session the index (or, when it does not
   come in the prompt's time, a line saying to call `index`), once.
-- The `Projects:` line and the hook's copy of the index keep within 9,000,
+- After the conversation origin and the `Projects:` line, session start
+  prints its parts in one order, each with a floor and a ceiling: the list
+  of new rules (at least its opening, a count and its closing; at most
+  1,000), the project rules (at least 4,000 when there are any; at most
+  6,000), then the index (at least its header, counts line and map; then
+  what remains). Each part with something to print first gets its floor,
+  in that order; the room left then goes in order, each up to its ceiling.
+  A part with nothing to print takes no room.
+- The `Projects:` line and the parts keep within 9,000,
   and the whole output within 9,500, counted as the client counts a hook's
-  text: Codex shows the agent only the start and end of more than 2,500
-  tokens, which it counts as UTF-8 bytes over four, and Claude Code a
-  preview of more than 10,000 UTF-16 units. So an index whose titles are
-  not in English lists fewer lines than one in English, and none is cut. A
+  text. Claude Code shows a preview of more than 10,000 UTF-16 units, so
+  there they are units. A Codex handler with `--context-limit` (setup's
+  7,500 tokens, which keep 10,000 units of any text whole) counts the same
+  units. A Codex handler without it shows the agent only the start and end
+  of more than 2,500 tokens, which it counts as UTF-8 bytes over four, so
+  there they are bytes, and an index whose titles take two or three bytes a
+  character lists fewer lines than one in English. In each, none is cut. A
   line after the header says when it shortened. Every memory
   is listed or counted, never both; the `index` tool always lists every
   line.
@@ -303,9 +314,9 @@ existing category for a new memory (`workflow`, not a new `process`). With
   session after the upgrade, a machine without the file, and a project it
   has never covered list nothing; a rule recorded into a project before
   this machine first opens it is taken silently too, and `review` lists it
-  by time. A long list takes at most 2,000 characters and counts the rest;
-  only then is the index shortened to make room. With a read-only token the
-  last line names the server's operator instead
+  by time. A long list takes at most 1,000 characters and counts the rest;
+  the project rules and the index then share the room it leaves. With a
+  read-only token the last line names the server's operator instead
   ([access tokens](server.md#access-tokens)), and against a server too old
   to fingerprint rules the list is left out.
 - When a rule is new, a new session (not a resumed, cleared or compacted
