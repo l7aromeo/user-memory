@@ -75,14 +75,7 @@ impl Gate {
     /// the registry's own refusal when it cannot be read.
     fn check(&self, provided: &str) -> Result<Result<Access, Refusal>, String> {
         let mut state = self.0.state.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Err(refusal) = state.refresh(&self.0.path) {
-            if state.damaged.as_ref() != Some(&refusal) {
-                eprintln!("{refusal}");
-                state.damaged = Some(refusal.clone());
-            }
-            return Err(refusal);
-        }
-        state.damaged = None;
+        state.refresh_logged(&self.0.path)?;
         if bool::from(provided.as_bytes().ct_eq(self.0.shared.as_bytes())) {
             return Ok(if state.shared_retired {
                 Err(Refusal::Revoked)
@@ -126,7 +119,7 @@ impl Gate {
         };
         let hash: String = hash.iter().map(|byte| format!("{byte:02x}")).collect();
         let mut state = self.0.state.lock().unwrap_or_else(PoisonError::into_inner);
-        state.refresh(&self.0.path)?;
+        state.refresh_logged(&self.0.path)?;
         let Some(conn) = &state.conn else {
             return Ok(false);
         };
@@ -148,6 +141,20 @@ fn digest(hex: &str) -> [u8; 32] {
 }
 
 impl Loaded {
+    /// [`Loaded::refresh`], printing a refusal to the server's log the first
+    /// time it is met, since requests are answered only [`UNREADABLE`].
+    fn refresh_logged(&mut self, path: &std::path::Path) -> Result<(), String> {
+        if let Err(refusal) = self.refresh(path) {
+            if self.damaged.as_ref() != Some(&refusal) {
+                eprintln!("{refusal}");
+                self.damaged = Some(refusal.clone());
+            }
+            return Err(refusal);
+        }
+        self.damaged = None;
+        Ok(())
+    }
+
     /// Reads the registry again when it has changed: opened when it first
     /// appears, reloaded when another connection has committed since.
     fn refresh(&mut self, path: &std::path::Path) -> Result<(), String> {
@@ -221,8 +228,14 @@ fn challenge(refusal: Refusal) -> &'static str {
     }
 }
 
+/// What a request is answered while the registry cannot be read. It names
+/// neither the file nor the cause: no token can be checked, so any caller
+/// gets it. The full message goes to the server's log, once.
+pub const UNREADABLE: &str =
+    "The server's token registry cannot be read; the server's log says why and what to do.";
+
 /// Lets a request through with its [`Access`], or answers 401 saying why,
-/// or 503 with the registry's refusal when it cannot be read.
+/// or 503 while the registry cannot be read.
 pub async fn authenticate(State(gate): State<Gate>, mut request: Request, next: Next) -> Response {
     let provided = request
         .headers()
@@ -242,7 +255,7 @@ pub async fn authenticate(State(gate): State<Gate>, mut request: Request, next: 
             "Authentication required",
         )
             .into_response(),
-        Err(damaged) => (StatusCode::SERVICE_UNAVAILABLE, damaged).into_response(),
+        Err(_) => (StatusCode::SERVICE_UNAVAILABLE, UNREADABLE).into_response(),
     }
 }
 
@@ -261,6 +274,7 @@ pub async fn revoke_own(
     }
     match gate.revoke(access) {
         Ok(_) => (StatusCode::OK, "This token is revoked.").into_response(),
-        Err(damaged) => (StatusCode::SERVICE_UNAVAILABLE, damaged).into_response(),
+        // Only a registry damaged after the gate let this request in.
+        Err(_) => (StatusCode::SERVICE_UNAVAILABLE, UNREADABLE).into_response(),
     }
 }

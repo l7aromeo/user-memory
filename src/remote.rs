@@ -1083,6 +1083,9 @@ enum Failure {
     /// The server answered 401: it refused this machine's access token,
     /// saying why when it is revoked or expired.
     Refused(Option<refused::Reason>),
+    /// The server answered 503: it is up but cannot serve requests, as
+    /// while its token registry cannot be read.
+    Unavailable,
 }
 
 impl Failure {
@@ -1091,6 +1094,8 @@ impl Failure {
     fn of(err: &anyhow::Error) -> Self {
         if err.chain().any(|cause| cause.is::<AuthRequiredError>()) {
             Self::Refused(refused::Reason::of(err))
+        } else if refused::unavailable(err) {
+            Self::Unavailable
         } else {
             Self::Unanswered
         }
@@ -1109,6 +1114,10 @@ impl Failure {
                 "{} The call was not run. Tell the user; don't open the token file ({}).",
                 reason.sentence(endpoint),
                 token_file.display()
+            ),
+            Self::Unavailable => format!(
+                "{} The call was not run. Tell the user; memory tries again on the next call.",
+                refused::unavailable_sentence(endpoint)
             ),
             Self::Refused(None) => format!(
                 "The memory server at {endpoint} refused this machine's access token ({}); the call was not run. Tell the user the token in that file needs replacing (user-memory doctor shows it); don't open the file. Memory tries again on the next call.",
