@@ -405,6 +405,7 @@ class Generator(unittest.TestCase):
         colliding = [a for t in drawn["tasks"] for a in t["actions"] if a.get("collides")]
         self.assertTrue(colliding)
         subcommands = {s for _, s in world.COMMANDS if s}
+        self.assertEqual({a["collides"] for a in colliding}, {"plain", "after a flag"})
         for a in colliding:
             self.assertNotIn("about", a)
             self.assertTrue(set(a["text"].split()) & subcommands, a)
