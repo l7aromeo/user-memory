@@ -296,6 +296,30 @@ fn host_requires_authentication_and_two_devices_share_persistent_memory() {
         "The file is in the memory server's exports folder, on the server, not among this machine's files. For a copy here, the user runs `user-memory export FILE`."
     );
     assert!(!text.contains(host.root.path().to_str().unwrap()), "{text}");
+    // So does the copy a forget makes before it deletes: it is the server's.
+    host.rpc(call(31,"record",json!({"category":"editors","context":"Setting up","title":"Uses Helix","content":"Uses Helix","reason":"Modal editing","scope":"global","user_confirmed":true,"origin":"chat/editor"})));
+    let forgot = host.rpc(call(
+        32,
+        "forget",
+        json!({"origin":"chat/editor","user_confirmed":true}),
+    ));
+    let text = forgot["result"]["content"][0]["text"].as_str().unwrap();
+    let reply: Value = serde_json::from_str(text).unwrap();
+    assert!(
+        reply["backup"]
+            .as_str()
+            .unwrap()
+            .starts_with("shared-forget-"),
+        "{text}"
+    );
+    assert!(
+        reply["next"]
+            .as_str()
+            .unwrap()
+            .contains("is on the memory server, in the backups folder beside its store"),
+        "{text}"
+    );
+    assert!(!text.contains(host.root.path().to_str().unwrap()), "{text}");
     let invalid = host.rpc(call(
         5,
         "forget",

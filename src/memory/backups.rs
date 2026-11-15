@@ -3,8 +3,12 @@
 //! never wait for it, and a failed backup never fails the write. A server
 //! also checks when it starts, while it runs and as it stops, so changes
 //! followed by a quiet stretch reach a backup without another write.
+//!
+//! A forget that deletes memories makes a copy of its own kind just before,
+//! beside the automatic backups: never the day's backup, never counted in
+//! [`KEEP`], and dropped once it is [`FORGET_KEPT_DAYS`] old by its name.
 
-use super::migrate::{copy_into, create_private, memory_rows};
+use super::migrate::{copy_into, create_private, memory_rows, write_backup};
 use crate::{private, shell};
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags};
@@ -66,6 +70,21 @@ const REPLACE_PAUSE: Duration = Duration::from_millis(50);
 /// backup that succeeds removes it.
 const FAILURE: &str = "last-failure";
 
+/// The label in the name of the copy a forget that deletes memories makes
+/// just before it: `<store>-forget-<UTC time>.<extension>`.
+const FORGET: &str = "forget";
+
+/// Days a forget's copy is kept, counted by the time in its name: as long as
+/// the automatic backups, [`KEEP`] daily copies, keep what the store held
+/// that day. Every forget of a day stays recoverable for that week, and
+/// forgotten text leaves the disk with it.
+const FORGET_KEPT_DAYS: usize = KEEP;
+
+/// The UTC time in a forget copy's name, as SQLite's strftime writes it,
+/// and the length it always has.
+const STAMP: &str = "%Y%m%dT%H%M%SZ";
+const STAMP_CHARS: usize = 16;
+
 /// Marks a copy still being written, `.<name>.partial-<process id>`, so a
 /// copy cut short never looks like a backup.
 const PARTIAL: &str = ".partial-";
@@ -80,6 +99,26 @@ pub struct Backup {
 }
 
 impl Backup {
+    pub fn name(&self) -> String {
+        self.path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+}
+
+/// A copy a forget made just before it deleted memories.
+pub struct ForgetCopy {
+    pub path: PathBuf,
+    /// The UTC time in its name, as [`STAMP`].
+    stamp: String,
+    /// When it was made, by that time: a move gives the file a newer one,
+    /// and the copy is dropped by its name.
+    pub made: SystemTime,
+    pub bytes: u64,
+}
+
+impl ForgetCopy {
     pub fn name(&self) -> String {
         self.path
             .file_name()
@@ -127,6 +166,32 @@ impl Names {
         }
     }
 
+    /// The name of a forget's copy made at `stamp`, with `-<n>` after it for
+    /// a second copy in the same second.
+    fn forget(&self, stamp: &str) -> String {
+        self.name(&format!("{FORGET}-{stamp}"))
+    }
+
+    /// The time in `file` when it names a forget's copy.
+    fn forget_stamp<'f>(&self, file: &'f str) -> Option<&'f str> {
+        let rest = file
+            .strip_prefix(&self.stem)?
+            .strip_prefix('-')?
+            .strip_prefix(FORGET)?
+            .strip_prefix('-')?;
+        let rest = match &self.extension {
+            Some(extension) => rest.strip_suffix(extension)?.strip_suffix('.')?,
+            None => rest,
+        };
+        let stamp = rest.get(..STAMP_CHARS)?;
+        let again = &rest[STAMP_CHARS..];
+        let numbered = again.is_empty()
+            || again
+                .strip_prefix('-')
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+        (is_stamp(stamp) && numbered).then_some(stamp)
+    }
+
     /// The date in `file` when it names one of these backups.
     fn date<'f>(&self, file: &'f str) -> Option<&'f str> {
         let rest = file.strip_prefix(&self.stem)?.strip_prefix('-')?;
@@ -147,41 +212,139 @@ fn is_date(text: &str) -> bool {
         })
 }
 
+/// Whether `text` has the shape of [`STAMP`], `YYYYMMDDTHHMMSSZ`.
+/// The time a [`STAMP`] names, read back by SQLite, which wrote it; none
+/// for a stamp that names no real time.
+fn stamp_time(stamp: &str) -> Option<SystemTime> {
+    let seconds: u64 = Connection::open_in_memory()
+        .ok()?
+        .query_row(
+            "SELECT unixepoch(substr(?1,1,4)||'-'||substr(?1,5,2)||'-'||substr(?1,7,2)||' '||substr(?1,10,2)||':'||substr(?1,12,2)||':'||substr(?1,14,2))",
+            [stamp],
+            |r| r.get(0),
+        )
+        .ok()?;
+    SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(seconds))
+}
+
+fn is_stamp(text: &str) -> bool {
+    text.len() == STAMP_CHARS
+        && text.bytes().enumerate().all(|(at, byte)| match at {
+            8 => byte == b'T',
+            15 => byte == b'Z',
+            _ => byte.is_ascii_digit(),
+        })
+}
+
 /// `db`'s automatic backups, newest first; none when the folder is missing.
+#[cfg(test)]
 pub fn list(db: &Path) -> Result<Vec<Backup>> {
+    Ok(scan(db)?.0)
+}
+
+/// The automatic backups and the forget copies in `db`'s backups folder,
+/// each newest first, from one listing of it.
+fn scan(db: &Path) -> Result<(Vec<Backup>, Vec<ForgetCopy>)> {
     let names = Names::of(db)?;
     let folder = folder(db);
     let entries = match fs::read_dir(&folder) {
         Ok(entries) => entries,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((Vec::new(), Vec::new()));
+        }
         Err(err) => return Err(err).with_context(|| format!("Cannot read {}", folder.display())),
     };
-    let mut backups = Vec::new();
+    let (mut backups, mut copies) = (Vec::new(), Vec::new());
     for entry in entries {
         let entry = entry.with_context(|| format!("Cannot read {}", folder.display()))?;
         let file = entry.file_name().to_string_lossy().into_owned();
-        let Some(date) = names.date(&file) else {
+        let date = names.date(&file);
+        let stamp = names.forget_stamp(&file);
+        if date.is_none() && stamp.is_none() {
             continue;
-        };
+        }
         let metadata = entry.metadata()?;
         if !metadata.is_file() {
             continue;
         }
-        backups.push(Backup {
-            path: entry.path(),
-            date: date.to_owned(),
-            modified: metadata.modified()?,
-            bytes: metadata.len(),
-        });
+        let (path, modified, bytes) = (entry.path(), metadata.modified()?, metadata.len());
+        if let Some(date) = date {
+            backups.push(Backup {
+                path,
+                date: date.to_owned(),
+                modified,
+                bytes,
+            });
+        } else if let Some(stamp) = stamp {
+            copies.push(ForgetCopy {
+                path,
+                stamp: stamp.to_owned(),
+                made: stamp_time(stamp).unwrap_or(modified),
+                bytes,
+            });
+        }
     }
     backups.sort_by(|a, b| b.date.cmp(&a.date));
-    Ok(backups)
+    copies.sort_by(|a, b| b.stamp.cmp(&a.stamp).then_with(|| b.path.cmp(&a.path)));
+    Ok((backups, copies))
+}
+
+/// Deletes the forget copies among `copies` older than
+/// [`FORGET_KEPT_DAYS`] by the time in their names; returns their names. A
+/// file time can be newer than the copy, as after a move, so it never
+/// counts. One that cannot be deleted is tried again at the next pass.
+fn drop_expired(copies: &[ForgetCopy]) -> Vec<String> {
+    if copies.is_empty() {
+        return Vec::new();
+    }
+    let Ok(cutoff) = Connection::open_in_memory().and_then(|c| {
+        c.query_row(
+            &format!("SELECT strftime('{STAMP}','now','-{FORGET_KEPT_DAYS} days')"),
+            [],
+            |r| r.get::<_, String>(0),
+        )
+    }) else {
+        return Vec::new();
+    };
+    copies
+        .iter()
+        .filter(|copy| copy.stamp < cutoff && fs::remove_file(&copy.path).is_ok())
+        .map(ForgetCopy::name)
+        .collect()
+}
+
+/// Makes the copy of `db` a forget takes just before it deletes memories,
+/// inside its write turn, and returns its file name: the copy holds exactly
+/// the store the forget is about to change, all `memories` of it, or the
+/// forget fails whole. Then drops forget copies past their days.
+pub fn before_forget(db: &Path, memories: i64) -> Result<String> {
+    let names = Names::of(db)?;
+    let folder = folder(db);
+    create_folder(&folder)?;
+    let stamp: String = Connection::open_in_memory()?.query_row(
+        &format!("SELECT strftime('{STAMP}','now')"),
+        [],
+        |r| r.get(0),
+    )?;
+    let mut name = names.forget(&stamp);
+    let mut again = 1;
+    while folder.join(&name).exists() {
+        again += 1;
+        name = names.forget(&format!("{stamp}-{again}"));
+    }
+    write_backup(db, &folder.join(&name), "forgotten", memories)?;
+    if let Ok((_, copies)) = scan(db) {
+        drop_expired(&copies);
+    }
+    Ok(name)
 }
 
 /// Every file of `db`'s automatic backups: the backups, a failure note and
 /// copies cut short. Anything else in the folder is not user-memory's.
 pub fn files(db: &Path) -> Result<Vec<PathBuf>> {
-    let mut files: Vec<PathBuf> = list(db)?.into_iter().map(|backup| backup.path).collect();
+    let (backups, copies) = scan(db)?;
+    let mut files: Vec<PathBuf> = backups.into_iter().map(|backup| backup.path).collect();
+    files.extend(copies.into_iter().map(|copy| copy.path));
     let folder = folder(db);
     let failure = folder.join(FAILURE);
     if failure.is_file() {
@@ -262,8 +425,8 @@ pub fn back_up_if_due(db: &Path) {
 /// and either that one is [`DUE`] old or the store has had no change for
 /// `quiet`. An unchanged store never gets one, so copies of the same
 /// memories never rotate distinct older backups out.
-fn due(db: &Path, quiet: Duration) -> bool {
-    let Ok(backups) = list(db) else {
+fn due(db: &Path, backups: Option<Vec<Backup>>, quiet: Duration) -> bool {
+    let Some(backups) = backups else {
         return true;
     };
     let Some(newest) = backups.first() else {
@@ -298,7 +461,13 @@ fn back_up_when(db: &Path, quiet: Duration, last: bool) {
         return;
     }
     let _copying = Copying(&key);
-    if !due(db, quiet) {
+    // The folder's one listing serves both: forget copies past their days
+    // go here, at no cost to a write beyond the look it already takes.
+    let scanned = scan(db).ok();
+    if let Some((_, copies)) = &scanned {
+        drop_expired(copies);
+    }
+    if !due(db, scanned.map(|(backups, _)| backups), quiet) {
         return;
     }
     // A store just created has had no memory written yet: nothing to keep.
@@ -509,11 +678,13 @@ fn create_folder(folder: &Path) -> Result<()> {
 /// backup just written; the next rotation tries it again.
 fn rotate(db: &Path, folder: &Path) -> Result<Vec<String>> {
     let mut deleted = Vec::new();
-    for old in list(db)?.into_iter().skip(KEEP) {
+    let (backups, copies) = scan(db)?;
+    for old in backups.into_iter().skip(KEEP) {
         if fs::remove_file(&old.path).is_ok() {
             deleted.push(old.name());
         }
     }
+    deleted.extend(drop_expired(&copies));
     for partial in partials(db, folder)? {
         if fs::metadata(&partial)
             .and_then(|metadata| metadata.modified())
@@ -575,10 +746,13 @@ pub struct Status {
     has_memories: bool,
     /// The failure note's text.
     failure: Option<String>,
+    /// The forget copies, and when the oldest was made, by its name.
+    forget_copies: usize,
+    oldest_forget: Option<SystemTime>,
 }
 
 pub fn status(db: &Path) -> Result<Status> {
-    let backups = list(db)?;
+    let (backups, copies) = scan(db)?;
     let folder = folder(db);
     let failure = match fs::read_to_string(folder.join(FAILURE)) {
         Ok(text) => Some(text.trim().to_owned()),
@@ -600,13 +774,15 @@ pub fn status(db: &Path) -> Result<Status> {
         changed_since,
         has_memories,
         failure,
+        forget_copies: copies.len(),
+        oldest_forget: copies.last().map(|copy| copy.made),
     })
 }
 
 impl Status {
     /// Doctor's line.
     pub fn line(&self) -> String {
-        match &self.newest {
+        let line = match &self.newest {
             Some(newest) => format!(
                 "Automatic backups: newest {}, {} old ({} kept in {})",
                 newest.name(),
@@ -615,6 +791,14 @@ impl Status {
                 self.folder.display()
             ),
             None => format!("Automatic backups: none yet in {}", self.folder.display()),
+        };
+        match self.oldest_forget {
+            Some(oldest) => format!(
+                "{line}; {} made before a forget, the oldest {} old, each dropped after {FORGET_KEPT_DAYS} days",
+                forget_count(self.forget_copies),
+                describe_age(age(oldest))
+            ),
+            None => line,
         }
     }
 
@@ -653,42 +837,78 @@ fn describe_age(age: Duration) -> String {
     format!("{count} {unit}{}", if count == 1 { "" } else { "s" })
 }
 
-/// `backup list`'s report: each backup newest first, then how to restore one.
+/// `backup list`'s report: each backup newest first, then the copies
+/// forgets made, then how to restore one.
 pub fn describe(db: &Path) -> Result<String> {
-    let backups = list(db)?;
+    let (backups, copies) = scan(db)?;
     let folder = folder(db);
-    if backups.is_empty() {
-        return Ok(format!(
-            "No automatic backups yet in {}. The first write of a day makes one; `user-memory backup now` makes one now.",
+    let mut out = if backups.is_empty() {
+        format!(
+            "No automatic backups yet in {}. The first write of a day makes one; `user-memory backup now` makes one now.\n",
             folder.display()
-        ));
-    }
-    let mut out = format!(
-        "Automatic backups in {}, newest first (the newest {KEEP} are kept):\n",
-        folder.display()
-    );
+        )
+    } else {
+        format!(
+            "Automatic backups in {}, newest first (the newest {KEEP} are kept):\n",
+            folder.display()
+        )
+    };
     for backup in &backups {
-        let when: String = Connection::open_in_memory()?.query_row(
-            "SELECT strftime('%Y-%m-%dT%H:%MZ',?1,'unixepoch')",
-            [backup
-                .modified
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs()],
-            |r| r.get(0),
-        )?;
-        let memories = Connection::open_with_flags(&backup.path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(anyhow::Error::from)
-            .and_then(|copy| Ok(memory_rows(&copy)?));
-        let memories = memories.map_or_else(|_| "unreadable".to_owned(), count);
-        out.push_str(&format!(
-            "  {}  made {when}  {memories}  {}\n",
-            backup.name(),
-            describe_size(backup.bytes)
-        ));
+        out.push_str(&listed(
+            &backup.name(),
+            &backup.path,
+            backup.modified,
+            backup.bytes,
+        )?);
     }
-    out.push_str(&restore(db, &backups[0].path, cfg!(windows)));
+    if !copies.is_empty() {
+        out.push_str(&format!(
+            "Copies made just before a forget deleted memories, newest first (each is dropped {FORGET_KEPT_DAYS} days after it was made):\n"
+        ));
+        for copy in &copies {
+            out.push_str(&listed(&copy.name(), &copy.path, copy.made, copy.bytes)?);
+        }
+    }
+    let newest = backups
+        .first()
+        .map(|backup| &backup.path)
+        .or_else(|| copies.first().map(|copy| &copy.path));
+    match newest {
+        Some(newest) => out.push_str(&restore(db, newest, cfg!(windows))),
+        None => {
+            out.pop();
+        }
+    }
     Ok(out)
+}
+
+/// One line of `backup list`: the file's name, when it was made, the
+/// memories it holds and its size.
+fn listed(name: &str, path: &Path, modified: SystemTime, bytes: u64) -> Result<String> {
+    let when: String = Connection::open_in_memory()?.query_row(
+        "SELECT strftime('%Y-%m-%dT%H:%MZ',?1,'unixepoch')",
+        [modified
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()],
+        |r| r.get(0),
+    )?;
+    let memories = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(anyhow::Error::from)
+        .and_then(|copy| Ok(memory_rows(&copy)?));
+    let memories = memories.map_or_else(|_| "unreadable".to_owned(), count);
+    Ok(format!(
+        "  {name}  made {when}  {memories}  {}\n",
+        describe_size(bytes)
+    ))
+}
+
+/// A number of forget copies, as "1 copy" or "3 copies".
+fn forget_count(copies: usize) -> String {
+    match copies {
+        1 => "1 copy".to_owned(),
+        _ => format!("{copies} copies"),
+    }
 }
 
 /// How to restore `backup` over the store `db`, for a POSIX shell or, on
@@ -1289,5 +1509,88 @@ mod tests {
         let bare = Names::of(Path::new("/d/store")).unwrap();
         assert_eq!(bare.name("2026-10-18"), "store-2026-10-18");
         assert_eq!(bare.date("store-2026-10-18"), Some("2026-10-18"));
+    }
+
+    /// The UTC time `days` ago, as a forget copy's name holds it.
+    fn stamp(days: i64) -> String {
+        Connection::open_in_memory()
+            .unwrap()
+            .query_row(
+                &format!("SELECT strftime('{STAMP}','now',?1)"),
+                [format!("-{days} days")],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    // A forget's copy is never the day's backup: not listed among the
+    // automatic ones, so it never counts toward KEEP and never makes a store
+    // without an automatic backup look backed up.
+    #[test]
+    fn a_forget_copy_is_never_taken_for_an_automatic_backup() {
+        let dir = tempdir().unwrap();
+        let db = store(dir.path());
+        add(&db);
+        // The write made the day's backup; this store has none for the test.
+        for backup in list(&db).unwrap() {
+            fs::remove_file(backup.path).unwrap();
+        }
+        let first = before_forget(&db, 1).unwrap();
+        assert!(
+            first.starts_with("memories-forget-") && first.ends_with(".sqlite3"),
+            "{first}"
+        );
+        let second = before_forget(&db, 1).unwrap();
+        assert_ne!(second, first);
+        assert!(names(&db).is_empty());
+        let (backups, copies) = scan(&db).unwrap();
+        assert!(due(&db, Some(backups), Duration::ZERO));
+        assert_eq!(copies.len(), 2);
+        let copy = Connection::open(folder(&db).join(&first)).unwrap();
+        assert_eq!(memory_rows(&copy).unwrap(), 1);
+        assert!(files(&db).unwrap().contains(&folder(&db).join(&first)));
+    }
+
+    // Forget copies go by the time in their names: one eight days old goes
+    // at the next pass, though its file is new and no backup is due, and
+    // one made today outlives a rotation that drops automatic backups.
+    #[test]
+    fn forget_copies_go_by_the_time_in_their_names() {
+        let dir = tempdir().unwrap();
+        let db = store(dir.path());
+        add(&db);
+        now(&db).unwrap();
+        let fresh = before_forget(&db, 1).unwrap();
+        let names_of = Names::of(&db).unwrap();
+        let old = folder(&db).join(names_of.forget(&stamp(FORGET_KEPT_DAYS as i64 + 1)));
+        fs::copy(folder(&db).join(&fresh), &old).unwrap();
+        // The store is unchanged since today's backup: none is due.
+        back_up_when(&db, HOUR, false);
+        assert!(!old.exists(), "dropped at the next pass");
+        assert!(folder(&db).join(&fresh).exists());
+        // One made three days ago and moved here just now: doctor and the
+        // listing give the time in its name, which its drop goes by.
+        let moved = names_of.forget(&stamp(3));
+        fs::copy(folder(&db).join(&fresh), folder(&db).join(&moved)).unwrap();
+        set_modified(&folder(&db).join(&moved), Duration::ZERO);
+        let line = status(&db).unwrap().line();
+        assert!(line.contains("the oldest 3 days old"), "{line}");
+        let listing = describe(&db).unwrap();
+        assert!(
+            listing.contains(&format!("{moved}  made {}T", date(3))),
+            "{listing}"
+        );
+        fs::remove_file(folder(&db).join(&moved)).unwrap();
+        for days in 1..=KEEP as i64 {
+            fs::copy(
+                folder(&db).join(&fresh),
+                folder(&db).join(names_of.name(&date(days))),
+            )
+            .unwrap();
+        }
+        let made = now(&db).unwrap();
+        assert_eq!(made.deleted, [names_of.name(&date(KEEP as i64))]);
+        assert!(folder(&db).join(&fresh).exists());
+        assert_eq!(names(&db).len(), KEEP);
     }
 }

@@ -885,6 +885,22 @@ pub fn forget(db: &Path, input: Forget) -> Result<Value> {
             json!({"deleted":count>0,"id":id})
         }
         (None, Some(origin)) if !origin.is_empty() => {
+            // A forget that deletes memories copies the store first, in this
+            // write turn, so the copy holds exactly what it deletes.
+            let deleting: i64 = tx.query_row(
+                "SELECT COUNT(DISTINCT memory_id) FROM memory_origins o WHERE origin=?1 AND NOT EXISTS (SELECT 1 FROM memory_origins p WHERE p.memory_id=o.memory_id AND p.origin<>?1)",
+                [&origin],
+                |r| r.get(0),
+            )?;
+            let backup = if deleting > 0 {
+                let memories = super::migrate::memory_rows(&tx)?;
+                Some(
+                    super::backups::before_forget(db, memories)
+                        .map_err(|err| anyhow::anyhow!("{COPY_FAILED}{}", copy_cause(&err)))?,
+                )
+            } else {
+                None
+            };
             // Removing the origin stales dependents of every memory that had it;
             // a memory is deleted only when no other conversation stated it.
             let touched = tx
@@ -910,7 +926,11 @@ pub fn forget(db: &Path, input: Forget) -> Result<Value> {
                 "DELETE FROM conversation_projects WHERE origin=?1",
                 [&origin],
             )?;
-            json!({"deleted":!ids.is_empty(),"count":ids.len(),"ids":ids,"kept":kept,"unlinked":unlinked})
+            let mut result = json!({"deleted":!ids.is_empty(),"count":ids.len(),"ids":ids,"kept":kept,"unlinked":unlinked});
+            if let Some(backup) = backup {
+                result["backup"] = json!(backup);
+            }
+            result
         }
         _ => {
             return Ok(
@@ -942,6 +962,28 @@ pub fn forget(db: &Path, input: Forget) -> Result<Value> {
     tx.commit_removing()?;
     Ok(result)
 }
+
+/// Why a forget that would delete memories deleted none, and what to do: the
+/// user asked for a deletion. No path, since replies never name the store's.
+const COPY_FAILED: &str = "Nothing was forgotten: the copy a forget makes before it deletes memories could not be written. Free space on the disk that holds the store, or make its backups folder writable, then forget again";
+
+/// Why the copy failed, in words that never hold a path: the I/O error's
+/// kind, or SQLite's description of its result code, whose own messages
+/// can name the file.
+fn copy_cause(err: &anyhow::Error) -> String {
+    for cause in err.chain() {
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            return format!(" ({})", io.kind());
+        }
+        if let Some(rusqlite::Error::SqliteFailure(code, _)) = cause.downcast_ref() {
+            return format!(" ({code})");
+        }
+    }
+    String::new()
+}
+
+/// The note a forget's reply adds on a memory server, where its copy is.
+pub const COPY_ON_SERVER: &str = "The copy named in backup is on the memory server, in the backups folder beside its store, not on this machine.";
 
 /// Forget's next step when patterns lost a supporting memory.
 const STALED_NEXT: &str = "Patterns in staled lost a supporting memory: re-derive or forget them with the user (user-memory skill, review).";
