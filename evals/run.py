@@ -1214,6 +1214,35 @@ def origins(record):
     return found
 
 
+# How much of a failed turn's message a step keeps: enough for the reason a
+# provider gives, short of a whole error page.
+FAILURE_TEXT = 300
+
+
+def turn_failure(client, events):
+    """Why the client ended a turn as failed, or None. Claude Code marks
+    its `result` event `is_error` and puts the error in its text; Codex
+    sends an `error` notification it won't retry and ends the turn
+    `failed`. Without this a failed turn reads as an answer (Claude's error
+    text) or an empty one (Codex), and is graded as the agent's choice."""
+    if client == "claude":
+        result = next((e for e in reversed(events) if e.get("type") == "result"), None)
+        if result and (result.get("is_error") or str(result.get("subtype", "")).startswith("error")):
+            return (f"Claude Code ended the turn as an error ({result.get('subtype')}): "
+                    f"{str(result.get('result') or '')[:FAILURE_TEXT]}")
+        return None
+    for message in reversed(events):
+        params = message.get("params") or {}
+        turn = params.get("turn") or {}
+        if message.get("method") == "turn/completed" and turn.get("status") not in (None, "completed"):
+            reason = (turn.get("error") or {}).get("message") or ""
+            return f"Codex ended the turn {turn['status']}: {reason[:FAILURE_TEXT]}"
+        if message.get("method") == "error" and not params.get("willRetry"):
+            reason = (params.get("error") or {}).get("message") or ""
+            return f"Codex reported an error: {reason[:FAILURE_TEXT]}"
+    return None
+
+
 def final_answer(client, events):
     if client == "claude":
         for event in reversed(events):
@@ -1672,6 +1701,7 @@ def trial(scenario, client, base, source, projects, guard):
                 answers = step.get("answers") or []
                 events, error = sessions[name].turn(
                     prompt, step.get("while_working"), [answers] if isinstance(answers, dict) else answers)
+            error = error or turn_failure(client, events)
             record = {
                 "step": index, "session": name, "client": client, "cwd": str(cwd),
                 "resumed": bool(resume),
@@ -1731,6 +1761,9 @@ def trial(scenario, client, base, source, projects, guard):
     return {"scenario": scenario["name"], "client": client, "sandbox": str(sandbox.dir),
             "model": CLAUDE_MODEL if client == "claude" else CODEX_MODEL, "usage": usage,
             "passed": all(r["passed"] for r in results if not r["informational"]),
+            # A turn the client ended as failed: the checks graded no choice
+            # of the agent's, so the trial is an error, not a scenario result.
+            "errors": [f"step {r['step']}: {r['error']}" for r in records if r["error"]],
             "checks": results, "steps": records, "stderr": closed, "memories": memories,
             "setup": sandbox.setup_output}
 
@@ -1804,7 +1837,8 @@ def probe(client, base, source):
     message sent during the turn reached the model (while_working), whether
     the harness answered the client's question tool (answers), whether the
     model got the server instructions, and whether the client reported
-    usage. Bills nothing: the model is the fake one on loopback."""
+    usage; then one turn the model refuses, and whether the harness records
+    why it failed. Bills nothing: the model is the fake one on loopback."""
     sandbox = Sandbox(base, source, client)
     sandbox.setup(True)
     with fake_model.FakeModel(PROBE_SCRIPTS[client], log=sandbox.dir / "fake-model.jsonl") as model:
@@ -1817,6 +1851,16 @@ def probe(client, base, source):
             session.close()
         requests = [json.dumps(r["body"]) for r in model.main_requests(
             "anthropic" if client == "claude" else "openai")]
+    # A turn the model refuses, every retry included: the harness must
+    # record why it failed.
+    with fake_model.FakeModel({"anthropic" if client == "claude" else "openai": [{"fail": 400, "repeat": True}]}) as model:
+        refused = (ClaudeSession if client == "claude" else CodexSession)(
+            sandbox, sandbox.workdir("plain", {}), {"fake_model": model.url})
+        try:
+            failed, _ = refused.turn("Rehearse a failed turn.")
+        finally:
+            refused.close()
+    failure = turn_failure(client, failed) or ""
     answered = [q for q in session.questions if q["answers"]]
     usage = claude_totals(events) if client == "claude" else codex_totals(events, CODEX_MODEL)
     return {
@@ -1825,6 +1869,7 @@ def probe(client, base, source):
         "answers": bool(answered) and any('Tabs' in r for r in requests[2:]),
         "instructions": bool(requests) and INSTRUCTIONS_OPENING in requests[0],
         "usage": bool(usage),
+        "failures": fake_model.FAILURE_MESSAGE in failure,
     }
 
 
@@ -1832,8 +1877,10 @@ def probe(client, base, source):
 # only reported, with what follows from it.
 PROBE_REQUIRED = {
     "claude": {"while_working": "takes a message during a turn", "answers": "lets the harness answer its question tool",
-               "instructions": "shows the server instructions to the model", "usage": "reports usage"},
-    "codex": {"while_working": "takes a message during a turn", "usage": "reports usage"},
+               "instructions": "shows the server instructions to the model", "usage": "reports usage",
+               "failures": "says why a turn failed"},
+    "codex": {"while_working": "takes a message during a turn", "usage": "reports usage",
+              "failures": "says why a turn failed"},
 }
 PROBE_NOTED = {
     "codex": {"answers": ("has a question tool in its default mode",
@@ -2024,7 +2071,10 @@ def main():
                     name = f"{b['label']}-{name}"
                 (batch / f"{name}.json").write_text(json.dumps(result, indent=1))
                 results.append(result)
-                print(f"{'PASS' if result['passed'] else 'FAIL'} {name}", flush=True)
+                outcome = "ERROR" if result["errors"] else "PASS" if result["passed"] else "FAIL"
+                print(f"{outcome} {name}", flush=True)
+                for error in result["errors"]:
+                    print(f"    {error}", flush=True)
                 for r in result["checks"]:
                     if not r["passed"]:
                         tag = " (informational)" if r["informational"] else ""
@@ -2039,9 +2089,9 @@ def summarize(batch, results):
     summary = {}
     for r in results:
         key = (r["scenario"], r["client"], r.get("binary", "-"))
-        passed, total, real, sent = summary.get(key, (0, 0, 0, 0))
+        passed, total, errored, real, sent = summary.get(key, (0, 0, 0, 0, 0))
         sent_origins = [o for s in r["steps"] for o in s["origins"]]
-        summary[key] = (passed + r["passed"], total + 1,
+        summary[key] = (passed + r["passed"], total + 1, errored + bool(r.get("errors")),
                         real + sum(o["real"] for o in sent_origins), sent + len(sent_origins))
     lines = [f"# Eval batch {batch.name}", ""]
     saved = batch / "binaries.json"
@@ -2052,8 +2102,9 @@ def summarize(batch, results):
         lines.append("")
     lines += ["| scenario | client | binary | passed | origins with the real conversation id |",
               "|---|---|---|---|---|"]
-    lines += [f"| {s} | {c} | {b} | {p}/{t} | {f'{o}/{n}' if n else '-'} |"
-              for (s, c, b), (p, t, o, n) in sorted(summary.items())]
+    # Errored runs count in the total, not as scenario failures.
+    lines += [f"| {s} | {c} | {b} | {p}/{t}{f' ({e} errored)' if e else ''} | {f'{o}/{n}' if n else '-'} |"
+              for (s, c, b), (p, t, e, o, n) in sorted(summary.items())]
     lines += ["", usage_table(results), "", f"Agent sessions counted so far: {counted_runs()}"]
     text = "\n".join(lines) + "\n"
     (batch / "summary.md").write_text(text)
