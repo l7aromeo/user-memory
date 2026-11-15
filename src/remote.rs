@@ -481,41 +481,84 @@ fn answered(message: &impl serde::Serialize) -> Option<serde_json::Value> {
 /// handshake, so a reconnect waits no longer than a hook would.
 const RECONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// A server reached again: its transport, what its handshake said, and the
+/// tools it lists when the bridge asked.
+struct Reconnected<R> {
+    remote: R,
+    handshake: Option<serde_json::Value>,
+    tools: Option<serde_json::Value>,
+}
+
 /// Reestablish the upstream session without repeating a client request.
 /// A 2026-07-28 session that sent no handshake has none to replay: each of
 /// its requests names its version in `_meta`, so the new transport alone
-/// carries it on.
+/// carries it on. With `tools_params`, the server is also asked for its
+/// tools, before any call of the app's reaches it, so a change is told
+/// before that call's reply.
 async fn reconnect<R: Transport<RoleClient>>(
     mut remote: R,
     initialize: Option<RxJsonRpcMessage<RoleServer>>,
     initialized: Option<RxJsonRpcMessage<RoleServer>>,
-) -> Result<(R, Option<serde_json::Value>)> {
-    let Some(init) = initialize else {
-        return Ok((remote, None));
+    tools_params: Option<&serde_json::Value>,
+) -> Result<Reconnected<R>> {
+    let handshake = match initialize {
+        Some(init) => Some(replay_handshake(&mut remote, init, initialized).await?),
+        None => None,
     };
+    let tools = match tools_params {
+        Some(params) => {
+            Transport::<RoleClient>::send(&mut remote, tools_check(params)?).await?;
+            let reply = answer(&mut remote, &serde_json::json!(TOOLS_CHECK_ID)).await?;
+            reply.pointer("/result/tools").cloned()
+        }
+        None => None,
+    };
+    Ok(Reconnected {
+        remote,
+        handshake,
+        tools,
+    })
+}
+
+/// The reply to request `id` on `remote`, skipping anything else it sends
+/// meanwhile.
+async fn answer<R: Transport<RoleClient>>(
+    remote: &mut R,
+    id: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    loop {
+        let reply = Transport::<RoleClient>::receive(remote)
+            .await
+            .context("Memory server connection closed")?;
+        let reply = serde_json::to_value(reply)?;
+        if reply.get("id") == Some(id)
+            && (reply.get("result").is_some() || reply.get("error").is_some())
+        {
+            return Ok(reply);
+        }
+    }
+}
+
+/// Replays the app's handshake `init` and `initialized` to a new server
+/// connection; the server's handshake result.
+async fn replay_handshake<R: Transport<RoleClient>>(
+    remote: &mut R,
+    init: RxJsonRpcMessage<RoleServer>,
+    initialized: Option<RxJsonRpcMessage<RoleServer>>,
+) -> Result<serde_json::Value> {
     let init_id = serde_json::to_value(&init)?
         .get("id")
         .cloned()
         .context("Client initialization has no request ID")?;
-    Transport::<RoleClient>::send(&mut remote, init).await?;
-    let result = loop {
-        let reply = Transport::<RoleClient>::receive(&mut remote)
-            .await
-            .context("Memory server connection closed")?;
-        let result = serde_json::to_value(reply)?;
-        if result.get("id") == Some(&init_id) {
-            if result.get("error").is_some() {
-                bail!("Memory server rejected initialization");
-            }
-            if result.get("result").is_some() {
-                break result;
-            }
-        }
+    Transport::<RoleClient>::send(remote, init).await?;
+    let reply = answer(remote, &init_id).await?;
+    let Some(result) = reply.get("result").cloned() else {
+        bail!("Memory server rejected initialization");
     };
     if let Some(notice) = initialized {
-        Transport::<RoleClient>::send(&mut remote, notice).await?;
+        Transport::<RoleClient>::send(remote, notice).await?;
     }
-    Ok((remote, result.get("result").cloned()))
+    Ok(result)
 }
 
 /// Relays messages between a local MCP client and the memory server. After
@@ -536,7 +579,8 @@ async fn forward<R: Transport<RoleClient>>(
     let mut outgoing = tokio::task::JoinSet::<Result<()>>::new();
     let mut syncs = tokio::task::JoinSet::new();
     let mut writes = Vec::new();
-    let mut pending: Vec<(serde_json::Value, bool)> = Vec::new();
+    // The app's requests the server has not answered, with their methods.
+    let mut pending: Vec<(serde_json::Value, String)> = Vec::new();
     let mut initialize: Option<RxJsonRpcMessage<RoleServer>> = None;
     let mut initialized: Option<RxJsonRpcMessage<RoleServer>> = None;
     let mut initial_version: Option<serde_json::Value> = None;
@@ -545,6 +589,10 @@ async fn forward<R: Transport<RoleClient>>(
     // next tool reply.
     let mut version_line: Option<String> = None;
     let mut notices: Vec<String> = Vec::new();
+    // The tools the app was last given, and the parameters of its last
+    // `tools/list`, to ask a server reached again for its own.
+    let mut given_tools: Option<serde_json::Value> = None;
+    let mut tools_params: Option<serde_json::Value> = None;
     let mut disconnected = false;
     let mut error = None;
     loop {
@@ -558,9 +606,11 @@ async fn forward<R: Transport<RoleClient>>(
                     initialize = Some(message.clone());
                 } else if method == "notifications/initialized" {
                     initialized = Some(message.clone());
+                } else if method == "tools/list" {
+                    tools_params = value.get("params").cloned();
                 }
                 if let Some(id) = value.get("id") && value.get("method").is_some() {
-                    pending.push((id.clone(), method == "tools/call"));
+                    pending.push((id.clone(), method.to_owned()));
                 }
                 if disconnected {
                     if method == "initialize" || method == "server/discover" {
@@ -573,25 +623,33 @@ async fn forward<R: Transport<RoleClient>>(
                             }
                         }
                     } else {
+                        // The server may have changed while it was away: its
+                        // own tool list tells, when the app was given one.
+                        let asked = given_tools.as_ref().map(|_| tools_params.clone().unwrap_or_else(|| serde_json::json!({})));
                         let recovered = async {
-                            reconnect(new_remote()?, initialize.clone(), initialized.clone()).await
+                            reconnect(new_remote()?, initialize.clone(), initialized.clone(), asked.as_ref()).await
                         };
                         match tokio::time::timeout(RECONNECT_TIMEOUT, recovered).await {
-                            Ok(Ok((next, handshake))) => {
+                            Ok(Ok(Reconnected { remote: next, handshake, tools })) => {
                                 remote = next;
                                 disconnected = false;
-                                let version = handshake.as_ref().and_then(|result| result.pointer("/serverInfo/version")).cloned();
+                                let version = handshake.as_ref().and_then(crate::setup::versions::server_version).cloned();
                                 let line = handshake.as_ref().and_then(|result| crate::setup::versions::server_line(crate::setup::versions::running(), endpoint, result));
                                 if line.is_some() && line != version_line {
                                     notices.extend(line.clone());
                                 }
                                 version_line = line;
-                                if let (Some(first), Some(current)) = (&initial_version, &version)
+                                if given_tools.is_some() {
+                                    if let Some(tools) = tools
+                                        && given_tools.as_ref() != Some(&tools)
+                                    {
+                                        given_tools = Some(tools);
+                                        tell_tools_changed(&mut local, &mut sends)?;
+                                    }
+                                } else if let (Some(first), Some(current)) = (&initial_version, &version)
                                     && first != current
                                 {
-                                    let notice: TxJsonRpcMessage<RoleServer> = serde_json::from_value(serde_json::json!({"jsonrpc":"2.0","method":"notifications/tools/list_changed"}))?;
-                                    let send = Transport::<RoleServer>::send(&mut local, notice);
-                                    start_in_order(&mut sends, async move { send.await.context("Cannot send memory server response to client") });
+                                    tell_tools_changed(&mut local, &mut sends)?;
                                 }
                             }
                             failed => {
@@ -621,14 +679,18 @@ async fn forward<R: Transport<RoleClient>>(
                     continue;
                 };
                 let value = serde_json::to_value(&message)?;
-                if initial_version.is_none() && let Some(version) = value.pointer("/result/serverInfo/version") {
+                if initial_version.is_none() && let Some(version) = value.get("result").and_then(crate::setup::versions::server_version) {
                     initial_version = Some(version.clone());
                     version_line = value.get("result").and_then(|result| crate::setup::versions::server_line(crate::setup::versions::running(), endpoint, result));
                 }
                 let mut message = message;
                 if let Some(id) = value.get("id") && (value.get("result").is_some() || value.get("error").is_some()) {
-                    let tool = pending.iter().any(|(request_id, tool)| request_id == id && *tool);
+                    let asked = pending.iter().find(|(request_id, _)| request_id == id).map(|(_, method)| method.clone());
                     pending.retain(|(request_id, _)| request_id != id);
+                    if asked.as_deref() == Some("tools/list") && let Some(tools) = value.pointer("/result/tools") {
+                        given_tools = Some(tools.clone());
+                    }
+                    let tool = asked.as_deref() == Some("tools/call");
                     if tool && !notices.is_empty() && let Some(with) = with_notices(&value, &mut notices) {
                         message = with;
                     }
@@ -715,18 +777,55 @@ impl Failure {
     }
 }
 
+/// The id of the `tools/list` the bridge sends a server it reached again;
+/// its reply never reaches the app.
+const TOOLS_CHECK_ID: &str = "user-memory-bridge-tools";
+
+/// The bridge's own `tools/list`, with the parameters of the app's last one
+/// (a 2026-07-28 request names its version and client in `_meta`), less
+/// its progress token: the reply is the bridge's, so no progress is shown.
+fn tools_check(params: &serde_json::Value) -> Result<TxJsonRpcMessage<RoleClient>> {
+    let mut params = params.clone();
+    if let Some(meta) = params
+        .get_mut("_meta")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        meta.remove("progressToken");
+    }
+    Ok(serde_json::from_value(
+        serde_json::json!({"jsonrpc":"2.0","id":TOOLS_CHECK_ID,"method":"tools/list","params":params}),
+    )?)
+}
+
+/// Tells the app its tools changed. The front carries it to a 2026-07-28
+/// app's listen streams.
+fn tell_tools_changed(
+    local: &mut impl Transport<RoleServer>,
+    sends: &mut tokio::task::JoinSet<Result<()>>,
+) -> Result<()> {
+    let notice: TxJsonRpcMessage<RoleServer> = serde_json::from_value(
+        serde_json::json!({"jsonrpc":"2.0","method":"notifications/tools/list_changed"}),
+    )?;
+    let send = Transport::<RoleServer>::send(local, notice);
+    start_in_order(sends, async move {
+        send.await
+            .context("Cannot send memory server response to client")
+    });
+    Ok(())
+}
+
 /// Answers every call still waiting with `message`.
 fn fail_pending(
     local: &mut impl Transport<RoleServer>,
     sends: &mut tokio::task::JoinSet<Result<()>>,
-    pending: &mut Vec<(serde_json::Value, bool)>,
+    pending: &mut Vec<(serde_json::Value, String)>,
     message: &str,
 ) -> Result<()> {
-    for (id, tool) in pending.drain(..) {
+    for (id, method) in pending.drain(..) {
         // A tool call gets a tool error, which the agent reads. Any other
         // request gets JSON-RPC's internal error: the relay failed it, not
         // the server, which may never have seen it.
-        let response = if tool {
+        let response = if method == "tools/call" {
             serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"isError":true,"content":[{"type":"text","text":message}]}})
         } else {
             serde_json::json!({"jsonrpc":"2.0","id":id,"error":{"code":rmcp::model::ErrorCode::INTERNAL_ERROR.0,"message":message}})

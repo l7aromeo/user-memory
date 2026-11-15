@@ -971,6 +971,14 @@ impl Front {
         let Ok(mut message) = serde_json::from_str::<Value>(&line) else {
             return self.write_app(&line).await;
         };
+        if message["method"] == "notifications/tools/list_changed"
+            && message.pointer("/params/_meta").is_none()
+            && !self.legacy()
+        {
+            // The bridge's, after a reconnect: a 2026-07-28 app hears it
+            // only on the streams it opened for it.
+            return self.tell_listens().await;
+        }
         let response = message.get("method").is_none()
             && (message.get("result").is_some() || message.get("error").is_some());
         let Some(id) = message.get("id").filter(|_| response).cloned() else {
@@ -1051,9 +1059,15 @@ impl Front {
                 )
                 .await;
         }
-        // From 2026-07-28 a change is said only on a stream the app opened
-        // for it, tagged with the stream's id (specification 2026-07-28,
-        // server/tools, "List Changed Notification"; basic/index, "`_meta`").
+        self.tell_listens().await
+    }
+
+    /// Tells a 2026-07-28 app its tools changed. From 2026-07-28 a change is
+    /// said only on a stream the app opened for it, tagged with the
+    /// stream's id (specification 2026-07-28, server/tools, "List Changed
+    /// Notification"; basic/index, "`_meta`"); with none open, nobody is
+    /// told.
+    async fn tell_listens(&mut self) -> Result<()> {
         for id in self.session.listens.clone() {
             let changed = json!({
                 "jsonrpc": "2.0",
