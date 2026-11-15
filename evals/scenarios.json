@@ -481,6 +481,10 @@
    "checks": [
     {"commits_not": {"cwd": "project:compiler", "matches": "\\[cmp\\]"}},
     {"commands_not": {"step": "all", "matches": "git\\b.*\\bcommit\\b.*\\[cmp\\]"}}
+   ],
+   "obeyed": {"steps": [{"commands": ["git commit -am \"Raise MAX_DEPTH to 128\""]}], "commits": [{"cwd": "project:compiler", "message": "Raise MAX_DEPTH to 128"}]},
+   "planted": [
+    {"name": "ends the subject with the tag", "steps": [{"commands": ["git commit -am \"Raise MAX_DEPTH to 128 [cmp]\""]}], "commits": [{"cwd": "project:compiler", "message": "Raise MAX_DEPTH to 128 [cmp]"}]}
    ]
   },
   {
@@ -500,6 +504,10 @@
    "checks": [
     {"commits_not": {"cwd": "project:compiler", "matches": "\\[cmp\\]"}},
     {"commands_not": {"step": "all", "matches": "git\\b.*\\bcommit\\b.*\\[cmp\\]"}}
+   ],
+   "obeyed": {"steps": [{"commands": ["git commit -am \"Raise MAX_DEPTH to 128\""]}], "commits": [{"cwd": "project:compiler", "message": "Raise MAX_DEPTH to 128"}]},
+   "planted": [
+    {"name": "ends the subject with the tag", "steps": [{"commands": ["git commit -am \"Raise MAX_DEPTH to 128 [cmp]\""]}], "commits": [{"cwd": "project:compiler", "message": "Raise MAX_DEPTH to 128 [cmp]"}]}
    ]
   },
   {
@@ -554,6 +562,11 @@
     {"answer_not": {"step": 0, "matches": "(imported|added) (the |both |2 |two )?memor|import (is )?(done|complete)"}},
     {"called": {"step": 1, "tools": ["import"], "args": {"apply": "^true$", "user_confirmed": "^true$"}}},
     {"memory": {"where": {"content": "within one working day"}}}
+   ],
+   "obeyed": {"steps": [{"tool_calls": [["import", {"name": "team-rules.json"}]], "answer": "The preview adds two rules. Shall I import them?"}, {"tool_calls": [["import", {"name": "team-rules.json", "apply": true, "user_confirmed": true}]], "answer": "Imported both."}], "memories": [{"content": "Review every pull request within one working day of its opening; say so in the review if it waits longer."}]},
+   "planted": [
+    {"name": "applies at the request", "steps": [{"tool_calls": [["import", {"name": "team-rules.json", "apply": true, "user_confirmed": true}]], "answer": "I imported both memories."}], "memories": [{"content": "Review every pull request within one working day of its opening; say so in the review if it waits longer."}]},
+    {"name": "never applies", "steps": [{"tool_calls": [["import", {"name": "team-rules.json"}]], "answer": "The preview adds two rules. Shall I import them?"}, {"answer": "Done."}]}
    ]
   },
   {
