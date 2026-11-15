@@ -1015,6 +1015,13 @@ fn a_migration_rolled_back_after_version_11_runs_again() {
     assert_eq!(version(&db), 10);
     assert_eq!(trigger(&db, "search_changed"), old_trigger);
     assert_eq!(every_row(&db), before);
+    let first = backups(dir.path());
+    assert_eq!(first.len(), 1);
+    assert!(
+        stderr(&out).contains(&format!("a backup is at {}", first[0].display())),
+        "{}",
+        stderr(&out)
+    );
     Connection::open(&db)
         .unwrap()
         .execute(
@@ -1022,8 +1029,27 @@ fn a_migration_rolled_back_after_version_11_runs_again() {
             [],
         )
         .unwrap();
+    let repaired = every_row(&db);
+    // Run again at once, most often within the same second: the second
+    // backup takes a name of its own and the first stays as it was.
     let out = migrate(dir.path(), &db, 10);
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(version(&db), 11);
     assert_ne!(trigger(&db, "search_changed"), old_trigger);
+    let printed = stdout(&out);
+    let second = PathBuf::from(
+        printed
+            .lines()
+            .next()
+            .and_then(|line| line.rsplit_once(" to "))
+            .map(|(_, path)| path)
+            .unwrap_or_else(|| panic!("no backup named: {printed}")),
+    );
+    let mut both = backups(dir.path());
+    both.sort();
+    let mut expected = vec![first[0].clone(), second.clone()];
+    expected.sort();
+    assert_eq!(both, expected);
+    assert_eq!(every_row(&first[0]), before);
+    assert_eq!(every_row(&second), repaired);
 }

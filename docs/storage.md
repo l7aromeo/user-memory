@@ -163,7 +163,9 @@ version changes the schema, the installer, `user-memory migrate` or a
 checkout's `./setup` ([run from a checkout](dev/development.md#run-from-a-checkout)):
 
 1. copies the store to `<store>.v<OLD>-<UTC time>.bak` beside it (mode 0600,
-   never replacing a file) and prints the path;
+   never replacing a file) and prints the path. A second backup in the same
+   second, such as a migration run again after one rolled back, ends in
+   `-2.bak`, the next `-3.bak`;
 2. applies every pending migration step in one transaction; if any step fails,
    nothing changes and the backup stays.
 
@@ -246,7 +248,8 @@ and, when it finds problems:
 
 1. copies the store page by page, damage included, to
    `<store>.repair-<UTC time>.bak` beside it (mode 0600, never replacing a
-   file), and checks that the copy holds every memory;
+   file; `-2.bak` for a second in the same second, as for a migration), and
+   checks that the copy holds every memory;
 2. under the same write lock, clears a `memory_writer` row left behind,
    rebuilds every index from the memories (`REINDEX`) and the keyword index
    from the memories' text (before schema version 6, FTS5 `rebuild`);

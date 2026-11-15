@@ -4,7 +4,7 @@
 use super::checked_key;
 use crate::memory::{
     connect,
-    migrate::{backup_path, memory_rows, write_backup},
+    migrate::{beside, memory_rows, write_backup},
     problems,
 };
 use anyhow::{Context, Result, bail};
@@ -100,8 +100,7 @@ pub fn move_project(db: &Path, old: &str, new: &str) -> Result<Moved> {
     let already = count(PROJECT_MEMORIES, &new)?;
     let stamp: String =
         tx.query_row("SELECT strftime('%Y%m%dT%H%M%SZ','now')", [], |r| r.get(0))?;
-    let backup = backup_path(db, "move", &stamp)?;
-    write_backup(db, &backup, "moved", memory_rows(&tx)?)?;
+    let backup = write_backup(db, &stamp, beside(db, "move")?, "moved", memory_rows(&tx)?)?;
     let moved = (|| -> Result<(usize, usize)> {
         // Patterns first: when a supporting memory then arrives under the
         // new key, the patterns citing it are already there, so the store

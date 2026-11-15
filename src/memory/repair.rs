@@ -4,7 +4,7 @@
 //! `memory_writer` is cleared; every index is rebuilt from them.
 
 use super::{
-    migrate::{BASELINE, backup_path, memory_rows, write_backup},
+    migrate::{BASELINE, beside, memory_rows, write_backup},
     schema::{self, Found, SCHEMA_VERSION},
 };
 use anyhow::{Context, Result, bail};
@@ -100,8 +100,7 @@ pub fn repair(db: &Path) -> Result<Repair> {
     let before = memory_rows(&tx)?;
     let stamp: String =
         tx.query_row("SELECT strftime('%Y%m%dT%H%M%SZ','now')", [], |r| r.get(0))?;
-    let backup = backup_path(db, "repair", &stamp)?;
-    write_backup(db, &backup, "repaired", before)?;
+    let backup = write_backup(db, &stamp, beside(db, "repair")?, "repaired", before)?;
     let kept = || {
         format!(
             "the backup {} holds the store as it was before the repair",
