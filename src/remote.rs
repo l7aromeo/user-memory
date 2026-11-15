@@ -666,6 +666,9 @@ async fn forward<R: Transport<RoleClient>>(
     let mut reached = false;
     let mut held: Vec<RxJsonRpcMessage<RoleServer>> = Vec::new();
     let mut first_answer: Option<tokio::time::Instant> = None;
+    // The app's `tools/list` requests for a later page: their replies are
+    // not the whole list.
+    let mut pages: Vec<serde_json::Value> = Vec::new();
     let mut stand_in: Option<StandIn> = None;
     // The requests the stand-in has not answered, with their methods; never
     // in `pending`, so a failed call leaves them be.
@@ -686,6 +689,9 @@ async fn forward<R: Transport<RoleClient>>(
                     initialized = Some(message.clone());
                 } else if method == "tools/list" {
                     tools_params = value.get("params").cloned();
+                    if value.pointer("/params/cursor").is_some() && let Some(id) = value.get("id") {
+                        pages.push(id.clone());
+                    }
                 }
                 if let Some(id) = value.get("id") && value.get("method").is_some() {
                     pending.push((id.clone(), method.to_owned()));
@@ -802,7 +808,8 @@ async fn forward<R: Transport<RoleClient>>(
                 if let Some(id) = value.get("id") && (value.get("result").is_some() || value.get("error").is_some()) {
                     let asked = pending.iter().find(|(request_id, _)| request_id == id).map(|(_, method)| method.clone());
                     pending.retain(|(request_id, _)| request_id != id);
-                    if asked.as_deref() == Some("tools/list") && let Some(tools) = value.pointer("/result/tools") {
+                    let page = pages.iter().position(|request| request == id).map(|at| pages.swap_remove(at)).is_some();
+                    if asked.as_deref() == Some("tools/list") && !page && let Some(tools) = value.pointer("/result/tools") {
                         given_tools = Some(tools.clone());
                     }
                     let tool = asked.as_deref() == Some("tools/call");
@@ -982,9 +989,14 @@ const TOOLS_CHECK_ID: &str = "user-memory-bridge-tools";
 
 /// The bridge's own `tools/list`, with the parameters of the app's last one
 /// (a 2026-07-28 request names its version and client in `_meta`), less
-/// its progress token: the reply is the bridge's, so no progress is shown.
+/// its cursor, so the reply is the whole list, and its progress token: the
+/// reply is the bridge's, so no progress is shown.
 fn tools_check(params: &serde_json::Value) -> Result<TxJsonRpcMessage<RoleClient>> {
     let mut params = params.clone();
+    // The whole list, not the page the app last asked for.
+    if let Some(fields) = params.as_object_mut() {
+        fields.remove("cursor");
+    }
     if let Some(meta) = params
         .get_mut("_meta")
         .and_then(serde_json::Value::as_object_mut)
@@ -1042,6 +1054,23 @@ fn fail_pending(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bridge asks for the whole tool list with the app's `_meta`,
+    /// whatever page the app last asked for, and reports no progress.
+    #[test]
+    fn the_tools_check_asks_for_the_whole_list() {
+        let params = serde_json::json!({
+            "cursor": "page-2",
+            "_meta": {"progressToken": 7, "io.modelcontextprotocol/protocolVersion": "2026-07-28"}
+        });
+        let asked = serde_json::to_value(tools_check(&params).unwrap()).unwrap();
+        assert_eq!(
+            asked,
+            serde_json::json!({"jsonrpc": "2.0", "id": TOOLS_CHECK_ID, "method": "tools/list", "params": {
+                "_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28"}
+            }})
+        );
+    }
 
     /// The CLI and the hooks get the server's own words for a failed call.
     #[test]
