@@ -7,7 +7,9 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import re
+import subprocess
 import tempfile
 import threading
 import time
@@ -1091,10 +1093,52 @@ class Planted(unittest.TestCase):
         finally:
             run.prepare, run.rehearsal_notes, run.stop_servers = originals
 
+    def test_a_transcript_can_commit_and_hold_memories_for_its_grading(self):
+        repo = self.trial / "x"
+        repo.mkdir()
+        env = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null"}
+        git = lambda *a: subprocess.run(  # noqa: E731
+            ["git", "-c", "user.name=T", "-c", "user.email=t@example.invalid", *a],
+            cwd=repo, env=env, check=True, capture_output=True, text=True).stdout.strip()
+        git("init", "-q", "-b", "main")
+        git("commit", "-q", "--allow-empty", "-m", "Start")
+        head = git("rev-parse", "HEAD")
+        self.sandbox.workdir = lambda spec, projects: repo
+        self.sandbox.commit_messages = lambda path: run.Sandbox.commit_messages(
+            types.SimpleNamespace(env={}), path)
+        scenario = {"name": "s", "sessions": [{"prompt": "commit it"}], "checks": [
+            {"commits_not": {"cwd": "project:x", "matches": "\\[cmp\\]"}},
+            {"memory": {"where": {"content": "one working day"}}},
+        ]}
+        tagged = {"commits": [{"cwd": "project:x", "message": "Raise it [cmp]"}]}
+        held = {"memories": [{"content": "Review within one working day"}]}
+        grades = run.planted_grades(scenario, tagged, scenario["checks"], self.sandbox, [])
+        self.assertEqual([ok for ok, _ in grades], [False, False])
+        grades = run.planted_grades(scenario, held, scenario["checks"], self.sandbox, [])
+        self.assertEqual([ok for ok, _ in grades], [True, True])
+        self.assertEqual(git("rev-parse", "HEAD"), head, "the branch is put back")
+        self.assertEqual(git("log", "--format=%s"), "Start")
+
     def test_a_planted_transcript_longer_than_the_scenario_is_refused(self):
         scenario = self.scenario(planted=[{"steps": [{}, {}]}])
         with self.assertRaises(ValueError):
             run.planted_notes(scenario, "claude", self.sandbox)
+
+
+class Batch(unittest.TestCase):
+    """What a batch runs, and in which order."""
+
+    def test_repeat_overrides_every_scenario_s_own(self):
+        scenario = {"name": "s", "repeat": 2}
+        self.assertEqual(len(run.runs_of(scenario, ["claude", "codex"])), 4)
+        self.assertEqual(len(run.runs_of(scenario, ["codex"], 5)), 5)
+        self.assertEqual(len(run.runs_of({"name": "t", "clients": ["claude"]}, ["codex"], 5)), 0)
+
+    def test_builds_take_turns_run_by_run(self):
+        order = run.batch_order([{"name": "s", "repeat": 2}], ["codex"],
+                                [{"label": "main"}, {"label": "a"}])
+        self.assertEqual([(run_[1], b["label"]) for _, run_, b in order],
+                         [(0, "main"), (0, "a"), (1, "main"), (1, "a")])
 
 
 class Rehearsal(unittest.TestCase):
