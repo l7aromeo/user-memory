@@ -82,7 +82,9 @@ user-memory record --type constraint --category programming --scope project --pr
 When similar memories exist, nothing is stored and the reply lists them. Run
 `record` again with one of:
 
-- `--confirms ID`: you said the same thing again;
+- `--confirms ID`: you said the same thing again; with `--source observed`,
+  an agent saw the same observation again in another conversation, and it
+  stays an observation;
 - `--supersedes ID` (repeatable): you changed your mind;
 - `--distinct-from ID` (repeatable, every listed one): they are different.
 
@@ -146,7 +148,8 @@ user-memory forget --import "shared.json@2026-11-15T10:42:07Z.e0e0e0e0"
 The first deletes one memory, by its full id or the 8 characters the index shows. The second deletes every memory
 one conversation recorded, and the projects it linked, reported as
 `unlinked`. A memory that another conversation also stated is kept and
-listed as `kept`. When it deletes memories, it first copies the store
+listed as `kept`, without what this conversation saw when it confirmed an
+observation. When it deletes memories, it first copies the store
 beside the [automatic backups](backup.md#automatic-backups) and names the
 copy as `backup`; on a large store that takes a few seconds, and if the
 copy can't be written, nothing is forgotten. The third undoes an import,

@@ -122,7 +122,17 @@ three of them and the agent records again with exactly one of:
 
 - `confirms: <id>` — the user said it again: the existing explicit memory gains
   this conversation (`origins`, `confirmations`, `last_confirmed_at`) instead
-  of a copy;
+  of a copy. A record with source `observed` confirms an observation the same
+  way: the agent saw it again in another conversation. The memory gains the
+  conversation, stays an observation (only the user's word makes it a rule)
+  and keeps its own `evidence` as first recorded: what the record saw goes
+  on that confirmation in the memory's history, as `observations`, one entry
+  per conversation, its latest. `read` shows the newest two with the memory
+  and counts the rest in `observations_more`; `read` with `history: true`
+  shows them all. So a sighting changes nothing an agent acts on, and no
+  other session hears of it, as none hears of the user's restatement. An
+  inference never confirms: ``Only an explicit or observed record can
+  confirm a memory``;
 - `supersedes: [<id>…]` — the user changed their mind: the old memories become
   superseded and the new one keeps only this conversation. With `merge: true`
   and two or more memories it consolidates duplicates the user approved
@@ -136,7 +146,8 @@ Details:
   conversation, when the memory has none) is a harmless no-op, so retries are
   safe.
 - Observations from different conversations are never duplicates: they are
-  independent evidence.
+  independent evidence. An agent that finds the same observation again may
+  still confirm it, so one memory counts the conversations that saw it.
 - A narrower project exception next to a general preference ("use Go in this
   repository" next to "prefer Rust") is usually recorded directly; similarity
   cannot tell it from related memories, and review lists such pairs as
@@ -196,6 +207,7 @@ on the command line) returns them, oldest first:
 | `imported` | For an event an import brought in: when that import ran, in the same form as `at`. Imported events are kept as the file had them; nothing reads them as this store's own. |
 | `import` | On the `import` event of a memory an import added or replaced: that import's name, as its summary gave it. |
 | `import_origins` | On that same event: the conversations the import brought to the memory, which [undoing it](#undoing-an-import) checks. |
+| `observations` | On a `confirm` event: what each observed record that confirmed the memory saw, as `origin` and `evidence`, one entry per conversation. Forgetting a conversation removes its entry. |
 | `undoes` | For an event an [undo of an import](#undoing-an-import) wrote: that import's name. |
 
 - Undo a wrong correction by `update` with the values in `before`.
@@ -212,7 +224,9 @@ on the command line) returns them, oldest first:
 - Events older than a year are dropped when an automatic backup is made,
   before the copy ([automatic backups](backup.md#automatic-backups)).
   History is for undoing recent mistakes: after a year, a rule edited once
-  no longer holds the wording it replaced. There is no limit per memory.
+  no longer holds the wording it replaced, and an observation keeps only the
+  sightings of the last year beside its own evidence and its count of
+  conversations. There is no limit per memory.
 - Exports carry the exported memories' events in a `history` section. An
   import adds them marked as `imported`, skips an event the store already
   holds or one it could not have written, and reports how many under

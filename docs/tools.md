@@ -46,6 +46,10 @@ apply it unasked; you may mention it or ask the user, and only their word
 makes it a rule.`` `review` and the `similar` list of a refused `record` carry
 it too. The note is not stored, so exports leave it out.
 
+`read` gives an observed memory seen again in other conversations its
+newest two sightings as `observations` (each an `origin` and its
+`evidence`), and how many more `history` lists as `observations_more`.
+
 `index` and `link` also accept fields that only user-memory's own client
 sends, for its session hooks and instruction files (`stamps`, `instructions`,
 `folder_projects` and the like). The tools' published schemas leave them out,

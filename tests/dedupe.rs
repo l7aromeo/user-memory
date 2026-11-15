@@ -247,7 +247,7 @@ fn a_restatement_is_held_back_then_recorded_as_a_confirmation() {
     );
     assert_eq!(
         out["resolve"],
-        "confirms: an explicit memory said again; supersedes: the user changed their mind; distinct_from: genuinely different; to make a listed observation the user's own, update it with user_confirmed."
+        "confirms: an explicit memory said again, or an observation seen again in another conversation, which stays an observation; supersedes: the user changed their mind; distinct_from: genuinely different; to make a listed observation the user's own, update it with user_confirmed."
     );
     let confirmed = s.record(&[
         "--content",
@@ -259,7 +259,7 @@ fn a_restatement_is_held_back_then_recorded_as_a_confirmation() {
     ]);
     assert_eq!(
         confirmed,
-        json!({"stored":true,"id":rust,"confirmed":true,"confirmations":2})
+        json!({"stored":true,"id":rust,"confirmed":true,"confirmations":2,"status":"confirmed"})
     );
     let memory = s.memory(&rust);
     assert_eq!(memory["origins"], json!(["chat/x", "chat/y"]));
@@ -322,7 +322,7 @@ fn confirmations_need_an_explicit_statement_about_an_active_explicit_memory_in_p
         .as_str()
         .unwrap()
         .to_owned();
-    let refusal = "confirms must name an active explicit memory with the same scope and project; to make an observation the user's own statement, call update on it with user_confirmed";
+    let refusal = REFUSAL;
     for (target, extra) in [
         (local.as_str(), &[][..]),
         (habit.as_str(), &[][..]),
@@ -352,8 +352,8 @@ fn confirmations_need_an_explicit_statement_about_an_active_explicit_memory_in_p
         &rust,
     ]);
     assert_eq!(
-        observed["reason"],
-        "Only the user's explicit statement can confirm a memory"
+        observed["reason"], REFUSAL,
+        "an observation never confirms the user's word"
     );
     let newer = s.stored(&["--content", "Prefer Zig", "--supersedes", &rust]);
     assert_eq!(
@@ -371,6 +371,409 @@ fn confirmations_need_an_explicit_statement_about_an_active_explicit_memory_in_p
         ])["reason"],
         "Give at most one of confirms, supersedes or distinct_from"
     );
+}
+
+/// Why a `confirms` names a memory it cannot confirm.
+const REFUSAL: &str = "confirms must name an active explicit memory, or an observed memory when the record is observed, with the same scope and project; to make an observation the user's own statement, call update on it with user_confirmed";
+
+impl Store {
+    fn text(&self, sql: &str, id: &str) -> String {
+        rusqlite::Connection::open(&self.db)
+            .unwrap()
+            .query_row(sql, [id], |r| r.get(0))
+            .unwrap()
+    }
+    fn observed(&self, extra: &[&str]) -> Value {
+        let mut args = vec![
+            "record",
+            "--type",
+            "lesson",
+            "--category",
+            "tooling",
+            "--source",
+            "observed",
+        ];
+        args.extend_from_slice(extra);
+        self.value(&args)
+    }
+}
+
+impl Store {
+    fn read(&self, id: &str) -> Value {
+        self.value(&["read", id])["memories"][0].clone()
+    }
+    fn events(&self, id: &str) -> Vec<Value> {
+        self.value(&["history", id])["memories"][0]["history"]
+            .as_array()
+            .unwrap()
+            .clone()
+    }
+    /// What another session hears of: the store's latest change.
+    fn last_change(&self) -> i64 {
+        self.count("SELECT last_change FROM store_changes WHERE id=1")
+    }
+    fn seen_again(&self, id: &str, origin: &str, evidence: &str) -> Value {
+        self.observed(&[
+            "--content",
+            "Run the tests before every commit",
+            "--evidence",
+            evidence,
+            "--origin",
+            origin,
+            "--confirms",
+            id,
+        ])
+    }
+    fn first_sighting(&self) -> String {
+        self.observed(&[
+            "--content",
+            "Run the tests before every commit",
+            "--evidence",
+            "A commit made without running the tests broke the build",
+            "--origin",
+            "chat/a",
+        ])["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+}
+
+fn sighting(origin: &str, evidence: &str) -> Value {
+    json!({"origin": origin, "evidence": evidence})
+}
+
+// An agent meets the same trap in a second conversation: the memory gains
+// that conversation, keeps what it saw with the confirmation, and stays an
+// observation whose own evidence is the first sighting's.
+#[test]
+fn an_observation_seen_again_confirms_the_observed_memory_and_stays_one() {
+    let s = Store::new();
+    let id = s.first_sighting();
+    assert_eq!(
+        s.seen_again(
+            &id,
+            "chat/b",
+            "A second commit without the tests broke the build again"
+        ),
+        json!({"stored":true,"id":id,"confirmed":true,"confirmations":2,"status":"tentative"})
+    );
+    let memory = s.read(&id);
+    assert_eq!(memory["origins"], json!(["chat/a", "chat/b"]));
+    assert_eq!(
+        (&memory["status"], &memory["source"]),
+        (&json!("tentative"), &json!("observed"))
+    );
+    assert_eq!(
+        memory["evidence"],
+        "A commit made without running the tests broke the build"
+    );
+    assert_eq!(
+        memory["observations"],
+        json!([sighting(
+            "chat/b",
+            "A second commit without the tests broke the build again"
+        )])
+    );
+    assert_eq!(s.count("SELECT COUNT(*) FROM memories"), 1, "no copy");
+    let last = s.events(&id).last().unwrap().clone();
+    assert_eq!(last["op"], "confirm");
+    assert_eq!(last["observations"], memory["observations"]);
+    assert_eq!(
+        last.get("before"),
+        None,
+        "an observation is no value it replaced"
+    );
+    // A conversation keeps its latest sighting only; the same one again adds nothing.
+    s.seen_again(
+        &id,
+        "chat/b",
+        "A release commit without the tests failed its checks",
+    );
+    assert_eq!(
+        s.seen_again(
+            &id,
+            "chat/b",
+            "A release commit without the tests failed its checks"
+        )["confirmations"],
+        2
+    );
+    assert_eq!(
+        s.read(&id)["observations"],
+        json!([sighting(
+            "chat/b",
+            "A release commit without the tests failed its checks"
+        )])
+    );
+    // A read shows the newest two and counts the rest; history shows all.
+    s.seen_again(&id, "chat/c", "Seen in a third chat");
+    s.seen_again(&id, "chat/d", &"d".repeat(2_000));
+    let memory = s.read(&id);
+    assert_eq!(
+        memory["observations"],
+        json!([
+            sighting("chat/d", &"d".repeat(2_000)),
+            sighting("chat/c", "Seen in a third chat")
+        ])
+    );
+    assert_eq!(memory["observations_more"], 1);
+    let all: Vec<Value> = s
+        .events(&id)
+        .iter()
+        .filter_map(|e| e["observations"].as_array().cloned())
+        .flatten()
+        .collect();
+    assert_eq!(all.len(), 3, "{all:?}");
+    assert_eq!(memory["confirmations"], 4);
+    // Made the user's own, it reads as their rule; its sightings stay in
+    // its history.
+    s.value(&[
+        "update",
+        &id,
+        "--content",
+        "Run the tests before every commit, even a small one",
+    ]);
+    let rule = s.read(&id);
+    assert_eq!(rule["source"], "explicit");
+    assert!(rule.get("observations").is_none(), "{rule}");
+    assert_eq!(
+        s.events(&id)
+            .iter()
+            .filter_map(|e| e["observations"].as_array())
+            .flatten()
+            .count(),
+        3
+    );
+    // An explicit memory's confirmation says its status too: one reply shape.
+    let rule = s.stored(&["--content", "Indent with tabs", "--origin", "chat/a"]);
+    assert_eq!(
+        s.record(&[
+            "--content",
+            "Indent with tabs",
+            "--origin",
+            "chat/b",
+            "--confirms",
+            &rule
+        ]),
+        json!({"stored":true,"id":rule,"confirmed":true,"confirmations":2,"status":"confirmed"})
+    );
+}
+
+// A sighting changes nothing an agent acts on: no session hears of it, as
+// none hears of the user's restatement.
+#[test]
+fn an_observation_seen_again_is_news_to_no_session() {
+    let s = Store::new();
+    let id = s.first_sighting();
+    // The fields the store's counter and the sessions' digests read.
+    let counted = "SELECT json_array(memory_type,category,context,title,content,reason,scope,project,source,status,evidence,evidence_ids,superseded_by) FROM memories WHERE id=?1";
+    let (change, fields) = (s.last_change(), s.text(counted, &id));
+    let before = s.count("SELECT COUNT(*) FROM memory_changes");
+    s.seen_again(
+        &id,
+        "chat/b",
+        "A second commit without the tests broke the build again",
+    );
+    assert_eq!(s.last_change(), change, "the store's counter moved");
+    assert_eq!(s.count("SELECT COUNT(*) FROM memory_changes"), before);
+    assert_eq!(s.text(counted, &id), fields, "a counted field changed");
+}
+
+// Forgetting a conversation takes what it saw too, from a confirmation the
+// trigger merged with the others' and from the store's file.
+#[test]
+fn forgetting_a_conversation_removes_its_observation_from_merged_confirmations() {
+    let s = Store::new();
+    let id = s.first_sighting();
+    for (origin, evidence) in [
+        ("chat/b", "Seen by b"),
+        ("chat/c", "zq7sighting by c"),
+        ("chat/d", "Seen by d"),
+    ] {
+        s.seen_again(&id, origin, evidence);
+    }
+    let confirms: Vec<Value> = s
+        .events(&id)
+        .into_iter()
+        .filter(|e| e["op"] == "confirm")
+        .collect();
+    assert_eq!(confirms.len(), 1, "merged: {confirms:?}");
+    assert_eq!(
+        confirms[0]["observations"],
+        json!([
+            sighting("chat/b", "Seen by b"),
+            sighting("chat/c", "zq7sighting by c"),
+            sighting("chat/d", "Seen by d")
+        ])
+    );
+    s.value(&["forget", "--origin", "chat/c"]);
+    let memory = s.read(&id);
+    assert_eq!(memory["origins"], json!(["chat/a", "chat/b", "chat/d"]));
+    assert_eq!(
+        memory["observations"],
+        json!([
+            sighting("chat/d", "Seen by d"),
+            sighting("chat/b", "Seen by b")
+        ])
+    );
+    assert_eq!(
+        s.count("SELECT COUNT(*) FROM memory_events WHERE instr(coalesce(before,'')||origin,'chat/c') OR instr(coalesce(before,''),'zq7sighting')"),
+        0
+    );
+    let bytes = std::fs::read(&s.db).unwrap();
+    assert!(
+        !bytes.windows(11).any(|w| w == b"zq7sighting"),
+        "the forgotten sighting is still in the store's file"
+    );
+}
+
+// What each conversation saw travels with an export, and an import into
+// another store shows it under the memory again.
+#[test]
+fn observations_travel_with_an_export() {
+    let s = Store::new();
+    let id = s.first_sighting();
+    s.seen_again(
+        &id,
+        "chat/b",
+        "A second commit without the tests broke the build again",
+    );
+    let file = s.home.join("export.json");
+    s.value(&["export", file.to_str().unwrap()]);
+    let other = Store::new();
+    other.value(&["import", file.to_str().unwrap(), "--apply"]);
+    assert_eq!(
+        other.read(&id)["observations"],
+        json!([sighting(
+            "chat/b",
+            "A second commit without the tests broke the build again"
+        )])
+    );
+}
+
+// Two conversations confirming at once both keep what they saw.
+#[test]
+fn two_sightings_at_once_are_both_kept() {
+    let s = Store::new();
+    let id = s.first_sighting();
+    let children: Vec<_> = ["chat/b", "chat/c"]
+        .iter()
+        .map(|origin| {
+            s.command(&[
+                "record",
+                "--type",
+                "lesson",
+                "--category",
+                "tooling",
+                "--source",
+                "observed",
+                "--content",
+                "Run the tests before every commit",
+                "--evidence",
+                &format!("Seen by {origin}"),
+                "--origin",
+                origin,
+                "--confirms",
+                &id,
+            ])
+            .spawn()
+            .unwrap()
+        })
+        .collect();
+    for mut child in children {
+        assert!(child.wait().unwrap().success());
+    }
+    let memory = s.read(&id);
+    assert_eq!(memory["confirmations"], 3);
+    let mut origins: Vec<&str> = memory["observations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["origin"].as_str().unwrap())
+        .collect();
+    origins.sort_unstable();
+    assert_eq!(origins, ["chat/b", "chat/c"]);
+}
+
+// Only an observation confirms an observation, in its own scope; an
+// inference never confirms, and the user's word goes through update.
+#[test]
+fn an_observation_confirms_only_an_observation_in_place() {
+    let s = Store::new();
+    let observed = s.observed(&[
+        "--content",
+        "Run the tests before every commit",
+        "--evidence",
+        "Seen in review",
+    ])["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let explicit = s.stored(&["--content", "Indent with tabs"]);
+    let local = s.observed(&[
+        "--content",
+        "Use the staging branch",
+        "--evidence",
+        "Seen",
+        "--scope",
+        "project",
+        "--project",
+        "repo",
+    ])["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for (target, record) in [
+        (
+            explicit.as_str(),
+            vec!["--source", "observed", "--evidence", "Saw it"],
+        ),
+        (
+            local.as_str(),
+            vec!["--source", "observed", "--evidence", "Saw it"],
+        ),
+        (observed.as_str(), vec![]),
+    ] {
+        let mut args = vec![
+            "--content",
+            "Run the tests before every commit",
+            "--confirms",
+            target,
+        ];
+        args.extend(record);
+        assert_eq!(s.record(&args)["reason"], REFUSAL, "{target}");
+    }
+    let other = s.observed(&[
+        "--content",
+        "Answer in short paragraphs",
+        "--evidence",
+        "Seen",
+    ])["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let inferred = s.value(&[
+        "record",
+        "--type",
+        "pattern",
+        "--category",
+        "tooling",
+        "--content",
+        "Runs the tests often",
+        "--source",
+        "inferred",
+        "--evidence-id",
+        &observed,
+        "--evidence-id",
+        &other,
+        "--confirms",
+        &observed,
+    ]);
+    assert_eq!(
+        inferred["reason"],
+        "Only an explicit or observed record can confirm a memory"
+    );
+    assert_eq!(s.memory(&observed)["confirmations"], 0);
 }
 
 // A changed mind replaces the old memory; only the new conversation stated it.
