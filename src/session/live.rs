@@ -142,16 +142,67 @@ pub(super) fn load(path: &Path) -> Option<Snapshot> {
     serde_json::from_slice(&fs::read(path).ok()?).ok()
 }
 
-/// Saves `snapshot` at `path` (folders and file private, replaced whole),
-/// then removes the snapshots of sessions over [`SNAPSHOT_AGE`] ago.
-pub(super) fn save(path: &Path, snapshot: &Snapshot) -> io::Result<()> {
+/// Age past which a temporary snapshot file is left over from a save its
+/// hook's time limit cut off: a save takes milliseconds.
+const LEFTOVER_AGE: Duration = Duration::from_secs(60);
+/// The end of a temporary snapshot file's name.
+const TEMPORARY: &str = ".partial";
+
+/// Whether a save may still replace the session's snapshot. A hook past its
+/// time limit abandons the save, and the snapshot stays what the session was
+/// last told about; a save that has replaced it can no longer be abandoned,
+/// so the hook then tells what it saved. Without this, a save finishing as
+/// the limit passes would record changes the session never heard of.
+#[derive(Default)]
+pub(super) struct Landing(std::sync::Mutex<Option<bool>>);
+
+impl Landing {
+    /// Runs `land` unless the save was abandoned, and records that it landed.
+    fn land(&self, land: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
+        let mut landed = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *landed == Some(false) {
+            return Err(io::ErrorKind::Interrupted.into());
+        }
+        land()?;
+        *landed = Some(true);
+        Ok(())
+    }
+
+    /// Abandons the save unless it already landed, and says whether it did.
+    pub(super) fn abandon(&self) -> bool {
+        let mut landed = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *landed != Some(true) {
+            *landed = Some(false);
+        }
+        *landed == Some(true)
+    }
+}
+
+/// Writes `snapshot` to `out` in one write: encoded whole first, since a
+/// snapshot holds a stamp for every memory the session sees (822 KB at
+/// 10,000 memories), and encoding straight into a file made a system call of
+/// each small piece.
+fn write_whole(mut out: impl io::Write, snapshot: &Snapshot) -> io::Result<()> {
+    out.write_all(&serde_json::to_vec(snapshot)?)
+}
+
+/// Saves `snapshot` at `path` (folders and file private, replaced whole)
+/// unless `landing` is abandoned first, then removes the snapshots of
+/// sessions over [`SNAPSHOT_AGE`] ago and leftover temporary files.
+pub(super) fn save(path: &Path, snapshot: &Snapshot, landing: &Landing) -> io::Result<()> {
     let dir = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
     private::create_dir(dir)?;
     let name = path
         .file_name()
         .ok_or(io::ErrorKind::InvalidInput)?
         .to_string_lossy();
-    let temporary = dir.join(format!(".{name}.{}", std::process::id()));
+    let temporary = dir.join(format!(".{name}.{}{TEMPORARY}", std::process::id()));
     let written = (|| {
         let file = private::create_file(
             fs::OpenOptions::new()
@@ -160,8 +211,10 @@ pub(super) fn save(path: &Path, snapshot: &Snapshot) -> io::Result<()> {
                 .truncate(true),
             &temporary,
         )?;
-        serde_json::to_writer(file, snapshot)?;
-        fs::rename(&temporary, path)
+        write_whole(file, snapshot)?;
+        #[cfg(debug_assertions)]
+        hold_for_tests(HOLD_SNAPSHOT);
+        landing.land(|| fs::rename(&temporary, path))
     })();
     if written.is_err() {
         let _ = fs::remove_file(&temporary);
@@ -171,21 +224,54 @@ pub(super) fn save(path: &Path, snapshot: &Snapshot) -> io::Result<()> {
     Ok(())
 }
 
+/// Names, in debug builds only, the file that holds a save before it
+/// replaces the snapshot ([`hold_for_tests`]).
+#[cfg(debug_assertions)]
+const HOLD_SNAPSHOT: &str = "USER_MEMORY_HOLD_SNAPSHOT";
+/// Names, in debug builds only, the file that holds the prompt hook past its
+/// limit before it abandons the save ([`hold_for_tests`]).
+#[cfg(debug_assertions)]
+pub(crate) const HOLD_ABANDON: &str = "USER_MEMORY_HOLD_ABANDON";
+
+/// In debug builds, waits here while the file the environment variable `var`
+/// names exists, after creating that name with `.reached` added, so a test
+/// can order a save against its hook.
+#[cfg(debug_assertions)]
+pub(super) fn hold_for_tests(var: &str) {
+    let Some(hold) = std::env::var_os(var) else {
+        return;
+    };
+    let mut reached = hold.clone();
+    reached.push(".reached");
+    let _ = fs::write(&reached, "");
+    while Path::new(&hold).exists() {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// Removes the snapshots in `dir` last written over [`SNAPSHOT_AGE`] before
-/// `now`.
+/// `now`, and the temporary files of saves cut off over [`LEFTOVER_AGE`]
+/// before it.
 fn remove_old(dir: &Path, now: SystemTime) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        let old = entry
+        let age = entry
             .metadata()
             .and_then(|m| m.modified())
             .ok()
             .and_then(|modified| now.duration_since(modified).ok())
-            .is_some_and(|age| age > SNAPSHOT_AGE);
-        if old && path.extension().is_some_and(|e| e == "json") {
+            .unwrap_or_default();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let old = if name.starts_with('.') && name.ends_with(TEMPORARY) {
+            age > LEFTOVER_AGE
+        } else {
+            age > SNAPSHOT_AGE && path.extension().is_some_and(|e| e == "json")
+        };
+        if old {
             let _ = fs::remove_file(path);
         }
     }
@@ -426,7 +512,10 @@ mod tests {
         let old = sessions.join("codex-gone.json");
         let recent = sessions.join("codex-recent.json");
         let other = sessions.join("notes.txt");
-        save(&path, &first).unwrap();
+        // Temporary files of saves cut off by their hook's limit.
+        let leftover = sessions.join(format!(".codex-cut.json.1{TEMPORARY}"));
+        let in_flight = sessions.join(format!(".codex-now.json.2{TEMPORARY}"));
+        save(&path, &first, &Landing::default()).unwrap();
         assert_eq!(load(&path).as_ref(), Some(&first));
         for private in [&path, &sessions] {
             assert!(
@@ -443,29 +532,102 @@ mod tests {
             assert_eq!(mode(&sessions), 0o700);
         }
         const DAY: Duration = Duration::from_secs(24 * 60 * 60);
-        for (file, days) in [(&old, 31), (&recent, 29), (&other, 31)] {
+        for (file, age) in [
+            (&old, DAY * 31),
+            (&recent, DAY * 29),
+            (&other, DAY * 31),
+            (&leftover, LEFTOVER_AGE * 2),
+            (&in_flight, Duration::ZERO),
+        ] {
             fs::write(file, "{}").unwrap();
             fs::File::options()
                 .write(true)
                 .open(file)
                 .unwrap()
-                .set_modified(SystemTime::now() - DAY * days)
+                .set_modified(SystemTime::now() - age)
                 .unwrap();
         }
         let second = Snapshot {
             projects: None,
             stamps: Stamps::new(),
         };
-        save(&path, &second).unwrap();
+        save(&path, &second, &Landing::default()).unwrap();
         assert_eq!(load(&path), Some(second));
         assert!(!old.exists(), "a snapshot over 30 days old is removed");
         assert!(recent.exists(), "a snapshot under 30 days old is kept");
         assert!(other.exists(), "only snapshots are removed");
+        assert!(!leftover.exists(), "a cut-off save's file is removed");
+        assert!(in_flight.exists(), "a save under way keeps its file");
         assert_eq!(
             fs::read_dir(&sessions).unwrap().count(),
-            3,
-            "no temporary file left"
+            4,
+            "no temporary file of this save left"
         );
+    }
+
+    /// A writer that keeps nothing and counts the calls made to it.
+    #[derive(Default)]
+    struct Calls(usize);
+
+    impl io::Write for Calls {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0 += 1;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_snapshot_reaches_its_file_in_one_write() {
+        // As large as a session's on a 10,000-memory store.
+        let snapshot = Snapshot {
+            projects: None,
+            stamps: (0..10_000)
+                .map(|i| {
+                    (
+                        format!("{i:08}-0000-4000-8000-000000000000"),
+                        stamp(
+                            "2026-10-01 10:00:00",
+                            "confirmed",
+                            "Six words of a title here",
+                        ),
+                    )
+                })
+                .collect(),
+        };
+        let mut calls = Calls::default();
+        write_whole(&mut calls, &snapshot).unwrap();
+        assert_eq!(calls.0, 1);
+    }
+
+    #[test]
+    fn an_abandoned_save_leaves_the_snapshot_and_a_landed_one_stays() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions/claude-s.json");
+        let told = Snapshot {
+            projects: None,
+            stamps: stamps(&[("11111111-aaaa", stamp("t", "confirmed", "Prefer Rust"))]),
+        };
+        save(&path, &told, &Landing::default()).unwrap();
+        // Abandoned before it replaced the file: the session keeps what it
+        // was told, and no temporary file stays.
+        let landing = Landing::default();
+        assert!(!landing.abandon());
+        let unsaid = Snapshot {
+            projects: None,
+            stamps: Stamps::new(),
+        };
+        let err = save(&path, &unsaid, &landing).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Interrupted);
+        assert_eq!(load(&path).as_ref(), Some(&told));
+        assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+        // Landed first: abandoning it says so, and the hook tells it.
+        let landing = Landing::default();
+        save(&path, &unsaid, &landing).unwrap();
+        assert!(landing.abandon());
+        assert_eq!(load(&path), Some(unsaid));
     }
 
     #[test]

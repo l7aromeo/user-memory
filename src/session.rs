@@ -199,7 +199,12 @@ async fn remember(
         &store_identity()?,
     )?;
     let snapshot = snapshot(checkout, origin, None).await.ok()?;
-    live::save(&path, &snapshot).ok()
+    // On a blocking thread, so the snapshot's share of the limit bounds the
+    // save too.
+    tokio::task::spawn_blocking(move || live::save(&path, &snapshot, &live::Landing::default()))
+        .await
+        .ok()?
+        .ok()
 }
 
 /// What the session's memories come from, which names its snapshot.
@@ -225,8 +230,21 @@ fn identity(server: Option<&str>, db: &Path) -> String {
 /// session last looked, or nothing, which is also the answer to any failure
 /// or to taking longer than [`PROMPT_LIMIT`].
 pub async fn prompt_submit(client: HookClient) -> String {
-    let notice = match tokio::time::timeout(hook_time(PROMPT_LIMIT), changes(client)).await {
-        Ok(notice) => notice,
+    let deadline = tokio::time::Instant::now() + hook_time(PROMPT_LIMIT);
+    let landing = std::sync::Arc::new(live::Landing::default());
+    let notice = match tokio::time::timeout_at(deadline, changes(client, landing.clone())).await {
+        Ok(Some((notice, saved))) => match tokio::time::timeout_at(deadline, saved).await {
+            Ok(_) => notice,
+            // Told only with the snapshot that records it: a save abandoned
+            // in time leaves the change for the next prompt.
+            Err(_) => {
+                stopped();
+                #[cfg(debug_assertions)]
+                live::hold_for_tests(live::HOLD_ABANDON);
+                landing.abandon().then_some(notice).flatten()
+            }
+        },
+        Ok(None) => None,
         Err(_) => {
             stopped();
             None
@@ -247,9 +265,14 @@ fn stopped() {
     eprintln!("user-memory: the prompt hook stopped at its time limit");
 }
 
-/// What changed since the session in the hook payload last looked, saving
-/// what it sees now. A session without a snapshot gets one and no notice.
-async fn changes(client: HookClient) -> Option<String> {
+/// What changed since the session in the hook payload last looked, and the
+/// save of what it sees now, under way on a blocking thread so the prompt's
+/// limit bounds it and `landing` can abandon it. A session without a
+/// snapshot gets one and no notice.
+async fn changes(
+    client: HookClient,
+    landing: std::sync::Arc<live::Landing>,
+) -> Option<(Option<String>, tokio::task::JoinHandle<std::io::Result<()>>)> {
     let bytes = payload().await?;
     let origin = origin(client, &bytes);
     let payload: Value = serde_json::from_slice(&bytes).ok()?;
@@ -263,11 +286,19 @@ async fn changes(client: HookClient) -> Option<String> {
     let now = snapshot(PathBuf::from(checkout), origin, before.as_ref())
         .await
         .ok()?;
-    let _ = live::save(&path, &now);
-    let before = before?;
+    let notice = match &before {
+        Some(before) => told(before, &now).await,
+        None => None,
+    };
+    let saved = tokio::task::spawn_blocking(move || live::save(&path, &now, &landing));
+    Some((notice, saved))
+}
+
+/// The notice for a session that last saw `before` and now sees `now`.
+async fn told(before: &live::Snapshot, now: &live::Snapshot) -> Option<String> {
     // Memories that left with a project are still active: the index of
     // those projects alone tells them from memories no longer active.
-    let gone = live::gone(&before, &now);
+    let gone = live::gone(before, now);
     let left = if gone.is_empty() {
         BTreeSet::new()
     } else {
@@ -278,7 +309,7 @@ async fn changes(client: HookClient) -> Option<String> {
             .into_keys()
             .collect()
     };
-    live::notice(&before, &now, &left)
+    live::notice(before, now, &left)
 }
 
 /// What the session in `checkout` sees: its projects, read fresh and kept

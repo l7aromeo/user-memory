@@ -28,6 +28,16 @@ pub fn finish(mut child: Child, what: &str) -> Output {
     child.wait_with_output().unwrap()
 }
 
+/// Waits until `done` holds; past [`STUCK`] the test fails, naming `what`
+/// never happened.
+pub fn until(what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = Instant::now() + STUCK;
+    while !done() {
+        assert!(Instant::now() < deadline, "{what} never happened");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 /// The environment a hook runs in when a test checks what it prints: its
 /// time limits ten times longer, so a loaded machine never cuts it short,
 /// yet its 5-second limit still ends before [`STUCK`].
