@@ -8,7 +8,7 @@ use super::{
     page::{Paging, page},
     read::{SHORT_ID, group_order, rank, standing_rule},
     schema::connect,
-    selection::{Filter, ScopeFilter, Selection, candidates},
+    selection::{Filter, ScopeFilter, Selection, candidates, project_rule_candidates},
     words::tokenize,
 };
 use anyhow::Result;
@@ -21,7 +21,7 @@ use std::{
     path::Path,
 };
 
-#[derive(Args, Default, Deserialize, Serialize, JsonSchema)]
+#[derive(Args, Clone, Default, Deserialize, Serialize, JsonSchema)]
 pub struct Index {
     #[command(flatten)]
     #[serde(flatten)]
@@ -83,7 +83,7 @@ pub struct Index {
     #[serde(default)]
     #[schemars(skip)]
     pub fit_unit: FitUnit,
-    /// Used by user-memory's own session hook with fit_room; leave unset. The part of fit_room, in fit_unit, for the standing rules of the session's projects: they come first, under one heading per project, each in full while the rules after it still fit as pointers, then as pointers, then counted; the index after them leaves them out. With it, an index that does not list every memory also ends with a map of what it leaves out, with or without rules. An older server ignores it and sends the index as before.
+    /// Used by user-memory's own session hook with fit_room; leave unset. The part of fit_room, in fit_unit, for the standing rules of the session's projects: they come first, under one heading per project, each in full while the rules after it still fit as pointers, then as pointers, then counted; the index after them leaves them out. With it, an index that does not list every memory also ends with a map of what it leaves out, with or without rules; with a fit_room no larger than it, the rules come alone, without an index. An older server ignores it and sends the index as before.
     #[arg(skip)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(skip)]
@@ -153,6 +153,11 @@ pub(super) struct Group {
 /// `stamps_since`, for tests of the client's side against such a server.
 #[cfg(debug_assertions)]
 const TEST_NO_POSITIONS: &str = "USER_MEMORY_TEST_NO_POSITIONS";
+/// Names, in debug builds only, the variable that has the store answer an
+/// index request as a server from before the project rules part did,
+/// ignoring `fit_rules_room`, for tests of the hooks against such a server.
+#[cfg(debug_assertions)]
+const TEST_NO_RULES_PART: &str = "USER_MEMORY_TEST_NO_RULES_PART";
 
 /// The index of the memories `input.selection` covers: by default every
 /// active global memory and those of the requested projects.
@@ -187,6 +192,19 @@ pub fn index(db: &Path, input: &Index) -> Result<String> {
             None => super::stamps::stamps(&conn, &filter),
         };
     }
+    // A debug build told so answers as a server from before the rules part.
+    #[cfg(debug_assertions)]
+    let older;
+    #[cfg(debug_assertions)]
+    let input = if std::env::var_os(TEST_NO_RULES_PART).is_some() {
+        older = Index {
+            fit_rules_room: None,
+            ..input.clone()
+        };
+        &older
+    } else {
+        input
+    };
     match input.fit_room {
         Some(room) => fitted(&conn, input, &selection, &filter, room),
         None => render(&conn, input, &filter, Some(&input.paging)),
@@ -197,7 +215,8 @@ pub fn index(db: &Path, input: &Index) -> Result<String> {
 /// once here so it asks for it in one call: with `input.fit_rules_room`,
 /// the project rules first ([`project_rules`]), then the index in the room
 /// they leave, ending with a map of what it does not list
-/// ([`unlisted_map`]) when it does not list every memory.
+/// ([`unlisted_map`]) when it does not list every memory; the rules alone
+/// when `room` is no larger than theirs.
 fn fitted(
     conn: &rusqlite::Connection,
     input: &Index,
@@ -210,6 +229,13 @@ fn fitted(
         return fitted_index(conn, input, selection, filter, room);
     };
     let rules = project_rules(conn, selection, filter, rules_room.min(room), unit)?;
+    // A room no larger than the rules' asks for them alone, as the subagent
+    // hook does: it shows no index, so none is built. A rules room of 0, which
+    // session start gives when its lines take the whole room, still asks
+    // for the index, shortened to its counts.
+    if rules_room > 0 && room <= rules_room {
+        return Ok(rules);
+    }
     let left = if rules.is_empty() {
         room
     } else {
@@ -724,12 +750,19 @@ fn rules_heading(key: &str) -> String {
 }
 
 /// The project rules part that begins `text`, the session hook's copy:
-/// every line before the index's header; empty when it has none.
+/// from its first heading up to the index's header, or to the end when it
+/// has no index (the rules alone, as asked with a room no larger than
+/// theirs). Empty when `text` does not begin with a heading: an index, or a
+/// store's sentence for no memories, from a server without the part.
 pub fn rules_part(text: &str) -> &str {
-    match text.find(HEADER[0]) {
-        Some(at) => text[..at].trim_end_matches('\n'),
-        None => "",
+    if !text.starts_with(PROJECT_RULES) {
+        return "";
     }
+    match text.find(HEADER[0]) {
+        Some(at) => &text[..at],
+        None => text,
+    }
+    .trim_end_matches('\n')
 }
 
 /// The headings in a rules part, one per project, as [`rules_heading`]
@@ -891,7 +924,7 @@ fn project_rules(
     room: usize,
     unit: FitUnit,
 ) -> Result<String> {
-    let mut rules: Vec<Memory> = candidates(conn, filter)?
+    let mut rules: Vec<Memory> = project_rule_candidates(conn, filter)?
         .into_iter()
         .filter(|m| standing_rule(m) && m.scope == "project")
         .collect();

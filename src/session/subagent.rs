@@ -84,8 +84,8 @@ pub async fn subagent_rules(
         .and_then(|payload| payload["cwd"].as_str().map(PathBuf::from))
         .or_else(|| std::env::current_dir().ok())?;
     // The global rules are the instruction files'; only the rules part is
-    // kept, so the index after it is not needed whole.
-    let (_, text) = index(folder, Some(client), context_limit, origin, true, 0)
+    // printed, so only the rules are asked for, without an index.
+    let (_, text) = index(folder, Some(client), context_limit, origin, true, 0, true)
         .await
         .ok()?;
     let part = memory::rules_part(&text);

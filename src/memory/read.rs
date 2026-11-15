@@ -753,6 +753,17 @@ pub(super) fn is_rule(source: &str, status: &str, memory_type: &str) -> bool {
     source == "explicit" && status == "confirmed" && RULE_TYPES.contains(&memory_type)
 }
 
+/// An SQL condition over a row of `memories` that holds for a standing
+/// rule, as [`is_rule`] decides.
+pub(super) fn rule_condition() -> String {
+    let types = RULE_TYPES
+        .iter()
+        .map(|t| format!("'{t}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("(source='explicit' AND status='confirmed' AND memory_type IN ({types}))")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

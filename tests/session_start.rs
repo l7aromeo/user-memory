@@ -2056,6 +2056,18 @@ fn the_index_keeps_project_rules_unless_asked_for_them_apart() {
             .to_owned()
     };
     assert_eq!(counts(&before), counts(index_part));
+    // A room no larger than the rules' asks for them alone, as the subagent
+    // hook does: the same rules part, and no index after it.
+    let alone =
+        index(json!({"fit_room": PROJECT_RULE_CHARS, "fit_rules_room": PROJECT_RULE_CHARS}));
+    assert_eq!(
+        alone,
+        apart[..apart.find("USER MEMORY INDEX").unwrap()].trim_end()
+    );
+    // No room at all, as when session start's lines take it all, still asks
+    // for the index, shortened to its counts, not for the rules alone.
+    let none = index(json!({"fit_room": 0, "fit_rules_room": 0}));
+    assert!(none.contains("USER MEMORY INDEX"), "{none}");
 }
 
 /// A store in `home` with 600 facts of project app and no rules: the 100
@@ -2217,14 +2229,23 @@ fn rules_that_fit_are_not_told() {
 /// What the subagent hook prints for `client` with `payload`, run in
 /// `folder` over the store in `home`.
 fn subagent(home: &Path, folder: &Path, client: &str, payload: &Value) -> String {
-    subagent_with(home, folder, &["--client", client], payload)
+    subagent_with(home, folder, &["--client", client], &[], payload)
 }
 
-/// What the subagent hook prints with `args` and `payload`, run in `folder`
-/// over the store in `home`.
-fn subagent_with(home: &Path, folder: &Path, args: &[&str], payload: &Value) -> String {
+/// What the subagent hook prints with `args`, the variables `vars` and
+/// `payload`, run in `folder` over the store in `home`.
+fn subagent_with(
+    home: &Path,
+    folder: &Path,
+    args: &[&str],
+    vars: &[(&str, &str)],
+    payload: &Value,
+) -> String {
     let mut command = Command::new(env!("CARGO_BIN_EXE_user-memory"));
-    command.arg("subagent-start").args(args);
+    command
+        .arg("subagent-start")
+        .args(args)
+        .envs(vars.iter().copied());
     let mut child = in_folder(command, home, folder)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -2283,11 +2304,51 @@ fn a_subagent_gets_the_project_rules_session_start_shows() {
             json!({"session_id":"s","agent_id":"a3","hook_event_name":"SubagentStart","cwd":&app});
         let args = ["--client", "codex", "--context-limit", limit];
         assert_eq!(
-            subagent_text(&subagent_with(home, &app, &args, &payload)),
+            subagent_text(&subagent_with(home, &app, &args, &[], &payload)),
             shown,
             "{limit}"
         );
     }
+}
+
+/// Has the store answer as a server from before the project rules part,
+/// which ignores `fit_rules_room` (debug builds only).
+const OLDER_SERVER: (&str, &str) = ("USER_MEMORY_TEST_NO_RULES_PART", "1");
+
+// A store with no memories, and one whose memories the session's projects
+// don't select, answer with a sentence and no index: neither is a rules
+// part, from this server or from one before the part, so a subagent gets
+// nothing and session start shows no rules.
+#[test]
+fn a_store_with_nothing_to_show_gives_a_subagent_nothing() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path();
+    let app = repository(home, "app", "git@github.com:acme/app.git");
+    let payload =
+        json!({"session_id":"s","agent_id":"a1","hook_event_name":"SubagentStart","cwd":&app});
+    let quiet = |stage: &str| {
+        for client in ["claude", "codex"] {
+            for vars in [&[][..], &[OLDER_SERVER][..]] {
+                let args = ["--client", client];
+                assert_eq!(
+                    subagent_with(home, &app, &args, vars, &payload),
+                    "",
+                    "{stage} {client} {vars:?}"
+                );
+            }
+        }
+        let start = started(home, &app, stage, "startup");
+        assert!(!start.contains("Project rules of"), "{stage}: {start}");
+        assert!(!start.contains("more project rule"), "{stage}: {start}");
+    };
+    quiet("empty");
+    remember(
+        home,
+        home,
+        "Deploy the web app from main",
+        &in_project("github.com/acme/web"),
+    );
+    quiet("nothing-selected");
 }
 
 /// A Codex transcript line of `kind` with `fields`.
