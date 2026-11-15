@@ -10,7 +10,10 @@ use rmcp::{
 };
 
 /// How rmcp's HTTP client begins the text of an answer it did not expect
-/// when the server answered 503.
+/// when the server answered 503. rmcp gives no status code to match, only
+/// this text; `a_damaged_or_newer_registry_refuses_every_request_until_moved_aside`
+/// in tests/tokens.rs runs the real client against a 503 and fails if a
+/// newer rmcp words it differently, so change this only with that test.
 const UNAVAILABLE_STATUS: &str = "HTTP 503";
 
 /// What the user is told when the server at `url` answered 503, as it does
