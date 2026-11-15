@@ -15,6 +15,10 @@ workflows and the release builds use, the Dockerfile's `RUST_IMAGE`, so
 `just check` here and in CI run the same lints. Moving to a new Rust release
 is one change in three places, the Dockerfile, `rust-toolchain.toml` and the
 workflows' `toolchain:` lines, which `cargo test --test ci` holds together.
+Move it when a new stable Rust is out, not only at a release, so the checks
+run the lints a release will build with; the release run refuses a Rust
+older than the current stable
+([releasing](releasing.md#build-and-publish-on-github)).
 A build that runs neither rustfmt nor clippy (the server image, the release
 builds) names the version itself, through `RUSTUP_TOOLCHAIN` or its image,
 so rustup fetches nothing more.

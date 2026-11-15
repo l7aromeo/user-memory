@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-ARG RUST_IMAGE=rust:1.99.1-bookworm
+ARG RUST_IMAGE=rust:1.100.0-bookworm
 FROM ${RUST_IMAGE} AS build
 RUN apt-get update && apt-get install -y --no-install-recommends cmake && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
