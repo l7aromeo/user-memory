@@ -31,7 +31,9 @@ const LATEST_ORIGIN: &str = "coalesce((SELECT origin FROM memory_events WHERE me
 /// The one conversation origin of every change to the memory `{id}` names
 /// after the event `{seq}`, empty when there were several or one gave
 /// none: a session is spared only a change that was all its own, never one
-/// another session made before it.
+/// another session made before it. Event numbers are reused once pruning
+/// drops the newest event, so on a store with no event for the pruning age,
+/// a change landing at or below a session's number is missed once.
 const ONLY_ORIGIN: &str = "coalesce((SELECT CASE WHEN count(DISTINCT origin)=1 THEN max(origin) END FROM memory_events WHERE memory_id={id} AND seq>{seq} AND op NOT IN ('confirm','distinct','origin_removed')),'')";
 
 /// Where a session's snapshot stands in the store's count of its changes,
