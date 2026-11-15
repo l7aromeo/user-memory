@@ -1071,3 +1071,33 @@ fn a_hand_over_names_only_its_own_state_files() {
         );
     }
 }
+
+/// A hand-over file a dying process left unread holds the app's input. A
+/// starting `serve` removes one older than ten minutes and leaves a recent
+/// one, which a hand-over may be about to read, and any other file.
+#[test]
+fn a_starting_serve_removes_hand_over_files_left_behind() {
+    let place = Place::new();
+    let state = sandbox::folder(place.dir.path(), "state");
+    fs::create_dir_all(&state).unwrap();
+    let old = state.join("handover-1-1.json");
+    let recent = state.join("handover-2-2.json");
+    let other = state.join("handover-notes.json");
+    for file in [&old, &recent, &other] {
+        fs::write(file, "{}\n").unwrap();
+    }
+    let hour_ago = std::time::SystemTime::now() - Duration::from_secs(60 * 60);
+    for file in [&old, &other] {
+        fs::File::options()
+            .write(true)
+            .open(file)
+            .unwrap()
+            .set_modified(hour_ago)
+            .unwrap();
+    }
+    let session = place.serve(Way::Exec, &[]);
+    session.close();
+    assert!(!old.exists(), "a file left behind stays");
+    assert!(recent.exists(), "a recent hand-over file went");
+    assert!(other.exists(), "another file went");
+}
