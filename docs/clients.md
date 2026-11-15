@@ -256,6 +256,12 @@ existing category for a new memory (`workflow`, not a new `process`). With
   what remains). Each part with something to print first gets its floor,
   in that order; the room left then goes in order, each up to its ceiling.
   A part with nothing to print takes no room.
+- When the project rules don't all fit, a line after the `Projects:` line
+  says how many are not shown, that `index` lists them and that the user
+  can run `review`; and when a session starts (not on a resume, clear or
+  compaction), the user is told per project how many rules it has and how
+  many session start and subagents show, in the same message as the new rules
+  (`systemMessage`, which both clients show).
 - The `Projects:` line and the parts keep within 9,000,
   and the whole output within 9,500, counted as the client counts a hook's
   text. Claude Code shows a preview of more than 10,000 UTF-16 units, so

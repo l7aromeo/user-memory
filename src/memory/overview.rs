@@ -728,6 +728,9 @@ fn titled_rule(m: &Memory) -> String {
     )
 }
 
+/// Ends the line counting a project's rules the part leaves out.
+const NOT_SHOWN: &str = " not shown; index lists them.";
+
 /// The line counting a project's rules the part leaves out.
 fn rules_counted(key: &str, count: usize, after_some: bool) -> String {
     let (more, noun) = match (after_some, count) {
@@ -736,7 +739,48 @@ fn rules_counted(key: &str, count: usize, after_some: bool) -> String {
         (false, 1) => ("", "rule"),
         (false, _) => ("", "rules"),
     };
-    format!("  {count}{more} {noun} of {key} not shown; index lists them.")
+    format!("  {count}{more} {noun} of {key}{NOT_SHOWN}")
+}
+
+/// A project whose rules the session hook's copy does not all show.
+#[derive(Debug, PartialEq, Eq)]
+pub struct RulesLeftOut {
+    pub key: String,
+    /// Rules shown, in full or by title.
+    pub shown: usize,
+    /// Rules only counted.
+    pub left_out: usize,
+}
+
+/// The projects whose rules `text`, the session hook's copy from
+/// [`project_rules`] on, counts rather than shows, in its order.
+pub fn rules_left_out(text: &str) -> Vec<RulesLeftOut> {
+    let mut found: Vec<RulesLeftOut> = Vec::new();
+    let mut shown = 0;
+    for line in text.lines().take_while(|line| *line != HEADER[0]) {
+        if line.starts_with(PROJECT_RULES) {
+            shown = 0;
+        } else if line.starts_with("    ") {
+            shown += 1;
+        } else if let Some(count) = line
+            .strip_prefix("  ")
+            .and_then(|l| l.strip_suffix(NOT_SHOWN))
+        {
+            let Some((count, key)) = count.split_once(' ').and_then(|(count, rest)| {
+                let key = rest.split_once(" of ")?.1;
+                Some((count.parse().ok()?, key))
+            }) else {
+                continue;
+            };
+            found.push(RulesLeftOut {
+                key: key.to_owned(),
+                shown,
+                left_out: count,
+            });
+            shown = 0;
+        }
+    }
+    found
 }
 
 /// How the part shows a rule.
