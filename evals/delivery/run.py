@@ -144,6 +144,8 @@ def counts(drawn, matched, bars):
     memories = {m["id"]: m for m in drawn["memories"]}
     total = Counter({"sessions": len({t["session"] for t in drawn["tasks"] if not t.get("probe")})})
     by_kind = {}
+    # What each session has shown so far, its tasks in order.
+    sessions = {}
     for task in drawn["tasks"]:
         if task.get("probe"):
             # A split-words probe: found when its long memory ranks first.
@@ -153,7 +155,8 @@ def counts(drawn, matched, bars):
             total["split found"] += bool(wanted) and all(
                 c["score"] < wanted[0]["score"] for c in found if c is not wanted[0])
             continue
-        c = metrics.evaluate(task, matched[task["id"]], memories, bars)
+        c = metrics.evaluate(task, matched[task["id"]], memories, bars,
+                             sessions.setdefault(task["session"], set()))
         total.update(c)
         by_kind.setdefault(task["kind"], Counter()).update(c)
     return total, by_kind
@@ -253,6 +256,9 @@ def report(title, total, by_kind):
     print(f"  holds: needed command passages held before their command {total['held before its action']} "
           f"of {total['command needs']}; commands no memory names held {total['unnamed held']} of "
           f"{total['unnamed commands']}")
+    if total["colliding commands"]:
+        print(f"  commands whose argument is another command's subcommand: held {total['colliding held']} of "
+              f"{total['colliding commands']}, passages pushed after them {total['colliding pushes']}")
     sessions = total["sessions"]
     print(f"  holds as a user feels them: {total['delivered|way:hold']} passages held at "
           f"{total['denials']} denied commands; per task {fmt(r(total['denials'], total['tasks']))} denials, "

@@ -136,7 +136,7 @@ def right(candidate, needed_points):
     return any(overlaps(candidate, p) for p in points)
 
 
-def evaluate(task, matched, memories, bars):
+def evaluate(task, matched, memories, bars, earlier=None):
     """The counts one task gives: deliveries and the right ones by way,
     signal and shape, each needed now, late, about this action or about
     something else, and placed against its command's runs; needs and the
@@ -145,10 +145,21 @@ def evaluate(task, matched, memories, bars):
     how often a long memory's delivered passage holds its needed point
     whole.
 
-    `memories` maps a memory id to its `shape` and `points`."""
+    `memories` maps a memory id to its `shape` and `points`. `earlier`
+    holds the passages shown in the session's earlier tasks, and gains
+    this task's: with `bars["remember"]` they are not shown again and
+    meet a need as if seen before it; without, holding one again is
+    counted. `bars["hold cap"]` limits the passages one hold shows, the
+    rest pushed after the command (`bars["hold rest"] == "push"`) or
+    dropped. With `bars["lesson oracle"]` a lesson is shown only after a
+    failed run of its command: an upper bound, as the matcher cannot know
+    a recovery lesson from a note."""
     actions = task["actions"]
     kind_of_work = task.get("kind")
     per_event = bars.get("per_event", PUSH_PER_EVENT)
+    hold_cap = bars.get("hold cap")
+    earlier = set() if earlier is None else earlier
+    remember = bars.get("remember")
     needed_points = defaultdict(list)
     needs_of = defaultdict(list)
     for need in task["needs"]:
@@ -163,18 +174,32 @@ def evaluate(task, matched, memories, bars):
         signal = "prompt" if i == 0 else kind
         named = any(need["action"] == i for need in task["needs"])
         held_here = False
+        held_now_here = False
+        held_count = 0
         pushed_here = 0
         for c in candidates:
             ways = decisions(c, bars, kind)
             if not ways:
                 continue
             key = (c["id"], c["slot"])
-            if key in shown:
+            if key in shown or (remember and key in earlier):
                 continue
             # The way it is delivered: a hold comes before the command, a
             # push after it; a failure push only when the plain bar misses.
             way = "hold" if "hold" in ways else ("push" if "push" in ways else "failure")
-            if way != "hold":
+            if bars.get("lesson oracle") and memories[c["id"]]["shape"] == "lesson" and not (
+                    way != "hold" and actions[i].get("failed")
+                    and subject_of(actions[i].get("about"))
+                    == subject_of(memories[c["id"]]["points"][0].get("about"))):
+                continue
+            if way == "hold" and hold_cap is not None and held_count >= hold_cap:
+                if bars.get("hold rest") != "push":
+                    continue
+                way = "push"
+            if way == "hold":
+                held_count += 1
+                counts["held again"] += key in earlier
+            else:
                 if per_event is not None and pushed_here >= per_event:
                     continue
                 pushed_here += 1
@@ -195,6 +220,7 @@ def evaluate(task, matched, memories, bars):
                              if c["slot"] == 255 or overlaps(c, point))
             moment = run_moment(memory, c, i, actions, way)
             how = "now" if now else "late" if ok else wrong
+            held_now_here |= way == "hold" and now
             for group in groups:
                 counts[f"delivered|{group}"] += 1
                 counts[f"right|{group}"] += ok
@@ -223,9 +249,17 @@ def evaluate(task, matched, memories, bars):
         if i == 0:
             counts["prompts"] += 1
             counts["prompts literal"] += bool(actions[0].get("literal"))
+        if held_count:
+            counts[f"hold size {held_count}"] += 1
         if kind == "command":
             counts["denials"] += held_here
-            if not named:
+            counts["denials with a need"] += held_now_here
+            if actions[i].get("collides"):
+                # Its argument names another command's subcommand.
+                counts["colliding commands"] += 1
+                counts["colliding held"] += held_here
+                counts["colliding pushes"] += pushed_here
+            elif not named:
                 counts["unnamed commands"] += 1
                 counts["unnamed held"] += held_here
     for need in task["needs"]:
@@ -233,6 +267,10 @@ def evaluate(task, matched, memories, bars):
         shape = memories[need["memory"]]["shape"]
         at = [first[key] for key in first if key[0] == need["memory"]
               and (key[1] == 255 or overlaps_slot(key, point, matched))]
+        if remember:
+            # Seen in an earlier task of the session: before this need.
+            at += [-1 for key in earlier if key[0] == need["memory"]
+                   and (key[1] == 255 or overlaps_slot(key, point, matched))]
         # Seen at its own action, held or pushed, is on time; a trap only
         # when held, as a push comes after the command ran.
         when = NEVER if not at else (EARLY if min(at) < need["action"] - 0.5
@@ -260,6 +298,7 @@ def evaluate(task, matched, memories, bars):
         if need["subject"] in ("command", "failure", "trap") and actions[need["action"]]["kind"] == "command":
             counts["command needs"] += 1
             counts["held before its action"] += need["action"] - 0.5 in at
+    earlier.update(shown)
     return counts
 
 

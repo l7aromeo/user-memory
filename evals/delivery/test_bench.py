@@ -147,6 +147,10 @@ class Evaluate(unittest.TestCase):
         self.assertEqual((c["unnamed commands"], c["unnamed held"]), (1, 1))
         c = metrics.evaluate(task, [[], [candidate("noise", 2.5, command=True)]], self.memories, BARS)
         self.assertEqual((c["unnamed commands"], c["unnamed held"]), (1, 0))
+        # A command whose argument names another subcommand counts apart.
+        task["actions"][1] = {"kind": "command", "collides": True}
+        c = metrics.evaluate(task, matched, self.memories, BARS)
+        self.assertEqual((c["colliding commands"], c["colliding held"], c["unnamed commands"]), (1, 1, 0))
 
 
 class Classes(unittest.TestCase):
@@ -254,6 +258,47 @@ class Classes(unittest.TestCase):
         c = metrics.evaluate(task, [five], memories, {**BARS, "per_event": None})
         self.assertEqual(c["delivered|all"], 5)
 
+    def test_a_hold_cap_pushes_or_drops_the_rest_and_sizes_are_counted(self):
+        memories = {m: {"shape": "note", "points": [{"start": 0, "end": 10}]} for m in "abcde"}
+        task = {"kind": "change", "actions": [{"kind": "command"}],
+                "needs": [{"action": 0, "memory": "a", "point": 0, "subject": "command"}]}
+        holds = [[candidate(m, 7 - n, command=True) for n, m in enumerate("abcde")]]
+        c = metrics.evaluate(task, holds, memories, BARS)
+        self.assertEqual((c["hold size 5"], c["denials"], c["denials with a need"]), (1, 1, 1))
+        dropped = metrics.evaluate(task, holds, memories, {**BARS, "hold cap": 3})
+        self.assertEqual((dropped["delivered|way:hold"], dropped["delivered|way:push"]), (3, 0))
+        pushed = metrics.evaluate(task, holds, memories, {**BARS, "hold cap": 3, "hold rest": "push"})
+        self.assertEqual((pushed["delivered|way:hold"], pushed["delivered|way:push"]), (3, 2))
+        # A denial carrying nothing needed now.
+        task["needs"] = []
+        c = metrics.evaluate(task, holds, memories, BARS)
+        self.assertEqual((c["denials"], c["denials with a need"]), (1, 0))
+
+    def test_a_session_remembers_what_it_showed(self):
+        memories = {"a": {"shape": "note", "points": [{"start": 0, "end": 10}]}}
+        task = {"kind": "change", "actions": [{"kind": "command"}],
+                "needs": [{"action": 0, "memory": "a", "point": 0, "subject": "command"}]}
+        held = [[candidate("a", 5, command=True)]]
+        session = set()
+        metrics.evaluate(task, held, memories, BARS, session)
+        again = metrics.evaluate(task, held, memories, BARS, session)
+        self.assertEqual((again["held again"], again["denials"]), (1, 1))
+        remembered = metrics.evaluate(task, held, memories, {**BARS, "remember": True}, session)
+        self.assertEqual((remembered["denials"], remembered["delivered|all"]), (0, 0))
+        # The need is met, as seen in an earlier task of the session.
+        self.assertEqual((remembered["found|all"], remembered["timing early|all"]), (1, 1))
+
+    def test_the_lesson_oracle_shows_a_lesson_only_after_its_command_failed(self):
+        tag = ["command", "git", "tag"]
+        memories = {"lesson": {"shape": "lesson", "points": [{"start": 0, "end": 10, "about": tag}]}}
+        oracle = {**BARS, "lesson oracle": True}
+        for failed, way, shown in ((False, "push", 0), (True, "push", 1), (True, "hold", 0)):
+            task = {"kind": "release", "actions": [{"kind": "command", "about": tag, "failed": failed}],
+                    "needs": []}
+            score = 2.5 if way == "push" else 3.5
+            c = metrics.evaluate(task, [[candidate("lesson", score, command=True)]], memories, oracle)
+            self.assertEqual(c["delivered|all"], shown, (failed, way))
+
     def test_deliveries_and_needs_are_banded_by_their_anchors_holders(self):
         memories = {m: {"shape": "note", "points": [{"start": 0, "end": 10, "anchored": True}]}
                     for m in ("one", "few", "many", "words")}
@@ -320,10 +365,22 @@ class Generator(unittest.TestCase):
                 self.assertNotIn(f"{program} {sub}", a["text"], a)
             elif a["spelled"] == "flag first":
                 self.assertIn(world.FLAG_FIRST[a["about"][1]], a["text"], a)
+            elif a["spelled"] == "prefix":
+                self.assertTrue(a["text"].startswith(tuple(world.PREFIXES)), a)
+                self.assertIn(" ".join(a["about"][1:]), a["text"], a)
             else:
                 self.assertTrue(a["text"].startswith(("./", world.ROOT_FOLDER)), a)
         self.assertEqual({a["spelled"] for a in spelled} & {"alias", "wrapper", "relative"},
                          {"alias", "wrapper", "relative"})
+
+    def test_a_share_of_tasks_run_a_command_naming_another_subcommand(self):
+        drawn = world.generate(5, 1_000)
+        colliding = [a for t in drawn["tasks"] for a in t["actions"] if a.get("collides")]
+        self.assertTrue(colliding)
+        subcommands = {s for _, s in world.COMMANDS if s}
+        for a in colliding:
+            self.assertNotIn("about", a)
+            self.assertTrue(set(a["text"].split()) & subcommands, a)
 
     def test_tasks_no_memory_names_hold_only_unnamed_commands(self):
         drawn = world.generate(5, 1_000)

@@ -146,6 +146,19 @@ FLAG_FIRST = {"git": "-C .", "cargo": "--locked", "gh": "--repo example/ledger",
               "kubectl": "-n prod", "terraform": "-chdir=infra", "npm": "--prefix .",
               "just": "--justfile justfile", "make": "-C ."}
 ROOT_FOLDER = "/work/ledger"
+# Wrappers no table names, in front of the command they run, as a share
+# of the spelled commands that can take one (`npx` before a package's
+# binary, a proxy before `git push`).
+PREFIXES = ["npx", "bunx", "proxychains", "caffeinate -i", "dotenv --", "nice -n 5"]
+# Commands whose arguments include a subcommand word of another command
+# the world has notes on (`cargo run --bin test` beside notes on `cargo
+# test`): a share of tasks run one, which no memory is about, so whatever
+# it delivers is about something else.
+COLLIDING = {"cargo": "cargo run --bin {sub}", "git": "git log --grep {sub}", "npm": "npm run {sub}",
+             "just": "just --show {sub}", "gh": "gh help {sub}", "docker": "docker logs {sub}",
+             "kubectl": "kubectl explain {sub}", "terraform": "terraform state show {sub}",
+             "make": "make -n {sub}"}
+COLLIDING_SHARE = 0.3
 
 # Flags commands carry, which never join the window.
 FLAGS = ["--dry-run", "--all", "-v", "--locked", "--force-with-lease", "-s", "--watch",
@@ -244,6 +257,9 @@ TRAPS = ["delete another session's lock file", "chain it after a reset", "run it
 # Share of the commands tasks run that are busy: a mature store holds
 # several notes on each, every one needed when it runs, all naming it as
 # written. Each busy command has this many notes beyond its first.
+# An oracle for #117: every trap names its command in a code span, as a
+# rule at record time could make it. Off in the benchmark's worlds.
+TRAPS_ANCHORED = False
 BUSY_SHARE = 0.3
 BUSY_NOTES = (3, 6)
 # Share of notes written with a context saying when they apply.
@@ -383,7 +399,7 @@ class World:
                                      text, project, about=["command", program, sub], anchored=True)
                     self._need(("command", program, sub), m)
             if rng.random() < TRAP_SHARE:
-                trap_anchored = rng.random() < ANCHORED_SHARE
+                trap_anchored = rng.random() < ANCHORED_SHARE or TRAPS_ANCHORED
                 said = self._command_name(program, sub, trap_anchored)
                 text = f"Never {rng.choice(TRAPS)} with {said}: it {rng.choice(FAILURES)}."
                 m = self._memory("trap", "constraint", "tooling",
@@ -553,7 +569,8 @@ class World:
         if rng.random() < SPELLED_SHARE:
             ways = ([("alias", ALIASES[(program, sub)])] if (program, sub) in ALIASES else []) + (
                 [("wrapper", WRAPPED[(program, sub)])] if (program, sub) in WRAPPED else []) + (
-                [("flag first", f"{program} {FLAG_FIRST[program]} {sub}")] if program in FLAG_FIRST else [])
+                [("flag first", f"{program} {FLAG_FIRST[program]} {sub}")] if program in FLAG_FIRST else []) + (
+                [("prefix", f"{rng.choice(PREFIXES)} {program} {sub}")] if sub else [])
             if ways:
                 spelled, said = rng.choice(ways)
                 text = " ".join(part for part in [said, flags] if part)
@@ -646,6 +663,10 @@ class World:
                     self._file(actions, needs, component)
                     for program, sub in WORK["split"]:
                         self._command(actions, needs, program, sub, fail())
+                if not unnamed and rng.random() < COLLIDING_SHARE:
+                    program, other = rng.choice([c for c in self.commands if c[0] in COLLIDING and c[1]])
+                    actions.append({"kind": "command", "failed": False, "collides": True,
+                                    "text": COLLIDING[program].format(sub=other)})
                 self.tasks.append({"id": f"{kind}-{t}", "kind": kind, "project": PROJECT,
                                    "session": n % SESSIONS, "unnamed": unnamed,
                                    "actions": actions, "needs": needs})
