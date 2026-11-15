@@ -91,8 +91,9 @@ it. After a 4-session smoke test, a 31-session batch needs `--budget 35`.
 `evals/fake_model.py` stands in for the Anthropic Messages API and the
 OpenAI Responses API, so the real Claude Code and Codex can run a turn that
 bills nothing. It listens on 127.0.0.1 only, forwards nothing and answers
-each request from a script: a text, or a tool call, which can wait for the
-test to release it so the test can act during a turn. It keeps each
+each request from a script: a text, a tool call, which can wait for the
+test to release it so the test can act during a turn, or a refusal with an
+HTTP status, to see how a client ends a failed turn. It keeps each
 request's path and JSON body, never its headers, so no token a client sends
 reaches its record or its log file, which a caller keeps in the trial
 folder. Every reply reports the same usage (`USAGE`). `python3 -I
@@ -176,7 +177,9 @@ current hashes are recorded as trusted in the trial's `config.toml`.
   `gpt-6-luna`, at `high` effort. A pass on a weaker agent says more about
   memory, and the batch costs less. `--top-models` runs Claude Code's `opus`
   and Codex's top tier instead; a failure on the cheaper models is run again
-  there before it is called a bug. `USER_MEMORY_EVAL_CLAUDE_MODEL`,
+  there before it is called a bug. Codex's top tier needs a login whose
+  plan serves that model; on a plan that doesn't, the session fails and the
+  step's `error` says so. `USER_MEMORY_EVAL_CLAUDE_MODEL`,
   `USER_MEMORY_EVAL_CODEX_MODEL` and `USER_MEMORY_EVAL_CODEX_EFFORT` name
   others for one run. The Codex tiers are named once in `evals/run.py`; every
   run except `--list` asks the installed Codex for its model list and stops
@@ -186,6 +189,11 @@ current hashes are recorded as trusted in the trial's `config.toml`.
   `thread/tokenUsage/updated` notifications (priced from `CODEX_PRICES` in
   `evals/run.py`). The batch summary shows input, cached input, output,
   reasoning and estimated cost per scenario, client and model.
+- A turn the client ends as failed is the step's `error`: Claude Code's
+  `result` marked `is_error`, or a Codex turn that ends `failed` or an
+  `error` it won't retry, with the reason it gave. Such a trial prints as
+  `ERROR`, not `FAIL`, since its checks graded no choice of the agent's,
+  and the summary counts it as errored beside the passed runs.
 
 The guard fingerprints the Codex binary in use, the user's real memory
 store, installed binary and receipt, `~/.claude/settings*.json`, `~/.claude/CLAUDE.md`,
@@ -265,7 +273,8 @@ only.
 `--rehearse` first runs one turn of each installed client against the
 [fake model](#the-fake-model), through the harness's own session code, and
 fails if a client no longer does what the harness relies on: take a message
-during a turn (`while_working`), report usage, and for Claude Code also let
+during a turn (`while_working`), report usage, say why a turn failed (one
+turn whose request the fake model refuses), and for Claude Code also let
 the harness answer its question tool and show the server instructions to
 the model. Whether Codex has a question tool in its default mode, and
 whether it shows the server instructions, is reported, not required. A

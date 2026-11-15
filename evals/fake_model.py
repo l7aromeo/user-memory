@@ -9,7 +9,11 @@ A script maps an API ("anthropic" or "openai") to the replies its main
 requests get in order; past the end each gets the text "done". A reply is
 `{"text": TEXT}`, `{"tool": NAME, "input": {...}}` or, for OpenAI's
 free-text tools such as Codex's `exec`, `{"custom_tool": NAME, "input":
-TEXT}`; with
+TEXT}`; `{"fail": STATUS}` answers
+with that HTTP status and an invalid-request error, as a provider does when
+it refuses a request, so a test can see how a client ends a failed turn. A
+reply with `"repeat": true` answers every later request too, as a client
+that retries a refused request meets the same refusal again. With
 `"hold": true` it waits until `release()` before answering, so a test can
 act while a turn is under way. Anthropic requests without tools (Claude
 Code's own side calls, such as a title) get text and take no reply from the
@@ -30,6 +34,9 @@ USAGE = {"input": 1000, "cached_input": 900, "output": 50, "reasoning": 20}
 # How long a held reply waits for release() before answering anyway, so a
 # test that forgets to release cannot hang a client.
 HOLD_LIMIT = 60
+# The message of a `fail` reply's error, so a test can find it where the
+# client reports the failed turn.
+FAILURE_MESSAGE = "The fake model refused this request."
 
 
 class FakeModel:
@@ -105,6 +112,8 @@ class FakeModel:
         if reply.get("hold"):
             self.held.set()
             self.released.wait(HOLD_LIMIT)
+        if "fail" in reply:
+            return self.refuse(handler, api, reply["fail"])
         if api == "anthropic":
             self.anthropic(handler, reply, body)
         else:
@@ -116,8 +125,11 @@ class FakeModel:
                 return {"text": "side"}
             replies = self.script.get(api, [])
             index = self.used[api]
-            self.used[api] += 1
-            return replies[index] if index < len(replies) else {"text": "done"}
+            if index >= len(replies):
+                return {"text": "done"}
+            if not replies[index].get("repeat"):
+                self.used[api] += 1
+            return replies[index]
 
     def main_requests(self, api):
         """Requests that took a reply from the script, in order."""
@@ -130,6 +142,17 @@ class FakeModel:
     def reply_json(handler, value):
         data = json.dumps(value).encode()
         handler.send_response(200)
+        handler.send_header("content-type", "application/json")
+        handler.send_header("content-length", str(len(data)))
+        handler.end_headers()
+        handler.wfile.write(data)
+
+    @staticmethod
+    def refuse(handler, api, status):
+        error = {"type": "invalid_request_error", "message": FAILURE_MESSAGE}
+        body = {"type": "error", "error": error} if api == "anthropic" else {"error": {**error, "code": None}}
+        data = json.dumps(body).encode()
+        handler.send_response(status)
         handler.send_header("content-type", "application/json")
         handler.send_header("content-length", str(len(data)))
         handler.end_headers()

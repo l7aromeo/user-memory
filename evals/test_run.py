@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 import types
+import urllib.error
 import urllib.request
 import unittest
 from pathlib import Path
@@ -834,7 +835,8 @@ class Probes(unittest.TestCase):
         return failures, out.getvalue()
 
     def test_a_lost_capability_fails_and_a_missing_client_is_skipped(self):
-        everything = {"error": None, "while_working": True, "answers": True, "instructions": True, "usage": True}
+        everything = {"error": None, "while_working": True, "answers": True, "instructions": True, "usage": True,
+                      "failures": True}
         codex = {**everything, "answers": False, "instructions": False}
         failures, said = self.run_probes({"claude": everything, "codex": codex})
         self.assertEqual(failures, 0, said)
@@ -843,11 +845,60 @@ class Probes(unittest.TestCase):
         failures, said = self.run_probes({"claude": {**everything, "while_working": False}, "codex": codex})
         self.assertEqual(failures, 1, said)
         self.assertIn("FAIL probe/claude: no longer takes a message during a turn", said)
+        failures, said = self.run_probes({"claude": everything, "codex": {**codex, "failures": False}})
+        self.assertEqual(failures, 1, said)
+        self.assertIn("FAIL probe/codex: takes a message during a turn; reports usage; no longer says why a "
+                      "turn failed", said)
         # Codex's server instructions are reported, never required.
         failures, said = self.run_probes({"claude": everything, "codex": {**codex, "usage": False}},
                                          present=("codex",))
         self.assertEqual(failures, 1, said)
         self.assertIn("skip probe/claude: not installed", said)
+
+
+class FailedTurns(unittest.TestCase):
+    """A turn the client ends as failed is the step's error, in the shapes
+    the real clients sent against the fake model's `fail` reply."""
+
+    REASON = "The fake model refused this request."
+
+    def test_claude_codes_error_result_is_the_steps_error(self):
+        result = {"type": "result", "subtype": "success", "is_error": True,
+                  "result": f"API Error: 400 {self.REASON}", "api_error_status": 400}
+        self.assertIn(self.REASON, run.turn_failure("claude", [result]))
+        self.assertIsNone(run.turn_failure("claude", [{**result, "is_error": False, "result": "done"}]))
+        self.assertIsNotNone(run.turn_failure("claude", [{"type": "result", "subtype": "error_during_execution"}]))
+
+    def test_a_failed_codex_turn_is_the_steps_error(self):
+        error = {"message": json.dumps({"error": {"type": "invalid_request_error", "message": self.REASON}}),
+                 "codexErrorInfo": "other"}
+        failed = [{"method": "error", "params": {"error": error, "willRetry": False}},
+                  {"method": "turn/completed", "params": {"turn": {"status": "failed", "error": error}}}]
+        self.assertIn("Codex ended the turn failed", run.turn_failure("codex", failed))
+        self.assertIn(self.REASON, run.turn_failure("codex", failed))
+        # An error Codex retries is no failure, and a completed turn none.
+        retried = [{"method": "error", "params": {"error": error, "willRetry": True}},
+                   {"method": "turn/completed", "params": {"turn": {"status": "completed"}}}]
+        self.assertIsNone(run.turn_failure("codex", retried))
+
+    def test_an_errored_trial_is_counted_apart_from_failures(self):
+        batch = Path(tempfile.mkdtemp())
+        base = {"scenario": "s", "client": "codex", "binary": "b", "steps": [], "usage": {}}
+        text = run.summarize(batch, [{**base, "passed": True, "errors": []},
+                                     {**base, "passed": False, "errors": ["step 0: Codex ended the turn failed"]}])
+        self.assertIn("| s | codex | b | 1/2 (1 errored) |", text)
+
+    def test_the_fake_models_fail_reply_refuses_with_its_status(self):
+        with fake_model.FakeModel({"anthropic": [{"fail": 400, "repeat": True}], "openai": [{"fail": 400}]}) as model:
+            # A repeated refusal meets a client's retry too; a single one
+            # gives way to the script's end.
+            for path, body, times in [("/v1/messages", {"tools": [{"name": "x"}]}, 3), ("/v1/responses", {}, 1)]:
+                for _ in range(times):
+                    with self.assertRaises(urllib.error.HTTPError) as refused:
+                        FakeModel.post(model.url, path, body)
+                    self.assertEqual(refused.exception.code, 400)
+                    self.assertIn(self.REASON, refused.exception.read().decode())
+            self.assertIn("done", FakeModel.post(model.url, "/v1/responses", {}))
 
 
 class ReadsAndPrivateFiles(unittest.TestCase):
