@@ -30,13 +30,16 @@ use std::{
     path::Path,
 };
 
-/// Actions the window keeps: older ones fall out. A starting value (#117);
-/// the delivery benchmark measures it.
+/// Actions the window keeps: older ones fall out. #117's starting value,
+/// which the delivery benchmark cannot measure: each of its tasks is
+/// matched in a window of its own and runs 4 to 7 actions, so no window
+/// tried (10 to 50) ever drops one, and all decide the same.
 pub(crate) const WINDOW_ACTIONS: usize = 30;
 
 /// Actions after which a term's weight in the window halves, so the action
-/// that fired counts most and one from ten actions ago a quarter. A
-/// starting value; the delivery benchmark measures it.
+/// that fired counts most and one from ten actions ago a quarter. The
+/// delivery benchmark found 2, 5 and 10 within 0.01 of each other on
+/// every measure at 1,000 memories, so the starting value stands.
 pub(crate) const WINDOW_HALF_LIFE: f64 = 5.0;
 
 /// What a memory's other passages add to its best one's score, per term
