@@ -83,17 +83,30 @@ pub fn writes(tool: &str, arguments: Option<&serde_json::Map<String, serde_json:
     }
 }
 
-/// The refusal for a tool call made over HTTP with a read-only token, from
-/// the request parts rmcp hands each call; `None` when the call may run.
-/// Local stdio `serve` has no request parts, and no token, so it is never
-/// scoped.
+/// What a hosted call is told when it arrives without the gate's [`Access`],
+/// which only a change in how rmcp hands over the request could cause.
+pub const UNCHECKED: &str = "This call reached the memory server without its token check, so it was not run; the server's operator should update user-memory or report it.";
+
+/// The refusal for a tool call on the `hosted` server made with a read-only
+/// token, from the request parts rmcp hands each call; `None` when the call
+/// may run. A hosted call without the gate's [`Access`] is refused whatever
+/// it asks, so a read-only token can never write through it. A local stdio
+/// `serve` has no token, so it is never scoped.
 pub fn refusal(
     tool: &str,
     arguments: Option<&serde_json::Map<String, serde_json::Value>>,
     extensions: &rmcp::model::Extensions,
+    hosted: bool,
 ) -> Option<String> {
-    let parts = extensions.get::<axum::http::request::Parts>()?;
-    let access = parts.extensions.get::<Access>()?;
+    if !hosted {
+        return None;
+    }
+    let parts = extensions.get::<axum::http::request::Parts>();
+    let Some((parts, access)) =
+        parts.and_then(|parts| Some((parts, parts.extensions.get::<Access>()?)))
+    else {
+        return Some(UNCHECKED.to_owned());
+    };
     (access.scope == Scope::Read && writes(tool, arguments))
         .then(|| read_only(&client_url(&parts.headers)))
 }
@@ -258,6 +271,41 @@ mod tests {
             headers.insert(header::HOST, host.parse().unwrap());
             assert_eq!(client_url(&headers), url, "{host}");
         }
+    }
+
+    /// A hosted call is refused without the request parts or the gate's
+    /// [`Access`], even a read; a local `serve`'s calls are never scoped.
+    #[test]
+    fn a_hosted_call_without_its_token_check_is_refused() {
+        let args = json!({}).as_object().cloned();
+        let empty = rmcp::model::Extensions::new();
+        for tool in ["record", "index"] {
+            assert_eq!(
+                refusal(tool, args.as_ref(), &empty, true).as_deref(),
+                Some(UNCHECKED),
+                "{tool}"
+            );
+            assert_eq!(refusal(tool, args.as_ref(), &empty, false), None, "{tool}");
+        }
+        let (parts, ()) = axum::http::Request::new(()).into_parts();
+        let mut without_access = rmcp::model::Extensions::new();
+        without_access.insert(parts);
+        assert_eq!(
+            refusal("record", args.as_ref(), &without_access, true).as_deref(),
+            Some(UNCHECKED)
+        );
+        let (mut parts, ()) = axum::http::Request::new(()).into_parts();
+        parts.extensions.insert(Access {
+            scope: Scope::Read,
+            hash: None,
+        });
+        let mut read = rmcp::model::Extensions::new();
+        read.insert(parts);
+        assert!(
+            refusal("record", args.as_ref(), &read, true)
+                .is_some_and(|said| said.contains("read-only"))
+        );
+        assert_eq!(refusal("index", args.as_ref(), &read, true), None);
     }
 
     #[test]

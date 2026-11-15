@@ -255,6 +255,12 @@ impl UserMemoryServer {
     fn store_on_server(&self) -> bool {
         !self.in_client_folder
     }
+
+    /// Whether this is `host`'s server, which every call reaches through the
+    /// token gate, unlike a `serve` in the client's folder.
+    fn hosted(&self) -> bool {
+        !self.in_client_folder
+    }
 }
 
 #[tool_router]
@@ -469,6 +475,7 @@ impl rmcp::ServerHandler for UserMemoryServer {
             &request.name,
             request.arguments.as_ref(),
             &context.extensions,
+            self.hosted(),
         ) {
             return Ok(
                 rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(refused)])
