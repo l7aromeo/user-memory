@@ -343,6 +343,13 @@ pub(crate) struct Matched {
     pub(crate) start: usize,
     pub(crate) length: usize,
     pub(crate) score: f64,
+    /// The same match scored free of the store's size, for measuring
+    /// bars on: each term's worth by how many memories hold it alone, as
+    /// `1/holders` and as `1/sqrt(holders)`; and the score as a share of
+    /// what the action that fired could score at most.
+    pub(crate) holders: f64,
+    pub(crate) root: f64,
+    pub(crate) share: f64,
     /// It holds a term of the action that fired.
     pub(crate) fired: bool,
     /// It holds a term of the failed action that fired.
@@ -744,41 +751,59 @@ impl DeliveryIndex {
         let rarest = rarity(all, 1.0);
         /// One passage's hits: its row, its gain, what it holds of the
         /// firing action, and each matched term's worth.
-        type Passage = (Row, f64, Wanted, Vec<(usize, f64)>);
+        type Passage = (Row, Gain, Wanted, Vec<(usize, Gain)>);
         /// One memory's hits: slot 0's score and flags, and each passage's.
         #[derive(Default)]
         struct Hits {
-            whole: f64,
+            whole: Gain,
             whole_wanted: Wanted,
             passages: BTreeMap<u16, Passage>,
         }
         let mut found: HashMap<u32, Hits> = HashMap::new();
+        // What the action that fired could score at most: each of its terms
+        // once as text, a term no memory holds as rare as one memory's.
+        let mut possible = 0.0;
         for (term, (key, want)) in wanted.iter().enumerate() {
+            let postings = self.postings(key)?;
+            let anchor = key.first() == Some(&b'a');
+            if want.fired {
+                let holders = postings.as_ref().map_or(1, |f| f.holders.max(1));
+                let base = if anchor {
+                    ANCHOR_WEIGHT
+                } else {
+                    weight(Field::Body)
+                };
+                possible += base * rarity(all, holders as f64) / rarest;
+            }
             let Some(Found {
                 holders,
                 rows: list,
-            }) = self.postings(key)?
+            }) = postings
             else {
                 continue;
             };
-            let anchor = key.first() == Some(&b'a');
             let worth = |field: Field| {
-                let base = if anchor { ANCHOR_WEIGHT } else { weight(field) };
-                base * rarity(all, holders as f64) / rarest * want.weight
+                let base = if anchor { ANCHOR_WEIGHT } else { weight(field) } * want.weight;
+                let held = holders.max(1) as f64;
+                Gain {
+                    store: base * rarity(all, held) / rarest,
+                    holders: base / held,
+                    root: base / held.sqrt(),
+                }
             };
             for (row, field) in list {
                 let hits = found.entry(row.memory).or_default();
                 if row.slot == 0 {
-                    hits.whole += worth(field);
+                    hits.whole.add(worth(field), 1.0);
                     merge(&mut hits.whole_wanted, want);
                 } else {
                     let entry = hits.passages.entry(row.slot).or_insert((
                         row,
-                        0.0,
+                        Gain::default(),
                         Wanted::default(),
                         Vec::new(),
                     ));
-                    entry.1 += worth(field);
+                    entry.1.add(worth(field), 1.0);
                     entry.3.push((term, worth(field)));
                     merge(&mut entry.2, want);
                 }
@@ -790,7 +815,7 @@ impl DeliveryIndex {
                 hits.passages
                     .values()
                     .fold(None::<&Passage>, |best, candidate| match best {
-                        Some(b) if b.1 >= candidate.1 => Some(b),
+                        Some(b) if b.1.store >= candidate.1.store => Some(b),
                         _ => Some(candidate),
                     });
             let (row, gain, own) = match best {
@@ -798,29 +823,43 @@ impl DeliveryIndex {
                     // Terms only the other passages hold, each once at its
                     // best worth.
                     let mine: BTreeSet<usize> = terms.iter().map(|(t, _)| *t).collect();
-                    let mut others: BTreeMap<usize, f64> = BTreeMap::new();
+                    let mut others: BTreeMap<usize, Gain> = BTreeMap::new();
                     for (_, _, _, terms) in hits.passages.values() {
                         for &(t, worth) in terms.iter().filter(|(t, _)| !mine.contains(t)) {
                             let best = others.entry(t).or_default();
-                            *best = best.max(worth);
+                            if worth.store > best.store {
+                                *best = worth;
+                            }
                         }
                     }
-                    let credit: f64 = others.values().sum::<f64>() * window.tuning.credit;
-                    (*row, gain + credit, *own)
+                    let mut gain = *gain;
+                    for worth in others.values() {
+                        gain.add(*worth, window.tuning.credit);
+                    }
+                    (*row, gain, *own)
                 }
                 None => match self.first_passage(memory)? {
-                    Some(row) => (row, 0.0, Wanted::default()),
+                    Some(row) => (row, Gain::default(), Wanted::default()),
                     None => continue,
                 },
             };
             let mut flags = hits.whole_wanted;
             merge(&mut flags, &own);
+            let mut total = hits.whole;
+            total.add(gain, 1.0);
             matched.push(Matched {
                 memory: memory as usize,
                 slot: i64::from(row.slot),
                 start: row.start as usize,
                 length: row.length as usize,
-                score: hits.whole + gain,
+                score: total.store,
+                holders: total.holders,
+                root: total.root,
+                share: if possible > 0.0 {
+                    total.store / possible
+                } else {
+                    0.0
+                },
                 fired: flags.fired,
                 failed: flags.failed,
                 anchored: flags.anchored,
@@ -829,6 +868,24 @@ impl DeliveryIndex {
         }
         matched.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.memory.cmp(&b.memory)));
         Ok(matched)
+    }
+}
+
+/// A match's score by the store's rarity, and free of the store's size
+/// (see [`Matched::holders`]).
+#[derive(Clone, Copy, Default)]
+struct Gain {
+    store: f64,
+    holders: f64,
+    root: f64,
+}
+
+impl Gain {
+    /// Adds `share` of `other`.
+    fn add(&mut self, other: Gain, share: f64) {
+        self.store += other.store * share;
+        self.holders += other.holders * share;
+        self.root += other.root * share;
     }
 }
 

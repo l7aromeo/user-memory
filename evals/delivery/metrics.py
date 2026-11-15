@@ -32,8 +32,9 @@ EARLY, ON_TIME, LATE, NEVER = "early", "on time", "late", "never"
 def decisions(candidate, bars, action_kind):
     """Which ways `candidate` is delivered at bars `bars`: pushed, pushed
     after a failure, held before a command. With `bars["anchor"]`, a push
-    also needs an anchor of the action that fired."""
-    score = candidate["score"]
+    also needs an anchor of the action that fired. `bars["scale"]` names
+    the quantity the bars test (the matcher's `score` by default)."""
+    score = candidate[bars.get("scale", "score")]
     out = set()
     # #125's change for pushes below their precision: a push needs an
     # anchor of the action, and stems only order what passed.
@@ -177,6 +178,9 @@ def evaluate(task, matched, memories, bars):
         groups = [f"subject:{need['subject']}", f"shape:{shape}"]
         if need["subject"] != "start rule":
             groups.append("all")
+            # The matcher's own recall: needs whose point an anchor can match.
+            if point.get("anchored"):
+                groups.append("anchored")
         for group in groups:
             counts[f"needed|{group}"] += 1
             counts[f"found|{group}"] += when != NEVER

@@ -633,8 +633,11 @@ matched below the bar:
     just delivery-bench --cost           # one lookup's time, 10,000 memories
 
 The bars and window are set on the tuning seeds (`--sweep`) and reported on
-others, so the report isn't graded on what set them. `--bars` reports at
-other bars (repeat it to compare several on the same stores), `--credit`
+others, so the report isn't graded on what set them. The sweep tries the
+bars on the store's score and on quantities free of the store's size, such
+as each term's worth by how many memories hold it alone. `--bars` reports at
+other bars, on any of those quantities with `scale=NAME` (repeat it to
+compare several on the same stores), `--credit`
 with credit for a memory's other passages, `--prompt-curve` at several
 prompt bars on stems alone, and `--keep DIR` keeps the built stores.
 `--presence` adds how often session start already lists what the tasks
