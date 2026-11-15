@@ -311,8 +311,10 @@ within 3 seconds, the client answers the agent app's handshake and tool
 list itself, with its own version's. Claude Code has the tools from the
 session's first turn; Codex, which starts its first turn before its tools
 are in, from the next one, unless the server refused the connection at
-once. Each call then gets the reply for the outage or the refused token. Once the server answers, the next call
-reaches it, and the session recovers by itself. When the server's tools
+once. Each call then gets the reply for the outage or the refused token.
+Once the server answers, the next call reaches it, and the session
+recovers by itself. A server that is only slow keeps the 30 seconds the
+apps give a server to start: until then, a call waits for its handshake. When the server's tools
 differ from the client's own, the app is told. Session start's index is
 not loaded again; the agent calls `index` itself. A server that no longer
 speaks the protocol version the client agreed with the app still gets the
