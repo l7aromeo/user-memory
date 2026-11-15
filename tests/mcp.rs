@@ -19,13 +19,14 @@ use std::{
 };
 use tempfile::tempdir;
 
-/// Most bytes all tool descriptions may take together. A client loads them
-/// with the tools, not in every session as it does the server instructions:
-/// Claude Code and Codex load a tool's description only when the agent
-/// looks the tool up. They measured 3,057 bytes once they taught the memory
-/// model where each idea is used; the room left takes a sentence per tool
-/// change, such as one on search (about 70). Raise it only with a new
-/// measurement.
+/// Most bytes all tool descriptions may take together. A client sends them
+/// with the tool definitions, so in a session that loads the tools at start
+/// they cost every session: Claude Code did so in the evaluation runs (one
+/// turn grew from 14,381 to 15,121 input tokens with these descriptions and
+/// their field docs), while Codex in code mode loads them on demand (10,217
+/// to 10,219). They measured 3,057 bytes once they taught the memory model
+/// where each idea is used; the room left takes a sentence per tool change,
+/// such as one on search (about 70). Raise it only with a new measurement.
 const DESCRIPTIONS_LIMIT: usize = 3400;
 
 /// A `user-memory serve` in `folder`, over the store in `home`.
