@@ -164,6 +164,14 @@ COLLIDING = {"cargo": "cargo run --bin {sub}", "git": "git show --stat {sub}", "
              "kubectl": "kubectl explain {sub}", "terraform": "terraform state show {sub}",
              "make": "make -n {sub}"}
 COLLIDING_SHARE = 0.3
+# The same with a flag first (`git --no-pager show push`), every other one:
+# a rule that reads a word after a flag as possibly its value would take
+# the later word.
+FLAGGED_COLLIDING = {"cargo": "cargo --offline run {sub}", "git": "git --no-pager show {sub}",
+                     "npm": "npm --silent run {sub}", "just": "just --quiet --show {sub}",
+                     "gh": "gh --version help {sub}", "docker": "docker --debug inspect {sub}",
+                     "kubectl": "kubectl -v explain {sub}", "terraform": "terraform -no-color state show {sub}",
+                     "make": "make -s -n {sub}"}
 
 # Flags commands carry, which never join the window.
 FLAGS = ["--dry-run", "--all", "-v", "--locked", "--force-with-lease", "-s", "--watch",
@@ -265,6 +273,8 @@ TRAPS = ["delete another session's lock file", "chain it after a reset", "run it
 # An oracle for #117: every trap names its command in a code span, as a
 # rule at record time could make it. Off in the benchmark's worlds.
 TRAPS_ANCHORED = False
+# The same for lessons: every lesson names its command in a code span.
+LESSONS_ANCHORED = False
 BUSY_SHARE = 0.3
 BUSY_NOTES = (3, 6)
 # The share of a busy command's extra notes a run of it needs: each run
@@ -422,7 +432,7 @@ class World:
                 if needed:
                     self._need(("trap", program, sub), m)
             if rng.random() < LESSON_SHARE:
-                lesson_anchored = rng.random() < ANCHORED_SHARE
+                lesson_anchored = rng.random() < ANCHORED_SHARE or LESSONS_ANCHORED
                 said = self._command_name(program, sub, lesson_anchored)
                 lesson = f"When {said} fails with a timeout, {rng.choice(DOS)} and run it again."
                 m = self._memory("lesson", "fact", "tooling",
@@ -694,8 +704,11 @@ class World:
                         self._command(actions, needs, program, sub, fail())
                 if not unnamed and rng.random() < COLLIDING_SHARE:
                     program, other = rng.choice([c for c in self.commands if c[0] in COLLIDING and c[1]])
-                    actions.append({"kind": "command", "failed": False, "collides": True,
-                                    "text": COLLIDING[program].format(sub=other)})
+                    flagged = n % 2 == 1
+                    template = (FLAGGED_COLLIDING if flagged else COLLIDING)[program]
+                    actions.append({"kind": "command", "failed": False,
+                                    "collides": "after a flag" if flagged else "plain",
+                                    "text": template.format(sub=other)})
                 self.tasks.append({"id": f"{kind}-{t}", "kind": kind, "project": PROJECT,
                                    "session": n % SESSIONS, "unnamed": unnamed,
                                    "actions": actions, "needs": needs})

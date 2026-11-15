@@ -285,9 +285,11 @@ def evaluate(task, matched, memories, bars, earlier=None):
             counts["denials with a need"] += held_now_here
             if actions[i].get("collides"):
                 # Its argument names another command's subcommand.
-                counts["colliding commands"] += 1
-                counts["colliding held"] += held_here
-                counts["colliding pushes"] += pushed_here
+                kind = actions[i]["collides"]
+                for group in [""] + ([f" {kind}"] if isinstance(kind, str) else []):
+                    counts[f"colliding commands{group}"] += 1
+                    counts[f"colliding held{group}"] += held_here
+                    counts[f"colliding pushes{group}"] += pushed_here
             elif not named:
                 counts["unnamed commands"] += 1
                 counts["unnamed held"] += held_here
