@@ -1395,6 +1395,27 @@ fn the_health_check_never_creates_or_changes_a_store() {
     assert_eq!(after, version - 1, "the check changed the store");
 }
 
+/// A store another connection keeps readers out of for a moment, as a
+/// commit does on a store not yet on the write-ahead log, is still healthy:
+/// the check waits for the lock rather than answering 503.
+#[test]
+fn the_health_check_waits_for_a_lock_that_keeps_readers_out() {
+    let host = Host::start();
+    let holder = Connection::open(host.db()).unwrap();
+    // Exclusive locking mode keeps readers out from the first read until
+    // the connection closes, which the thread does after a moment.
+    holder
+        .execute_batch("PRAGMA locking_mode = EXCLUSIVE; BEGIN EXCLUSIVE; COMMIT;")
+        .unwrap();
+    let released = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(1));
+        drop(holder);
+    });
+    let answer = host.send("GET", "/", "", "");
+    released.join().unwrap();
+    assert_eq!(answer.status, 200, "{}", answer.body);
+}
+
 /// A token file an interrupted copy out of the Docker server's volume left
 /// in the store's folder is deleted by the next `host token` and when the
 /// server starts, once it is old enough that no copy can still be reading

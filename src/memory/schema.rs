@@ -288,6 +288,13 @@ fn wait_for_migration(conn: &Connection, mut found: i64, current: i64) -> Result
 #[cfg(debug_assertions)]
 const TEST_SCHEMA_VERSION: &str = "USER_MEMORY_TEST_SCHEMA_VERSION";
 
+/// How long [`servable`] waits for a lock that keeps readers out, such as a
+/// commit to a store not yet on the write-ahead log, so a healthy store
+/// busy for a moment is not reported as broken. A commit takes seconds at
+/// most on a slow, busy disk; this stays well under the 20 seconds the
+/// Docker healthcheck waits for its answer.
+const SERVABLE_WAIT: Duration = Duration::from_secs(10);
+
 /// Whether the store at `db` can be served, checked without writing to it:
 /// it exists, reads as a database, and has this binary's schema version.
 /// For the server's unauthenticated health check, which must never create,
@@ -298,6 +305,7 @@ pub fn servable(db: &Path) -> Result<()> {
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .with_context(|| format!("Cannot open {}", db.display()))?;
+    conn.busy_timeout(SERVABLE_WAIT)?;
     let found = version(&conn).with_context(|| format!("Cannot read {}", db.display()))?;
     let current = schema_version();
     if found != current {
