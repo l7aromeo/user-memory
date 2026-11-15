@@ -311,7 +311,8 @@ on Windows), each private to you:
   server's position as its connector last found it (`<key>.changed`, the
   key a hash of the server's address), when a hook last ran
   (`<key>.wanted`) and when a connector last started to ask
-  (`<key>.polling`), all empty or a few bytes. A prompt whose snapshot
+  (`<key>.polling`, which one connector at a time takes), all empty or a
+  few bytes. A prompt whose snapshot
   holds that position asks the server nothing
   ([session hooks](clients.md#session-hooks)).
 - `instructions/`: one record per instruction file user-memory wrote, with

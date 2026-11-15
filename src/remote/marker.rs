@@ -119,12 +119,67 @@ impl Files {
     /// the interval, which is [`QUIET_POLLS`] polls once no hook ran for
     /// [`QUIET_AFTER_POLLS`]. Another connector's poll makes them young, so
     /// a machine polls once an interval however many sessions it runs.
+    ///
+    /// A claim newer than the marker is a poll still waiting for its answer,
+    /// however slow the server: no other poll starts until it is answered or
+    /// [`STALE_AFTER_POLLS`] polls have passed, when its connector counts as
+    /// gone. A poll that fails leaves its claim so too, so a server that is
+    /// down is asked once in that time; the marker is stale by then, and the
+    /// hooks ask the server themselves.
     fn due(&self, now: SystemTime) -> bool {
         let every = poll_every();
         let quiet = age(&self.wanted, now).is_none_or(|age| age > every * QUIET_AFTER_POLLS);
         let interval = if quiet { every * QUIET_POLLS } else { every };
         let old = |path: &Path| age(path, now).is_none_or(|age| age >= interval);
-        old(&self.marker) && old(&self.claim)
+        let claimed = age(&self.claim, now);
+        let waiting = claimed.is_some_and(|claimed| {
+            claimed < every * STALE_AFTER_POLLS
+                && age(&self.marker, now).is_none_or(|marker| claimed < marker)
+        });
+        old(&self.marker) && old(&self.claim) && !waiting
+    }
+
+    /// Takes the claim for a poll that [`Files::due`] found due; false when
+    /// another connector took it first. Several connectors can find a poll
+    /// due at the same instant, as when the system wakes their timers
+    /// together, so the claim moves by one step only one of them can make:
+    /// renaming it away, or creating it when there is none. A claim renamed
+    /// away that turns out younger than a poll was just taken by another
+    /// connector, after this one found the poll due, and goes back; a third
+    /// connector that finds no claim in that moment creates its own, so two
+    /// polls can run once. A process stopped between the rename and the
+    /// removal leaves its empty `.polling.<pid>` file: nothing reads it, and
+    /// a later connector with that process id replaces and removes it.
+    fn take(&self) -> bool {
+        let Some(dir) = self.claim.parent() else {
+            return false;
+        };
+        if private::create_dir(dir).is_err() {
+            return false;
+        }
+        let taken = self
+            .claim
+            .with_extension(format!("{CLAIM}.{}", std::process::id()));
+        match fs::rename(&self.claim, &taken) {
+            Ok(()) => {
+                let fresh = age(&taken, SystemTime::now()).is_some_and(|age| age < poll_every());
+                if fresh {
+                    // A link never replaces a claim made in the meantime.
+                    let _ = fs::hard_link(&taken, &self.claim);
+                }
+                let _ = fs::remove_file(&taken);
+                if fresh {
+                    return false;
+                }
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => return false,
+        }
+        private::create_file(
+            fs::OpenOptions::new().write(true).create_new(true),
+            &self.claim,
+        )
+        .is_ok()
     }
 }
 
@@ -203,11 +258,10 @@ pub async fn poll(connection: Connection) {
             poll_every() * QUIET_POLLS
         };
         let waiting = !woken && last_asked.is_some_and(|at| at.elapsed() < wait);
-        if waiting || !files.due(SystemTime::now()) {
+        if waiting || !files.due(SystemTime::now()) || !files.take() {
             continue;
         }
         last_asked = Some(tokio::time::Instant::now());
-        let _ = touch(&files.claim);
         if let Some(old) = &without_positions {
             if version(&connection).await.is_none_or(|now| &now == old) {
                 continue;
@@ -302,5 +356,63 @@ mod tests {
         fs::remove_file(&files.wanted).unwrap();
         assert!(!files.due(now + poll * 2));
         assert!(files.due(now + poll * (QUIET_POLLS + 1)));
+    }
+
+    /// Sets the time of `path` to `ago` before now.
+    fn aged(path: &Path, ago: Duration) {
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(SystemTime::now() - ago)
+            .unwrap();
+    }
+
+    #[test]
+    fn a_poll_waits_for_one_not_yet_answered_up_to_the_stale_age() {
+        let root = tempfile::tempdir().unwrap();
+        let files = Files::in_dir(root.path(), URL);
+        let poll = REMOTE_MARKER_POLL;
+        touch(&files.wanted).unwrap();
+        files
+            .write(&Position::kept("1.0123456789abcdef.7".into()))
+            .unwrap();
+        aged(&files.marker, poll * 2);
+        // Claimed after the marker was written: a poll still waiting for
+        // its answer, past the interval.
+        touch(&files.claim).unwrap();
+        aged(&files.claim, poll + poll / 2);
+        let now = SystemTime::now();
+        assert!(!files.due(now), "a poll under way");
+        assert!(
+            files.due(now + poll * STALE_AFTER_POLLS),
+            "its connector is gone"
+        );
+        // Answered: the marker is newer than the claim.
+        aged(&files.claim, poll * 3);
+        assert!(files.due(SystemTime::now()));
+        // A server without positions, or one that is down, leaves no newer
+        // marker: one poll in that time.
+        fs::remove_file(&files.marker).unwrap();
+        aged(&files.claim, poll * 2);
+        let now = SystemTime::now();
+        assert!(!files.due(now));
+        assert!(files.due(now + poll * STALE_AFTER_POLLS));
+    }
+
+    #[test]
+    fn one_connector_takes_a_claim_the_others_found_due_with_it() {
+        let root = tempfile::tempdir().unwrap();
+        let files = Files::in_dir(root.path(), URL);
+        // No claim yet: the first to create it has it.
+        assert!(files.take());
+        assert!(!files.take(), "taken a moment ago");
+        assert!(files.claim.is_file());
+        // An old claim: the first to rename it away has it.
+        aged(&files.claim, REMOTE_MARKER_POLL * 2);
+        assert!(files.take());
+        assert!(!files.take(), "taken a moment ago");
+        assert!(files.claim.is_file());
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1, "one claim");
     }
 }
