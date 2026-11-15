@@ -300,6 +300,13 @@ fn read_token(path: &Path) -> Result<String> {
     Ok(token.to_owned())
 }
 
+/// A new value for a shared token file: 32 random bytes in hex, which
+/// every released server and client reads as a token.
+fn new_shared_token() -> String {
+    let bytes: [u8; 32] = rand::random();
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 fn host_token(path: &Path) -> Result<String> {
     if !path.is_absolute() {
         bail!("Token file must use an absolute path");
@@ -308,8 +315,7 @@ fn host_token(path: &Path) -> Result<String> {
         return read_token(path);
     }
     fs::create_dir_all(path.parent().context("Invalid token-file path")?)?;
-    let bytes: [u8; 32] = rand::random();
-    let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let token = new_shared_token();
     let mut file = private::create_file(fs::OpenOptions::new().write(true).create_new(true), path)
         .context("Cannot create server access-token file")?;
     file.write_all(token.as_bytes())?;

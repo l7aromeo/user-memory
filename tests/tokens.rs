@@ -55,6 +55,13 @@ impl Host {
             child: None,
             address: String::new(),
         };
+        host.serve(env);
+        host
+    }
+
+    /// Starts `host` on this folder's store and shared token file.
+    fn serve(&mut self, env: &[(&str, &str)]) {
+        let host = self;
         let mut command = host.command(&[]);
         command.args([
             "host",
@@ -86,7 +93,12 @@ impl Host {
             .unwrap()
             .to_owned();
         host.child = Some(child);
-        host
+    }
+
+    /// Stops the server and starts it again on the same files.
+    fn restart(&mut self) {
+        self.stop();
+        self.serve(&[]);
     }
 
     fn db(&self) -> PathBuf {
@@ -108,23 +120,27 @@ impl Host {
 
     /// `host token ARGS` on this server's registry, from another process.
     fn token(&self, args: &[&str]) -> Output {
-        let out = self
-            .command(
-                &[
-                    &["host", "token"],
-                    args,
-                    &["--db", self.db().to_str().unwrap()],
-                ]
-                .concat(),
-            )
-            .output()
-            .unwrap();
+        let out = self.try_token(args);
         assert!(
             out.status.success(),
             "{}",
             String::from_utf8_lossy(&out.stderr)
         );
         out
+    }
+
+    /// `host token ARGS`, which may fail.
+    fn try_token(&self, args: &[&str]) -> Output {
+        self.command(
+            &[
+                &["host", "token"],
+                args,
+                &["--db", self.db().to_str().unwrap()],
+            ]
+            .concat(),
+        )
+        .output()
+        .unwrap()
     }
 
     /// A new client token named `name` (with `extra` options), read from
@@ -949,6 +965,189 @@ impl Drop for Bridge {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// `host token retire-shared` on this server's shared token file.
+fn retire(host: &Host) -> Output {
+    let file = host.root.path().join("access-token");
+    host.try_token(&["retire-shared", "--token-file", file.to_str().unwrap()])
+}
+
+const NO_WRITER: &str = "No client token has write access; add one with `user-memory host token add NAME` first, so the shared file is not the only way in.";
+
+/// The leftovers of an interrupted retire-shared beside the shared file.
+fn leftovers(host: &Host) -> Vec<String> {
+    fs::read_dir(host.root.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(".access-token.retire-"))
+        .collect()
+}
+
+/// The new value is 64 hex characters, which every released server and
+/// client reads as a token, readable only by its owner.
+fn assert_replaced(host: &Host) -> String {
+    let file = host.root.path().join("access-token");
+    let value = fs::read_to_string(&file).unwrap();
+    assert_ne!(value, SHARED);
+    assert!(
+        value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit()),
+        "the new value has {} characters",
+        value.len()
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    assert_eq!(leftovers(host), Vec::<String>::new());
+    value
+}
+
+/// retire-shared refuses until a client token can write, and refuses a
+/// client's token file; then the running server refuses the shared token as
+/// revoked at once, its file holds a new value that is never printed, and
+/// after a restart that value is refused too.
+#[test]
+fn retiring_the_shared_file_needs_a_writer_and_refuses_its_token_at_once() {
+    let mut host = Host::start();
+    // No registry: nothing can write but the shared file.
+    let out = retire(&host);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains(NO_WRITER));
+    assert!(!host.registry().exists());
+    // Read-only, revoked and expired tokens cannot write either.
+    host.add("reader", &["--read-only"]);
+    host.add("gone", &[]);
+    host.token(&["revoke", "gone"]);
+    host.add("late", &["--expires", "30"]);
+    host.registry_conn()
+        .execute(
+            "UPDATE client_tokens SET expires_at = ?1 WHERE name = 'late'",
+            [now() - 1],
+        )
+        .unwrap();
+    let out = retire(&host);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains(NO_WRITER));
+    assert_eq!(
+        fs::read_to_string(host.root.path().join("access-token")).unwrap(),
+        SHARED
+    );
+    assert_eq!(host.initialize(SHARED).status, 200);
+
+    // A client's token file is not the shared file.
+    let writer = host.add("writer", &[]);
+    let client_file = host.root.path().join("writer.token");
+    let out = host.try_token(&[
+        "retire-shared",
+        "--token-file",
+        client_file.to_str().unwrap(),
+    ]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("holds a client token"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(fs::read_to_string(&client_file).unwrap(), writer);
+
+    let out = retire(&host);
+    let said = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "{said}");
+    assert!(out.stdout.is_empty());
+    let value = assert_replaced(&host);
+    assert!(!said.contains(&value), "{said}");
+    let refused = host.initialize(SHARED);
+    assert_eq!(refused.status, 401);
+    assert!(
+        refused.challenge.contains(r#"error_description="revoked""#),
+        "{}",
+        refused.challenge
+    );
+    assert_eq!(host.initialize(&writer).status, 200);
+    let listed = String::from_utf8_lossy(&host.token(&["list"]).stdout).into_owned();
+    assert!(!listed.contains("owner (shared file)"), "{listed}");
+    assert!(listed.contains("writer"), "{listed}");
+
+    // A restarted server reads the new value and refuses it as well.
+    host.restart();
+    let refused = host.initialize(&value);
+    assert_eq!(refused.status, 401);
+    assert!(
+        refused.challenge.contains(r#"error_description="revoked""#),
+        "{}",
+        refused.challenge
+    );
+    assert_eq!(host.initialize(SHARED).status, 401);
+    assert_eq!(host.initialize(&writer).status, 200);
+}
+
+/// A retire-shared stopped after writing the new value, or after
+/// committing the setting, completes when it is run again.
+#[test]
+fn a_retire_shared_stopped_at_any_step_completes_on_a_rerun() {
+    // Stopped after step 1: a new value beside the file, no setting.
+    let host = Host::start();
+    let writer = host.add("writer", &[]);
+    fs::write(
+        host.root
+            .path()
+            .join(".access-token.retire-00000000000000ff"),
+        "f".repeat(64),
+    )
+    .unwrap();
+    assert_eq!(host.initialize(SHARED).status, 200);
+    let out = retire(&host);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_replaced(&host);
+    assert_eq!(host.initialize(SHARED).status, 401);
+    assert_eq!(host.initialize(&writer).status, 200);
+
+    // Stopped after step 2: the setting committed, the file not replaced.
+    // A power loss after the rename leaves the same, since the folder is
+    // not synced, with the new value possibly still beside the file.
+    let host = Host::start();
+    let writer = host.add("writer", &[]);
+    fs::write(
+        host.root
+            .path()
+            .join(".access-token.retire-00000000000000ee"),
+        "e".repeat(64),
+    )
+    .unwrap();
+    host.registry_conn()
+        .execute(
+            "INSERT INTO settings (key, value) VALUES ('shared_file_retired', '1')",
+            [],
+        )
+        .unwrap();
+    assert_eq!(host.initialize(SHARED).status, 401);
+    let out = retire(&host);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_replaced(&host);
+    assert_eq!(host.initialize(&writer).status, 200);
+
+    // Run again when done: a new value again, nothing else changes.
+    let before = fs::read_to_string(host.root.path().join("access-token")).unwrap();
+    let out = retire(&host);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_ne!(assert_replaced(&host), before);
 }
 
 /// A stand-in memory server on loopback that answers every handshake and
