@@ -233,6 +233,44 @@ existing category for a new memory (`workflow`, not a new `process`). With
   client's file, the session has the old one, so the hook lists the rules.
 - It runs on new and resumed sessions, `/clear` and compaction: a resumed
   transcript holds the index as it was, so it gets the current one.
+- After the projects line, it lists the standing rules added or changed
+  since this machine's last session of the store, global ones and those of
+  the projects it has covered before, then how to remove one that isn't
+  yours:
+
+  ```
+  New rules since your last session:
+    3f9c2a1b Push only with the user's go-ahead (from claude:session/<id>, claude)
+  If one isn't the user's, remove it with forget on their yes, or forget with its origin to remove everything that conversation recorded.
+  ```
+
+  Each line names the conversation and client that wrote the rule as it
+  stands: no client for an import, whose client is the importer's, and for
+  a rule an undone import gave back, who wrote it before that import.
+
+  It keeps the ids and fingerprints of the rules it showed (a hash of title,
+  content, context, reason and scope; no text) in
+  `sessions/seen-<store key>.json` beside the snapshots, and compares ids
+  and fingerprints, never dates, so an imported rule counts as new and a
+  move, a confirmation or an update that changes nothing doesn't. A rule an
+  undone import gave back is listed only if a session showed the import's
+  version. The first
+  session after the upgrade, a machine without the file, and a project it
+  has never covered list nothing; a rule recorded into a project before
+  this machine first opens it is taken silently too, and `review` lists it
+  by time. A long list takes at most 2,000 characters and counts the rest;
+  only then is the index shortened to make room. With a read-only token the
+  last line names the server's operator instead
+  ([access tokens](server.md#access-tokens)), and against a server too old
+  to fingerprint rules the list is left out.
+- When a rule is new, a new session (not a resumed, cleared or compacted
+  one) also tells you, beside the agent's text: "1 new rule and 12 new
+  memories recorded by agents since your last session: `user-memory review`
+  lists them." The hook then prints its client's JSON (`systemMessage`, with
+  the text above as `additionalContext`); every other start prints plain
+  text as before. A rule first listed at a resumed or compacted start is in
+  the next new session's message. New memories agents recorded, with no new
+  rule, say nothing to you; `review` lists them.
 - It saves what the session sees of memory (each memory's id, last change,
   status and title, for the global memories and its projects') in
   `${XDG_STATE_HOME:-~/.local/state}/user-memory/sessions/<client>-<session id>-<store key>.json`,

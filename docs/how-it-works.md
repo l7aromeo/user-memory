@@ -186,6 +186,10 @@ Other memories
 - **Projects** names every project the session loads and where each comes
   from ([what a session loads](projects.md#what-a-session-loads)). With none,
   a `No project:` line tells the agent what to propose instead.
+- **New rules since your last session**, when there are any, lists the rules
+  added or changed since this machine's last session start, with where each
+  came from and how to remove one that isn't yours; a new session also tells
+  you how many ([session hooks](clients.md#session-hooks)).
 - **The index** lists every memory in scope, one line each: an 8-character id
   and the title. Marks: `[project]` for a project memory, `(tentative)` for
   one not confirmed, `×N` when N conversations said it. The agent reads a

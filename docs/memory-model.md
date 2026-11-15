@@ -103,6 +103,9 @@ Example explicit preference (`record` arguments):
   - only explicit, confirmed memories of a rule type become your rules;
   - a running session hears of every change in its
     [change notice](how-it-works.md#change-notices-during-a-session);
+  - the next session start lists every rule added or changed since the last
+    one on that machine, and tells you
+    ([session hooks](clients.md#session-hooks));
   - `forget --origin` removes everything one conversation recorded;
   - [automatic backups](backup.md#automatic-backups) keep the store as it
     was before.
