@@ -207,9 +207,11 @@ log would be applied to the restored store.
 also compares every index with its table and checks the keyword index's
 FTS5 structure, then stems every memory again and compares the result with
 the keyword index, and checks that the keyword index removes deleted words
-at once. Two processes writing the store at once without SQLite's
-locks leave exactly that damage: an index whose entries no longer match the
-memories.
+at once. Two processes writing the store at once without SQLite's locks
+leave exactly that damage: an index whose entries no longer match the
+memories. It also checks that no write left behind the row naming its
+client in `memory_writer`: every write clears it before committing, and a
+row left by another program would name that program's writes.
 
 `user-memory repair` (`--db PATH` for another store; on a server,
 `docker compose exec memory user-memory repair`) checks the store the same way
@@ -218,9 +220,9 @@ and, when it finds problems:
 1. copies the store page by page, damage included, to
    `<store>.repair-<UTC time>.bak` beside it (mode 0600, never replacing a
    file), and checks that the copy holds every memory;
-2. under the same write lock, rebuilds every index from the memories
-   (`REINDEX`) and the keyword index from the memories' text (before schema
-   version 6, FTS5 `rebuild`);
+2. under the same write lock, clears a `memory_writer` row left behind,
+   rebuilds every index from the memories (`REINDEX`) and the keyword index
+   from the memories' text (before schema version 6, FTS5 `rebuild`);
 3. if the store still fails the check, rewrites the whole file (`VACUUM`),
    which mends damage beyond the indexes, such as a miscounted free-page list;
 4. counts the memories again, without any index, and prints what it found.

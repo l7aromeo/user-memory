@@ -1,6 +1,7 @@
 //! The store's integrity check, and the repair of a store whose indexes no
 //! longer match its tables: the damage left when two processes wrote to it
-//! at once. Rows are never changed; every index is rebuilt from them.
+//! at once. Rows are never changed, except that a write's client left in
+//! `memory_writer` is cleared; every index is rebuilt from them.
 
 use super::{
     migrate::{BASELINE, backup_path, memory_rows, write_backup},
@@ -24,6 +25,7 @@ pub fn problems(conn: &Connection) -> Result<Vec<String>> {
         if stem_index(conn)? {
             found.extend(super::index::problems(conn)?);
         }
+        found.extend(super::history::problems(conn)?);
     }
     Ok(found)
 }
@@ -110,6 +112,7 @@ pub fn repair(db: &Path) -> Result<Repair> {
     // stem index from version 6, an FTS5 copy of the text before.
     (|| -> Result<()> {
         tx.execute_batch("REINDEX;")?;
+        super::history::clear_writer(&tx)?;
         if stem_index(&tx)? {
             super::index::rebuild(&tx)
         } else {

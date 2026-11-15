@@ -71,9 +71,6 @@ pub fn move_project(db: &Path, old: &str, new: &str) -> Result<Moved> {
     // One write lock from the counts to the commit, so no writer slips in
     // between the backup and the move.
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    // The memories' history names this client for the move; the row goes
-    // before the commit.
-    crate::memory::note_writer(&tx, None, None, "")?;
     let found = problems(&tx)?;
     if !found.is_empty() {
         bail!(
@@ -82,6 +79,10 @@ pub fn move_project(db: &Path, old: &str, new: &str) -> Result<Moved> {
             found.join("\n  ")
         );
     }
+    // The memories' history names this client for the move, after the
+    // check, which counts a writer row as damage; the row goes before the
+    // commit.
+    crate::memory::note_writer(&tx, None, None, "")?;
     let count = |sql: &str, key: &str| tx.query_row(sql, [key], |r| r.get::<_, usize>(0));
     let memories = count(PROJECT_MEMORIES, &old)?;
     let links = count(

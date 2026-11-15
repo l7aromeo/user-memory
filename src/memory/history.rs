@@ -472,6 +472,39 @@ pub(super) fn parse(value: &Value, timestamp: impl Fn(&str) -> Option<String>) -
     })
 }
 
+/// Whether the store has the writer row's table (schema version 7 on).
+fn has_writer(conn: &Connection) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='memory_writer')",
+        [],
+        |r| r.get(0),
+    )
+}
+
+/// What is wrong with the history's tables: a writer row left after a
+/// write, which every write clears before committing. Only another program
+/// writing it, or SQL run by hand, leaves one, and the triggers would then
+/// record its client for other programs' writes.
+pub(super) fn problems(conn: &Connection) -> rusqlite::Result<Vec<String>> {
+    if !has_writer(conn)? {
+        return Ok(Vec::new());
+    }
+    let left: i64 = conn.query_row("SELECT count(*) FROM memory_writer", [], |r| r.get(0))?;
+    Ok(if left > 0 {
+        vec!["history: a write's client is left in memory_writer, so other programs' writes would be recorded as its".to_owned()]
+    } else {
+        Vec::new()
+    })
+}
+
+/// Clears a writer row left after a write (see [`problems`]).
+pub(super) fn clear_writer(conn: &Connection) -> rusqlite::Result<()> {
+    if has_writer(conn)? {
+        conn.execute("DELETE FROM memory_writer", [])?;
+    }
+    Ok(())
+}
+
 /// The number of the store's newest event, or 0: an import compares the
 /// file's events with those up to here.
 pub(super) fn mark(conn: &Connection) -> rusqlite::Result<i64> {
