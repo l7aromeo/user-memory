@@ -217,6 +217,13 @@ fn initialization_delivers_portable_memory_guidance_and_keeps_tools_available() 
             .unwrap()
             .contains("tentative: not yet the user's own word")
     );
+    // Asking for an import is not the yes: the user approves its preview.
+    assert!(
+        field_doc("import", "user_confirmed")
+            .as_str()
+            .unwrap()
+            .contains("approved applying this import after its preview")
+    );
     for (command, short) in [
         (
             "record",

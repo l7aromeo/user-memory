@@ -96,7 +96,7 @@ pub struct ImportMemories {
     /// For memories whose id exists with different contents: abort (default), keep-store or use-file.
     #[serde(default)]
     pub on_conflict: OnConflict,
-    /// True only when the user asked to import this file. A message they typed, even mid-turn, or an answer they picked counts.
+    /// True only when the user approved applying this import after its preview. A message they typed, even mid-turn, or an answer they picked counts.
     #[serde(default)]
     pub user_confirmed: bool,
     /// For an export from before titles (format version 1): each memory id to the title the user approved.
