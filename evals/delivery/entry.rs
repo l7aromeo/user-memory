@@ -165,6 +165,7 @@ fn matched(index: &DeliveryIndex, m: &Matched) -> Value {
         "root": (m.root * 1e4).round() / 1e4,
         "mixed": (m.mixed * 1e4).round() / 1e4,
         "mixed_log": (m.mixed_log * 1e4).round() / 1e4,
+        "flat": (m.flat * 1e4).round() / 1e4,
         "share": (m.share * 1e4).round() / 1e4,
         "fewest": m.fewest,
         "fired": m.fired,
