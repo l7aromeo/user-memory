@@ -137,6 +137,10 @@ const NO_PROJECT_NEW: &str = "If it is one new project, run `user-memory project
 /// file, so it goes on with the task and leaves the checks to the user.
 const UNAVAILABLE_NEXT: &str =
     "Work without memory for now; tell the user once, and suggest they run user-memory doctor.";
+/// The time session start gives the marker's repair after the index is
+/// ready: enough for a write that waits for no other writer, a few
+/// milliseconds, and short beside the hook's limit.
+const RECONCILE_GRACE: Duration = Duration::from_millis(200);
 /// Opens the index a prompt gives a session whose start could not read
 /// memory, once memory answers: the agent's last word on memory was to work
 /// without it.
@@ -164,16 +168,20 @@ pub async fn start(path: PathBuf, client: Option<HookClient>) -> String {
     let origin = client
         .zip(payload.as_deref())
         .and_then(|(c, p)| origin(c, p));
-    // A store on this machine whose marker missed a change gets a new id
-    // first, so the sessions running on it read it whole.
-    if setup::configured_remote().ok().flatten().is_none() {
-        let db = db_path();
-        let _ = tokio::time::timeout_at(
-            deadline,
-            tokio::task::spawn_blocking(move || memory::reconcile(&db)),
-        )
-        .await;
-    }
+    // A store on this machine whose marker missed a change gets a new id,
+    // so the sessions running on it read it whole. Beside the index, not
+    // before it: setting the marker right takes the write turn, and a long
+    // writer must not keep the index from the session. One still waiting
+    // when the index is ready gets [`RECONCILE_GRACE`] more; left then, its
+    // transaction rolled back, it is done at the next session start.
+    let reconcile = setup::configured_remote()
+        .ok()
+        .flatten()
+        .is_none()
+        .then(|| {
+            let db = db_path();
+            tokio::task::spawn_blocking(move || memory::reconcile(&db))
+        });
     // Marked before memory is asked and cleared once the index is in hand,
     // so a start that fails, or is cut off before it hears, is marked.
     let missed = client
@@ -200,6 +208,9 @@ pub async fn start(path: PathBuf, client: Option<HookClient>) -> String {
         tokio::time::timeout_at(deadline, start_index(path, client, origin.clone())),
         tokio::time::timeout_at(deadline, version_line())
     );
+    if let Some(reconcile) = reconcile {
+        let _ = tokio::time::timeout(hook_time(RECONCILE_GRACE), reconcile).await;
+    }
     let index = match index {
         Ok(Ok(text)) => {
             if let Some(missed) = &missed {

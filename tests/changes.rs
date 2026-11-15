@@ -632,6 +632,26 @@ fn session_start_sets_right_a_marker_that_missed_a_change() {
     assert_eq!(store.marker(), Some(format!("{renewed} {now}\n")));
 }
 
+// Setting a stale marker right waits for the write turn; a long writer then
+// still leaves session start its index.
+#[test]
+fn session_start_prints_the_index_while_a_stale_marker_waits_for_a_writer() {
+    let store = Store::new();
+    store.record("Use Helix", &[]);
+    let (id, last) = store.state();
+    fs::write(store.marker_path(), format!("{id} {}\n", last - 1)).unwrap();
+    let writer = Connection::open(&store.db).unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let out = store
+        .command(&["session-start"])
+        .current_dir(store.root.path())
+        .output()
+        .unwrap();
+    writer.execute_batch("ROLLBACK").unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("Use Helix"), "{text}");
+}
+
 // Another program's statement with its own conflict clause replaces the
 // clause of the statements its triggers run: the row a change leaves still
 // names the latest change and whether the memory is live.
