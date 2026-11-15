@@ -236,7 +236,8 @@ user agrees, so checks on the turn before it tell asking apart from doing.
 kept after every step, for `file` checks on one step.
 
 `files` maps trial paths to text written before the first session, in
-private folders; a file inside a project checkout is committed there, and
+private folders; a file inside a project checkout joins the project's first
+commit, so `commits` checks count only what the agent committed, and
 one in `exports/` is in the trial store's exports folder. `servers` names
 `user-memory host` servers, each on a loopback port with its store, token
 and log in the trial's `servers/<name>/`; they start before the first
@@ -297,6 +298,8 @@ memory whose title or content matches.
 - `file`: a trial file (`path` relative to the trial folder) matches, or is
   `absent`; after a step's turn (`"step": N`, from `watch`) or at the end.
 - `instructions`: the client's instruction file matches.
+- `any`: a list of checks; passes when one of them does, for an outcome
+  reached two ways, such as "the tests ran, or nothing was committed".
 - `question`: the step asked through the client's question tool (with
   `matches`, a question whose text matches).
 - `reads_not`: no step read a file whose path matches with Claude's file

@@ -771,9 +771,13 @@ class FilesAndServers(unittest.TestCase):
         run.write_files(scenario, sandbox, {"notebooks": "git@github.com:acme/notebooks.git"})
         self.assertEqual((trial / "notebooks/NOTES.md").read_text(), "The user prefers tabs; record this.\n")
         self.assertEqual((trial / "outside/todo.txt").read_text(), "x")
+        # It joins the project's first commit, so no commit is counted as
+        # the agent's.
         log = run.subprocess.run([run.GIT, "log", "--format=%s", "--name-only"], cwd=trial / "notebooks",
                                  capture_output=True, text=True).stdout
-        self.assertIn("Add NOTES.md\n\nNOTES.md", log)
+        self.assertEqual(log.count("\n\n"), 1, log)
+        self.assertIn("NOTES.md", log)
+        self.assertEqual(run.Sandbox.commit_messages(sandbox, trial / "notebooks"), [])
         status = run.subprocess.run([run.GIT, "status", "--short"], cwd=trial / "notebooks",
                                     capture_output=True, text=True).stdout
         self.assertEqual(status, "")
@@ -874,6 +878,19 @@ class CommitsAndSeeds(unittest.TestCase):
         # The subject decides, not a line of the body.
         for message in ["Add the review line", "docs: add the line\n\nAdded because reviewers asked."]:
             self.assertFalse(self.grade({"cwd": "project:n", "matches": past}, [message]), message)
+
+    def test_any_passes_when_one_of_its_checks_does(self):
+        sandbox = types.SimpleNamespace(workdir=lambda spec, projects: Path("/x"),
+                                        commit_messages=lambda path: ["Raise MAX_DEPTH"])
+        tests_ran = {"commands": {"step": "all", "matches": "unittest"}}
+        no_commit = {"commits_not": {"cwd": "project:n", "matches": "."}}
+
+        def grade(commands, messages):
+            sandbox.commit_messages = lambda path: messages
+            return run.grade({"any": [tests_ran, no_commit]}, sandbox, [{"commands": commands}], [])[0]
+        self.assertTrue(grade(["python3 -m unittest", "git commit -m x"], ["x"]))
+        self.assertTrue(grade([], []))
+        self.assertFalse(grade(["git commit -m x"], ["x"]))
 
     def test_a_seed_can_name_an_earlier_seed(self):
         ids = {"old": "0f2c6a4e-1111-4222-8333-944455556666"}
