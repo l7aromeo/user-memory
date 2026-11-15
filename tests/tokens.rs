@@ -940,7 +940,14 @@ impl Bridge {
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            // What an agent app would keep in its log, for tests to read.
+            .stderr(
+                fs::File::options()
+                    .create(true)
+                    .append(true)
+                    .open(host.root.path().join("bridge.log"))
+                    .unwrap(),
+            )
             .spawn()
             .unwrap();
         let input = child.stdin.take().unwrap();
@@ -1409,4 +1416,97 @@ fn a_copy_left_in_the_store_folder_is_deleted_once_no_copy_can_use_it() {
     host.restart();
     assert!(!old.exists());
     assert!(fresh.exists() && other.exists());
+}
+
+/// A token is never shown where someone could read it: one is issued and
+/// used on every path a client or the operator meets, accepted and then
+/// refused, and neither the token nor the start of its secret appears in
+/// any output, any answer, the connector's log or the server's log, traced.
+/// Left out: the installer, which reads a token file it is given and is
+/// checked in tests/install.rs, and the Docker server's copy, checked in
+/// `host_token_runs_in_the_docker_server_and_retires_its_shared_file`.
+#[test]
+fn no_output_or_log_shows_a_token() {
+    let mut host = Host::start_with(&[("USER_MEMORY_TEST_TRACE", "1")]);
+    let url = format!("http://{}/mcp", host.address);
+    let file = host.root.path().join("laptop.token");
+    let text = |out: &Output| {
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    };
+    let mut seen: Vec<(&str, String)> = Vec::new();
+    seen.push((
+        "add",
+        text(&host.token(&["add", "laptop", "--out", file.to_str().unwrap()])),
+    ));
+    let token = fs::read_to_string(&file).unwrap();
+    seen.push(("list", text(&host.token(&["list"]))));
+    seen.push(("state", text(&host.token(&["state", "--name", "laptop"]))));
+    let answer = host.initialize(&token);
+    assert_eq!(answer.status, 200);
+    seen.push((
+        "an accepted request",
+        format!("{}{}", answer.challenge, answer.body),
+    ));
+    let payload = json!({"session_id":"s","cwd":host.root.path(),"hook_event_name":"SessionStart"})
+        .to_string();
+    let exported = host.root.path().join("exported.json");
+    let calls: [(&str, Vec<&str>, &str); 5] = [
+        (
+            "doctor",
+            vec![
+                "doctor",
+                "--url",
+                &url,
+                "--token-file",
+                file.to_str().unwrap(),
+            ],
+            "",
+        ),
+        (
+            "the session hook",
+            vec!["session-start", "--client", "claude"],
+            &payload,
+        ),
+        ("a call", vec!["index"], ""),
+        ("export", vec!["export", exported.to_str().unwrap()], ""),
+        ("import", vec!["import", exported.to_str().unwrap()], ""),
+    ];
+    for (path, args, stdin) in &calls {
+        seen.push((path, text(&client(&host, &file, args, stdin.as_bytes()))));
+    }
+    let mut bridge = Bridge::start(&host, &file);
+    bridge.send(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"app","version":"1"}}}));
+    seen.push(("the bridge's handshake", bridge.reply().to_string()));
+    bridge.send(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+    seen.push(("the bridge's call", bridge.call(2, "index").1));
+
+    seen.push(("revoke", text(&host.token(&["revoke", "laptop"]))));
+    let refused = host.initialize(&token);
+    assert_eq!(refused.status, 401);
+    seen.push((
+        "a refused request",
+        format!("{}{}", refused.challenge, refused.body),
+    ));
+    seen.push(("the bridge's refusal", bridge.call(3, "index").1));
+    drop(bridge);
+    for (path, args, stdin) in &calls {
+        seen.push((path, text(&client(&host, &file, args, stdin.as_bytes()))));
+    }
+    seen.push((
+        "the connector's log",
+        fs::read_to_string(host.root.path().join("bridge.log")).unwrap_or_default(),
+    ));
+    let log = host.stop();
+    assert!(log.contains("registry loaded"), "traced:\n{log}");
+    seen.push(("the server's log", log));
+
+    // The secret's first characters, after the public prefix.
+    let start = &token[..12];
+    for (path, said) in &seen {
+        assert!(!said.contains(start), "{path} shows the token:\n{said}");
+    }
 }
