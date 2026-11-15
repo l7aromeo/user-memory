@@ -285,18 +285,24 @@ store needs none is reported as not needed. Until the store is upgraded, the
 server and hooks refuse it, so memory is unavailable on that store.
 
 Nothing else migrates. The MCP server, the CLI, the session hook and `host`
-refuse an older store with "run the installer again (or ./setup, or
-`user-memory migrate`) to upgrade it", and a newer one with "update user-memory and restart your client" (what
-sessions opened before an upgrade show). Refused stores are left untouched. To
-undo an upgrade, stop your clients and every other process using the store,
-delete `<store>-wal` and `<store>-shm` if they are there, copy the `.bak` back
-and install the previous version; memories recorded since are lost unless
-exported first. A `-wal` left beside the store is applied to whatever store
-sits there, so skipping the delete brings writes made after the backup into
-the restored store. The previous version reads a WAL store as it is. Stores
-from before schema version 2, and files that are not user-memory stores, are
-refused: move the file aside and run setup to start fresh, then import an
-export made with the version that created it.
+refuse an older store with the first message below, and a newer one with the
+second, which is what sessions opened before an upgrade show:
+
+```output
+<store> has schema version <found>; run the installer again (or ./setup, or `user-memory migrate`) to upgrade it to version <current>. A backup is made first; the store was left unchanged.
+<store> has schema version <found>, but this user-memory is older than the store (it uses version <current>); update user-memory and restart your client. The store was left unchanged.
+```
+
+Refused stores are left untouched. To undo an upgrade, stop your clients and
+every other process using the store, delete `<store>-wal` and `<store>-shm` if
+they are there, copy the `.bak` back and install the previous version;
+memories recorded since are lost unless exported first. A `-wal` left beside
+the store is applied to whatever store sits there, so skipping the delete
+brings writes made after the backup into the restored store. The previous
+version reads a WAL store as it is. Stores from before schema version 2, and
+files that are not user-memory stores, are refused: move the file aside and
+run setup to start fresh, then import an export made with the version that
+created it.
 
 ## The state folder
 

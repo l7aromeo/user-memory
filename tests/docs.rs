@@ -7,6 +7,9 @@
 //!   name subcommands the built binary has, with flags its `--help` lists.
 //! - Every quoted output must come from a string in src/, install.sh or
 //!   uninstall.sh. Strings in test code don't count.
+//! - Both hold for the newest release note only. An older one is history: it
+//!   was checked against its own release when that was built, and stays as
+//!   written. Its links and example ids are still checked.
 //!
 //! Marking quoted output, for whoever writes the docs:
 //!
@@ -14,6 +17,9 @@
 //! - An inline span in double backticks (``like this``) is a quoted message;
 //!   it renders as plain code. A double-backtick span that holds a backtick
 //!   is ordinary inline code, as Markdown means it, and is not checked.
+//! - An inline span may wrap within its paragraph, as Markdown allows: its
+//!   lines are joined by one space. A double-backtick span that does not
+//!   close before its paragraph ends fails, so no quote goes unchecked.
 //! - In a quote, `…` and `<placeholder>` stand for text left out. A word
 //!   joined to one, such as `/.git` in `…/.git`, is checked only when a
 //!   string in the code holds it: the rest of a path the code builds is in
@@ -99,12 +105,34 @@ fn docs() -> Vec<(String, String)> {
     docs
 }
 
+/// The docs whose commands and quoted output must match today's binary:
+/// all but the older release notes. A release note is checked against its
+/// own release when that is built and stays as written after it, so only
+/// the newest, the one being prepared or just released, must still match.
+fn current(docs: Vec<(String, String)>) -> Vec<(String, String)> {
+    let newest = docs
+        .iter()
+        .filter_map(|(name, _)| release_version(name))
+        .max();
+    docs.into_iter()
+        .filter(|(name, _)| release_version(name).is_none_or(|version| Some(version) == newest))
+        .collect()
+}
+
+/// A release note's version, from `release-notes/v<major>.<minor>.<patch>.md`.
+fn release_version(name: &str) -> Option<Vec<u64>> {
+    let version = name.strip_prefix("release-notes/v")?.strip_suffix(".md")?;
+    version.split('.').map(|part| part.parse().ok()).collect()
+}
+
 /// What a doc quotes: commands (any code) and output (marked), each with
-/// the line it is on.
+/// the line it opens on, and the lines where a double-backtick quote opens
+/// and never closes in its paragraph.
 #[derive(Default)]
 struct Quotes {
     code: Vec<(usize, String)>,
     output: Vec<(usize, String)>,
+    unclosed: Vec<usize>,
 }
 
 fn quotes(doc: &str) -> Quotes {
@@ -112,10 +140,12 @@ fn quotes(doc: &str) -> Quotes {
     // Inside a fenced block: whether it is tagged `output`.
     let mut fence: Option<bool> = None;
     let mut continued = String::new();
+    let mut paragraph = Paragraph::default();
     for (index, line) in doc.lines().enumerate() {
         let number = index + 1;
         let trimmed = line.trim_start();
         if let Some(rest) = trimmed.strip_prefix("```") {
+            paragraph.end(&mut quotes);
             fence = match fence {
                 Some(_) => None,
                 None => Some(rest.trim() == "output"),
@@ -132,15 +162,92 @@ fn quotes(doc: &str) -> Quotes {
                     quotes.code.push((number, std::mem::take(&mut continued)));
                 }
             }
-            None => spans(line, number, &mut quotes),
+            None => paragraph.add(number, trimmed, &mut quotes),
         }
     }
+    paragraph.end(&mut quotes);
     quotes
 }
 
-/// Inline code spans: a single backtick run is code, a double one output.
-fn spans(line: &str, number: usize, quotes: &mut Quotes) {
-    let chars: Vec<char> = line.chars().collect();
+/// A paragraph's text, its lines joined by one space as Markdown joins them
+/// in a code span, with the line each character is on: a span may wrap
+/// within its paragraph, never past it.
+#[derive(Default)]
+struct Paragraph {
+    chars: Vec<char>,
+    lines: Vec<usize>,
+    /// Whether its lines are in a block quote, after their `>`.
+    quoted: bool,
+}
+
+impl Paragraph {
+    /// Adds a line with its indent removed, ending the paragraph first when
+    /// the line cannot go on with it: a blank line, a heading, a table row,
+    /// a new list item, or a step into or out of a block quote.
+    fn add(&mut self, number: usize, trimmed: &str, quotes: &mut Quotes) {
+        let (quoted, text) = match trimmed.strip_prefix('>') {
+            Some(rest) => (true, rest.trim_start()),
+            None => (false, trimmed),
+        };
+        if text.is_empty() {
+            self.end(quotes);
+            return;
+        }
+        // A heading or a table row is a paragraph of one line.
+        let alone = heading(text) || text.starts_with('|');
+        if alone || list_item(text) || quoted != self.quoted {
+            self.end(quotes);
+        }
+        if !self.chars.is_empty() {
+            self.chars.push(' ');
+            self.lines.push(number);
+        }
+        self.quoted = quoted;
+        for c in text.chars() {
+            self.chars.push(c);
+            self.lines.push(number);
+        }
+        if alone {
+            self.end(quotes);
+        }
+    }
+
+    fn end(&mut self, quotes: &mut Quotes) {
+        spans(&self.chars, &self.lines, quotes);
+        self.chars.clear();
+        self.lines.clear();
+    }
+}
+
+/// The deepest heading Markdown has: `######`. Seven `#` are text.
+const HEADING_LEVELS: usize = 6;
+
+/// Whether a line, indent removed, is a heading: one to [`HEADING_LEVELS`]
+/// `#`, then a space or the line's end. A line that starts with an issue
+/// number such as `#120` is text.
+fn heading(text: &str) -> bool {
+    let level = text.chars().take_while(|&c| c == '#').count();
+    let rest = &text[level..];
+    (1..=HEADING_LEVELS).contains(&level) && (rest.is_empty() || rest.starts_with(' '))
+}
+
+/// Whether a line, indent removed, opens a list item: `-`, `*` or `+`, or a
+/// number with `.` or `)`, then a space or the line's end.
+fn list_item(text: &str) -> bool {
+    let digits = text.chars().take_while(char::is_ascii_digit).count();
+    let rest = if digits > 0 {
+        text[digits..].strip_prefix(['.', ')'])
+    } else {
+        text.strip_prefix(['-', '*', '+'])
+    };
+    rest.is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
+}
+
+/// Inline code spans in a paragraph: a single backtick run is code, a
+/// double one output. A run closes at the next run of its length, as in
+/// Markdown; one that never closes is literal text, and for a double run an
+/// error to report, since a quote would go unchecked.
+fn spans(chars: &[char], lines: &[usize], quotes: &mut Quotes) {
     let mut i = 0;
     while i < chars.len() {
         if chars[i] != '`' {
@@ -163,8 +270,13 @@ fn spans(line: &str, number: usize, quotes: &mut Quotes) {
                 j += 1;
             }
         }
+        let number = lines[i];
         let Some(end) = end else {
-            break;
+            if run == 2 {
+                quotes.unclosed.push(number);
+            }
+            i = start;
+            continue;
         };
         let text: String = chars[start..end].iter().collect();
         match run {
@@ -361,7 +473,7 @@ fn command_errors() -> Vec<String> {
     };
     let mut errors = Vec::new();
     let mut checked = 0;
-    for (name, doc) in docs() {
+    for (name, doc) in current(docs()) {
         for (line, code) in quotes(&doc).code {
             for args in commands(&code) {
                 if args.is_empty() {
@@ -1745,41 +1857,62 @@ fn output_errors() -> Vec<String> {
     let labels = header_labels();
     let mut errors = Vec::new();
     let mut checked = 0;
-    for (name, doc) in docs() {
-        for (line, quote) in quotes(&doc).output {
-            if data_line(&quote) {
-                continue;
-            }
-            if let Some(error) = projects_line_error(&quote, &labels) {
-                errors.push(format!("{name}:{line}: {error}"));
-            }
-            for Fragment {
-                text: fragment,
-                value,
-            } in fragments(&quote)
-            {
-                checked += 1;
-                let mut matcher = Matcher::new(&corpus, &fragment);
-                let covered = matcher.covers();
-                if matcher.steps > QUOTE_STEPS {
-                    errors.push(format!(
-                        "{name}:{line}: matching took {} steps, over the {QUOTE_STEPS} bound: the matcher has grown slow",
-                        matcher.steps
-                    ));
-                }
-                // A value the code builds from parts is not in its strings,
-                // so only one a string holds part of can be checked.
-                let built = value && !corpus.joined.contains(&fragment);
-                if !covered && !built {
-                    errors.push(format!("{name}:{line}: no code prints {fragment:?}"));
-                }
-            }
-        }
+    for (name, doc) in current(docs()) {
+        errors.extend(quote_errors(&name, &doc, &corpus, &labels, &mut checked));
     }
     assert!(
         checked > 5,
         "only {checked} quotes found; is the parser broken?"
     );
+    errors
+}
+
+/// What one doc quotes that the code does not print, and the quotes it
+/// leaves open; `checked` counts the fragments matched.
+fn quote_errors(
+    name: &str,
+    doc: &str,
+    corpus: &Corpus,
+    labels: &[String],
+    checked: &mut usize,
+) -> Vec<String> {
+    let quotes = quotes(doc);
+    let mut errors: Vec<String> = quotes
+        .unclosed
+        .iter()
+        .map(|line| {
+            format!("{name}:{line}: a ``…`` quote opens here and does not close in its paragraph")
+        })
+        .collect();
+    for (line, quote) in quotes.output {
+        if data_line(&quote) {
+            continue;
+        }
+        if let Some(error) = projects_line_error(&quote, labels) {
+            errors.push(format!("{name}:{line}: {error}"));
+        }
+        for Fragment {
+            text: fragment,
+            value,
+        } in fragments(&quote)
+        {
+            *checked += 1;
+            let mut matcher = Matcher::new(corpus, &fragment);
+            let covered = matcher.covers();
+            if matcher.steps > QUOTE_STEPS {
+                errors.push(format!(
+                    "{name}:{line}: matching took {} steps, over the {QUOTE_STEPS} bound: the matcher has grown slow",
+                    matcher.steps
+                ));
+            }
+            // A value the code builds from parts is not in its strings,
+            // so only one a string holds part of can be checked.
+            let built = value && !corpus.joined.contains(&fragment);
+            if !covered && !built {
+                errors.push(format!("{name}:{line}: no code prints {fragment:?}"));
+            }
+        }
+    }
     errors
 }
 
@@ -2703,4 +2836,118 @@ fn an_id_outside_the_example_set_is_caught() {
         &["e0000001", "0000-4000-8000-000000000002"].join("-")
     ));
     assert!(example_id("E0000007-0000-4000-8000-000000000007"));
+}
+
+// ─── Quotes that wrap ───────────────────────────────────────────────────────
+
+/// A message the code prints, wrapped over two lines as a doc wraps it.
+const WRAPPED: &str = "The session gets ``User memory is reachable again. Session start could not
+read it, so here is the index it would have given:``, once.
+";
+
+fn output(doc: &str) -> Vec<(usize, String)> {
+    quotes(doc).output
+}
+
+#[test]
+fn a_wrapped_quote_is_checked_against_the_code() {
+    let corpus = corpus();
+    let labels = header_labels();
+    let mut checked = 0;
+    let errors = quote_errors("doc.md", WRAPPED, &corpus, &labels, &mut checked);
+    assert_eq!(errors, Vec::<String>::new());
+    assert_eq!(checked, 1, "the wrapped quote was not read");
+    let changed = WRAPPED.replace("would have given", "would give");
+    let errors = quote_errors("doc.md", &changed, &corpus, &labels, &mut checked);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0].starts_with("doc.md:1: no code prints"),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn a_list_item_goes_on_in_its_indented_lines() {
+    assert_eq!(
+        output("- an item ``foo\n  bar`` ends"),
+        [(1, "foo bar".to_owned())]
+    );
+}
+
+#[test]
+fn a_block_quote_goes_on_after_its_markers() {
+    assert_eq!(output("> a ``foo\n> bar`` b"), [(1, "foo bar".to_owned())]);
+}
+
+#[test]
+fn a_new_list_item_or_heading_ends_the_quote() {
+    for doc in ["- ``foo\n- bar``", "``foo\n# bar``"] {
+        let quotes = quotes(doc);
+        assert!(quotes.output.is_empty(), "{doc:?}: {:?}", quotes.output);
+        assert_eq!(quotes.unclosed, [1, 2], "{doc:?}");
+    }
+}
+
+#[test]
+fn a_line_starting_with_a_hash_is_a_heading_only_with_a_space() {
+    assert_eq!(
+        output("a ``foo\n#120 lands`` b"),
+        [(1, "foo #120 lands".to_owned())]
+    );
+    assert_eq!(
+        output("a ``foo\n####### seven`` b"),
+        [(1, "foo ####### seven".to_owned())]
+    );
+    assert_eq!(quotes("a ``foo\n# Title``").unclosed, [1, 2]);
+}
+
+#[test]
+fn a_fence_ends_the_quote() {
+    let quotes = quotes("``foo\n```\nbar``\n```");
+    assert!(quotes.output.is_empty(), "{:?}", quotes.output);
+    assert_eq!(quotes.unclosed, [1]);
+}
+
+#[test]
+fn a_line_break_in_a_quote_is_one_space() {
+    assert_eq!(output("``a\n    b``"), [(1, "a b".to_owned())]);
+}
+
+#[test]
+fn a_wrapped_quote_is_on_the_line_it_opens() {
+    assert_eq!(
+        output("intro\nmore ``foo\nbar`` end"),
+        [(2, "foo bar".to_owned())]
+    );
+}
+
+#[test]
+fn a_lone_backtick_hides_no_later_quote() {
+    assert_eq!(output("a ` b ``x`` c"), [(1, "x".to_owned())]);
+}
+
+#[test]
+fn a_wrapped_double_backtick_span_holding_a_backtick_is_code() {
+    let quotes = quotes("``a `b`\nc``");
+    assert!(quotes.output.is_empty(), "{:?}", quotes.output);
+    assert_eq!(quotes.code, [(1, "a `b` c".to_owned())]);
+}
+
+#[test]
+fn only_the_newest_release_note_must_match_the_code() {
+    let stale = "``No code prints this line at all.``\n";
+    let docs = current(vec![
+        ("docs/page.md".to_owned(), stale.to_owned()),
+        ("release-notes/v0.9.0.md".to_owned(), stale.to_owned()),
+        ("release-notes/v0.10.0.md".to_owned(), stale.to_owned()),
+    ]);
+    let corpus = corpus();
+    let labels = header_labels();
+    let mut checked = 0;
+    let failing: Vec<String> = docs
+        .iter()
+        .filter(|(name, doc)| !quote_errors(name, doc, &corpus, &labels, &mut checked).is_empty())
+        .map(|(name, _)| name.clone())
+        .collect();
+    assert_eq!(failing, ["docs/page.md", "release-notes/v0.10.0.md"]);
 }
