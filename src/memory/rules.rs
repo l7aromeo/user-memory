@@ -145,14 +145,14 @@ mod tests {
     fn only_confirmed_explicit_global_rules_are_listed_by_category() {
         let (_dir, db) = store();
         let push = add(&db, "Ask before every git push", &[]);
-        let attribution = add(
+        let tests = add(
             &db,
-            "No AI attribution in commits",
+            "Run the tests before every commit",
             &[("memory_type", "constraint")],
         );
-        let magic = add(
+        let python = add(
             &db,
-            "No magic values",
+            "Use Python 3.13 in this repository",
             &[("memory_type", "value"), ("category", "programming")],
         );
         add(&db, "Ship by Friday", &[("memory_type", "goal")]);
@@ -171,8 +171,8 @@ mod tests {
             ],
         );
         add(&db, "Tentative rule", &[("status", "tentative")]);
-        let old = add(&db, "Indent with tabs", &[]);
-        let new = add(&db, "Indent with spaces", &[("category", "programming")]);
+        let old = add(&db, "Indent with spaces", &[]);
+        let new = add(&db, "Indent with tabs", &[("category", "programming")]);
         connect(&db)
             .unwrap()
             .execute(
@@ -189,11 +189,11 @@ mod tests {
             [
                 "".to_owned(),
                 "programming".to_owned(),
-                format!("- {} Indent with spaces", short(new)),
-                format!("- {} No magic values", short(magic)),
+                format!("- {} Indent with tabs", short(new)),
+                format!("- {} Use Python 3.13 in this repository", short(python)),
                 "".to_owned(),
                 "workflow".to_owned(),
-                format!("- {} No AI attribution in commits", short(attribution)),
+                format!("- {} Run the tests before every commit", short(tests)),
                 format!("- {} Ask before every git push", short(push)),
             ],
             "{text}"
@@ -203,10 +203,10 @@ mod tests {
             "When releasing",
             "origin",
             "Ship",
-            "Python",
+            "Python here",
             "short replies",
             "Tentative",
-            "tabs",
+            "spaces",
         ] {
             assert!(!text.contains(leaked), "{leaked}: {text}");
         }
