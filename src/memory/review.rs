@@ -42,7 +42,7 @@ fn default_groups() -> usize {
 
 #[derive(Args, Deserialize, Serialize, JsonSchema)]
 pub struct Review {
-    /// Projects whose memories are reviewed with the global ones: project keys or git remote URLs, never local paths. Without any, only global memories are reviewed.
+    /// Projects reviewed with the global memories: project keys or git remote URLs, never local paths; none reviews only the global ones.
     // --projects is the tool's own name for it, which agents copy into the CLI.
     #[arg(long = "project", visible_alias = "projects")]
     #[serde(default)]
@@ -51,7 +51,7 @@ pub struct Review {
     #[arg(long, default_value_t = GROUPS)]
     #[serde(default = "default_groups")]
     pub max_groups: usize,
-    /// Members of a group the user chose to leave as they are, in full or as the index's 8 characters: every pair among them is marked distinct, changing no memory, so review stops grouping them. Needs user_confirmed.
+    /// Members of a group the user chose to leave as they are, full ids or the index's 8 characters: each pair is marked distinct and no memory changes, so review stops grouping them. Needs user_confirmed.
     #[arg(long = "keep")]
     #[serde(default)]
     pub keep: Vec<MemoryRef>,

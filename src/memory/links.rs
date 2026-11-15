@@ -26,7 +26,7 @@ pub struct Link {
     // (where to find it) instead of a bare "missing field".
     #[serde(default)]
     pub origin: String,
-    /// Project keys or git remote URLs to load in this conversation, or with unlink to remove; none lists its links. For repositories this folder always needs, use .user-memory @ lines (user-memory project-id --include) instead of linking in every conversation: run it when the user asks for that, propose it when you noticed the need.
+    /// Project keys or git remote URLs to load in this conversation; with unlink, to remove; none lists the links. A repository a folder always needs goes in .user-memory @ lines (user-memory project-id --include): propose it, run it when the user asks.
     #[serde(default)]
     pub projects: Vec<String>,
     /// Remove the listed links instead of adding them.

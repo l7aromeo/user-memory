@@ -89,7 +89,7 @@ pub struct Search {
 
 #[derive(Args, Deserialize, Serialize, JsonSchema)]
 pub struct Read {
-    /// Up to 20 memory ids, each in full or as the first 8 characters the index shows. Give ids or a category, not both; with ids, status applies and projects and scope are ignored. Ids that match nothing are listed under unknown.
+    /// Ids to read; ids or a category, not both. With ids, status applies and projects and scope don't; unmatched ids come back under unknown.
     #[serde(default)]
     pub ids: Vec<String>,
     /// With a category: which memories of it, as for index and search.
@@ -100,7 +100,7 @@ pub struct Read {
     #[command(flatten)]
     #[serde(flatten)]
     pub paging: Paging,
-    /// Also return each memory's history, oldest first: every change with its operation, time, client and the values it replaced. Restoring an earlier wording is an update with those values. An id of a forgotten memory returns what is left of its history under forgotten.
+    /// Also return each memory's history, oldest first: each change's operation, time, client and replaced values; restore an earlier wording with update. A forgotten memory's id returns what is left under forgotten.
     #[arg(long)]
     #[serde(default)]
     pub history: bool,

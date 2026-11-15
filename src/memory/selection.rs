@@ -15,8 +15,7 @@ use rusqlite::{Connection, params_from_iter, types::Value as Sql};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// Which scopes a request covers beyond the default (global memories plus the
-/// requested projects').
+/// Which scopes a request covers.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, ValueEnum, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ScopeFilter {
@@ -24,11 +23,11 @@ pub enum ScopeFilter {
     Global,
     /// Only the requested projects' memories.
     Project,
-    /// Every memory of every project, for review or inspection.
+    /// Every memory of every project.
     All,
 }
 
-/// Which statuses a request covers; active memories unless asked otherwise.
+/// Which statuses a request covers.
 #[derive(
     Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, ValueEnum, PartialEq, Eq,
 )]
@@ -63,7 +62,7 @@ impl StatusFilter {
 /// active global memories and those of `projects`.
 #[derive(Args, Clone, Default, Deserialize, Serialize, JsonSchema)]
 pub struct Selection {
-    /// Projects whose memories join the global ones: project keys or git remote URLs, as `user-memory project-id` prints them, never local paths. Another project's memories appear only when listed here.
+    /// Projects whose memories join the global ones: project keys or git remote URLs as `user-memory project-id` prints them, never local paths.
     // --projects is the tools' own name for it, which agents copy into the CLI.
     // The CLI resolves a folder to its project, which the tools refuse.
     #[arg(
@@ -73,11 +72,11 @@ pub struct Selection {
     )]
     #[serde(default)]
     pub projects: Vec<String>,
-    /// Narrow or widen the scopes: global, project (only the listed projects'), or all (every project, for review or inspection).
+    /// global, project (only the listed projects') or all (every project).
     #[arg(long, value_enum)]
     #[serde(default)]
     pub scope: Option<ScopeFilter>,
-    /// Only this category; synonyms such as coding/programming match each other.
+    /// Only this category; synonyms such as coding/programming match.
     #[arg(long)]
     #[serde(default)]
     pub category: Option<String>,
@@ -89,7 +88,7 @@ pub struct Selection {
     #[arg(long, value_enum)]
     #[serde(default)]
     pub source: Option<Source>,
-    /// active (the default), stale, superseded or all. tentative: not yet the user's own word; stale: a pattern lost a supporting memory and needs re-deriving or forgetting (user-memory skill, review); superseded: replaced, kept for history.
+    /// active (the default), stale, superseded or all. tentative: not yet the user's own word; stale: a pattern lost a supporting memory and needs re-deriving or forgetting; superseded: replaced, kept for history.
     #[arg(
         long,
         value_enum,
@@ -148,7 +147,7 @@ pub struct Subset {
     #[arg(long, value_enum)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<ScopeFilter>,
-    /// Only this category; synonyms such as coding/programming match each other.
+    /// Only this category; synonyms such as coding/programming match.
     #[arg(long)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
