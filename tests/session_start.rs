@@ -910,6 +910,16 @@ fn in_folder(mut command: Command, home: &Path, folder: &Path) -> Command {
 /// What Claude Code's session start in `folder` shows conversation
 /// `session`, started, resumed or compacted as `source` says.
 fn started(home: &Path, folder: &Path, session: &str, source: &str) -> String {
+    started_told(home, folder, session, source).0
+}
+
+/// [`started`]'s text, and its message for the user when it has one.
+fn started_told(
+    home: &Path,
+    folder: &Path,
+    session: &str,
+    source: &str,
+) -> (String, Option<String>) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_user-memory"));
     command.args(["session-start", "--client", "claude"]);
     let mut child = in_folder(command, home, folder)
@@ -925,7 +935,25 @@ fn started(home: &Path, folder: &Path, session: &str, source: &str) -> String {
         .unwrap()
         .write_all(payload.to_string().as_bytes())
         .unwrap();
-    text(&child.wait_with_output().unwrap())
+    told(&text(&child.wait_with_output().unwrap()))
+}
+
+/// Session start's text for the agent and its message for the user, from
+/// what it printed: plain text, or the JSON it prints with a message.
+fn told(out: &str) -> (String, Option<String>) {
+    if !out.starts_with('{') {
+        return (out.to_owned(), None);
+    }
+    let out: Value = serde_json::from_str(out).unwrap();
+    let keys: Vec<&String> = out.as_object().unwrap().keys().collect();
+    assert_eq!(keys, ["systemMessage", "hookSpecificOutput"], "{out}");
+    (
+        out["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .to_owned(),
+        Some(out["systemMessage"].as_str().unwrap().to_owned()),
+    )
 }
 
 /// The `link` reply for `arguments`, called in `folder`.
@@ -1850,12 +1878,11 @@ fn with_project_rules(home: &Path, key: &str, rules: &[(String, String, String, 
     }
 }
 
-/// The lines of session start's project rules part: after the Projects
-/// line, up to the index header.
+/// The lines of session start's project rules part: from its first
+/// heading up to the index header.
 fn rules_part(hook: &str) -> Vec<&str> {
     hook.lines()
-        .skip_while(|line| !line.starts_with("Projects: "))
-        .skip(1)
+        .skip_while(|line| !line.starts_with("Project rules of "))
         .take_while(|line| !line.starts_with("USER MEMORY INDEX"))
         .collect()
 }
@@ -2106,4 +2133,83 @@ fn a_whole_index_has_no_map() {
     remember(home, &app, "Prefer Rust", &["--scope", "global"]);
     let hook = started(home, &app, "s", "startup");
     assert!(!hook.contains(" listed. Not listed: "), "{hook}");
+}
+
+// Rules that don't fit are told: one line to the model after the projects
+// line, at every start; and to the user once, when the session starts, in
+// the one message both clients show.
+#[test]
+fn rules_that_do_not_fit_are_told_to_the_model_and_once_to_the_user() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path();
+    let app = repository(home, "app", "git@github.com:acme/app.git");
+    with_project_rules(home, "github.com/acme/app", &rules_of_width(300, 200));
+    let (text, message) = started_told(home, &app, "s", "startup");
+    let shown = rules_part(&text)
+        .iter()
+        .filter(|line| line.starts_with("    "))
+        .count();
+    let line = format!(
+        "{} more project rules are not shown; `index` lists them, and the user can run `review`.",
+        300 - shown
+    );
+    assert_eq!(text.lines().nth(2), Some(line.as_str()), "{text}");
+    assert_eq!(
+        message.as_deref(),
+        Some(
+            format!(
+                "github.com/acme/app has 300 rules; session start and subagents show {shown}. `review` can merge them."
+            )
+            .as_str()
+        )
+    );
+    for source in ["resume", "clear", "compact"] {
+        let (again, message) = started_told(home, &app, "s", source);
+        assert_eq!(message, None, "{source}");
+        assert_eq!(again.lines().nth(2), Some(line.as_str()), "{source}");
+    }
+}
+
+// Linked projects' rules, left out because the folder's project filled the
+// part, are told as shown to none: one rule in the singular.
+#[test]
+fn rules_left_out_whole_are_told_as_shown_to_none() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path();
+    let app = repository(home, "app", "git@github.com:acme/app.git");
+    with_project_rules(home, "github.com/acme/app", &rules_of_width(300, 200));
+    for (title, project) in [
+        ("Run the fuzzer before merging", "github.com/acme/tools"),
+        ("Write docs in British English", "github.com/acme/docs"),
+        ("Link every page from the index", "github.com/acme/docs"),
+    ] {
+        remember(home, home, title, &in_project(project));
+    }
+    link(
+        home,
+        home,
+        json!({"origin":"claude:session/s","projects":["github.com/acme/tools","github.com/acme/docs"]}),
+    );
+    let (_, message) = started_told(home, &app, "s", "startup");
+    let message = message.unwrap();
+    assert!(
+        message.ends_with(concat!(
+            " github.com/acme/tools has 1 rule; session start and subagents leave it out.",
+            " github.com/acme/docs has 2 rules; session start and subagents show none.",
+            " `review` can merge them."
+        )),
+        "{message}"
+    );
+}
+
+// Rules that fit say nothing of it, to the model or the user.
+#[test]
+fn rules_that_fit_are_not_told() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path();
+    let app = repository(home, "app", "git@github.com:acme/app.git");
+    with_project_rules(home, "github.com/acme/app", &rules_of_width(10, 200));
+    let (text, message) = started_told(home, &app, "s", "startup");
+    assert_eq!(message, None);
+    assert!(!text.contains("more project rule"), "{text}");
 }

@@ -342,6 +342,7 @@ pub async fn start(
             new_rules_block(found, snapshot, reply, unit, read_only, room)
         })
     };
+    let mut left_out = Vec::new();
     let index = match index {
         Ok(Ok((lines, index, rules_elsewhere))) => {
             if let Some(missed) = &missed {
@@ -375,9 +376,13 @@ pub async fn start(
                             _ => memory::shorten(&index, room, unit),
                         }
                     };
-                    format!("{lines}\n{listed}\n{index}")
+                    left_out = memory::rules_left_out(&index);
+                    format!("{lines}{}\n{listed}\n{index}", overflow_line(&left_out))
                 }
-                None => format!("{lines}\n{index}"),
+                None => {
+                    left_out = memory::rules_left_out(&index);
+                    format!("{lines}{}\n{index}", overflow_line(&left_out))
+                }
             };
             capped(text, limit.saturating_sub(ADDED_ROOM), unit, INDEX_CUT)
         }
@@ -403,18 +408,66 @@ pub async fn start(
         Some(line) => format!("{line}\n{index}"),
         None => index,
     };
-    match told {
-        Some(told) => told_output(&told, text),
-        None => text,
+    // The user hears of rules that don't fit once, when the session starts.
+    let overflow = if startup(payload.as_deref()) {
+        overflow_message(&left_out)
+    } else {
+        None
+    };
+    let message: Vec<String> = told
+        .map(|told| told_message(&told))
+        .into_iter()
+        .chain(overflow)
+        .collect();
+    if message.is_empty() {
+        text
+    } else {
+        told_output(message.join(" "), text)
     }
+}
+
+/// The line after the projects lines when the project rules don't all
+/// fit, with its line break first; empty when they do.
+fn overflow_line(left_out: &[memory::RulesLeftOut]) -> String {
+    let count: usize = left_out.iter().map(|project| project.left_out).sum();
+    match count {
+        0 => String::new(),
+        1 => "\n1 more project rule is not shown; `index` lists it, and the user can run `review`."
+            .to_owned(),
+        n => format!(
+            "\n{n} more project rules are not shown; `index` lists them, and the user can run `review`."
+        ),
+    }
+}
+
+/// What the user is told when a project's rules don't all fit: per
+/// project, how many it has and how many session start shows, which every
+/// subagent and every start after a compaction shows too.
+fn overflow_message(left_out: &[memory::RulesLeftOut]) -> Option<String> {
+    let sentences: Vec<String> = left_out
+        .iter()
+        .map(|project| {
+            let key = &project.key;
+            match (project.shown + project.left_out, project.shown) {
+                (1, _) => format!("{key} has 1 rule; session start and subagents leave it out."),
+                (all, 0) => format!(
+                    "{key} has {all} rules; session start and subagents show none. `review` can merge them."
+                ),
+                (all, shown) => format!(
+                    "{key} has {all} rules; session start and subagents show {shown}. `review` can merge them."
+                ),
+            }
+        })
+        .collect();
+    (!sentences.is_empty()).then(|| sentences.join(" "))
 }
 
 /// Session start's output when it has a message for the user: the JSON
 /// both clients read, with `text` for the agent as it would be printed
 /// alone. Every other start prints `text` as it is.
-fn told_output(told: &seen::Told, text: String) -> String {
+fn told_output(message: String, text: String) -> String {
     serde_json::to_string(&StartOutput {
-        system_message: told_message(told),
+        system_message: message,
         hook_specific_output: StartContext {
             hook_event_name: "SessionStart",
             additional_context: text,
@@ -1492,10 +1545,10 @@ mod tests {
     fn the_message_output_holds_only_fields_both_clients_read() {
         let text = "Conversation origin: x\nindex".to_owned();
         let out: Value = serde_json::from_str(&told_output(
-            &seen::Told {
+            told_message(&seen::Told {
                 rules: 2,
                 agents: 1,
-            },
+            }),
             text.clone(),
         ))
         .unwrap();
@@ -1647,6 +1700,19 @@ mod tests {
                 .sum::<usize>()
                 + longest_close
         );
+    }
+
+    // The overflow line is one line of row 1, inside the margin kept free
+    // under the parts, however many rules it counts.
+    #[test]
+    fn the_overflow_line_fits_the_margin() {
+        let longest = overflow_line(&[memory::RulesLeftOut {
+            key: "github.com/acme/app".into(),
+            shown: 0,
+            left_out: 99_999,
+        }]);
+        assert!(longest.len() < INDEX_MARGIN, "{longest}");
+        assert_eq!(overflow_line(&[]), "");
     }
 
     // Session start asks for its index in one request, and reads what the

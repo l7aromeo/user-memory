@@ -755,9 +755,13 @@ fn rows(text: &str) -> Vec<(Row, &str)> {
         assert!(next >= row, "{next:?} after {row:?}: {line:?}\n{text}");
         row = next;
         let belongs = match row {
-            Row::Head => ["Conversation origin: ", "Projects: "]
-                .iter()
-                .any(|start| line.starts_with(start)),
+            Row::Head => {
+                ["Conversation origin: ", "Projects: "]
+                    .iter()
+                    .any(|start| line.starts_with(start))
+                    || line
+                        .ends_with(" not shown; `index` lists them, and the user can run `review`.")
+            }
             Row::NewRules => line == NEW_RULES || line == REMOVE || line.starts_with("  "),
             Row::ProjectRules => line.starts_with("Project rules of ") || line.starts_with("  "),
             Row::Index => true,
@@ -864,4 +868,54 @@ fn a_part_with_nothing_takes_no_room() {
     );
     let length = text.encode_utf16().count();
     assert!(length * 10 > 9_500 * 9 && length <= 9_500, "{length}");
+}
+
+/// Adds `count` standing rules of `project` to `home`'s store, as a store
+/// that had them before this machine's last session.
+fn stored_rules(home: &Home, project: &str, count: usize) {
+    let conn = rusqlite::Connection::open(home.path().join("memory.sqlite3")).unwrap();
+    for i in 0..count {
+        let id = format!(
+            "{:08x}-0000-4000-8000-{:012x}",
+            0xe000_0000_u32 as usize + i,
+            i + 1
+        );
+        let title = format!("Rule {i:03} of how this project is built and shipped");
+        conn.execute(
+            "INSERT INTO memories (id,memory_type,category,title,content,source,status,scope,project) VALUES (?1,'preference','workflow',?2,?2,'explicit','confirmed','project',?3)",
+            rusqlite::params![id, title, project],
+        )
+        .unwrap();
+    }
+}
+
+// A new rule and rules that don't fit: the user hears both in one message,
+// #42's sentence first, and the JSON keeps to the fields both clients read.
+#[test]
+fn a_new_rule_and_rules_that_do_not_fit_are_told_in_one_message() {
+    let home = Home::new();
+    let key = "github.com/acme/app";
+    let app = home.project(key);
+    home.project_rule(&unlike(0), key);
+    stored_rules(&home, key, 299);
+    home.start("s1", &app, "startup");
+    home.project_rule(&unlike(1), key);
+    let raw = home.raw("s2", &app, "startup");
+    let out: Value = serde_json::from_str(&raw).unwrap();
+    let keys: Vec<&String> = out.as_object().unwrap().keys().collect();
+    assert_eq!(keys, ["systemMessage", "hookSpecificOutput"], "{out}");
+    let message = out["systemMessage"].as_str().unwrap();
+    let (new, overflow) = message
+        .split_once(" lists them. ")
+        .unwrap_or_else(|| panic!("{message}"));
+    assert_eq!(
+        new,
+        "1 new rule since your last session: `user-memory review`"
+    );
+    assert!(
+        overflow.starts_with("github.com/acme/app has 301 rules; ")
+            && overflow.contains("; session start and subagents show ")
+            && overflow.ends_with(". `review` can merge them."),
+        "{message}"
+    );
 }
