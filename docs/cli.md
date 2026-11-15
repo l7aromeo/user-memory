@@ -100,7 +100,7 @@ user-memory update e0000001-0000-4000-8000-000000000001 --title 'Ask before ever
 ```
 
 ```bash
-user-memory update e0000001-0000-4000-8000-000000000001 --content 'Prefer Python for prototypes' --reason 'Faster iteration'
+user-memory update e0000001-0000-4000-8000-000000000001 --content 'Ask before every git push, even on a feature branch' --reason 'A push can start a deploy'
 ```
 
 `--evidence` replaces the kept evidence, `--origin ORIGIN` adds the
@@ -108,7 +108,7 @@ conversation the correction came from, and `--replace-origins` with it keeps
 only that one:
 
 ```bash
-user-memory update e0000001-0000-4000-8000-000000000001 --content 'Prefer Python for prototypes' --origin claude:session/<id> --replace-origins
+user-memory update e0000001-0000-4000-8000-000000000001 --content 'Ask before every git push, even on a feature branch' --origin claude:session/<id> --replace-origins
 ```
 
 Every change is kept in the memory's history for a year, with the values
