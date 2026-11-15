@@ -78,6 +78,10 @@ jobs:
 
   build:
     needs: version
+    # The Rust each step installs, named over rust-toolchain.toml: the file
+    # would add its rustfmt and clippy, which no release build runs.
+    env:
+      RUSTUP_TOOLCHAIN: ${{ needs.version.outputs.rust }}
     strategy:
       fail-fast: true
       matrix:
@@ -202,6 +206,9 @@ jobs:
   assemble:
     needs: [version, build]
     runs-on: ubuntu-latest
+    # As in build: the installed Rust, not rust-toolchain.toml's components.
+    env:
+      RUSTUP_TOOLCHAIN: ${{ needs.version.outputs.rust }}
     # About twice the longest green run (381 s), rounded up to 5 minutes.
     timeout-minutes: 15
     steps:
