@@ -330,6 +330,9 @@ struct Wanted {
     anchored: bool,
     /// It is an anchor of the command that fired.
     command: bool,
+    /// The fewest memories holding an anchor of the action that fired that
+    /// this match holds; 0 for none.
+    fewest: usize,
 }
 
 /// One passage the window matched, with the memory's best score.
@@ -345,11 +348,17 @@ pub(crate) struct Matched {
     pub(crate) score: f64,
     /// The same match scored free of the store's size, for measuring
     /// bars on: each term's worth by how many memories hold it alone, as
-    /// `1/holders` and as `1/sqrt(holders)`; and the score as a share of
-    /// what the action that fired could score at most.
+    /// `1/holders` and as `1/sqrt(holders)`; anchors as `1/sqrt(holders)`
+    /// or `1/(1 + ln holders)` with stems as `1/holders`; and the score as
+    /// a share of what the action that fired could score at most.
     pub(crate) holders: f64,
     pub(crate) root: f64,
+    pub(crate) mixed: f64,
+    pub(crate) mixed_log: f64,
     pub(crate) share: f64,
+    /// The fewest memories holding an anchor of the action that fired that
+    /// this match holds; 0 for none.
+    pub(crate) fewest: usize,
     /// It holds a term of the action that fired.
     pub(crate) fired: bool,
     /// It holds a term of the failed action that fired.
@@ -785,12 +794,24 @@ impl DeliveryIndex {
             let worth = |field: Field| {
                 let base = if anchor { ANCHOR_WEIGHT } else { weight(field) } * want.weight;
                 let held = holders.max(1) as f64;
+                let (mixed, mixed_log) = if anchor {
+                    (base / held.sqrt(), base / (1.0 + held.ln()))
+                } else {
+                    (base / held, base / held)
+                };
                 Gain {
                     store: base * rarity(all, held) / rarest,
                     holders: base / held,
                     root: base / held.sqrt(),
+                    mixed,
+                    mixed_log,
                 }
             };
+            let mut want = *want;
+            if want.anchored {
+                want.fewest = holders;
+            }
+            let want = &want;
             for (row, field) in list {
                 let hits = found.entry(row.memory).or_default();
                 if row.slot == 0 {
@@ -855,6 +876,8 @@ impl DeliveryIndex {
                 score: total.store,
                 holders: total.holders,
                 root: total.root,
+                mixed: total.mixed,
+                mixed_log: total.mixed_log,
                 share: if possible > 0.0 {
                     total.store / possible
                 } else {
@@ -864,6 +887,7 @@ impl DeliveryIndex {
                 failed: flags.failed,
                 anchored: flags.anchored,
                 command: flags.command,
+                fewest: flags.fewest,
             });
         }
         matched.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.memory.cmp(&b.memory)));
@@ -878,6 +902,8 @@ struct Gain {
     store: f64,
     holders: f64,
     root: f64,
+    mixed: f64,
+    mixed_log: f64,
 }
 
 impl Gain {
@@ -886,6 +912,8 @@ impl Gain {
         self.store += other.store * share;
         self.holders += other.holders * share;
         self.root += other.root * share;
+        self.mixed += other.mixed * share;
+        self.mixed_log += other.mixed_log * share;
     }
 }
 
@@ -895,6 +923,9 @@ fn merge(into: &mut Wanted, other: &Wanted) {
     into.failed |= other.failed;
     into.anchored |= other.anchored;
     into.command |= other.command;
+    if other.fewest > 0 && (into.fewest == 0 || other.fewest < into.fewest) {
+        into.fewest = other.fewest;
+    }
 }
 
 /// The memories search may deliver in a scope: active ones of the global
@@ -1178,6 +1209,36 @@ mod tests {
     ) -> Option<&'a Matched> {
         let id = format!("00000000-0000-4000-8000-{id_end:012}");
         found.iter().find(|m| index.id(m.memory) == id)
+    }
+
+    #[test]
+    fn a_term_is_held_by_memories_not_passages() {
+        // One long memory names the command in each of six passages, a
+        // short one names it once: two holders, not seven.
+        let padding =
+            ["padding words keep each paragraph long enough to stand as its own passage here"; 3]
+                .join(" ");
+        let long: String = (0..6)
+            .map(|i| format!("Step {i}: run `cargo publish` only after the tag. {padding}\n\n"))
+            .collect();
+        let index = store(
+            "build",
+            &[
+                ("Publishing in steps", long.as_str()),
+                ("Publish note", "Run `cargo publish` from a clean tree."),
+            ],
+        );
+        let Some(Found { holders, rows }) = index.postings(&key(true, "cargo publish")).unwrap()
+        else {
+            panic!("the anchor is indexed");
+        };
+        assert!(rows.len() > 2, "{} rows", rows.len());
+        assert_eq!(holders, 2);
+        let found = rank(&index, &[action(Kind::Command, "cargo publish")]);
+        assert!(
+            found.iter().filter(|m| m.fewest == 2).count() == 2,
+            "{found:?}"
+        );
     }
 
     #[test]
