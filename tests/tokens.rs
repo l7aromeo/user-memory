@@ -1236,3 +1236,64 @@ fn a_token_revoked_between_the_handshake_and_the_call_is_told() {
     assert!(!out.status.success());
     assert!(said.contains(&sentences(&url)[0].1), "{said}");
 }
+
+/// `user-memory server health --port` against this server.
+fn health(host: &Host) -> Output {
+    let port = host.address.rsplit_once(':').unwrap().1;
+    host.command(&["server", "health", "--port", port])
+        .output()
+        .unwrap()
+}
+
+/// `/` needs no token and answers 503 while the store cannot be opened,
+/// which the Docker healthcheck (`server health`) reports; a repaired store
+/// answers at once, and a healthy answer is reused for a few seconds rather
+/// than opening the store for every caller.
+#[test]
+fn the_health_check_needs_no_token_and_fails_while_the_store_cannot_open() {
+    let mut host = Host::start();
+    // A store from another schema version, as after a newer binary
+    // migrated it, cannot be opened.
+    let store = Connection::open(host.db()).unwrap();
+    let version: i64 = store
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    store.pragma_update(None, "user_version", 999).unwrap();
+    let broken = host.send("GET", "/", "", "");
+    assert_eq!(broken.status, 503);
+    assert!(
+        !broken.body.contains(host.root.path().to_str().unwrap()),
+        "{}",
+        broken.body
+    );
+    let out = health(&host);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("The memory store cannot be opened"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    store.pragma_update(None, "user_version", version).unwrap();
+    let out = health(&host);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(host.send("GET", "/", "", "").status, 200);
+    // Broken again at once: the healthy answer stands until it is stale.
+    store.pragma_update(None, "user_version", 999).unwrap();
+    assert_eq!(host.send("GET", "/", "", "").status, 200);
+    store.pragma_update(None, "user_version", version).unwrap();
+    // The server's log names the failure once.
+    let log = host.stop();
+    assert_eq!(
+        log.matches("The memory store cannot be opened").count(),
+        1,
+        "{log}"
+    );
+
+    // Nothing listening.
+    assert!(!health(&host).status.success());
+}

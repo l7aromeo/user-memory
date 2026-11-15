@@ -36,6 +36,10 @@ pub enum ServerCommand {
     /// Writes the project from the given server build, builds and starts
     /// it, upgrading the store first when it replaces an earlier server.
     Install(Install),
+    /// Exits 0 when the server in this container answers `/`, which needs
+    /// no token and fails while the store cannot be opened: the compose
+    /// healthcheck.
+    Health(Health),
     /// Stops and removes the server, its image and its project folder; its
     /// volume, and the memories in it, only when the user confirms deleting
     /// them. Exits 1 when something was left, each with what to do.
@@ -89,6 +93,13 @@ pub struct Install {
 }
 
 #[derive(Args)]
+pub struct Health {
+    /// The port the server listens on in this container.
+    #[arg(long, default_value_t = CONTAINER_PORT, hide = true)]
+    port: u16,
+}
+
+#[derive(Args)]
 pub struct Remove {
     /// The project folder, such as ~/.local/share/user-memory/docker.
     #[arg(long)]
@@ -134,6 +145,15 @@ pub fn run(command: ServerCommand) -> i32 {
         ServerCommand::Check(check) => check_place(&check.place),
         ServerCommand::Target => target().map(|target| println!("{target}")),
         ServerCommand::Install(install) => self::install(&install),
+        ServerCommand::Health(Health { port }) => {
+            return match health(port) {
+                Ok(()) => 0,
+                Err(err) => {
+                    eprintln!("user-memory server health: {err:#}");
+                    1
+                }
+            };
+        }
         ServerCommand::Remove(remove) => {
             return match self::remove(&remove) {
                 Ok(true) => 0,
@@ -152,6 +172,30 @@ pub fn run(command: ServerCommand) -> i32 {
             1
         }
     }
+}
+
+/// How long the healthcheck waits for `/`, below compose.yaml's 25-second
+/// timeout so a slow answer is reported rather than killed.
+const HEALTH_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Whether the server on this machine's `port` answers `/` with 200.
+fn health(port: u16) -> Result<()> {
+    let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    let mut stream = TcpStream::connect_timeout(&address, HEALTH_TIMEOUT)
+        .with_context(|| format!("nothing answers on {address}"))?;
+    stream.set_read_timeout(Some(HEALTH_TIMEOUT))?;
+    stream.set_write_timeout(Some(HEALTH_TIMEOUT))?;
+    io::Write::write_all(
+        &mut stream,
+        format!("GET / HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n").as_bytes(),
+    )?;
+    let mut answer = String::new();
+    io::Read::read_to_string(&mut stream, &mut answer)?;
+    let (head, body) = answer.split_once("\r\n\r\n").unwrap_or((&answer, ""));
+    if head.split_whitespace().nth(1) != Some("200") {
+        bail!("{}", body.trim());
+    }
+    Ok(())
 }
 
 /// Docker is installed and running; for a new server, its port is free and
@@ -515,8 +559,9 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     healthcheck:
-      # A string test runs through the container's shell (same as CMD-SHELL).
-      test: "USER_MEMORY_URL=http://127.0.0.1:8765/mcp USER_MEMORY_TOKEN_FILE=/data/access-token user-memory index >/dev/null"
+      # Asks the server for `/`, which needs no token and fails while the
+      # store cannot be opened.
+      test: [CMD, user-memory, server, health]
       interval: 30s
       timeout: 25s
       start_period: 20s
