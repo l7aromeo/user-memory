@@ -1,6 +1,11 @@
 //! The words of a text as keyword matching sees them: lowercase runs of
 //! letters and digits without function words, and the category labels that
 //! mean the same.
+//!
+//! Also compiled by the delivery benchmark's binary (`user-memory-bench`,
+//! evals/delivery/entry.rs) through a `#[path]` mirror of `src/memory`:
+//! use only std, rust-stemmers and modules inside that mirror here, or that
+//! binary stops building (docs/dev/development.md).
 
 use std::collections::BTreeSet;
 

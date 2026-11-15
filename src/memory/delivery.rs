@@ -1,0 +1,1238 @@
+//! Delivery matching: what an agent did lately, as terms, ranked against
+//! memories' passages with the store's own keyword weights, and the bars a
+//! passage must pass to be pushed after an action, pushed after a failed
+//! one, or hold a command back (issues #117 and #118, measured by #125).
+//!
+//! - The window: each action adds the terms the agent stated or did, never
+//!   a tool's result, a file's contents or the text an edit writes; the
+//!   last [`WINDOW_ACTIONS`] count, newer ones more.
+//! - The delivery index: a read-only copy of the keyword index's rows for
+//!   one scope (stems, anchors and each passage's place, no sentence of any
+//!   memory), written to a local file and looked up there without opening
+//!   the store.
+//! - The score: what a memory's slot 0 and one passage hold of the window,
+//!   each term by its field and its rarity, as search ranks a topic.
+//!
+//! No hook calls this yet, so the shipped binary does not declare the
+//! module. The delivery benchmark's binary (`user-memory-bench`,
+//! evals/delivery/entry.rs) compiles it through a `#[path]` mirror of
+//! `src/memory`: use only std, rusqlite and the mirrored modules here.
+
+use crate::memory::index::{
+    passages::{self, CONTEXT_SLOT, SLOTS},
+    stems::{Field, Stems, stamp, token},
+    weights::{ANCHOR_WEIGHT, rarity, weight},
+};
+use rusqlite::{Connection, OpenFlags, params_from_iter};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+    fmt, fs,
+    path::Path,
+};
+
+/// Actions the window keeps: older ones fall out. A starting value (#117);
+/// the delivery benchmark measures it.
+pub(crate) const WINDOW_ACTIONS: usize = 30;
+
+/// Actions after which a term's weight in the window halves, so the action
+/// that fired counts most and one from ten actions ago a quarter. A
+/// starting value; the delivery benchmark measures it.
+pub(crate) const WINDOW_HALF_LIFE: f64 = 5.0;
+
+/// What a memory's other passages add to its best one's score, per term
+/// that only they hold, as a share of that term's worth: 0 scores a memory
+/// by its best passage alone, as search does (#124), so a long memory
+/// matching in many places does not outrank a short one matching as well
+/// in one. The delivery benchmark measures whether credit helps.
+pub(crate) const OTHER_PASSAGE_CREDIT: f64 = 0.0;
+
+/// The score a passage needs to be pushed after an action, with at least
+/// one matched term from that action (#117). Absolute: rank orders what
+/// passes and never makes a passage pass. A starting value; the delivery
+/// benchmark measures it.
+pub(crate) const PUSH_BAR: f64 = 2.0;
+
+/// The lower score that lets a passage matching a failed action's own
+/// terms be pushed after it (#117): a trap is worth showing once the
+/// command it names has just failed. A starting value, like [`PUSH_BAR`].
+pub(crate) const FAILURE_BAR: f64 = 1.0;
+
+/// The score a passage needs to hold a shell command back (#118), with one
+/// of its anchors in the command line: above [`PUSH_BAR`], as a hold
+/// interrupts the agent. A starting value, like [`PUSH_BAR`].
+pub(crate) const HOLD_BAR: f64 = 2.5;
+
+/// Programs that run the command after them, which is the one a memory
+/// names: `sudo cargo publish` is `cargo publish`.
+const WRAPPERS: &[&str] = &["sudo", "env", "time", "nohup", "exec", "command"];
+
+/// File extensions and the language a memory names them by, so editing
+/// `parse.rs` adds "rust" to the window.
+const LANGUAGES: &[(&str, &str)] = &[
+    ("c", "c"),
+    ("cpp", "c++"),
+    ("cs", "c#"),
+    ("go", "go"),
+    ("h", "c"),
+    ("java", "java"),
+    ("js", "javascript"),
+    ("json", "json"),
+    ("kt", "kotlin"),
+    ("md", "markdown"),
+    ("py", "python"),
+    ("rb", "ruby"),
+    ("rs", "rust"),
+    ("sh", "shell"),
+    ("sql", "sql"),
+    ("swift", "swift"),
+    ("toml", "toml"),
+    ("ts", "typescript"),
+    ("tsx", "typescript"),
+    ("yaml", "yaml"),
+    ("yml", "yaml"),
+];
+
+/// What an agent did, by the kind of hook that saw it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Kind {
+    /// The user's prompt.
+    Prompt,
+    /// A subagent's task, its first window.
+    Task,
+    /// A plan's items, one per line.
+    Plan,
+    /// A shell command line.
+    Command,
+    /// A file read or edited, by its path relative to the project root.
+    File,
+    /// A message the agent sent.
+    Message,
+    /// The agent's own memory search, by its topic.
+    Search,
+}
+
+/// One action: its kind, what the agent stated or did (a prompt's words, a
+/// command line, a path), and whether it failed. Nothing else of a tool
+/// call joins the window: there is no field for its result, a file's
+/// contents or an edit's text.
+#[derive(Clone, Debug)]
+pub(crate) struct Action {
+    pub(crate) kind: Kind,
+    pub(crate) text: String,
+    pub(crate) failed: bool,
+}
+
+/// The terms one action adds to the window: stems as the keyword index
+/// holds them, and anchors matched as written.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(in crate::memory) struct Terms {
+    pub(in crate::memory) stems: BTreeSet<String>,
+    pub(in crate::memory) anchors: BTreeSet<String>,
+}
+
+impl Terms {
+    fn words(&mut self, stems: &mut Stems, text: &str) {
+        self.stems.extend(stems.all(text));
+    }
+}
+
+/// The segments of a command line: the commands of a chain or pipe,
+/// split at `&&`, `||`, `;`, `|` and line ends outside quotes, each as its
+/// words without quotes.
+fn segments(line: &str) -> Vec<Vec<String>> {
+    let mut segments = Vec::new();
+    let mut words: Vec<String> = Vec::new();
+    let mut word = String::new();
+    let mut quote: Option<char> = None;
+    let mut chars = line.chars().peekable();
+    let end_word = |word: &mut String, words: &mut Vec<String>| {
+        if !word.is_empty() {
+            words.push(std::mem::take(word));
+        }
+    };
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), c) => word.push(c),
+            (None, '\'' | '"') => quote = Some(c),
+            (None, '&' | '|') => {
+                // `&&`, `||`, a pipe, or a command sent to the background.
+                if chars.peek() == Some(&c) {
+                    chars.next();
+                }
+                end_word(&mut word, &mut words);
+                segments.push(std::mem::take(&mut words));
+            }
+            (None, ';' | '\n') => {
+                end_word(&mut word, &mut words);
+                segments.push(std::mem::take(&mut words));
+            }
+            (None, c) if c.is_whitespace() => end_word(&mut word, &mut words),
+            (None, c) => word.push(c),
+        }
+    }
+    end_word(&mut word, &mut words);
+    segments.push(words);
+    segments.retain(|words| !words.is_empty());
+    segments
+}
+
+/// Whether `word` sets a variable for the command after it (`RUST_LOG=1`).
+fn assignment(word: &str) -> bool {
+    word.split_once('=').is_some_and(|(name, _)| {
+        !name.is_empty()
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            && !name.starts_with(|c: char| c.is_ascii_digit())
+    })
+}
+
+/// A shell command's terms: each segment's program with its subcommand,
+/// as a memory's code span names them (`cargo publish`), and its path
+/// arguments, as anchors and as words.
+fn command_terms(line: &str, stems: &mut Stems, terms: &mut Terms) {
+    for words in segments(line) {
+        let mut rest = words
+            .iter()
+            .map(String::as_str)
+            .skip_while(|word| assignment(word) || WRAPPERS.contains(word));
+        let Some(program) = rest.next() else {
+            continue;
+        };
+        let name = program.rsplit('/').next().unwrap_or(program);
+        let args: Vec<&str> = rest.collect();
+        let sub = args.first().filter(|arg| !arg.starts_with('-'));
+        terms.anchors.insert(name.to_lowercase());
+        terms.anchors.extend(passages::anchors(program));
+        terms.words(stems, program);
+        if let Some(sub) = sub {
+            terms.anchors.insert(format!("{name} {sub}").to_lowercase());
+            terms.words(stems, sub);
+        }
+        for arg in args.iter().filter(|arg| !arg.starts_with('-')) {
+            let found = passages::anchors(arg);
+            if !found.is_empty() {
+                terms.words(stems, arg);
+                terms.anchors.extend(found);
+            }
+        }
+    }
+}
+
+/// A file's terms: its path relative to the project root, every tail of it
+/// and every folder it is in as anchors, its folder and file names as
+/// words, and the language its extension names.
+fn file_terms(path: &str, stems: &mut Stems, terms: &mut Terms) {
+    let path = path.trim().trim_start_matches("./");
+    let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+    for at in 0..parts.len() {
+        terms.anchors.insert(parts[at..].join("/").to_lowercase());
+        if at > 0 {
+            let folder = parts[..at].join("/").to_lowercase();
+            terms.anchors.insert(format!("{folder}/"));
+            terms.anchors.insert(folder);
+        }
+    }
+    terms.words(stems, path);
+    if let Some((_, extension)) = parts.last().and_then(|name| name.rsplit_once('.'))
+        && let Some((_, language)) = LANGUAGES
+            .iter()
+            .find(|(ext, _)| ext.eq_ignore_ascii_case(extension))
+    {
+        terms.words(stems, language);
+    }
+}
+
+/// The terms `action` adds to the window.
+pub(in crate::memory) fn terms(action: &Action, stems: &mut Stems) -> Terms {
+    let mut terms = Terms::default();
+    match action.kind {
+        Kind::Command => command_terms(&action.text, stems, &mut terms),
+        Kind::File => file_terms(&action.text, stems, &mut terms),
+        Kind::Prompt | Kind::Task | Kind::Plan | Kind::Message | Kind::Search => {
+            terms.words(stems, &action.text);
+            terms.anchors.extend(passages::query_anchors(&action.text));
+        }
+    }
+    terms
+}
+
+/// The window's and the score's settings: the constants above, which the
+/// delivery benchmark varies to measure them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Tuning {
+    pub(crate) window_actions: usize,
+    pub(crate) half_life: f64,
+    pub(crate) credit: f64,
+}
+
+impl Default for Tuning {
+    fn default() -> Self {
+        Self {
+            window_actions: WINDOW_ACTIONS,
+            half_life: WINDOW_HALF_LIFE,
+            credit: OTHER_PASSAGE_CREDIT,
+        }
+    }
+}
+
+/// An agent context's recent actions, newest last, with the stems of the
+/// words they used.
+pub(crate) struct Window {
+    tuning: Tuning,
+    stems: Stems,
+    actions: VecDeque<(Kind, Terms, bool)>,
+}
+
+impl Default for Window {
+    fn default() -> Self {
+        Self::with(Tuning::default())
+    }
+}
+
+impl Window {
+    /// An empty window with other settings than the constants.
+    pub(crate) fn with(tuning: Tuning) -> Self {
+        Self {
+            tuning,
+            stems: Stems::new(),
+            actions: VecDeque::new(),
+        }
+    }
+
+    /// Adds `action`, the one that fires the next match; the oldest past
+    /// [`WINDOW_ACTIONS`] falls out.
+    pub(crate) fn push(&mut self, action: &Action) {
+        let terms = terms(action, &mut self.stems);
+        self.actions.push_back((action.kind, terms, action.failed));
+        while self.actions.len() > self.tuning.window_actions {
+            self.actions.pop_front();
+        }
+    }
+}
+
+/// How the index keys a term: a stem or an anchor, as its hex token.
+fn key(anchor: bool, term: &str) -> Vec<u8> {
+    let mut key = vec![if anchor { b'a' } else { b's' }];
+    key.extend(token(term).into_bytes());
+    key
+}
+
+/// What the window holds of one term.
+#[derive(Clone, Copy, Default)]
+struct Wanted {
+    /// Its weight by the age of the newest action holding it.
+    weight: f64,
+    /// The action that fired holds it.
+    fired: bool,
+    /// The action that fired failed and holds it.
+    failed: bool,
+    /// It is an anchor of the action that fired.
+    anchored: bool,
+    /// It is an anchor of the command that fired.
+    command: bool,
+}
+
+/// One passage the window matched, with the memory's best score.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Matched {
+    /// The memory's position in the index (see [`DeliveryIndex::id`]).
+    pub(crate) memory: usize,
+    /// The passage's slot (see `index::rows`).
+    pub(crate) slot: i64,
+    /// Its place in the content, or the context's for [`CONTEXT_SLOT`].
+    pub(crate) start: usize,
+    pub(crate) length: usize,
+    pub(crate) score: f64,
+    /// It holds a term of the action that fired.
+    pub(crate) fired: bool,
+    /// It holds a term of the failed action that fired.
+    pub(crate) failed: bool,
+    /// It holds an anchor of the action that fired.
+    pub(crate) anchored: bool,
+    /// It holds an anchor of the command that fired.
+    pub(crate) command: bool,
+}
+
+impl Matched {
+    /// Pushed after the action: past [`PUSH_BAR`] with one of its terms.
+    pub(crate) fn push(&self) -> bool {
+        self.fired && self.score >= PUSH_BAR
+    }
+    /// Pushed after a failed action: past [`FAILURE_BAR`] with one of its
+    /// terms.
+    pub(crate) fn failure(&self) -> bool {
+        self.failed && self.score >= FAILURE_BAR
+    }
+    /// Holds the command: one of its anchors, and past [`HOLD_BAR`].
+    /// Stems alone never hold.
+    pub(crate) fn hold(&self) -> bool {
+        self.command && self.score >= HOLD_BAR
+    }
+}
+
+/// The file the delivery index is written to starts with this, its format
+/// in the last byte.
+const MAGIC: &[u8; 8] = b"UMDELIV1";
+
+/// A memory id as the store writes it: a hyphenated UUID.
+const ID_BYTES: usize = 36;
+
+/// Bytes of one row, one directory entry and one posting in the file.
+const ROW_BYTES: usize = 14;
+const ENTRY_BYTES: usize = 20;
+const POSTING_BYTES: usize = 5;
+
+/// Why a delivery index can't be built or read.
+#[derive(Debug)]
+pub(crate) enum Error {
+    Store(rusqlite::Error),
+    File(std::io::Error),
+    /// The store's keyword index is missing, stale or has memories queued.
+    NotCurrent,
+    /// The file isn't a delivery index this code wrote, or was cut short.
+    Format,
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Error::Store(e) => write!(f, "the store: {e}"),
+            Error::File(e) => write!(f, "the delivery index file: {e}"),
+            Error::NotCurrent => write!(
+                f,
+                "the store's keyword index isn't current for this code; run `user-memory reindex`"
+            ),
+            Error::Format => write!(f, "the delivery index file is not one this code wrote"),
+        }
+    }
+}
+
+impl From<rusqlite::Error> for Error {
+    fn from(e: rusqlite::Error) -> Self {
+        Error::Store(e)
+    }
+}
+
+impl From<std::io::Error> for Error {
+    fn from(e: std::io::Error) -> Self {
+        Error::File(e)
+    }
+}
+
+/// One row of the keyword index, as the delivery index keeps it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Row {
+    memory: u32,
+    slot: u16,
+    start: u32,
+    length: u32,
+}
+
+/// One memory's rows for building: its slot 0 and passages, each with its
+/// stems by field and its anchors.
+pub(crate) struct Source {
+    pub(in crate::memory) id: String,
+    pub(in crate::memory) rows: Vec<SourceRow>,
+}
+
+/// One row of a memory to index (see `index::rows`).
+pub(in crate::memory) struct SourceRow {
+    pub(in crate::memory) slot: i64,
+    pub(in crate::memory) start: usize,
+    pub(in crate::memory) length: usize,
+    pub(in crate::memory) stems: Vec<(String, Field)>,
+    pub(in crate::memory) anchors: Vec<String>,
+}
+
+/// One term's rows while the index is built: each row with the field
+/// holding the term there, and the memories holding it.
+type Postings = (Vec<(u32, u8)>, BTreeSet<u32>);
+
+/// The rows holding one term, with the field holding it in each, and how
+/// many memories hold it.
+struct Found {
+    holders: usize,
+    rows: Vec<(Row, Field)>,
+}
+
+/// The delivery index: the bytes of its file, read in place.
+pub(crate) struct DeliveryIndex {
+    bytes: Vec<u8>,
+    memories: usize,
+    ids_at: usize,
+    rows: usize,
+    rows_at: usize,
+    entries: usize,
+    entries_at: usize,
+    pool_at: usize,
+    postings_at: usize,
+}
+
+fn u32_at(bytes: &[u8], at: usize) -> Result<u32, Error> {
+    bytes
+        .get(at..at + 4)
+        .and_then(|b| b.try_into().ok())
+        .map(u32::from_le_bytes)
+        .ok_or(Error::Format)
+}
+
+fn put(bytes: &mut Vec<u8>, value: usize) -> Result<(), Error> {
+    bytes.extend(
+        u32::try_from(value)
+            .map_err(|_| Error::Format)?
+            .to_le_bytes(),
+    );
+    Ok(())
+}
+
+impl DeliveryIndex {
+    /// The file's bytes for `memories`: their ids, their rows, and each
+    /// term's rows sorted by its key, so a lookup reads only its terms.
+    pub(crate) fn write(memories: &[Source]) -> Result<Vec<u8>, Error> {
+        let mut rows: Vec<Row> = Vec::new();
+        // Each term's rows with the field holding it, and the memories
+        // holding it.
+        let mut postings: BTreeMap<Vec<u8>, Postings> = BTreeMap::new();
+        for (m, memory) in memories.iter().enumerate() {
+            let m = u32::try_from(m).map_err(|_| Error::Format)?;
+            for row in &memory.rows {
+                let r = u32::try_from(rows.len()).map_err(|_| Error::Format)?;
+                rows.push(Row {
+                    memory: m,
+                    slot: u16::try_from(row.slot).map_err(|_| Error::Format)?,
+                    start: u32::try_from(row.start).map_err(|_| Error::Format)?,
+                    length: u32::try_from(row.length).map_err(|_| Error::Format)?,
+                });
+                let terms = row
+                    .stems
+                    .iter()
+                    .map(|(stem, field)| (key(false, stem), *field as u8))
+                    .chain(
+                        row.anchors
+                            .iter()
+                            .map(|anchor| (key(true, anchor), Field::Body as u8)),
+                    );
+                for (key, field) in terms {
+                    let (list, holders) = postings.entry(key).or_default();
+                    list.push((r, field));
+                    holders.insert(m);
+                }
+            }
+        }
+        let mut bytes = MAGIC.to_vec();
+        let stamp = stamp();
+        put(&mut bytes, stamp.len())?;
+        bytes.extend(stamp.as_bytes());
+        put(&mut bytes, memories.len())?;
+        for memory in memories {
+            let mut id = memory.id.clone().into_bytes();
+            if id.len() != ID_BYTES {
+                return Err(Error::Format);
+            }
+            bytes.append(&mut id);
+        }
+        put(&mut bytes, rows.len())?;
+        for row in &rows {
+            bytes.extend(row.memory.to_le_bytes());
+            bytes.extend(row.slot.to_le_bytes());
+            bytes.extend(row.start.to_le_bytes());
+            bytes.extend(row.length.to_le_bytes());
+        }
+        put(&mut bytes, postings.len())?;
+        let mut pool: Vec<u8> = Vec::new();
+        let mut lists: Vec<u8> = Vec::new();
+        for (key, (list, holders)) in &postings {
+            put(&mut bytes, pool.len())?;
+            put(&mut bytes, key.len())?;
+            put(&mut bytes, holders.len())?;
+            put(&mut bytes, lists.len() / POSTING_BYTES)?;
+            put(&mut bytes, list.len())?;
+            pool.extend(key);
+            for (row, field) in list {
+                lists.extend(row.to_le_bytes());
+                lists.push(*field);
+            }
+        }
+        put(&mut bytes, pool.len())?;
+        bytes.extend(pool);
+        bytes.extend(lists);
+        Ok(bytes)
+    }
+
+    /// Reads the index from `bytes`, checking its sections fit, without
+    /// copying them.
+    pub(crate) fn read(bytes: Vec<u8>) -> Result<Self, Error> {
+        if !bytes.starts_with(MAGIC) {
+            return Err(Error::Format);
+        }
+        let mut at = MAGIC.len();
+        let stamp_len = u32_at(&bytes, at)? as usize;
+        at += 4;
+        if bytes.get(at..at + stamp_len) != Some(stamp().as_bytes()) {
+            return Err(Error::Format);
+        }
+        at += stamp_len;
+        let memories = u32_at(&bytes, at)? as usize;
+        let ids_at = at + 4;
+        at = ids_at + memories * ID_BYTES;
+        let rows = u32_at(&bytes, at)? as usize;
+        let rows_at = at + 4;
+        at = rows_at + rows * ROW_BYTES;
+        let entries = u32_at(&bytes, at)? as usize;
+        let entries_at = at + 4;
+        at = entries_at + entries * ENTRY_BYTES;
+        let pool_len = u32_at(&bytes, at)? as usize;
+        let pool_at = at + 4;
+        let postings_at = pool_at + pool_len;
+        let index = Self {
+            bytes,
+            memories,
+            ids_at,
+            rows,
+            rows_at,
+            entries,
+            entries_at,
+            pool_at,
+            postings_at,
+        };
+        if entries > 0 {
+            let (_, _, first, count) = index.entry(entries - 1)?;
+            if index.bytes.len() < postings_at + (first + count) * POSTING_BYTES {
+                return Err(Error::Format);
+            }
+        } else if index.bytes.len() < postings_at {
+            return Err(Error::Format);
+        }
+        Ok(index)
+    }
+
+    /// Reads the index from its file at `path`.
+    pub(crate) fn load(path: &Path) -> Result<Self, Error> {
+        Self::read(fs::read(path)?)
+    }
+
+    /// How many memories it holds.
+    pub(crate) fn len(&self) -> usize {
+        self.memories
+    }
+
+    /// The id of memory `m`.
+    pub(crate) fn id(&self, m: usize) -> &str {
+        let at = self.ids_at + m * ID_BYTES;
+        std::str::from_utf8(&self.bytes[at..at + ID_BYTES]).unwrap_or("")
+    }
+
+    fn row(&self, r: usize) -> Result<Row, Error> {
+        let at = self.rows_at + r * ROW_BYTES;
+        let slot = self
+            .bytes
+            .get(at + 4..at + 6)
+            .and_then(|b| b.try_into().ok())
+            .map(u16::from_le_bytes)
+            .ok_or(Error::Format)?;
+        Ok(Row {
+            memory: u32_at(&self.bytes, at)?,
+            slot,
+            start: u32_at(&self.bytes, at + 6)?,
+            length: u32_at(&self.bytes, at + 10)?,
+        })
+    }
+
+    /// Entry `e` of the directory: its key, how many memories hold it, and
+    /// its first posting and their count.
+    fn entry(&self, e: usize) -> Result<(&[u8], usize, usize, usize), Error> {
+        let at = self.entries_at + e * ENTRY_BYTES;
+        let key_at = self.pool_at + u32_at(&self.bytes, at)? as usize;
+        let key_len = u32_at(&self.bytes, at + 4)? as usize;
+        let key = self
+            .bytes
+            .get(key_at..key_at + key_len)
+            .ok_or(Error::Format)?;
+        Ok((
+            key,
+            u32_at(&self.bytes, at + 8)? as usize,
+            u32_at(&self.bytes, at + 12)? as usize,
+            u32_at(&self.bytes, at + 16)? as usize,
+        ))
+    }
+
+    /// The rows holding `key`, each with the field holding it there, and
+    /// how many memories hold it.
+    fn postings(&self, key: &[u8]) -> Result<Option<Found>, Error> {
+        let (mut low, mut high) = (0, self.entries);
+        while low < high {
+            let mid = (low + high) / 2;
+            let (found, holders, first, count) = self.entry(mid)?;
+            match found.cmp(key) {
+                std::cmp::Ordering::Less => low = mid + 1,
+                std::cmp::Ordering::Greater => high = mid,
+                std::cmp::Ordering::Equal => {
+                    let mut list = Vec::with_capacity(count);
+                    for p in first..first + count {
+                        let at = self.postings_at + p * POSTING_BYTES;
+                        let row = self.row(u32_at(&self.bytes, at)? as usize)?;
+                        let field = *self.bytes.get(at + 4).ok_or(Error::Format)?;
+                        let field = *Field::ALL.get(usize::from(field)).ok_or(Error::Format)?;
+                        list.push((row, field));
+                    }
+                    return Ok(Some(Found {
+                        holders,
+                        rows: list,
+                    }));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// The first passage row of memory `m`, which a match on its slot 0
+    /// alone shows: rows are written by memory, in slot order from slot 0.
+    fn first_passage(&self, m: u32) -> Result<Option<Row>, Error> {
+        let (mut low, mut high) = (0, self.rows);
+        while low < high {
+            let mid = (low + high) / 2;
+            if self.row(mid)?.memory < m {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        let mut r = low;
+        while r < self.rows {
+            let row = self.row(r)?;
+            if row.memory != m {
+                break;
+            }
+            if row.slot != 0 {
+                return Ok(Some(row));
+            }
+            r += 1;
+        }
+        Ok(None)
+    }
+
+    /// The passages `window` matches, one per memory (its best), strongest
+    /// first, each scored as search scores a topic: what slot 0 holds plus
+    /// the best passage's own terms, each by its field's weight, its rarity
+    /// among the indexed memories and its age in the window; plus
+    /// [`OTHER_PASSAGE_CREDIT`] of each term only the memory's other
+    /// passages hold. Rarity is divided by the rarest possible, so a bar is
+    /// on one scale whatever the store's size; that changes the scale only,
+    /// not the order, and search's own score is untouched.
+    pub(crate) fn rank(&self, window: &Window) -> Result<Vec<Matched>, Error> {
+        let mut wanted: BTreeMap<Vec<u8>, Wanted> = BTreeMap::new();
+        let newest = window.actions.len().saturating_sub(1);
+        for (i, (kind, terms, failed)) in window.actions.iter().enumerate() {
+            let age = (newest - i) as f64;
+            let fired = i == newest;
+            let weight = 0.5f64.powf(age / window.tuning.half_life);
+            let keys = terms
+                .stems
+                .iter()
+                .map(|stem| (key(false, stem), false))
+                .chain(terms.anchors.iter().map(|anchor| (key(true, anchor), true)));
+            for (key, anchor) in keys {
+                let w = wanted.entry(key).or_default();
+                w.weight = w.weight.max(weight);
+                w.fired |= fired;
+                w.failed |= fired && *failed;
+                w.anchored |= fired && anchor;
+                w.command |= fired && anchor && *kind == Kind::Command;
+            }
+        }
+        let all = self.memories as f64;
+        let rarest = rarity(all, 1.0);
+        /// One passage's hits: its row, its gain, what it holds of the
+        /// firing action, and each matched term's worth.
+        type Passage = (Row, f64, Wanted, Vec<(usize, f64)>);
+        /// One memory's hits: slot 0's score and flags, and each passage's.
+        #[derive(Default)]
+        struct Hits {
+            whole: f64,
+            whole_wanted: Wanted,
+            passages: BTreeMap<u16, Passage>,
+        }
+        let mut found: HashMap<u32, Hits> = HashMap::new();
+        for (term, (key, want)) in wanted.iter().enumerate() {
+            let Some(Found {
+                holders,
+                rows: list,
+            }) = self.postings(key)?
+            else {
+                continue;
+            };
+            let anchor = key.first() == Some(&b'a');
+            let worth = |field: Field| {
+                let base = if anchor { ANCHOR_WEIGHT } else { weight(field) };
+                base * rarity(all, holders as f64) / rarest * want.weight
+            };
+            for (row, field) in list {
+                let hits = found.entry(row.memory).or_default();
+                if row.slot == 0 {
+                    hits.whole += worth(field);
+                    merge(&mut hits.whole_wanted, want);
+                } else {
+                    let entry = hits.passages.entry(row.slot).or_insert((
+                        row,
+                        0.0,
+                        Wanted::default(),
+                        Vec::new(),
+                    ));
+                    entry.1 += worth(field);
+                    entry.3.push((term, worth(field)));
+                    merge(&mut entry.2, want);
+                }
+            }
+        }
+        let mut matched = Vec::with_capacity(found.len());
+        for (memory, hits) in found {
+            let best =
+                hits.passages
+                    .values()
+                    .fold(None::<&Passage>, |best, candidate| match best {
+                        Some(b) if b.1 >= candidate.1 => Some(b),
+                        _ => Some(candidate),
+                    });
+            let (row, gain, own) = match best {
+                Some((row, gain, own, terms)) => {
+                    // Terms only the other passages hold, each once at its
+                    // best worth.
+                    let mine: BTreeSet<usize> = terms.iter().map(|(t, _)| *t).collect();
+                    let mut others: BTreeMap<usize, f64> = BTreeMap::new();
+                    for (_, _, _, terms) in hits.passages.values() {
+                        for &(t, worth) in terms.iter().filter(|(t, _)| !mine.contains(t)) {
+                            let best = others.entry(t).or_default();
+                            *best = best.max(worth);
+                        }
+                    }
+                    let credit: f64 = others.values().sum::<f64>() * window.tuning.credit;
+                    (*row, gain + credit, *own)
+                }
+                None => match self.first_passage(memory)? {
+                    Some(row) => (row, 0.0, Wanted::default()),
+                    None => continue,
+                },
+            };
+            let mut flags = hits.whole_wanted;
+            merge(&mut flags, &own);
+            matched.push(Matched {
+                memory: memory as usize,
+                slot: i64::from(row.slot),
+                start: row.start as usize,
+                length: row.length as usize,
+                score: hits.whole + gain,
+                fired: flags.fired,
+                failed: flags.failed,
+                anchored: flags.anchored,
+                command: flags.command,
+            });
+        }
+        matched.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.memory.cmp(&b.memory)));
+        Ok(matched)
+    }
+}
+
+/// Adds what `other` holds of the firing action to `into`.
+fn merge(into: &mut Wanted, other: &Wanted) {
+    into.fired |= other.fired;
+    into.failed |= other.failed;
+    into.anchored |= other.anchored;
+    into.command |= other.command;
+}
+
+/// The memories search may deliver in a scope: active ones of the global
+/// scope and of `projects`, never a guess or an observation about the user
+/// (inferred memories, types `behavior` and `pattern`).
+const CANDIDATES: &str = "SELECT k.key,m.id FROM search_keys k JOIN memories m ON m.id=k.id \
+     WHERE m.status IN ('confirmed','tentative') AND m.source!='inferred' \
+     AND m.memory_type NOT IN ('behavior','pattern') \
+     AND (m.scope='global' OR (m.scope='project' AND m.project IN (SELECT value FROM json_each(?1)))) \
+     ORDER BY k.key";
+
+/// The rows of the store's keyword index at `db` for the memories search
+/// may deliver in the global scope and `projects`, read without writing.
+pub(crate) fn sources(db: &Path, projects: &[String]) -> Result<Vec<Source>, Error> {
+    let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let current: Option<String> = conn
+        .query_row("SELECT stemmed_by FROM search_state WHERE id=1", [], |r| {
+            r.get(0)
+        })
+        .ok();
+    let queued: i64 = conn.query_row("SELECT count(*) FROM search_pending", [], |r| r.get(0))?;
+    if current.as_deref() != Some(stamp().as_str()) || queued > 0 {
+        return Err(Error::NotCurrent);
+    }
+    let scope = format!(
+        "[{}]",
+        projects
+            .iter()
+            .map(|p| format!("\"{}\"", p.replace('\\', "\\\\").replace('"', "\\\"")))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let mut keys: BTreeMap<i64, usize> = BTreeMap::new();
+    let mut sources = Vec::new();
+    let mut statement = conn.prepare(CANDIDATES)?;
+    let mut found = statement.query(params_from_iter([scope]))?;
+    while let Some(r) = found.next()? {
+        keys.insert(r.get(0)?, sources.len());
+        sources.push(Source {
+            id: r.get(1)?,
+            rows: Vec::new(),
+        });
+    }
+    let mut statement = conn.prepare(
+        "SELECT rowid,category,title,type,body,anchors,start,length FROM search_words ORDER BY rowid",
+    )?;
+    let mut rows = statement.query([])?;
+    while let Some(r) = rows.next()? {
+        let number: i64 = r.get(0)?;
+        let Some(&m) = keys.get(&number.div_euclid(SLOTS)) else {
+            continue;
+        };
+        let mut stems = Vec::new();
+        for (c, field) in Field::ALL.into_iter().enumerate() {
+            let column: String = r.get(c + 1)?;
+            stems.extend(column.split_whitespace().map(|t| (decode(t), field)));
+        }
+        let anchors: String = r.get(5)?;
+        let start: Option<i64> = r.get(6)?;
+        let length: Option<i64> = r.get(7)?;
+        sources[m].rows.push(SourceRow {
+            slot: number.rem_euclid(SLOTS),
+            start: usize::try_from(start.unwrap_or(0)).unwrap_or(0),
+            length: usize::try_from(length.unwrap_or(0)).unwrap_or(0),
+            stems,
+            anchors: anchors.split_whitespace().map(decode).collect(),
+        });
+    }
+    Ok(sources)
+}
+
+/// The term a hex token stands for (see `stems::token`); a token that isn't
+/// one stays as it is, and matches nothing a window holds.
+fn decode(token: &str) -> String {
+    let bytes: Option<Vec<u8>> = (0..token.len())
+        .step_by(2)
+        .map(|at| {
+            token
+                .get(at..at + 2)
+                .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+        })
+        .collect();
+    bytes
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .unwrap_or_else(|| token.to_owned())
+}
+
+/// The text of `matched` from the store at `db`: the passage cut from the
+/// memory's content, or its context.
+pub(crate) fn text(conn: &Connection, id: &str, matched: &Matched) -> Result<String, Error> {
+    let (content, context): (String, String) = conn.query_row(
+        "SELECT content,context FROM memories WHERE id=?1",
+        [id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let source = if matched.slot == CONTEXT_SLOT {
+        context
+    } else {
+        content
+    };
+    Ok(source
+        .get(matched.start..matched.start + matched.length)
+        .unwrap_or("")
+        .trim()
+        .to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, reason = "tests fail loudly on a broken setup")]
+    use super::*;
+    use crate::memory::index::passages::split;
+
+    fn action(kind: Kind, text: &str) -> Action {
+        Action {
+            kind,
+            text: text.to_owned(),
+            failed: false,
+        }
+    }
+
+    fn of(kind: Kind, text: &str) -> Terms {
+        terms(&action(kind, text), &mut Stems::new())
+    }
+
+    fn stems(text: &str) -> BTreeSet<String> {
+        Stems::new().all(text)
+    }
+
+    #[test]
+    fn a_command_adds_each_program_with_its_subcommand_and_its_paths() {
+        let terms = of(
+            Kind::Command,
+            "RUST_LOG=1 cargo publish --dry-run --registry internal && git -C repo status | sudo ./scripts/release.sh 'docs/notes.md'",
+        );
+        for anchor in [
+            "cargo",
+            "cargo publish",
+            "git",
+            "release.sh",
+            "./scripts/release.sh",
+            "docs/notes.md",
+        ] {
+            assert!(terms.anchors.contains(anchor), "{anchor}: {terms:?}");
+        }
+        // A flag is no subcommand, and neither the variable nor `sudo` is
+        // the program.
+        assert!(
+            !terms.anchors.iter().any(|a| a.starts_with("git ")),
+            "{terms:?}"
+        );
+        assert!(
+            !terms
+                .anchors
+                .iter()
+                .any(|a| a.starts_with("rust_log") || a.starts_with("sudo")),
+            "{terms:?}"
+        );
+        // Words of the programs, subcommands and paths, never of flags or
+        // other arguments.
+        assert!(
+            terms
+                .stems
+                .is_superset(&stems("cargo publish release scripts docs notes"))
+        );
+        for word in [
+            "dri", "registri", "intern", "repo", "status", "rust_log", "sudo",
+        ] {
+            assert!(!terms.stems.contains(word), "{word}: {terms:?}");
+        }
+    }
+
+    #[test]
+    fn a_file_adds_its_path_its_tails_its_folders_and_its_language() {
+        let terms = of(Kind::File, "./src/memory/read.rs");
+        for anchor in [
+            "src/memory/read.rs",
+            "memory/read.rs",
+            "read.rs",
+            "src",
+            "src/",
+            "src/memory",
+            "src/memory/",
+        ] {
+            assert!(terms.anchors.contains(anchor), "{anchor}: {terms:?}");
+        }
+        assert!(terms.stems.is_superset(&stems("src memory read rs rust")));
+    }
+
+    #[test]
+    fn prose_adds_its_words_and_the_anchors_a_topic_would() {
+        for kind in [
+            Kind::Prompt,
+            Kind::Task,
+            Kind::Plan,
+            Kind::Message,
+            Kind::Search,
+        ] {
+            let terms = of(kind, "Release the parser with `cargo publish`");
+            assert_eq!(terms.stems, stems("Release the parser with cargo publish"));
+            assert!(terms.anchors.contains("cargo publish"), "{kind:?}");
+            assert!(terms.anchors.contains("parser"), "{kind:?}");
+        }
+    }
+
+    /// An index of `memories`, each given as its title and content, from
+    /// rows built as the store builds them.
+    fn index(memories: &[(&str, &str)]) -> DeliveryIndex {
+        let mut stems = Stems::new();
+        let sources: Vec<Source> = memories
+            .iter()
+            .enumerate()
+            .map(|(i, (title, content))| {
+                let whole: Vec<(String, Field)> = stems
+                    .all(title)
+                    .into_iter()
+                    .map(|s| (s, Field::Title))
+                    .collect();
+                let held: BTreeSet<String> = whole.iter().map(|(s, _)| s.clone()).collect();
+                let mut rows = vec![SourceRow {
+                    slot: 0,
+                    start: 0,
+                    length: 0,
+                    stems: whole,
+                    anchors: passages::anchors(title).into_iter().collect(),
+                }];
+                for (slot, place) in (1..).zip(split(content)) {
+                    let part = &content[place.clone()];
+                    rows.push(SourceRow {
+                        slot,
+                        start: place.start,
+                        length: place.len(),
+                        stems: stems
+                            .all(part)
+                            .into_iter()
+                            .filter(|s| !held.contains(s))
+                            .map(|s| (s, Field::Body))
+                            .collect(),
+                        anchors: passages::anchors(part).into_iter().collect(),
+                    });
+                }
+                Source {
+                    id: format!("00000000-0000-4000-8000-{i:012}"),
+                    rows,
+                }
+            })
+            .collect();
+        DeliveryIndex::read(DeliveryIndex::write(&sources).unwrap()).unwrap()
+    }
+
+    /// A store of `n` filler memories, each sharing `common`, plus `extra`.
+    fn store(common: &str, extra: &[(&str, &str)]) -> DeliveryIndex {
+        let filler: Vec<(String, String)> = (0..40)
+            .map(|i| {
+                (
+                    format!("Note {i} about the {common} step"),
+                    format!("Keep the {common} step tidy, case {i}."),
+                )
+            })
+            .collect();
+        let mut all: Vec<(&str, &str)> = filler
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        all.extend_from_slice(extra);
+        index(&all)
+    }
+
+    fn rank(index: &DeliveryIndex, actions: &[Action]) -> Vec<Matched> {
+        let mut window = Window::default();
+        for action in actions {
+            window.push(action);
+        }
+        index.rank(&window).unwrap()
+    }
+
+    fn by_id<'a>(
+        index: &DeliveryIndex,
+        found: &'a [Matched],
+        id_end: usize,
+    ) -> Option<&'a Matched> {
+        let id = format!("00000000-0000-4000-8000-{id_end:012}");
+        found.iter().find(|m| index.id(m.memory) == id)
+    }
+
+    #[test]
+    fn the_file_reads_back_and_a_cut_or_foreign_file_is_refused() {
+        let built = DeliveryIndex::write(&[]).unwrap();
+        assert_eq!(DeliveryIndex::read(built.clone()).unwrap().len(), 0);
+        let index = store("deploy", &[]);
+        assert_eq!(index.len(), 40);
+        let mut bytes = index.bytes.clone();
+        bytes.truncate(bytes.len() - 1);
+        assert!(matches!(DeliveryIndex::read(bytes), Err(Error::Format)));
+        let mut foreign = index.bytes.clone();
+        foreign[0] = b'X';
+        assert!(matches!(DeliveryIndex::read(foreign), Err(Error::Format)));
+    }
+
+    #[test]
+    fn nothing_passes_on_a_common_term_alone() {
+        let index = store(
+            "deploy",
+            &[("Deploy checklist", "Check the deploy step twice.")],
+        );
+        let found = rank(&index, &[action(Kind::Prompt, "deploy")]);
+        assert!(!found.is_empty());
+        assert!(found.iter().all(|m| !m.push() && !m.hold()), "{found:?}");
+    }
+
+    #[test]
+    fn a_rare_anchor_in_a_command_passes_and_a_near_miss_does_not() {
+        let rule = (
+            "Dry run before publishing",
+            "Run `cargo publish --dry-run` before `cargo publish`; a failed upload burns the version number.",
+        );
+        let index = store("deploy", &[rule]);
+        let found = rank(&index, &[action(Kind::Command, "cargo publish")]);
+        let hit = by_id(&index, &found, 40).unwrap();
+        assert!(hit.push() && hit.hold(), "{hit:?}");
+        // Another subcommand of the same program shares only its name.
+        let found = rank(&index, &[action(Kind::Command, "cargo build")]);
+        assert!(
+            by_id(&index, &found, 40).is_none_or(|m| !m.push() && !m.hold()),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn stems_alone_never_hold_a_command() {
+        let index = store(
+            "deploy",
+            &[(
+                "Publishing crates",
+                "Publishing a crate burns its version number, so publishing waits for review.",
+            )],
+        );
+        let found = rank(&index, &[action(Kind::Command, "cargo publish")]);
+        let hit = by_id(&index, &found, 40).unwrap();
+        assert!(!hit.command && !hit.hold(), "{hit:?}");
+    }
+
+    #[test]
+    fn older_window_terms_alone_deliver_nothing_on_an_unrelated_action() {
+        let index = store(
+            "deploy",
+            &[(
+                "Dry run before publishing",
+                "Run `cargo publish --dry-run` first.",
+            )],
+        );
+        let found = rank(
+            &index,
+            &[
+                action(Kind::Command, "cargo publish"),
+                action(Kind::File, "README.md"),
+            ],
+        );
+        let hit = by_id(&index, &found, 40).unwrap();
+        assert!(!hit.fired && !hit.push(), "{hit:?}");
+    }
+
+    #[test]
+    fn a_failed_action_lowers_the_bar_for_its_own_terms() {
+        let index = store(
+            "deploy",
+            &[(
+                "Signing tags",
+                "Sign release tags; `git tag -s` needs the key loaded.",
+            )],
+        );
+        let mut failed = action(Kind::Command, "git tag v1.2.0");
+        let found = rank(&index, std::slice::from_ref(&failed));
+        let hit = by_id(&index, &found, 40).unwrap();
+        assert!(!hit.failure(), "{hit:?}");
+        failed.failed = true;
+        let found = rank(&index, &[failed]);
+        let hit = by_id(&index, &found, 40).unwrap();
+        assert!(hit.failed && hit.score >= FAILURE_BAR, "{hit:?}");
+        assert!(hit.failure(), "{hit:?}");
+    }
+
+    #[test]
+    fn the_best_passage_is_returned_with_its_place() {
+        let content = [
+            "Point one is about aardvarks, and only aardvarks: where they sleep, what they eat and how far they walk on a cold night out on the plain near the river bend, and why the young ones follow the old ones from the burrow to the termite mounds and back again before the sun comes up over the hills.",
+            "Point two is about the zeppelin hangar and its glacier door, which sticks in winter and needs two people and a lever to open before the morning flight leaves, and which the crew oils every Sunday so the hinge does not freeze solid while the airship is out over the northern sea for the week.",
+            "Point three is about bassoons and their reeds in the band, which crack in dry air unless they rest in a case with a damp sponge for at least an hour each day, and which the players soak in warm water before every rehearsal so the tone stays even through the long slow movements of the piece.",
+        ]
+        .join("\n");
+        let index = store("deploy", &[("Three points", &content)]);
+        let found = rank(&index, &[action(Kind::Prompt, "zeppelin glacier")]);
+        let hit = by_id(&index, &found, 40).unwrap();
+        let passage = &content[hit.start..hit.start + hit.length];
+        assert!(passage.contains("zeppelin"), "{passage:?}");
+        assert!(!passage.contains("aardvark"), "{passage:?}");
+    }
+}
