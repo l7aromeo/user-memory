@@ -262,6 +262,13 @@ TRAPS = ["delete another session's lock file", "chain it after a reset", "run it
 TRAPS_ANCHORED = False
 BUSY_SHARE = 0.3
 BUSY_NOTES = (3, 6)
+# The share of a busy command's extra notes a run of it needs: each run
+# draws its own; the rest are about the command but not needed this time.
+BUSY_NEEDED = 1.0
+# Times a task runs each busy command, as a test loop does: the line again,
+# alternately as it was and with another argument.
+BUSY_REPEATS = 1
+REPEAT_ARGUMENTS = ["parser", "--nocapture", "export::tests", "-- --ignored", "--quiet"]
 # Share of notes written with a context saying when they apply.
 CONTEXT_SHARE = 0.3
 # Points of a long merged memory, each about one subject.
@@ -321,6 +328,7 @@ class World:
         self.commands = work + rng.sample(extra, self.shape["extra_commands"])
         self.files = {c: f"{rng.choice(FOLDERS)}/{c}.{rng.choice(EXTENSIONS)}" for c in COMPONENTS}
         self.busy = {c: rng.randint(*BUSY_NOTES) for c in rng.sample(work, round(len(work) * BUSY_SHARE))}
+        self.busy_notes = set()
         projects = [PROJECT] + ([OTHER_PROJECT] if self.shape["other_project"] else [])
         for project in projects:
             self._notes(project, needed=project == PROJECT)
@@ -398,6 +406,7 @@ class World:
                                      f"{program} {sub}".strip() + ": " + text.strip("`").split(";")[0][:60],
                                      text, project, about=["command", program, sub], anchored=True)
                     self._need(("command", program, sub), m)
+                    self.busy_notes.add(m["id"])
             if rng.random() < TRAP_SHARE:
                 trap_anchored = rng.random() < ANCHORED_SHARE or TRAPS_ANCHORED
                 said = self._command_name(program, sub, trap_anchored)
@@ -561,26 +570,40 @@ class World:
             needs.append({"action": action, "memory": memory, "point": point,
                           "subject": subject[0]})
 
-    def _command(self, actions, needs, program, sub, failed):
+    def _command(self, actions, needs, program, sub, failed, again=None, repeat=0):
         rng = self.rng
-        flags = " ".join(rng.sample(FLAGS, rng.randint(0, 2)))
-        text = " ".join(part for part in [program, sub, flags] if part)
         spelled = None
-        if rng.random() < SPELLED_SHARE:
-            ways = ([("alias", ALIASES[(program, sub)])] if (program, sub) in ALIASES else []) + (
-                [("wrapper", WRAPPED[(program, sub)])] if (program, sub) in WRAPPED else []) + (
-                [("flag first", f"{program} {FLAG_FIRST[program]} {sub}")] if program in FLAG_FIRST else []) + (
-                [("prefix", f"{rng.choice(PREFIXES)} {program} {sub}")] if sub else [])
-            if ways:
-                spelled, said = rng.choice(ways)
-                text = " ".join(part for part in [said, flags] if part)
+        if again:
+            text = again
+        else:
+            flags = " ".join(rng.sample(FLAGS, rng.randint(0, 2)))
+            text = " ".join(part for part in [program, sub, flags] if part)
+            if rng.random() < SPELLED_SHARE:
+                ways = ([("alias", ALIASES[(program, sub)])] if (program, sub) in ALIASES else []) + (
+                    [("wrapper", WRAPPED[(program, sub)])] if (program, sub) in WRAPPED else []) + (
+                    [("flag first", f"{program} {FLAG_FIRST[program]} {sub}")] if program in FLAG_FIRST else []) + (
+                    [("prefix", f"{rng.choice(PREFIXES)} {program} {sub}")] if sub else [])
+                if ways:
+                    spelled, said = rng.choice(ways)
+                    text = " ".join(part for part in [said, flags] if part)
         actions.append({"kind": "command", "failed": failed, "about": ["command", program, sub],
-                        "text": text, "spelled": spelled})
-        self._needs_at(needs, len(actions) - 1, ("command", program, sub))
+                        "text": text, "spelled": spelled, "busy": (program, sub) in self.busy,
+                        "repeat": repeat})
+        noted = self.needed.get(("command", program, sub), [])
+        if BUSY_NEEDED < 1:
+            busy = [n for n in noted if n[0] in self.busy_notes]
+            kept = set(rng.sample(busy, max(1, round(len(busy) * BUSY_NEEDED)))) if busy else set()
+            noted = [n for n in noted if n[0] not in self.busy_notes or n in kept]
+        for memory, point in noted:
+            needs.append({"action": len(actions) - 1, "memory": memory, "point": point, "subject": "command"})
         self._needs_at(needs, len(actions) - 1, ("rule", program, sub))
         self._needs_at(needs, len(actions) - 1, ("trap", program, sub))
         if failed:
             self._needs_at(needs, len(actions) - 1, ("failure", program, sub))
+        if BUSY_REPEATS > 1 and (program, sub) in self.busy and not repeat:
+            for r in range(1, BUSY_REPEATS):
+                line = text if r % 2 == 0 else f"{text} {rng.choice(REPEAT_ARGUMENTS)}"
+                self._command(actions, needs, program, sub, rng.random() < FAILURE_SHARE, line, r)
 
     def _file(self, actions, needs, component):
         path, spelled = self.files[component], None

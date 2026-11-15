@@ -49,6 +49,25 @@ class Decisions(unittest.TestCase):
                                            anchored_failure, "command"), {"failure"})
 
 
+class Combined(unittest.TestCase):
+    def test_a_command_and_other_events_are_tested_on_their_own_quantities(self):
+        c = {**candidate("a", 0, anchored=True, command=True), "share": 0.9, "mixed": 0.1}
+        bars = {"scale": "kind", "anchor": True,
+                "command": {"scale": "share", "push": 0.6, "failure": 0.6, "hold": 0.75},
+                "other": {"scale": "mixed", "push": 0.4, "failure": 0.4, "hold": 0.4}}
+        self.assertEqual(metrics.decisions(c, bars, "command"), {"push", "hold"})
+        self.assertEqual(metrics.decisions(c, bars, "file"), set())
+
+    def test_either_passes_a_way_that_any_part_passes(self):
+        c = {**candidate("a", 0, anchored=True, command=True), "share": 0.65, "mixed": 0.5}
+        bars = {"scale": "either", "anchor": True,
+                "parts": [{"scale": "share", "push": 0.6, "failure": 0.6, "hold": 0.75},
+                          {"scale": "mixed", "push": 0.4, "failure": 0.4, "hold": 0.6}]}
+        self.assertEqual(metrics.decisions(c, bars, "command"), {"push"})
+        c["mixed"] = 0.6
+        self.assertEqual(metrics.decisions(c, bars, "command"), {"push", "hold"})
+
+
 class Places(unittest.TestCase):
     def test_a_passage_touching_a_point_does_not_overlap_it(self):
         point = {"start": 10, "end": 20}
@@ -151,6 +170,11 @@ class Evaluate(unittest.TestCase):
         task["actions"][1] = {"kind": "command", "collides": True}
         c = metrics.evaluate(task, matched, self.memories, BARS)
         self.assertEqual((c["colliding commands"], c["colliding held"], c["unnamed commands"]), (1, 1, 0))
+        # A second run of a busy command in the task holds nothing again.
+        task["actions"] = [{"kind": "prompt"}, {"kind": "command", "busy": True},
+                           {"kind": "command", "busy": True, "repeat": 1}]
+        c = metrics.evaluate(task, [[], matched[1], matched[1]], self.memories, BARS)
+        self.assertEqual((c["repeat runs"], c["repeat held"], c["repeat nothing"], c["busy runs"]), (1, 0, 1, 2))
 
 
 class Classes(unittest.TestCase):
@@ -381,6 +405,26 @@ class Generator(unittest.TestCase):
         for a in colliding:
             self.assertNotIn("about", a)
             self.assertTrue(set(a["text"].split()) & subcommands, a)
+
+    def test_a_busy_command_runs_again_and_needs_a_share_of_its_notes(self):
+        base = world.generate(5, 1_000)
+        saved = world.BUSY_NEEDED, world.BUSY_REPEATS
+        try:
+            world.BUSY_NEEDED, world.BUSY_REPEATS = 0.25, 3
+            varied = world.generate(5, 1_000)
+        finally:
+            world.BUSY_NEEDED, world.BUSY_REPEATS = saved
+        # The memories drawn before the tasks are the same; filler after them differs.
+        drawn_first = ("note", "trap", "lesson", "decision", "rule", "start rule", "essential", "merged")
+        structured = lambda drawn: sorted(m["id"] for m in drawn["memories"] if m["shape"] in drawn_first)
+        self.assertEqual(structured(base), structured(varied))
+        runs = [a for t in varied["tasks"] for a in t["actions"] if a.get("busy")]
+        repeats = [a for a in runs if a["repeat"]]
+        self.assertEqual(len(repeats), 2 * (len(runs) - len(repeats)))
+        # A run needs fewer of the busy notes than every one of them.
+        need = lambda drawn: sum(len(t["needs"]) for t in drawn["tasks"])
+        per_run = need(varied) / sum(len(t["actions"]) for t in varied["tasks"])
+        self.assertLess(per_run, need(base) / sum(len(t["actions"]) for t in base["tasks"]))
 
     def test_tasks_no_memory_names_hold_only_unnamed_commands(self):
         drawn = world.generate(5, 1_000)
