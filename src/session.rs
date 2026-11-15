@@ -8,7 +8,7 @@
 
 mod live;
 
-use crate::{db_path, memory, project, setup};
+use crate::{db_path, memory, memory::FitUnit, project, setup};
 use anyhow::Context;
 use clap::ValueEnum;
 use live::{LINKED, LISTED, PENDING, THIS_FOLDER};
@@ -22,11 +22,31 @@ use std::{
 
 /// Upper bound for the whole hook, well under the client hook timeout.
 const LIMIT: Duration = Duration::from_secs(5);
-/// Hook output enters model context; clients cap it near 10,000 characters.
-const CHARS: usize = 9500;
-/// The projects line's and the index's share of [`CHARS`]: above it, whole
-/// groups collapse into counted lines, leaving room for the origin line.
-const INDEX_CHARS: usize = 9000;
+/// Codex shows the agent only the head and tail of a hook's text over
+/// 2,500 tokens (`DEFAULT_HOOK_OUTPUT_TOKEN_LIMIT` in
+/// codex-rs/hooks/src/output_spill.rs), which it counts as UTF-8 bytes over
+/// four (`APPROX_BYTES_PER_TOKEN` in codex-rs/utils/string/src/truncate.rs).
+const CODEX_LIMIT: usize = 2_500 * 4;
+/// Claude Code saves a hook's text over 10,000 characters to a file and
+/// shows the agent a preview.
+const CLAUDE_LIMIT: usize = 10_000;
+/// What Claude Code counts [`CLAUDE_LIMIT`] in: UTF-16 units, as measured
+/// with Claude Code 2.1.325 against a fake model. A session-start text of
+/// 9,900 emoji (19,784 units) reached the model as a preview, and one of
+/// 9,900 CJK characters (9,900 units, 29,668 bytes) whole.
+const CLAUDE_UNIT: FitUnit = FitUnit::Utf16Units;
+/// Kept free under a client's limit for the lines session start puts before
+/// the cut text: the conversation origin (about 350 with its sentence) and a
+/// version line.
+const ADDED_ROOM: usize = 500;
+/// The projects line's and the index's share is this much less again than
+/// the cut's: above it, whole groups collapse into counted lines, so the cut
+/// stays a last resort.
+const INDEX_MARGIN: usize = 500;
+/// Said where [`capped`] cut session start's index.
+const INDEX_CUT: &str = "(index cut to fit; index lists every line)";
+/// Said where [`capped`] cut the prompt hook's notice.
+const NOTICE_CUT: &str = "(cut to fit; index lists every memory)";
 /// The instruction-file sync's share of [`LIMIT`]: a slow one is cut off and
 /// the hook shows the whole index, with time left to fetch it.
 const SYNC_SHARE: Duration = Duration::from_secs(2);
@@ -91,6 +111,15 @@ impl HookClient {
     }
 }
 
+/// How long a hook's text may be before `client` cuts it, and the unit it
+/// counts in; with no client named, the stricter: Codex's bytes.
+fn hook_limit(client: Option<HookClient>) -> (usize, FitUnit) {
+    match client {
+        Some(HookClient::Claude) => (CLAUDE_LIMIT, CLAUDE_UNIT),
+        Some(HookClient::Codex) | None => (CODEX_LIMIT, FitUnit::Utf8Bytes),
+    }
+}
+
 /// Said in place of the projects line when the session sees no project, so
 /// the agent links one or proposes a key rather than recording globally:
 /// this opening, then the repositories found inside with
@@ -143,7 +172,10 @@ pub async fn start(path: PathBuf, client: Option<HookClient>) -> String {
         tokio::time::timeout_at(deadline, version_line())
     );
     let index = match index {
-        Ok(Ok(text)) => capped(text, CHARS),
+        Ok(Ok(text)) => {
+            let (limit, unit) = hook_limit(client);
+            capped(text, limit - ADDED_ROOM, unit, INDEX_CUT)
+        }
         Ok(Err(err)) => {
             let reason = err.to_string();
             let reason = reason.lines().next().unwrap_or_default();
@@ -251,7 +283,9 @@ pub async fn prompt_submit(client: HookClient) -> String {
             None
         }
     };
+    let (limit, unit) = hook_limit(Some(client));
     notice
+        .map(|text| capped(text, limit, unit, NOTICE_CUT))
         .map(|text| {
             json!({"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":text}})
                 .to_string()
@@ -401,7 +435,8 @@ async fn index(
         Repositories::default()
     };
     let line = projects_lines(&seen, &repositories);
-    let room = INDEX_CHARS.saturating_sub(line.chars().count() + 1);
+    let (limit, unit) = hook_limit(client);
+    let room = (limit - ADDED_ROOM - INDEX_MARGIN).saturating_sub(unit.len(&line) + 1);
     let remote = remote.as_ref();
     let mut fetch = async |input: Value| -> anyhow::Result<String> {
         let page = match remote {
@@ -419,11 +454,19 @@ async fn index(
             None => Ok(page),
         }
     };
-    let index = fitted(&mut fetch, &seen, origin.as_deref(), rules_elsewhere, room).await?;
+    let index = fitted(
+        &mut fetch,
+        &seen,
+        origin.as_deref(),
+        rules_elsewhere,
+        room,
+        unit,
+    )
+    .await?;
     Ok(format!("{line}\n{index}"))
 }
 
-/// The index of what the session sees within `room` characters, asked of
+/// The index of what the session sees within `room` in `unit`, asked of
 /// `fetch` (one index call) in one request: the store builds the whole
 /// index once and shortens it. An older server ignores the room and lists
 /// one page, with a cursor when more follow, so the index is then read page
@@ -434,6 +477,7 @@ async fn fitted(
     origin: Option<&str>,
     rules_elsewhere: bool,
     room: usize,
+    unit: FitUnit,
 ) -> anyhow::Result<String> {
     let input = json!({
         "projects": seen.keys(),
@@ -443,8 +487,9 @@ async fn fitted(
     let mut asked = input.clone();
     asked["fit_room"] = json!(room);
     asked["fit_whole_projects"] = json!(seen.core);
+    asked["fit_unit"] = json!(unit);
     let reply = fetch(asked).await?;
-    if memory::next_cursor(&reply).is_none() && reply.chars().count() <= room {
+    if memory::next_cursor(&reply).is_none() && unit.len(&reply) <= room {
         return Ok(reply);
     }
     let whole = whole_of(fetch, input).await?;
@@ -453,8 +498,8 @@ async fn fitted(
         .iter()
         .filter(|p| !seen.core.contains(&p.key))
         .collect();
-    if whole.chars().count() <= room || others.is_empty() {
-        return Ok(memory::shorten(&whole, room));
+    if unit.len(&whole) <= room || others.is_empty() {
+        return Ok(memory::shorten(&whole, room, unit));
     }
     // Too large with every project: global memories and the folder's own
     // projects first, then a share of the room for each other one.
@@ -473,7 +518,7 @@ async fn fitted(
             index,
         });
     }
-    Ok(memory::tiered(&whole, &core, &projects, room))
+    Ok(memory::tiered(&whole, &core, &projects, room, unit))
 }
 
 /// Every page of the index `input` asks for, merged, from `fetch`.
@@ -799,21 +844,26 @@ fn origin(client: HookClient, payload: &[u8]) -> Option<String> {
     (!id.is_empty() && origin.chars().count() <= ORIGIN_CHARS).then_some(origin)
 }
 
-/// Keeps whole lines within `limit` characters and says when it cut: the last
-/// resort when even a shortened index does not fit.
-fn capped(text: String, limit: usize) -> String {
-    if text.chars().count() <= limit {
+/// Keeps whole lines within `limit` in `unit`, ending with `note` when it
+/// cut, the note included: the last resort when even a shortened index does
+/// not fit.
+fn capped(text: String, limit: usize, unit: FitUnit, note: &str) -> String {
+    if unit.len(&text) <= limit {
         return text;
     }
+    let room = limit.saturating_sub(unit.len(note));
     let mut kept = String::new();
+    let mut used = 0;
     for line in text.lines() {
-        if kept.chars().count() + line.chars().count() + 1 > limit {
+        let width = unit.len(line) + 1;
+        if used + width > room {
             break;
         }
         kept.push_str(line);
         kept.push('\n');
+        used += width;
     }
-    kept.push_str("(index cut to fit; index lists every line)");
+    kept.push_str(note);
     kept
 }
 
@@ -893,7 +943,9 @@ mod tests {
                 calls.set(calls.get() + 1);
                 memory::index(&db, &serde_json::from_value(input)?)
             };
-            let one = fitted(&mut store, &seen, None, false, INDEX_CHARS)
+            let room = CODEX_LIMIT - ADDED_ROOM - INDEX_MARGIN;
+            let unit = FitUnit::Utf8Bytes;
+            let one = fitted(&mut store, &seen, None, false, room, unit)
                 .await
                 .unwrap();
             assert_eq!(calls.get(), 1, "{case}");
@@ -905,11 +957,11 @@ mod tests {
                 fields.remove("fit_whole_projects");
                 memory::index(&db, &serde_json::from_value(input)?)
             };
-            let walked = fitted(&mut older, &seen, None, false, INDEX_CHARS)
+            let walked = fitted(&mut older, &seen, None, false, room, unit)
                 .await
                 .unwrap();
             assert_eq!(one, walked, "{case}");
-            assert!(one.chars().count() <= INDEX_CHARS, "{case}");
+            assert!(one.len() <= room, "{case}");
             let shortened = one.contains("Shortened to fit the session start");
             let tiered = one.contains(" more (index projects: [");
             assert_eq!(
@@ -1036,12 +1088,22 @@ mod tests {
 
     #[test]
     fn output_keeps_whole_lines_within_the_limit() {
-        let note = "(index cut to fit; index lists every line)";
-        assert_eq!(capped("abc\ndef".into(), 7), "abc\ndef");
-        assert_eq!(capped("abc\ndef\ng".into(), 8), format!("abc\ndef\n{note}"));
-        assert_eq!(capped("abc\ndef\nx".into(), 7), format!("abc\n{note}"));
-        assert_eq!(capped("ab\nc\nd".into(), 4), format!("ab\n{note}"));
-        assert_eq!(capped("abcdef".into(), 3), note);
+        let note = "(cut)";
+        let cut = |text: &str, limit| capped(text.into(), limit, FitUnit::Utf8Bytes, note);
+        assert_eq!(cut("abc\ndef", 7), "abc\ndef");
+        // The note counts against the limit.
+        assert_eq!(cut("ab\ncd\nefghij", 12), "ab\ncd\nefghij");
+        assert_eq!(cut("ab\ncd\nefghij", 11), format!("ab\ncd\n{note}"));
+        assert_eq!(cut("ab\ncd\nefghij", 10), format!("ab\n{note}"));
+        assert_eq!(cut("abcdef", 5), note);
+        // In the client's unit: 'é' is two bytes, one UTF-16 unit; '😀'
+        // four bytes, two units.
+        let text = "éé\n😀\nx";
+        assert_eq!(capped(text.into(), 10, FitUnit::Utf16Units, note), text);
+        assert_eq!(
+            capped(text.into(), 10, FitUnit::Utf8Bytes, note),
+            format!("éé\n{note}")
+        );
     }
 
     #[test]

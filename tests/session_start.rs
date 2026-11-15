@@ -390,6 +390,17 @@ const HOOK_CHARS: usize = 9500;
 /// A store of `count` memories written straight into the database: rules in
 /// five categories, then facts, goals, decisions and observations.
 fn large_store(home: &Path, count: usize) -> std::path::PathBuf {
+    large_store_titled(home, count, &|i| {
+        format!("Memory number {i:03}, written as one full line an agent can act on")
+    })
+}
+
+/// [`large_store`] with memory `i` titled `title(i)`.
+fn large_store_titled(
+    home: &Path,
+    count: usize,
+    title: &dyn Fn(usize) -> String,
+) -> std::path::PathBuf {
     let db = home.join("memory.sqlite3");
     let created = Command::new(env!("CARGO_BIN_EXE_user-memory"))
         .arg("index")
@@ -418,7 +429,7 @@ fn large_store(home: &Path, count: usize) -> std::path::PathBuf {
             8 => ("decision", "explicit", "confirmed"),
             _ => ("behavior", "observed", "tentative"),
         };
-        let title = format!("Memory number {i:03}, written as one full line an agent can act on");
+        let title = title(i);
         conn.execute(
             "INSERT INTO memories (id,memory_type,category,title,content,source,status,evidence) VALUES (?1,?2,?3,?4,?4,?5,?6,'seen')",
             rusqlite::params![id, kind, categories[i % categories.len()], title, source, status],
@@ -564,6 +575,191 @@ fn assert_listed_or_counted(hook: &str, total: usize) {
         };
         assert!(line.ends_with(&expected), "{line}");
     }
+}
+
+/// Each client's limit on a hook's text, in its own unit: Codex 2,500
+/// tokens of four UTF-8 bytes (codex-rs/hooks/src/output_spill.rs), Claude
+/// Code 10,000 UTF-16 units (measured; see `CLAUDE_UNIT` in src/session.rs).
+const CLIENT_LIMIT: usize = 10_000;
+
+/// How long `text` is as `client` counts it.
+fn client_length(client: &str, text: &str) -> usize {
+    match client {
+        "codex" => text.len(),
+        _ => text.encode_utf16().count(),
+    }
+}
+
+// Titles of several bytes a character fit each client's limit in that
+// client's unit, shortened rather than cut: CJK (three bytes, one UTF-16
+// unit each) and emoji (four bytes, two units). Counted in characters, the
+// CJK index passes Codex's limit and the emoji one Claude Code's.
+#[test]
+fn multibyte_titles_fit_each_clients_limit_in_its_own_unit() {
+    let titles: [(&str, &dyn Fn(usize) -> String); 2] = [
+        ("cjk", &|i| {
+            format!("{i:03} 構築と検索の設定は作業木ごとに確認してから進めること")
+        }),
+        ("emoji", &|i| {
+            format!("{i:03} {}", "🚀🧪🔒🧭📦✅🎯🔧".repeat(3))
+        }),
+    ];
+    for (script, title) in titles {
+        let home = tempdir().unwrap();
+        large_store_titled(home.path(), 600, title);
+        for client in ["claude", "codex"] {
+            let payload = format!(r#"{{"session_id":"{script}-{client}"}}"#);
+            let out = with_payload(
+                home.path(),
+                &["--client", client],
+                payload.as_bytes(),
+                true,
+                HOOK_ROOM,
+            );
+            let hook = text(&out);
+            let length = client_length(client, &hook);
+            assert!(
+                length <= CLIENT_LIMIT,
+                "{script}, {client}: {length} of {CLIENT_LIMIT}"
+            );
+            assert!(
+                length * 10 > CLIENT_LIMIT * 8,
+                "{script}, {client}: only {length}"
+            );
+            assert!(hook.contains(SHORTENED), "{script}, {client}");
+            assert!(!hook.contains("(index cut to fit"), "{script}, {client}");
+            assert_listed_or_counted(&hook, 600);
+        }
+    }
+}
+
+// The prompt hook's notice keeps to the client's limit too: a conversation
+// that links many projects between prompts hears of the first 20, with a
+// count of the rest.
+#[test]
+fn a_notice_of_many_linked_projects_names_twenty_and_counts_the_rest() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path();
+    let app = repository(home, "app", "git@github.com:acme/app.git");
+    started(home, &app, "many", "startup");
+    assert_eq!(prompted(home, &app, "many"), "");
+    let keys: Vec<String> = (0..300)
+        .map(|i| format!("github.com/acme/a-repository-with-a-long-name-{i:03}"))
+        .collect();
+    let linked = link(
+        home,
+        &app,
+        json!({"origin":"claude:session/many","projects":keys}),
+    );
+    assert_eq!(linked["added"].as_array().unwrap().len(), 300, "{linked}");
+    let notice = prompted(home, &app, "many");
+    assert!(
+        client_length("claude", &notice) <= CLIENT_LIMIT,
+        "{} units",
+        client_length("claude", &notice)
+    );
+    let line = notice.lines().next().unwrap();
+    assert_eq!(line.matches(" (linked)").count(), 20, "{line}");
+    assert!(line.ends_with("; and 280 more"), "{line}");
+}
+
+// Sixty rule categories with long CJK names overflow even a shortened index
+// in bytes, as each group keeps its count line: for Codex the last-resort cut
+// keeps it within 10,000 bytes and says so, where Claude Code, counting
+// UTF-16 units, gets the shortened index whole.
+#[test]
+fn an_index_too_long_even_shortened_is_cut_to_each_clients_limit() {
+    let home = tempdir().unwrap();
+    let db = large_store(home.path(), 0);
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    for i in 0..180 {
+        let id = format!("{:08x}-0000-4000-8000-{:012x}", i + 1, i + 1);
+        let category = format!("{:02}構築と検索の設定と作業木の確認を進める手順", i % 60);
+        let title = format!("{i:03}構築と検索の設定は作業木ごとに確認してから進めること");
+        conn.execute(
+            "INSERT INTO memories (id,memory_type,category,title,content,source,status) VALUES (?1,'preference',?2,?3,?3,'explicit','confirmed')",
+            rusqlite::params![id, category, title],
+        )
+        .unwrap();
+    }
+    drop(conn);
+    for client in ["claude", "codex"] {
+        let payload = format!(r#"{{"session_id":"wide-{client}"}}"#);
+        let out = with_payload(
+            home.path(),
+            &["--client", client],
+            payload.as_bytes(),
+            true,
+            HOOK_ROOM,
+        );
+        let hook = text(&out);
+        let length = client_length(client, &hook);
+        assert!(
+            length <= CLIENT_LIMIT,
+            "{client}: {length} of {CLIENT_LIMIT}"
+        );
+        let cut = hook
+            .trim_end()
+            .ends_with("(index cut to fit; index lists every line)");
+        assert_eq!(cut, client == "codex", "{client}: {hook}");
+        assert!(length * 10 > CLIENT_LIMIT * 8, "{client}: only {length}");
+    }
+}
+
+// Twenty projects with long keys in a script of three bytes a character
+// pass Codex's limit even when only twenty are named: the notice is cut to
+// fit, and says so, rather than lose its middle.
+#[test]
+fn a_notice_too_long_for_codex_is_cut_to_its_limit() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path();
+    let app = repository(home, "app", "git@github.com:acme/app.git");
+    let prompt = |session: &str| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_user-memory"));
+        command.args(["prompt-submit", "--client", "codex"]);
+        let mut child = in_folder(command, home, home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let payload = json!({"session_id":session,"cwd":&app,"hook_event_name":"UserPromptSubmit"});
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload.to_string().as_bytes())
+            .unwrap();
+        let out = text(&child.wait_with_output().unwrap());
+        if out.is_empty() {
+            return out;
+        }
+        let reply: Value = serde_json::from_str(&out).unwrap();
+        reply["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    assert_eq!(prompt("wide"), "");
+    let keys: Vec<String> = (0..20)
+        .map(|i| format!("local:{i:02}{}", "漢".repeat(200)))
+        .collect();
+    let linked = link(
+        home,
+        &app,
+        json!({"origin":"codex:thread/wide","projects":keys}),
+    );
+    assert_eq!(linked["added"].as_array().unwrap().len(), 20, "{linked}");
+    let notice = prompt("wide");
+    assert!(
+        client_length("codex", &notice) <= CLIENT_LIMIT,
+        "{} bytes",
+        client_length("codex", &notice)
+    );
+    assert!(
+        notice.ends_with("(cut to fit; index lists every memory)"),
+        "{notice}"
+    );
 }
 
 // A folder project of 300 memories and no other project: the hook fills its
