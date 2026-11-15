@@ -104,11 +104,13 @@ give.
 
 - `search_keys` gives each memory a number, in the order memories were
   stored, and copies the columns search filters on.
-- `search_words` (SQLite FTS5) holds each memory's stems under its number,
-  each at the strongest field holding it: category, title, type, or the
-  text. It stores the stems it indexes, as hex, never the text, so FTS5's
-  `secure-delete` can take a deleted memory's words out of its pages at
-  once ([removed text](#removed-text)).
+- `search_words` (SQLite FTS5) holds each memory in rows numbered from
+  its number: one for its category, title, type, reason and evidence, and
+  one for each [passage](memory-model.md#passages) with the passage's place
+  in the text (`start`, `length`). A row holds stems, each at the strongest
+  field holding it there, and literal anchors. It stores what it indexes,
+  as hex, never the text, so FTS5's `secure-delete` can take a deleted
+  memory's words out of its pages at once ([removed text](#removed-text)).
 - Triggers on `memories` keep the numbers and filter columns in step with
   every write, from user-memory or any other program, and queue a changed
   memory in `search_pending`. Every write by user-memory stems what it

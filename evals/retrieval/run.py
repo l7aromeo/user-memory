@@ -5,7 +5,9 @@ Builds a throwaway store from memories.json, runs every query in
 queries.json through `user-memory search` as the session's project would,
 and reports top1, top3, mean reciprocal rank (MRR) and misses per query
 style, keyword-only and, with an embeddings endpoint, fused with semantic
-similarity. Nothing here touches the user's own store or settings: the
+similarity. A query that names the part of a long memory it asks about
+(`passage`) also counts whether its target came back with that part as
+its passage. Nothing here touches the user's own store or settings: the
 store, home and state live in a temporary folder.
 
     just retrieval-bench
@@ -94,7 +96,9 @@ class Store:
     def search(self, query, project, embed):
         reply = json.loads(self.run(
             ["search", query, "--project", project, "--page-size", PAGE], embed))
-        return [self.ids.get(m["id"], m["id"]) for m in reply["memories"]], reply.get("semantic")
+        found = [self.ids.get(m["id"], m["id"]) for m in reply["memories"]]
+        passages = {self.ids.get(m["id"], m["id"]): m.get("passage") for m in reply["memories"]}
+        return found, reply.get("semantic"), passages
 
 
 def score(rows):
@@ -107,6 +111,10 @@ def score(rows):
         "mrr": round(sum(1 / r for r in ranks if r) / len(rows), 3),
         "misses": sum(1 for r in ranks if r is None),
         "median_matched": statistics.median(row["matched"] for row in rows),
+        # Of the queries naming the part of a long memory they ask about,
+        # those whose target came back with that part as its passage.
+        "passages": sum(1 for row in rows if row.get("passage_found")),
+        "passage_queries": sum(1 for row in rows if "passage_found" in row),
     }
 
 
@@ -119,6 +127,10 @@ def table(name, rows):
         s = score(part)
         print(f"  {style:<11}{s['queries']:>4}{s['top1']:>6}{s['top3']:>6}{s['mrr']:>7.3f}"
               f"{s['misses']:>6}{s['median_matched']:>9}")
+    s = score(rows)
+    if s["passage_queries"]:
+        print(f"  passages: {s['passages']} of {s['passage_queries']} queries about part of a long "
+              "memory got that part as the passage")
 
 
 def main():
@@ -164,15 +176,19 @@ def main():
         for mode, embed in modes.items():
             rows = []
             for q in spec["queries"]:
-                found, semantic = store.search(q["query"], spec["project"], embed)
+                found, semantic, passages = store.search(q["query"], spec["project"], embed)
                 if mode == "fused" and not semantic:
                     sys.exit(f"the endpoint did not rank {q['query']!r}; is it running?")
                 leaked = outside.intersection(found)
                 if leaked:
                     sys.exit(f"{q['query']!r} returned another project's memories: {sorted(leaked)}")
                 rank = found.index(q["target"]) + 1 if q["target"] in found else None
-                rows.append({"style": q["style"], "query": q["query"], "target": q["target"],
-                             "rank": rank, "matched": len(found), "found": found})
+                row = {"style": q["style"], "query": q["query"], "target": q["target"],
+                       "rank": rank, "matched": len(found), "found": found}
+                if "passage" in q:
+                    shown = passages.get(q["target"]) or ""
+                    row["passage_found"] = q["passage"].lower() in shown.lower()
+                rows.append(row)
             results[mode] = {"summary": score(rows), "rows": rows}
             table(mode, rows)
             # Relevance alone: global targets ranked among global memories,

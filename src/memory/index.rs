@@ -12,14 +12,20 @@ use super::{
 use anyhow::{Result, bail};
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 use serde_json::{Value, json};
-use std::{collections::HashMap, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    ops::Range,
+    path::Path,
+};
 use uuid::Uuid;
 
 pub(super) mod embed;
+pub(super) mod passages;
 pub(super) mod stems;
 pub(super) mod vectors;
 
-use stems::{Field, Stems, Text, fields, stamp, token};
+use super::similar::{category_group, tokenize};
+use stems::{Field, Stems, Text, stamp, token};
 
 /// The keyword index and the vectors, created with every store and by the
 /// migration to version 6. Part of the stored schema: bump
@@ -29,7 +35,9 @@ use stems::{Field, Stems, Text, fields, stamp, token};
 ///   are keyed by their text id, and VACUUM may renumber a rowid), in the
 ///   order the memories were stored. It copies the columns search filters
 ///   on under their `memories` names, so one filter serves both tables.
-/// - `search_words` ([`WORDS`]) holds each memory's stems under its key.
+/// - `search_words` ([`WORDS`]) holds each memory's stems and anchors in
+///   rows numbered from its key ([`SLOTS`]; the triggers write the number
+///   out).
 /// - `search_pending` lists the memories whose words changed since they
 ///   were indexed. Stemming needs Rust, so triggers queue the memory and
 ///   every write drains the queue before it commits.
@@ -70,7 +78,7 @@ CREATE TABLE IF NOT EXISTS search_changes (
     id TEXT NOT NULL
 );
 CREATE TRIGGER IF NOT EXISTS search_inserted AFTER INSERT ON memories BEGIN
-    DELETE FROM search_words WHERE rowid IN (SELECT key FROM search_keys WHERE id=NEW.id);
+    DELETE FROM search_words WHERE rowid BETWEEN (SELECT key*256 FROM search_keys WHERE id=NEW.id) AND (SELECT key*256+255 FROM search_keys WHERE id=NEW.id);
     DELETE FROM search_pending WHERE key IN (SELECT key FROM search_keys WHERE id=NEW.id);
     DELETE FROM search_keys WHERE id=NEW.id;
     INSERT INTO search_keys(id,memory_type,category,scope,project,source,status,updated_at) VALUES (NEW.id,NEW.memory_type,NEW.category,NEW.scope,NEW.project,NEW.source,NEW.status,NEW.updated_at);
@@ -83,7 +91,7 @@ CREATE TRIGGER IF NOT EXISTS search_changed AFTER UPDATE ON memories BEGIN
     INSERT INTO search_changes(id) VALUES (NEW.id);
 END;
 CREATE TRIGGER IF NOT EXISTS search_deleted AFTER DELETE ON memories BEGIN
-    DELETE FROM search_words WHERE rowid IN (SELECT key FROM search_keys WHERE id=OLD.id);
+    DELETE FROM search_words WHERE rowid BETWEEN (SELECT key*256 FROM search_keys WHERE id=OLD.id) AND (SELECT key*256+255 FROM search_keys WHERE id=OLD.id);
     DELETE FROM search_pending WHERE key IN (SELECT key FROM search_keys WHERE id=OLD.id);
     DELETE FROM search_keys WHERE id=OLD.id;
     DELETE FROM memory_vectors WHERE id=OLD.id;
@@ -99,14 +107,31 @@ CREATE TRIGGER IF NOT EXISTS search_vector_deleted AFTER DELETE ON memory_vector
     INSERT INTO search_changes(id) VALUES (OLD.id);
 END;";
 
-/// The keyword index: each memory's stems under its key, each stem in the
-/// column of the strongest field holding it, as hex tokens (see
-/// `stems::token`). It holds no text and no positions: search asks only
-/// which memories hold a stem, and in which field. The index stores its
-/// columns, the same tokens, because FTS5's `secure-delete` (see [`secure`])
-/// works only on an index that can read a deleted entry's tokens back.
-/// Part of the stored schema, as [`SEARCH`] is.
-const WORDS: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS search_words USING fts5(category,title,type,body,detail=column,tokenize='ascii');";
+/// The keyword index: each memory's [`rows`], numbered `key * SLOTS +
+/// slot`, each stem in the column of the strongest field holding it in the
+/// row and each anchor in `anchors`, as hex tokens (see `stems::token`),
+/// with a passage's place in its text (`start`, `length`, in bytes). It
+/// holds no text and no positions: search asks only which rows hold a stem
+/// or an anchor, and in which field. The index stores its columns, the same
+/// tokens, because FTS5's `secure-delete` (see [`secure`]) works only on an
+/// index that can read a deleted entry's tokens back. Part of the stored
+/// schema, as [`SEARCH`] is.
+const WORDS: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS search_words USING fts5(category,title,type,body,anchors,start UNINDEXED,length UNINDEXED,detail=column,tokenize='ascii');";
+
+/// Rows the keyword index numbers for each memory: the memory's rows are
+/// `key * SLOTS` up to the next memory's. Slot 0 holds what counts for the
+/// whole memory, slots from 1 the content's passages, and [`CONTEXT_SLOT`]
+/// the context's. The triggers in [`SEARCH`] write this number out.
+pub(in crate::memory) const SLOTS: i64 = 256;
+
+/// The slot of a memory's context, a passage of its own: it says when the
+/// memory applies.
+pub(in crate::memory) const CONTEXT_SLOT: i64 = SLOTS - 1;
+
+const _: () = assert!(
+    passages::MAX_PASSAGES as i64 + 1 < CONTEXT_SLOT,
+    "every content passage has a slot before the context's"
+);
 
 /// Creates the search tables and triggers where missing, as every open of a
 /// current store does; a store created now gets an empty index stamped as
@@ -203,6 +228,82 @@ pub(super) fn settle(conn: &Connection) -> Result<()> {
     drain(conn)
 }
 
+/// One row of a memory in the keyword index (see [`rows`]).
+#[derive(Debug, PartialEq)]
+pub(in crate::memory) struct Row {
+    pub(in crate::memory) slot: i64,
+    /// Each stem of the row with the strongest field holding it there.
+    pub(in crate::memory) stems: Vec<(String, Field)>,
+    /// The row's literal anchors (see [`passages::anchors`]).
+    pub(in crate::memory) anchors: Vec<String>,
+    /// The passage's bytes in its text: the content's, or the context's in
+    /// [`CONTEXT_SLOT`]. Empty in slot 0.
+    pub(in crate::memory) place: Range<usize>,
+}
+
+/// The rows a memory is indexed and ranked in. Slot 0 holds the category,
+/// title, type, reason and evidence, which say what the whole memory is
+/// about, so they count for each passage; then a row for each passage of
+/// the content and one for a non-empty context. A passage row holds only
+/// the stems and anchors slot 0 does not, which count the same either way.
+pub(in crate::memory) fn rows(stems: &mut Stems, text: Text) -> Vec<Row> {
+    let labels = category_group(text.category).join(" ");
+    let whole = format!("{} {}", text.reason, text.evidence);
+    let mut held: BTreeMap<String, Field> = BTreeMap::new();
+    for (field, words) in Field::ALL.into_iter().zip([
+        labels.as_str(),
+        text.title,
+        text.memory_type,
+        whole.as_str(),
+    ]) {
+        for word in tokenize(words) {
+            held.entry(stems.of(word).to_owned()).or_insert(field);
+        }
+    }
+    let anchored: BTreeSet<String> = [text.title, text.reason, text.evidence]
+        .into_iter()
+        .flat_map(passages::anchors)
+        .collect();
+    let content = passages::split(text.content)
+        .into_iter()
+        .zip(1..)
+        .map(|(place, slot)| (slot, text.content, place));
+    let context =
+        (!text.context.is_empty()).then_some((CONTEXT_SLOT, text.context, 0..text.context.len()));
+    let mut rows = vec![Row {
+        slot: 0,
+        stems: held
+            .iter()
+            .map(|(stem, &field)| (stem.clone(), field))
+            .collect(),
+        anchors: anchored.iter().cloned().collect(),
+        place: 0..0,
+    }];
+    for (slot, source, place) in content.chain(context) {
+        let part = &source[place.clone()];
+        let own: BTreeSet<String> = tokenize(part)
+            .into_iter()
+            .map(|word| stems.of(word).to_owned())
+            .filter(|stem| !held.contains_key(stem))
+            .collect();
+        rows.push(Row {
+            slot,
+            stems: own.into_iter().map(|stem| (stem, Field::Body)).collect(),
+            anchors: passages::anchors(part)
+                .into_iter()
+                .filter(|anchor| !anchored.contains(anchor))
+                .collect(),
+            place,
+        });
+    }
+    rows
+}
+
+/// The first and last row number of the memory keyed `key`.
+fn row_numbers(key: i64) -> (i64, i64) {
+    (key * SLOTS, key * SLOTS + SLOTS - 1)
+}
+
 /// Indexes the memories queued in `search_pending`, inside the caller's
 /// write transaction. Every write runs it before committing, so the index
 /// matches the memories in each committed state. An index stamped by other
@@ -231,9 +332,10 @@ pub(super) fn drain(conn: &Connection) -> Result<()> {
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut stems = Stems::new();
-    let mut forget = conn.prepare_cached("DELETE FROM search_words WHERE rowid=?1")?;
+    let mut forget =
+        conn.prepare_cached("DELETE FROM search_words WHERE rowid BETWEEN ?1 AND ?2")?;
     let mut insert = conn.prepare_cached(
-        "INSERT INTO search_words(rowid,category,title,type,body) VALUES (?1,?2,?3,?4,?5)",
+        "INSERT INTO search_words(rowid,category,title,type,body,anchors,start,length) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
     )?;
     let mut done = conn.prepare_cached("DELETE FROM search_pending WHERE key=?1")?;
     for (
@@ -249,7 +351,7 @@ pub(super) fn drain(conn: &Connection) -> Result<()> {
         ],
     ) in &queued
     {
-        let found = fields(
+        let rows = rows(
             &mut stems,
             Text {
                 memory_type,
@@ -261,36 +363,75 @@ pub(super) fn drain(conn: &Connection) -> Result<()> {
                 evidence,
             },
         );
-        let mut columns: [Vec<String>; 4] = Default::default();
-        for (stem, field) in found {
-            columns[field as usize].push(token(&stem));
-        }
-        if columns.iter().flatten().any(|t| t.len() > TOKEN_LIMIT) {
+        let stored: Vec<_> = rows.iter().map(|row| (row, columns(row))).collect();
+        if stored
+            .iter()
+            .flat_map(|(_, columns)| columns)
+            .any(|tokens| tokens.split(' ').any(|t| t.len() > TOKEN_LIMIT))
+        {
             continue;
         }
-        let [category, title, kind, body] = columns.map(|tokens| tokens.join(" "));
-        forget.execute([key])?;
-        insert.execute(params![key, category, title, kind, body])?;
+        let (first, last) = row_numbers(*key);
+        forget.execute([first, last])?;
+        for (row, [category, title, kind, body, anchors]) in stored {
+            let place = (row.slot != 0).then(|| (row.place.start, row.place.len()));
+            insert.execute(params![
+                first + row.slot,
+                category,
+                title,
+                kind,
+                body,
+                anchors,
+                place.map(|(start, _)| start),
+                place.map(|(_, length)| length),
+            ])?;
+        }
         done.execute([key])?;
     }
     Ok(())
 }
 
+/// The token columns of `row` as the index stores them: category, title,
+/// type, body and anchors.
+fn columns(row: &Row) -> [String; 5] {
+    let mut columns: [Vec<String>; 5] = Default::default();
+    for (stem, field) in &row.stems {
+        columns[*field as usize].push(token(stem));
+    }
+    columns[4] = row.anchors.iter().map(|anchor| token(anchor)).collect();
+    columns.map(|tokens| tokens.join(" "))
+}
+
+/// Whether the keyword index has this binary's layout ([`WORDS`]), rather
+/// than an earlier version's, which a store not yet upgraded has.
+fn ours(conn: &Connection) -> Result<bool> {
+    let sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE name='search_words'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let wanted = WORDS.replacen("IF NOT EXISTS ", "", 1);
+    Ok(sql.is_some_and(|sql| sql == wanted.trim_end_matches(';')))
+}
+
 /// Rebuilds the keyword index from the memories with this binary's code,
 /// inside the caller's write transaction: new keys in stored order, every
-/// memory's stems, and the current stamp. FTS5's `delete-all` works only on
-/// a contentless index, as a store not yet upgraded has, and deleting row
-/// by row reads the index a repair mends; emptying the stored columns and
-/// rebuilding the index from them drops whatever it held instead, without
-/// freeing the table's own pages, which a miscounted free-page list would
-/// refuse.
+/// memory's rows, and the current stamp. FTS5's `delete-all` works only on
+/// a contentless index, as a store not yet upgraded may have, and deleting
+/// row by row reads the index a repair mends; emptying the stored columns
+/// and rebuilding the index from them drops whatever it held instead,
+/// without freeing the table's own pages, which a miscounted free-page list
+/// would refuse. An earlier version's index, which repair may mend before
+/// the upgrade, is only emptied and left unstamped: this binary cannot fill
+/// it, and the upgrade replaces it and fills the new one.
 pub(super) fn rebuild(conn: &Connection) -> Result<()> {
     if stored(conn)? {
         conn.execute_batch(
             "DELETE FROM search_words_content;
 INSERT INTO search_words(search_words) VALUES('rebuild');",
         )?;
-        secure(conn)?;
     } else {
         conn.execute_batch("INSERT INTO search_words(search_words) VALUES('delete-all');")?;
     }
@@ -300,6 +441,11 @@ DELETE FROM search_keys;
 INSERT INTO search_keys(id,memory_type,category,scope,project,source,status,updated_at) SELECT id,memory_type,category,scope,project,source,status,updated_at FROM memories ORDER BY rowid;
 INSERT INTO search_pending(key) SELECT key FROM search_keys;",
     )?;
+    if !ours(conn)? {
+        conn.execute("DELETE FROM search_state", [])?;
+        return Ok(());
+    }
+    secure(conn)?;
     conn.execute(
         "INSERT INTO search_state(id,stemmed_by) VALUES (1,?1) ON CONFLICT(id) DO UPDATE SET stemmed_by=excluded.stemmed_by",
         [stamp()],
@@ -394,32 +540,74 @@ impl Candidates {
     }
 }
 
-/// For each memory of `covered`, read from a [`ready`] index, and each of
-/// the stemmed `query` terms it holds, calls `held(memory, term, field)`
-/// with the strongest field holding the term. The index gives only the
-/// keys holding each term, so a word most memories hold costs one lookup
-/// per memory.
+/// What a row holds of a search's topic: query stem `t` at the strongest
+/// field holding it there, or query anchor `a`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(in crate::memory) enum Hit {
+    Term(usize, Field),
+    Anchor(usize),
+}
+
+/// For each memory of `covered`, read from a [`ready`] index, and each row
+/// holding one of the stemmed `query` terms or the `anchors`, calls
+/// `held(memory, slot, hit)`. The index gives only the rows holding each
+/// term, so a word most memories hold costs one lookup per row.
 pub(in crate::memory) fn hits(
     conn: &Connection,
     covered: &Candidates,
     query: &[String],
-    mut held: impl FnMut(usize, usize, Field),
+    anchors: &[String],
+    mut held: impl FnMut(usize, i64, Hit),
 ) -> Result<()> {
     let mut matching =
         conn.prepare_cached("SELECT rowid FROM search_words WHERE search_words MATCH ?1")?;
-    for (t, term) in query.iter().enumerate() {
-        let token = token(term);
-        // Each stem is stored once, at its strongest field.
-        for field in Field::ALL {
-            let mut rows = matching.query([format!("{} : \"{token}\"", field.column())])?;
-            while let Some(r) = rows.next()? {
-                if let Some(i) = covered.at_key(r.get(0)?) {
-                    held(i, t, field);
-                }
+    let columns = Field::ALL
+        .into_iter()
+        .flat_map(|field| {
+            query
+                .iter()
+                .enumerate()
+                .map(move |(t, term)| (field.column(), token(term), Hit::Term(t, field)))
+        })
+        .chain(
+            anchors
+                .iter()
+                .enumerate()
+                .map(|(a, anchor)| ("anchors", token(anchor), Hit::Anchor(a))),
+        );
+    for (column, token, hit) in columns {
+        let mut rows = matching.query([format!("{column} : \"{token}\"")])?;
+        while let Some(r) = rows.next()? {
+            let number: i64 = r.get(0)?;
+            if let Some(i) = covered.at_key(number.div_euclid(SLOTS)) {
+                held(i, number.rem_euclid(SLOTS), hit);
             }
         }
     }
     Ok(())
+}
+
+/// [`hits`] for memory `i` from its `rows`, for a search without the
+/// index: the same calls, for the same rows, as the index makes.
+pub(in crate::memory) fn row_hits(
+    rows: &[Row],
+    i: usize,
+    query: &[String],
+    anchors: &[String],
+    mut held: impl FnMut(usize, i64, Hit),
+) {
+    for row in rows {
+        for (stem, field) in &row.stems {
+            if let Ok(t) = query.binary_search(stem) {
+                held(i, row.slot, Hit::Term(t, *field));
+            }
+        }
+        for anchor in &row.anchors {
+            if let Ok(a) = anchors.binary_search(anchor) {
+                held(i, row.slot, Hit::Anchor(a));
+            }
+        }
+    }
 }
 
 /// Reads every memory `filter` covers into `into`, without its text, in
@@ -449,10 +637,11 @@ pub(in crate::memory) fn covered(
 }
 
 /// What is wrong with a current keyword index: memories without a key,
-/// keys without a memory or with columns that differ from it, and stored
-/// stems that differ from the memories' words. Empty for an index stamped
-/// by other code, which search does not read, and while memories are
-/// queued, which the next write indexes.
+/// keys without a memory or with columns that differ from it, an index
+/// that keeps deleted words, and stored rows that differ from the
+/// memories' words and passages. Empty for an index stamped by other code,
+/// which search does not read, and while memories are queued, which the
+/// next write indexes.
 pub(super) fn problems(conn: &Connection) -> Result<Vec<String>> {
     if !current(conn)? || pending(conn)? {
         return Ok(Vec::new());
@@ -472,13 +661,14 @@ pub(super) fn problems(conn: &Connection) -> Result<Vec<String>> {
         found.push("search index: it keeps deleted words until its segments merge".to_owned());
     }
     let mut expected: HashMap<(i64, String), &'static str> = HashMap::new();
+    let mut places: HashMap<i64, Option<(i64, i64)>> = HashMap::new();
     let mut stems = Stems::new();
-    let mut rows = conn
+    let mut memories = conn
         .prepare(
             "SELECT k.key,m.memory_type,m.category,m.title,m.content,m.context,m.reason,m.evidence FROM search_keys k JOIN memories m ON m.id=k.id",
         )?;
-    let mut rows = rows.query([])?;
-    while let Some(r) = rows.next()? {
+    let mut memories = memories.query([])?;
+    while let Some(r) = memories.next()? {
         let key: i64 = r.get(0)?;
         let text: [String; 7] = [
             r.get(1)?,
@@ -498,7 +688,8 @@ pub(super) fn problems(conn: &Connection) -> Result<Vec<String>> {
             reason,
             evidence,
         ] = &text;
-        for (stem, field) in fields(
+        let (first, _) = row_numbers(key);
+        for row in rows(
             &mut stems,
             Text {
                 memory_type,
@@ -510,23 +701,50 @@ pub(super) fn problems(conn: &Connection) -> Result<Vec<String>> {
                 evidence,
             },
         ) {
-            expected.insert((key, token(&stem)), field.column());
+            let number = first + row.slot;
+            for (stem, field) in &row.stems {
+                expected.insert((number, token(stem)), field.column());
+            }
+            for anchor in &row.anchors {
+                expected.insert((number, token(anchor)), "anchors");
+            }
+            places.insert(
+                number,
+                (row.slot != 0).then(|| (row.place.start as i64, row.place.len() as i64)),
+            );
         }
     }
     conn.execute_batch(
         "CREATE VIRTUAL TABLE IF NOT EXISTS temp.search_entries USING fts5vocab(main,'search_words','instance');",
     )?;
-    let mut differing = std::collections::BTreeSet::new();
-    let mut stored = conn.prepare("SELECT doc,term,col FROM temp.search_entries")?;
-    let mut stored = stored.query([])?;
-    while let Some(r) = stored.next()? {
-        let (key, term, column): (i64, String, String) = (r.get(0)?, r.get(1)?, r.get(2)?);
-        if expected.remove(&(key, term)) != Some(column.as_str()) {
-            differing.insert(key);
+    let mut differing = BTreeSet::new();
+    let mut stored_entries = conn.prepare("SELECT doc,term,col FROM temp.search_entries")?;
+    let mut stored_entries = stored_entries.query([])?;
+    while let Some(r) = stored_entries.next()? {
+        let (number, term, column): (i64, String, String) = (r.get(0)?, r.get(1)?, r.get(2)?);
+        if expected.remove(&(number, term)) != Some(column.as_str()) {
+            differing.insert(number.div_euclid(SLOTS));
         }
     }
-    differing.extend(expected.into_keys().map(|(key, _)| key));
+    differing.extend(
+        expected
+            .into_keys()
+            .map(|(number, _)| number.div_euclid(SLOTS)),
+    );
     conn.execute_batch("DROP TABLE temp.search_entries;")?;
+    let mut stored_places = conn.prepare("SELECT rowid,start,length FROM search_words")?;
+    let mut stored_places = stored_places.query([])?;
+    while let Some(r) = stored_places.next()? {
+        let number: i64 = r.get(0)?;
+        let place: Option<(i64, i64)> = match (r.get(1)?, r.get(2)?) {
+            (Some(start), Some(length)) => Some((start, length)),
+            _ => None,
+        };
+        if places.remove(&number) != Some(place) {
+            differing.insert(number.div_euclid(SLOTS));
+        }
+    }
+    differing.extend(places.into_keys().map(|number| number.div_euclid(SLOTS)));
     if !differing.is_empty() {
         found.push(format!(
             "search index: the stored words of {} memories differ from their text",
@@ -682,6 +900,60 @@ pub(in crate::memory) fn reindex_with(db: &Path, config: Option<&embed::Config>)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Slot 0 holds each word of the category, title, type, reason and
+    // evidence at the strongest field holding it; a passage holds only the
+    // words and anchors slot 0 does not, and the context is its own
+    // passage in the last slot.
+    #[test]
+    fn a_memorys_rows_keep_each_word_once_at_its_strongest_field() {
+        let mut stems = Stems::new();
+        let rows = rows(
+            &mut stems,
+            Text {
+                memory_type: "preference",
+                category: "coding",
+                title: "Releases need notes",
+                content: "Write release notes in `CHANGELOG.md` for each tag",
+                context: "When tagging",
+                reason: "Users read `CHANGELOG.md` first",
+                evidence: "",
+            },
+        );
+        let slots: Vec<i64> = rows.iter().map(|row| row.slot).collect();
+        assert_eq!(slots, [0, 1, CONTEXT_SLOT]);
+        let field = |slot: usize, stem: &str| {
+            rows[slot]
+                .stems
+                .iter()
+                .find(|(s, _)| s == stem)
+                .map(|(_, field)| *field)
+        };
+        // An alias of the category counts as the category.
+        assert_eq!(field(0, "program"), Some(Field::Category));
+        assert_eq!(field(0, "releas"), Some(Field::Title));
+        assert_eq!(field(0, "prefer"), Some(Field::Type));
+        assert_eq!(field(0, "user"), Some(Field::Body));
+        assert_eq!(field(1, "write"), Some(Field::Body));
+        assert_eq!(field(1, "releas"), None, "slot 0 holds it");
+        assert_eq!(field(2, "tag"), Some(Field::Body));
+        assert_eq!(rows[0].anchors, ["changelog.md"]);
+        assert!(rows[1].anchors.is_empty(), "slot 0 holds it");
+        assert_eq!(rows[1].place, 0..50);
+        assert_eq!(rows[2].place, 0..12);
+    }
+
+    // The triggers write the row numbering out in SQL.
+    #[test]
+    fn the_triggers_number_rows_as_the_index_does() {
+        assert_eq!(SEARCH.matches(&format!("key*{SLOTS}")).count(), 4);
+        assert_eq!(
+            SEARCH
+                .matches(&format!("key*{SLOTS}+{}", SLOTS - 1))
+                .count(),
+            2
+        );
+    }
 
     fn store() -> (tempfile::TempDir, Connection) {
         let dir = tempfile::tempdir().unwrap();

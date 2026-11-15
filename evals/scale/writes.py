@@ -8,8 +8,9 @@ checkout's release build and, on a copy, without the history's triggers,
 so the triggers' cost shows on its own. Given `--baseline-binary`, an
 earlier release's build (once per release), it times that release on a
 store it built, for the numbers a change is compared with. Prints a table in
-milliseconds, with each store's size and its keyword index's. Nothing here
-touches the user's own store or settings.
+milliseconds, with each store's size and how much of it is the keyword
+index and the history. Nothing here touches the user's own store or
+settings.
 
     just write-budget
     just write-budget --baseline-binary /path/to/0.9.1/user-memory --baseline-binary /path/to/0.9.3/user-memory
@@ -81,6 +82,16 @@ def writes(binary, env, db, runs):
     return [round(statistics.median(samples[1:]) * 1000) for samples in (record, update, forget)]
 
 
+def sized(db):
+    """The store's size, its keyword index's and its history's, in MB."""
+    size, index = upgrade.sizes(db)
+    conn = sqlite3.connect(db)
+    history = conn.execute(
+        "SELECT coalesce(sum(pgsize),0) FROM dbstat WHERE name LIKE 'memory_events%'").fetchone()[0]
+    conn.close()
+    return size, index, round(history / 1e6, 1)
+
+
 def store(tmp, name, binary, env, memories):
     db = tmp / name / "memories.sqlite3"
     db.parent.mkdir()
@@ -109,8 +120,8 @@ def main():
             name = subprocess.run([str(baseline), "--version"], capture_output=True,
                                   text=True).stdout.strip() or f"baseline {n + 1}"
             db = store(tmp, f"baseline{n}", baseline, env, args.memories)
-            sized = upgrade.sizes(db)
-            rows.append((name, writes(baseline, {**env, "USER_MEMORY_DB": str(db)}, db, args.runs), sized))
+            sizes = sized(db)
+            rows.append((name, writes(baseline, {**env, "USER_MEMORY_DB": str(db)}, db, args.runs), sizes))
         db = store(tmp, "current", args.binary, env, args.memories)
         bare = tmp / "bare" / "memories.sqlite3"
         bare.parent.mkdir()
@@ -122,17 +133,19 @@ def main():
             conn.execute(f"DROP TRIGGER {trigger}")
         conn.commit()
         conn.close()
-        sized = upgrade.sizes(db)
+        sizes = sized(db)
         rows.append(("this build", writes(args.binary, {**env, "USER_MEMORY_DB": str(db)}, db, args.runs),
-                     sized))
+                     sizes))
         if triggers:
             rows.append(("without history triggers",
-                         writes(args.binary, {**env, "USER_MEMORY_DB": str(bare)}, bare, args.runs), sized))
+                         writes(args.binary, {**env, "USER_MEMORY_DB": str(bare)}, bare, args.runs), sizes))
         print(f"{args.memories} memories, median of {args.runs - 1} runs after a warm-up (ms); "
               "sizes of the store as built, in MB")
-        print(f"{'':<26} {'record':>7} {'update':>7} {'forget':>7} {'store':>7} {'index':>7}")
-        for name, (record, update, forget), (size, index) in rows:
-            print(f"{name:<26} {record:>7} {update:>7} {forget:>7} {size:>7} {index:>7}")
+        print(f"{'':<26} {'record':>7} {'update':>7} {'forget':>7} {'store':>7} {'index':>7}"
+              f" {'history':>8} {'rest':>7}")
+        for name, (record, update, forget), (size, index, history) in rows:
+            print(f"{name:<26} {record:>7} {update:>7} {forget:>7} {size:>7} {index:>7}"
+                  f" {history:>8} {round(size - index - history, 1):>7}")
         conn = sqlite3.connect(db)
         events = conn.execute("SELECT count(*), coalesce(sum(length(before)),0) FROM memory_events").fetchone() \
             if triggers else None

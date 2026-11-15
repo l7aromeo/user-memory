@@ -84,7 +84,43 @@ const STEPS: &[Step] = &[
         check: always,
         apply: to_v8,
     },
+    Step {
+        check: always,
+        apply: to_v9,
+    },
 ];
+
+/// Version 9 indexes each memory by passage: the keyword index gains its
+/// anchors and each passage's place, and numbers a memory's rows from its
+/// key, so the triggers delete a range. The old index goes with its stamp,
+/// and the rebuild that ends every upgrade ([`run`]) fills the new one, so
+/// an upgrade through versions 8 and 9 rebuilds it once. The SQL is written
+/// out as it was at version 9.
+fn to_v9(conn: &Connection, _: Option<&Titles>) -> Result<()> {
+    conn.execute_batch(
+        "DROP TABLE search_words;
+CREATE VIRTUAL TABLE search_words USING fts5(category,title,type,body,anchors,start UNINDEXED,length UNINDEXED,detail=column,tokenize='ascii');
+DELETE FROM search_state;
+DROP TRIGGER search_inserted;
+CREATE TRIGGER search_inserted AFTER INSERT ON memories BEGIN
+    DELETE FROM search_words WHERE rowid BETWEEN (SELECT key*256 FROM search_keys WHERE id=NEW.id) AND (SELECT key*256+255 FROM search_keys WHERE id=NEW.id);
+    DELETE FROM search_pending WHERE key IN (SELECT key FROM search_keys WHERE id=NEW.id);
+    DELETE FROM search_keys WHERE id=NEW.id;
+    INSERT INTO search_keys(id,memory_type,category,scope,project,source,status,updated_at) VALUES (NEW.id,NEW.memory_type,NEW.category,NEW.scope,NEW.project,NEW.source,NEW.status,NEW.updated_at);
+    INSERT INTO search_pending(key) SELECT key FROM search_keys WHERE id=NEW.id;
+    INSERT INTO search_changes(id) VALUES (NEW.id);
+END;
+DROP TRIGGER search_deleted;
+CREATE TRIGGER search_deleted AFTER DELETE ON memories BEGIN
+    DELETE FROM search_words WHERE rowid BETWEEN (SELECT key*256 FROM search_keys WHERE id=OLD.id) AND (SELECT key*256+255 FROM search_keys WHERE id=OLD.id);
+    DELETE FROM search_pending WHERE key IN (SELECT key FROM search_keys WHERE id=OLD.id);
+    DELETE FROM search_keys WHERE id=OLD.id;
+    DELETE FROM memory_vectors WHERE id=OLD.id;
+    INSERT INTO search_changes(id) VALUES (OLD.id);
+END;",
+    )?;
+    Ok(())
+}
 
 /// Version 8 gives the keyword index stored columns, so FTS5's
 /// `secure-delete` takes a deleted entry's words out at once and a write

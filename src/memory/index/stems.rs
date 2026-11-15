@@ -1,9 +1,9 @@
-//! The words keyword search matches: each word of a memory stemmed, and kept
-//! at the strongest field that holds it, as the keyword index stores them.
+//! The words keyword search matches: each word of a memory stemmed, as the
+//! keyword index stores them.
 
 use crate::memory::{
     Memory,
-    similar::{CATEGORY_ALIASES, STOP, category_group, tokenize},
+    similar::{CATEGORY_ALIASES, STOP, tokenize},
 };
 use rust_stemmers::{Algorithm, Stemmer};
 use std::collections::{BTreeSet, HashMap};
@@ -93,26 +93,6 @@ impl<'a> From<&'a Memory> for Text<'a> {
     }
 }
 
-/// Each stem of `text` with the strongest field holding it.
-pub(in crate::memory) fn fields(stems: &mut Stems, text: Text) -> HashMap<String, Field> {
-    let labels = category_group(text.category).join(" ");
-    let body = format!(
-        "{} {} {} {}",
-        text.content, text.context, text.reason, text.evidence
-    );
-    let mut strongest = HashMap::new();
-    for (field, words) in
-        Field::ALL
-            .into_iter()
-            .zip([labels.as_str(), text.title, text.memory_type, body.as_str()])
-    {
-        for word in tokenize(words) {
-            strongest.entry(stems.of(word).to_owned()).or_insert(field);
-        }
-    }
-    strongest
-}
-
 /// How the keyword index stores `stem`: the lowercase hex of its UTF-8
 /// bytes. The index's `ascii` tokenizer keeps a run of hex digits as one
 /// token and changes nothing in it, so the index matches exactly the stems
@@ -132,8 +112,9 @@ pub(in crate::memory) fn token(stem: &str) -> String {
 pub(in crate::memory) const STEMMER: &str = "rust-stemmers 1.2.0";
 
 /// Bumped whenever how words are found changes in a way the rest of
-/// [`stamp`] does not show: the tokenizer, the fields or the encoding.
-const FORMAT: u32 = 1;
+/// [`stamp`] does not show: the tokenizer, the fields, the rows and
+/// passages (`index::rows`) or the encoding.
+const FORMAT: u32 = 2;
 
 /// Everything the stored stems depend on. The keyword index records the
 /// stamp it was built with, and search reads the index only while it
@@ -149,34 +130,6 @@ pub(in crate::memory) fn stamp() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn text<'a>(category: &'a str, title: &'a str, content: &'a str) -> Text<'a> {
-        Text {
-            memory_type: "preference",
-            category,
-            title,
-            content,
-            context: "",
-            reason: "",
-            evidence: "",
-        }
-    }
-
-    #[test]
-    fn a_word_is_kept_at_the_strongest_field_holding_it() {
-        let mut stems = Stems::new();
-        let found = fields(
-            &mut stems,
-            text("coding", "Releases need notes", "Write release notes"),
-        );
-        // An alias of the category counts as the category.
-        assert_eq!(found["program"], Field::Category);
-        assert_eq!(found["releas"], Field::Title);
-        assert_eq!(found["note"], Field::Title);
-        assert_eq!(found["write"], Field::Body);
-        assert_eq!(found["prefer"], Field::Type);
-        assert!(!found.contains_key("the"));
-    }
 
     #[test]
     fn tokens_are_hex_digits_only_and_tell_stems_apart() {
