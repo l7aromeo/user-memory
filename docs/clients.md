@@ -205,8 +205,13 @@ conversations, then most recently changed). Each is in full (title, what it
 says, where it applies, why) while the rules after it still fit by title,
 then by title after a line that says so, then counted. A rule longer than
 400 characters is shown by title. They take up to 6,000 characters, and the
-index after them leaves them out. A server from before 0.10 sends the index
-as before, with the project rules in its Rules.
+index after them leaves them out. When the index does not list every
+memory, its last line says how many it lists and maps the rest: per type,
+how many and the words most distinctive of their titles, within 400
+characters, for example
+``112 of 600 listed. Not listed: 488 facts (benchmarks, cache, containers, fonts). `search` finds them.``
+A server from before 0.10 sends the index as before, with the project rules
+in its Rules and no map.
 
 Without instruction files (`setup --no-instructions`), the global rules are
 listed under Rules, and the line about instruction files is left out.

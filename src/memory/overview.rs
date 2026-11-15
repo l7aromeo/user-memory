@@ -15,7 +15,11 @@ use anyhow::Result;
 use clap::Args;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::{cmp::Reverse, collections::BTreeMap, path::Path};
+use std::{
+    cmp::Reverse,
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
 
 #[derive(Args, Default, Deserialize, Serialize, JsonSchema)]
 pub struct Index {
@@ -79,7 +83,7 @@ pub struct Index {
     #[serde(default)]
     #[schemars(skip)]
     pub fit_unit: FitUnit,
-    /// Used by user-memory's own session hook with fit_room; leave unset. The part of fit_room, in fit_unit, for the standing rules of the session's projects: they come first, under one heading per project, each in full while the rules after it still fit as pointers, then as pointers, then counted; the index after them leaves them out. An older server ignores it and sends the index as before.
+    /// Used by user-memory's own session hook with fit_room; leave unset. The part of fit_room, in fit_unit, for the standing rules of the session's projects: they come first, under one heading per project, each in full while the rules after it still fit as pointers, then as pointers, then counted; the index after them leaves them out. With it, an index that does not list every memory also ends with a map of what it leaves out, with or without rules. An older server ignores it and sends the index as before.
     #[arg(skip)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(skip)]
@@ -192,7 +196,8 @@ pub fn index(db: &Path, input: &Index) -> Result<String> {
 /// What the session hook shows within `room` in `input.fit_unit`, built
 /// once here so it asks for it in one call: with `input.fit_rules_room`,
 /// the project rules first ([`project_rules`]), then the index in the room
-/// they leave.
+/// they leave, ending with a map of what it does not list
+/// ([`unlisted_map`]) when it does not list every memory.
 fn fitted(
     conn: &rusqlite::Connection,
     input: &Index,
@@ -205,12 +210,144 @@ fn fitted(
         return fitted_index(conn, input, selection, filter, room);
     };
     let rules = project_rules(conn, selection, filter, rules_room.min(room), unit)?;
-    if rules.is_empty() {
-        return fitted_index(conn, input, selection, filter, room);
+    let left = if rules.is_empty() {
+        room
+    } else {
+        room.saturating_sub(unit.len(&rules) + 1)
+    };
+    let mut index = fitted_index(conn, input, selection, filter, left)?;
+    let mut in_index = candidates(conn, filter)?;
+    in_index.retain(|m| !standing_rule(m) || (m.scope == "global" && !input.without_global_rules));
+    if !split_listed(&index, &in_index).1.is_empty() {
+        let room = left.saturating_sub(UNLISTED_MAP_CHARS + 1);
+        index = fitted_index(conn, input, selection, filter, room)?;
+        let map = unlisted_map(&index, &in_index, unit);
+        if !map.is_empty() {
+            index = format!("{index}\n{map}");
+        }
     }
-    let left = room.saturating_sub(unit.len(&rules) + 1);
-    let index = fitted_index(conn, input, selection, filter, left)?;
-    Ok(format!("{rules}\n{index}"))
+    Ok(if rules.is_empty() {
+        index
+    } else {
+        format!("{rules}\n{index}")
+    })
+}
+
+/// The most room the map of what the index does not list takes, in the
+/// session hook's unit: about 50 characters a type ("86 facts (build,
+/// cache, fonts, benchmarks)"), so seven types with four words each and the
+/// sentence around them.
+pub const UNLISTED_MAP_CHARS: usize = 400;
+/// The words the map gives each type at most.
+const MAP_WORDS: usize = 4;
+/// The shortest word the map shows: shorter ones say little about a topic.
+const MAP_WORD_MIN: usize = 3;
+
+/// `in_index` split into the memories `index` lists and those it does not,
+/// each matched by its whole line, so two memories whose ids share their
+/// short form are told apart; a line listed once matches one memory.
+fn split_listed<'a>(index: &str, in_index: &'a [Memory]) -> (Vec<&'a Memory>, Vec<&'a Memory>) {
+    let mut lines: BTreeMap<&str, usize> = BTreeMap::new();
+    for shown in index.lines() {
+        *lines.entry(shown).or_default() += 1;
+    }
+    in_index.iter().partition(|m| {
+        lines
+            .get_mut(line(m).as_str())
+            .is_some_and(|left| match left.checked_sub(1) {
+                Some(less) => {
+                    *left = less;
+                    true
+                }
+                None => false,
+            })
+    })
+}
+
+/// The line that ends an index which does not list all of `in_index`: how
+/// many it lists, and for each type of those it does not, how many and the
+/// words most distinctive of their titles: frequent among them and rare in
+/// the listed ones. Types with the most first, ties by name, words by score
+/// then alphabetically, so the same store gives the same map. Within
+/// [`UNLISTED_MAP_CHARS`] in `unit`: fewer words, then fewer types, until it
+/// fits. Empty when every memory is listed.
+fn unlisted_map(index: &str, in_index: &[Memory], unit: FitUnit) -> String {
+    let (listed, unlisted) = split_listed(index, in_index);
+    if unlisted.is_empty() {
+        return String::new();
+    }
+    let words = |m: &Memory| -> BTreeSet<String> {
+        tokenize(&m.title)
+            .into_iter()
+            .filter(|w| w.chars().count() >= MAP_WORD_MIN && !w.chars().all(char::is_numeric))
+            .collect()
+    };
+    let mut in_listed: BTreeMap<String, usize> = BTreeMap::new();
+    for m in &listed {
+        for word in words(m) {
+            *in_listed.entry(word).or_default() += 1;
+        }
+    }
+    let mut by_type: BTreeMap<&str, Vec<&Memory>> = BTreeMap::new();
+    for m in &unlisted {
+        by_type.entry(&m.memory_type).or_default().push(m);
+    }
+    let mut types: Vec<(&str, usize, Vec<String>)> = by_type
+        .into_iter()
+        .map(|(kind, memories)| {
+            let mut frequency: BTreeMap<String, usize> = BTreeMap::new();
+            for m in &memories {
+                for word in words(m) {
+                    *frequency.entry(word).or_default() += 1;
+                }
+            }
+            // Frequent among these titles, discounted by how many listed
+            // titles already carry the word.
+            let rarity = |word: &str| {
+                let seen = in_listed.get(word).copied().unwrap_or(0);
+                ((listed.len() + 2) as f64 / (seen + 1) as f64).ln()
+            };
+            let mut scored: Vec<(f64, String)> = frequency
+                .into_iter()
+                .map(|(word, count)| (count as f64 * rarity(&word), word))
+                .collect();
+            scored.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+            let top = scored.into_iter().take(MAP_WORDS).map(|(_, w)| w).collect();
+            (kind, memories.len(), top)
+        })
+        .collect();
+    types.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    let entry = |(kind, count, words): &(&str, usize, Vec<String>), take: usize| {
+        let plural = if *count == 1 { "" } else { "s" };
+        let words = &words[..take.min(words.len())];
+        if words.is_empty() {
+            format!("{count} {kind}{plural}")
+        } else {
+            format!("{count} {kind}{plural} ({})", words.join(", "))
+        }
+    };
+    let line = |shown: usize, take: usize| {
+        let mut entries: Vec<String> = types[..shown].iter().map(|t| entry(t, take)).collect();
+        let others: usize = types[shown..].iter().map(|(_, count, _)| count).sum();
+        if others > 0 {
+            entries.push(format!("{others} of other types"));
+        }
+        format!(
+            "{} of {} listed. Not listed: {}. `search` finds them.",
+            listed.len(),
+            in_index.len(),
+            entries.join(", ")
+        )
+    };
+    for shown in (0..=types.len()).rev() {
+        for take in (0..=MAP_WORDS).rev() {
+            let candidate = line(shown, take);
+            if unit.len(&candidate) <= UNLISTED_MAP_CHARS {
+                return candidate;
+            }
+        }
+    }
+    line(0, 0)
 }
 
 /// The whole index of `selection` (whose filter is `filter`) within `room`
@@ -991,6 +1128,83 @@ mod tests {
             }
         }
         lines.join("\n")
+    }
+
+    /// A memory of `kind` titled `title`, with an id from `n`.
+    fn memory(n: usize, kind: &str, title: &str) -> Memory {
+        Memory {
+            id: uuid::Uuid::parse_str(&format!("{n:08x}-0000-4000-8000-{n:012x}")).unwrap(),
+            memory_type: kind.to_owned(),
+            title: title.to_owned(),
+            ..Memory::default()
+        }
+    }
+
+    // Many types with long words: the map keeps to its room with fewer words
+    // per type, then fewer types and a count of the rest; numbers and short
+    // words are never shown.
+    #[test]
+    fn the_map_keeps_to_its_room() {
+        let kinds = [
+            "preference",
+            "constraint",
+            "value",
+            "fact",
+            "goal",
+            "decision",
+            "behavior",
+            "pattern",
+            "observation",
+        ];
+        let mut memories = Vec::new();
+        for (k, kind) in kinds.iter().enumerate() {
+            for i in 0..10 {
+                let title = format!(
+                    "{i} on configuration{k} internationalisation{k} reproducibility{k} observability{k}"
+                );
+                memories.push(memory(k * 10 + i + 1, kind, &title));
+            }
+        }
+        let map = unlisted_map("", &memories, FitUnit::Utf8Bytes);
+        assert!(map.len() <= UNLISTED_MAP_CHARS, "{} {map}", map.len());
+        assert!(
+            map.starts_with("0 of 90 listed. Not listed: 10 behaviors ("),
+            "{map}"
+        );
+        assert!(!map.contains(" on,") && !map.contains("(0"), "{map}");
+        let all_words = unlisted_map("", &memories[..10], FitUnit::Utf8Bytes);
+        assert_eq!(
+            all_words,
+            "0 of 10 listed. Not listed: 10 preferences (configuration0, internationalisation0, observability0, reproducibility0). `search` finds them."
+        );
+    }
+
+    // Two memories whose ids share their short form: an index that lists
+    // both is whole, and one that lists one of them leaves the other out.
+    #[test]
+    fn memories_sharing_a_short_id_are_told_apart() {
+        let shared = |n: usize, title: &str| Memory {
+            id: uuid::Uuid::parse_str(&format!("abcdef12-0000-4000-8000-{n:012}")).unwrap(),
+            ..memory(n, "fact", title)
+        };
+        let both = [
+            shared(1, "Builds run nightly"),
+            shared(2, "Caches expire weekly"),
+        ];
+        let index = |listed: &[Memory]| {
+            let lines: Vec<String> = listed.iter().map(line).collect();
+            format!(
+                "Other memories\n  fact ({})\n{}",
+                listed.len(),
+                lines.join("\n")
+            )
+        };
+        assert_eq!(split_listed(&index(&both), &both).1.len(), 0);
+        assert_eq!(unlisted_map(&index(&both), &both, FitUnit::Utf8Bytes), "");
+        assert_eq!(
+            unlisted_map(&index(&both[..1]), &both, FitUnit::Utf8Bytes),
+            "1 of 2 listed. Not listed: 1 fact (caches, expire, weekly). `search` finds them."
+        );
     }
 
     #[test]

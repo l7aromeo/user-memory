@@ -2030,3 +2030,80 @@ fn the_index_keeps_project_rules_unless_asked_for_them_apart() {
     };
     assert_eq!(counts(&before), counts(index_part));
 }
+
+/// A store in `home` with 600 facts of project app and no rules: the 100
+/// newest about the parser and the export, the 500 older about the cache,
+/// the fonts, the benchmarks and the containers.
+fn facts_without_rules(home: &Path) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_user-memory"));
+    command.arg("index");
+    assert!(
+        in_folder(command, home, home)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let conn = rusqlite::Connection::open(home.join("memory.sqlite3")).unwrap();
+    for i in 0..600 {
+        let id = format!("{:08x}-0000-4000-8000-{:012x}", i + 1, i + 1);
+        let word = if i < 100 {
+            ["parser", "export"][i % 2]
+        } else {
+            ["cache", "fonts", "benchmarks", "containers"][i % 4]
+        };
+        let title = format!("{i:03} notes how the app handles its {word}");
+        let changed = format!("2026-11-01 {:02}:{:02}:00", 23 - i / 60, 59 - i % 60);
+        conn.execute(
+            "INSERT INTO memories (id,memory_type,category,title,content,source,status,scope,project,updated_at) VALUES (?1,'fact','tools',?2,?2,'explicit','confirmed','project','github.com/acme/app',?3)",
+            rusqlite::params![id, title, changed],
+        )
+        .unwrap();
+    }
+}
+
+// An index that does not list every memory ends with how many it lists and
+// a map of the rest: per type, the words most distinctive of the unlisted
+// titles, within its room; a project with no rules gets it too. The same
+// store gives the same map at the next start.
+#[test]
+fn a_partial_index_ends_with_a_map_of_what_it_leaves_out() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path();
+    let app = repository(home, "app", "git@github.com:acme/app.git");
+    facts_without_rules(home);
+    let hook = started(home, &app, "first", "startup");
+    assert!(hook.chars().count() <= HOOK_CHARS, "{hook}");
+    assert!(!hook.contains("Project rules of"), "{hook}");
+    let map = hook.lines().last().unwrap();
+    let listed = hook
+        .lines()
+        .filter(|l| l.starts_with("    ") && l.contains(" notes how "))
+        .count();
+    assert!(listed > 0 && listed < 600, "{hook}");
+    assert_eq!(
+        map,
+        format!(
+            "{listed} of 600 listed. Not listed: {} facts (benchmarks, cache, containers, fonts). `search` finds them.",
+            600 - listed
+        ),
+        "{hook}"
+    );
+    assert!(map.chars().count() <= 400);
+    assert_eq!(
+        started(home, &app, "second", "startup").lines().last(),
+        Some(map)
+    );
+}
+
+// An index that lists every memory has no map.
+#[test]
+fn a_whole_index_has_no_map() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path();
+    let app = repository(home, "app", "git@github.com:acme/app.git");
+    with_project_rules(home, "github.com/acme/app", &rules_of_width(3, 80));
+    remember(home, &app, "Prefer Rust", &["--scope", "global"]);
+    let hook = started(home, &app, "s", "startup");
+    assert!(!hook.contains(" listed. Not listed: "), "{hook}");
+}
