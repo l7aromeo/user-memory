@@ -107,8 +107,9 @@ pub fn state(compose: &Compose, hash: Option<&str>, name: Option<&str>) -> Resul
 }
 
 /// Issues a token named `name` in the container and copies it to `out`,
-/// owner-only: a new file, or replacing `out` when `replace`. The copy in
-/// the volume is deleted, or by [`sweep`] if this stops first.
+/// owner-only: a new file, or replacing `out` when `replace`. A failed copy
+/// revokes the token. The copy in the volume is deleted, or by [`sweep`] if
+/// this stops first.
 pub fn add_to_file(
     compose: &Compose,
     name: &str,
@@ -130,7 +131,13 @@ pub fn add_to_file(
     if let Some(days) = &expires {
         args.extend(["--expires", days]);
     }
-    let copied = run(compose, &args).and_then(|_| copy_out(compose, &inside, out, replace));
+    // A token the container issued but this machine never received is
+    // revoked, which also frees its name.
+    let copied = run(compose, &args).and_then(|_| {
+        copy_out(compose, &inside, out, replace).inspect_err(|_| {
+            let _ = run(compose, &["revoke", name]);
+        })
+    });
     let _ = compose
         .command(&["exec", "-T", SERVICE, "rm", "-f", &inside])
         .stdin(Stdio::null())
@@ -171,7 +178,7 @@ fn copy_out(compose: &Compose, inside: &str, out: &Path, replace: bool) -> Resul
         if replace {
             fs::rename(&copy, out)
         } else {
-            fs::hard_link(&copy, out)
+            private::place_new(&copy, out)
         }
         .with_context(|| format!("Cannot write {}", out.display()))
     })();

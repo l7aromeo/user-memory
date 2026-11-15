@@ -427,6 +427,9 @@ fn compose(args: &[String]) -> u8 {
             .env("USER_MEMORY_DB", server.join("memories.sqlite3"))
             .env_remove("USER_MEMORY_URL")
             .env_remove("USER_MEMORY_TOKEN_FILE")
+            // The container has its own environment, so a test's seam on
+            // this machine stays here.
+            .env_remove("USER_MEMORY_TEST_LINKS")
             .status()
             .unwrap();
         return status

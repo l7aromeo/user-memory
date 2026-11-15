@@ -120,6 +120,7 @@ fn only_debug_builds_have_the_test_seams() {
         "USER_MEMORY_TEST_RELAY",
         "USER_MEMORY_TEST_EXEC_FAIL",
         "USER_MEMORY_TEST_TRACE",
+        "USER_MEMORY_TEST_LINKS",
         "USER_MEMORY_HOLD_SNAPSHOT",
         "USER_MEMORY_HOLD_ABANDON",
     ] {
