@@ -46,11 +46,13 @@ On each machine running the client:
 | `~/.config/user-memory/client-token` | The access token, readable only by you. |
 | `~/.local/bin/.user-memory.json` | Setup's choices: the server address or store path, clients, hooks, skill. |
 | `~/.local/state/user-memory/sessions/` | For each recent session, the id, last change, status and title of each memory it saw, so the change notice can compare. A file's name holds a key made from the store's path or the server's address (a hash, not the path or address itself). Files unused for 30 days are removed. |
+| `~/.local/state/user-memory/handover-*.json` | Only while an open session moves to a new binary after an upgrade: the session's handshake, the tools it was given and the input read but not yet answered, which can hold a memory being recorded. Readable only by you. The new binary deletes it as it starts; if a dying process leaves one behind, the next session to start deletes it once it is ten minutes old. |
 | `~/.local/state/user-memory/instructions/` | For each instruction file user-memory last wrote: its path, time, size and a SHA-256 of its text, never the text itself, so the next write can tell nobody has saved it since. |
 | `~/.claude/rules/user-memory.md`, the block in `~/.codex/AGENTS.md` | The titles of your global rules. |
 
 On Windows the token is in `%LOCALAPPDATA%\user-memory\config\client-token`,
 the session files in `%LOCALAPPDATA%\user-memory\state\sessions\`, the
+hand-over files in `%LOCALAPPDATA%\user-memory\state\`, the
 write records in `%LOCALAPPDATA%\user-memory\state\instructions\`, and
 `.user-memory.json` in `%LOCALAPPDATA%\Programs\user-memory\bin`. There,
 "readable only by you" means an access list that allows only your account.

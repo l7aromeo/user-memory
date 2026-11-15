@@ -77,6 +77,11 @@ const KILLED_CHECKS: u32 = 3;
 /// `handover-<pid>-<nanoseconds>.json`.
 const STATE_PREFIX: &str = "handover-";
 const STATE_SUFFIX: &str = ".json";
+/// How old a hand-over state file is when a starting `serve` removes it as
+/// left behind. The new process reads its file as it starts, within
+/// seconds even on a machine checking a new executable under load, so ten
+/// minutes never catches a hand-over in progress.
+const STALE_STATE: Duration = Duration::from_secs(10 * 60);
 /// The `_meta` key that names a 2026-07-28 request's protocol version
 /// (specification 2026-07-28, basic/index, "`_meta`"; server/discover).
 const META_PROTOCOL: &str = "io.modelcontextprotocol/protocolVersion";
@@ -551,6 +556,25 @@ fn is_state_file(path: &Path) -> bool {
         && fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_file())
 }
 
+/// Removes the hand-over state files a process left behind when it died
+/// between the hand-over and reading its file: each can hold input the
+/// app sent, such as a memory being recorded.
+fn remove_stale_state() {
+    let Some(entries) = crate::paths::state_dir().and_then(|dir| fs::read_dir(dir).ok()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let stale = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .is_ok_and(|written| written.elapsed().is_ok_and(|age| age > STALE_STATE));
+        if stale && is_state_file(&path) {
+            let _ = fs::remove_file(&path);
+        }
+    }
+}
+
 /// Whether this platform hands over by relaying: Windows, which has no
 /// `exec`, and a debug build told to by [`TEST_RELAY`].
 fn relays() -> bool {
@@ -612,6 +636,7 @@ enum Step {
 /// binary is replaced.
 pub async fn serve(inner: Inner) -> Result<()> {
     let taken = take_session();
+    remove_stale_state();
     let handed = taken.is_some();
     let (session, pending) = taken.unwrap_or_else(|| {
         let binary = env::current_exe().unwrap_or_default();
