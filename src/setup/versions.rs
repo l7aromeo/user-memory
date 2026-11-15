@@ -514,11 +514,33 @@ mod tests {
 
     /// Inputs newer than [`MIN_SERVER`] that an older server may ignore
     /// without misleading anyone: the tool, the input and why.
-    const IGNORED_SAFELY: &[(&str, &str, &str)] = &[(
-        "update",
-        "drop_history",
-        "it asks that the replaced value be kept nowhere; a server from before history keeps no history, and its correction removes the replaced text from the store's files the same way, so the store ends as the input asks (backups made before keep it on either version)",
-    )];
+    const IGNORED_SAFELY: &[(&str, &str, &str)] = &[
+        (
+            "update",
+            "drop_history",
+            "it asks that the replaced value be kept nowhere; a server from before history keeps no history, and its correction removes the replaced text from the store's files the same way, so the store ends as the input asks (backups made before keep it on either version)",
+        ),
+        (
+            "index",
+            "fit_room",
+            "only user-memory's own session hook sends it, to have the index fitted to its room; a server from before it sends a page of the index with a cursor, which the hook reads page by page and fits itself, as it did before",
+        ),
+        (
+            "index",
+            "fit_unit",
+            "it comes with fit_room, naming the unit the room is counted in; a server from before it fits nothing, and the hook fits the pages it sends in that unit itself",
+        ),
+        (
+            "index",
+            "fit_whole_projects",
+            "it comes with fit_room, naming the projects that come first; a server from before it fits nothing, and the hook fits the pages itself, the global memories and those projects first, as it did before",
+        ),
+        (
+            "index",
+            "stamps_since",
+            "only user-memory's own session hook sends it, with the position from its last stamps reply; a server from before it sends the v1 stamps reply, which the hook reads as a full list, as it did before",
+        ),
+    ];
 
     /// The source of user-memory's own files, parsed.
     fn parsed(path: &str) -> syn::File {
