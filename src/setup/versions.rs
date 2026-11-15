@@ -554,6 +554,11 @@ mod tests {
             "stamps_since",
             "only user-memory's own session hook sends it, with the position from its last stamps reply; a server from before it sends the v1 stamps reply, which the hook reads as a full list, as it did before",
         ),
+        (
+            "index",
+            "rule_prints",
+            "only user-memory's own session hook sends it, to list the rules added since the last session; a server from before it sends a stamps reply without prints, and the hook then lists no rules and keeps no state, as it did before",
+        ),
     ];
 
     /// Every tool input a server reads that v0.8.0 did not has a floor or a

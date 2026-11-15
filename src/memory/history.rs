@@ -226,6 +226,18 @@ pub(super) fn undo_mark(named: &str) -> String {
     format!("{UNDO}{named}")
 }
 
+/// An SQL condition over the `memory_events` row named `event` that holds
+/// when an undo of an import cancelled it: an event the undo wrote, or the
+/// import's own event on a memory the undo then gave back or deleted.
+/// What reads a memory's latest change leaves both out, so a memory given
+/// back reads as the version it is, as if the import never ran.
+pub(super) fn undone(event: &str) -> String {
+    format!(
+        "(substr(coalesce({event}.imported,''),1,{len})='{UNDO}' OR {event}.op='import' AND EXISTS (SELECT 1 FROM memory_events u WHERE u.memory_id={event}.memory_id AND u.imported='{UNDO}'||{event}.imported))",
+        len = UNDO.len()
+    )
+}
+
 /// How long events are kept, as SQLite's date modifier: history is for
 /// undoing recent mistakes, and a year covers a correction noticed late
 /// while bounding what a store keeps of text the user replaced.

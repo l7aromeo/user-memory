@@ -137,6 +137,7 @@ mod tests {
                 "origin_links",
                 "page_size",
                 "projects",
+                "rule_prints",
                 "scope",
                 "source",
                 "stamps",
