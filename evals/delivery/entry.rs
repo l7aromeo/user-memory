@@ -108,8 +108,9 @@ struct TuningArgs {
     #[arg(long)]
     pairs: bool,
     /// Which word argument of a command names its subcommand: every, the
-    /// first, or the first some memory pairs with the program.
-    #[arg(long, value_parser = ["every", "first", "noted"])]
+    /// first, the first some memory pairs with the program, or the first
+    /// unless it may be a flag's value (after-flag).
+    #[arg(long, value_parser = ["every", "first", "noted", "after-flag"])]
     subcommand: Option<String>,
 }
 
@@ -124,6 +125,7 @@ impl TuningArgs {
             subcommand: match self.subcommand.as_deref() {
                 Some("first") => SubcommandWord::First,
                 Some("noted") => SubcommandWord::Noted,
+                Some("after-flag") => SubcommandWord::AfterFlag,
                 Some(_) => SubcommandWord::Every,
                 None => base.subcommand,
             },

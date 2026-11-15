@@ -144,6 +144,10 @@ pub(crate) enum Subcommand {
     /// The first word argument, no path, that some memory pairs with the
     /// program; else the first.
     Noted,
+    /// The first word argument, no path; when it directly follows a flag,
+    /// so it may be that flag's value, and no memory pairs it with the
+    /// program, the next word argument if a memory pairs that one.
+    AfterFlag,
 }
 
 impl Terms {
@@ -244,6 +248,26 @@ fn command_terms(
                     .take(1)
                     .map(pair),
             ),
+            Subcommand::AfterFlag => {
+                let at = args
+                    .iter()
+                    .position(|arg| word_argument(arg) && !arg.contains('/'));
+                if let Some(at) = at {
+                    let flagged =
+                        at > 0 && args[at - 1].starts_with('-') && !args[at - 1].contains('=');
+                    let next = args[at + 1..]
+                        .iter()
+                        .find(|arg| word_argument(arg) && !arg.contains('/'));
+                    match next {
+                        Some(next) if flagged => {
+                            terms.choices.push(vec![pair(&args[at]), pair(next)])
+                        }
+                        _ => {
+                            terms.anchors.insert(pair(&args[at]));
+                        }
+                    }
+                }
+            }
             Subcommand::Noted => {
                 let choices: Vec<String> = words_after
                     .filter(|arg| !arg.contains('/'))
@@ -1480,6 +1504,17 @@ mod tests {
         let test = |found: &[Matched]| by_id(&index, found, 41).is_some_and(|m| m.command);
         assert!(test(&ranked("cargo run test", noted)));
         assert!(!test(&ranked("cargo run test", first)));
+        // After a flag only: `apply` behind `-n prod`, but `run` follows no
+        // flag, so `cargo run test` stays `cargo run`. Its own mirror is a
+        // flag, an unnamed subcommand, then a named word.
+        let after_flag = Tuning {
+            subcommand: Subcommand::AfterFlag,
+            ..Tuning::default()
+        };
+        assert!(apply(&ranked("kubectl -n prod apply", after_flag)));
+        assert!(!test(&ranked("cargo run test", after_flag)));
+        assert!(test(&ranked("cargo --offline run test", after_flag)));
+        assert!(!test(&ranked("cargo --offline run test", first)));
     }
 
     #[test]
