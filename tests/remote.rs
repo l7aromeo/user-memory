@@ -3768,3 +3768,55 @@ fn connectors_on_one_machine_share_their_polls() {
     assert!(one > 0);
     assert!(five <= one + one / 2, "one connector: {one}; five: {five}");
 }
+
+// A write one session's connector relays reaches the other sessions on the
+// machine at their next prompt, not at the next poll: the connector drops
+// the marker once the server has answered the write.
+#[test]
+fn a_write_through_one_connector_reaches_another_sessions_next_prompt() {
+    let host = Host::start(root());
+    let machine = Machine {
+        home: tempdir().unwrap(),
+        url: format!("http://{}/mcp", host.address),
+        token: host.root.path().join("token"),
+        // Polls far apart, so only the dropped marker can tell the write.
+        env: vec![("USER_MEMORY_MARKER_POLL_MS", "20000".to_owned())],
+    };
+    let mut connector = machine.connector();
+    machine.hook("session-start");
+    machine.marker();
+    let (quiet, log) = machine.hook("prompt-submit");
+    assert_eq!(quiet, "", "{log}");
+    let mut input = connector.0.stdin.take().unwrap();
+    let output = lines(connector.0.stdout.take().unwrap());
+    writeln!(input, "{}", initialize(1)).unwrap();
+    input.flush().unwrap();
+    reply(&output);
+    writeln!(
+        input,
+        "{}",
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"})
+    )
+    .unwrap();
+    writeln!(
+        input,
+        "{}",
+        call(
+            2,
+            "record",
+            json!({"category":"workflow","context":"Reviewing","title":"Prefer small pull requests","content":"Prefer small pull requests","reason":"Easier review","scope":"global","user_confirmed":true,"origin":"claude:session/other"})
+        )
+    )
+    .unwrap();
+    input.flush().unwrap();
+    let recorded = reply(&output);
+    assert!(
+        recorded["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("\"stored\":true"),
+        "{recorded}"
+    );
+    let (told, log) = machine.hook("prompt-submit");
+    assert!(told.contains("Prefer small pull requests"), "{told}{log}");
+}

@@ -289,7 +289,11 @@ connector (`serve`) asks the server for its position every 5 seconds, or
 every minute once no hook ran for two minutes, and keeps it in the
 [state folder](storage.md#the-state-folder) for every session on the
 machine, so a prompt whose snapshot holds it sends the server no request.
-Several connectors on one machine share the polls. A position older than
+A change made elsewhere reaches a session's notice within about 5 seconds;
+one a session on this machine makes through its connector, at the other
+sessions' next prompt, since the connector drops the position once the
+server has answered the write. Several connectors on one machine share the
+polls. A position older than
 three polls, as with no connector running or after a quiet spell, counts
 as moved: the prompt asks the server itself, and the connector goes back to
 polling every 5 seconds. A server too old to give positions gets no

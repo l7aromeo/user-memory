@@ -146,6 +146,17 @@ pub fn position(url: &str) -> Option<Position> {
     fresh.then(|| files.position()).flatten()
 }
 
+/// For the relay, after the server answered a write it passed on: the
+/// marker no longer says where the server at `url` stands, so it goes, and
+/// the claim with it. Until the next tick's poll writes it again, the hooks
+/// of every session on this machine ask the server, and hear the write.
+pub fn moved(url: &str) {
+    if let Some(files) = Files::of(url) {
+        let _ = fs::remove_file(&files.marker);
+        let _ = fs::remove_file(&files.claim);
+    }
+}
+
 /// Sets the time of the private file `path`, creating it.
 fn touch(path: &Path) -> io::Result<()> {
     private::create_dir(path.parent().ok_or(io::ErrorKind::InvalidInput)?)?;

@@ -892,6 +892,7 @@ async fn forward<R: Transport<RoleClient>>(
                 {
                     writes.swap_remove(at);
                     syncs.spawn(crate::setup::sync_bounded());
+                    marker::moved(endpoint);
                 }
                 let send = Transport::<RoleServer>::send(&mut local, message);
                 start_in_order(&mut sends, async move { send.await.context("Cannot send memory server response to client") });
