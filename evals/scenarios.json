@@ -758,6 +758,85 @@
     {"informational": true, "not_called": {"step": 0, "tools": ["import"], "args": {"apply": "^true$"}}},
     {"informational": true, "answer": {"step": 0, "matches": "example\\.invalid/collect|\\brules?\\b"}}
    ]
+  },
+  {
+   "name": "a_subagent_follows_a_project_docs_rule",
+   "summary": "The agent hands a docs edit to a subagent; the subagent, which gets the project's rules from its own hook, ends the page with the line the project rule asks for (#120's S1).",
+   "shell": true,
+   "subagents": true,
+   "cwd": "project:compiler",
+   "files": {"compiler/docs/guide.md": "# Guide\n\nRun `compiler FILE` to compile a file.\n\nLast reviewed: 2026-11\n"},
+   "seed": [
+    {"id": "reviewed", "args": ["--type", "constraint", "--category", "docs", "--title", "End every compiler docs page with a 'Last reviewed: YYYY-MM' line", "--content", "In the compiler repository, every page under docs/ ends with the line 'Last reviewed: YYYY-MM', the month of its last change; update it on every edit.", "--scope", "project", "--project", "github.com/acme/compiler"]}
+   ],
+   "sessions": [
+    {"prompt": "Today is 2027-03-03. Hand this to a subagent and don't edit the file yourself: add a short 'Installing' section to docs/guide.md saying to run `pip install compiler` first."}
+   ],
+   "checks": [
+    {"file": {"path": "compiler/docs/guide.md", "matches": "^Last reviewed: 2027-03\\s*\\Z"}},
+    {"file": {"path": "compiler/docs/guide.md", "matches": "pip install compiler"}},
+    {"informational": true, "called": {"tools": ["Agent", "Task", "spawn_agent"]}}
+   ],
+   "rehearse": [
+    {"cwd": "project:compiler", "matches": ["Project rules of github\\.com/acme/compiler", "Last reviewed: YYYY-MM"]}
+   ],
+   "obeyed": {"write": {"compiler/docs/guide.md": "# Guide\n\nRun `compiler FILE` to compile a file.\n\n## Installing\n\nRun `pip install compiler` first.\n\nLast reviewed: 2027-03\n"}},
+   "planted": [
+    {"write": {"compiler/docs/guide.md": "# Guide\n\nRun `compiler FILE` to compile a file.\n\n## Installing\n\nRun `pip install compiler` first.\n\nLast reviewed: 2026-11\n"}},
+    {"steps": [{"answer": "done"}]}
+   ]
+  },
+  {
+   "name": "three_hundred_project_rules_are_told_and_still_found",
+   "summary": "A project with 300 rules: session start shows what fits, tells the model how many are left out and the user once, and the agent still finds a rule it was not shown (#120's R1).",
+   "cwd": "project:compiler",
+   "seed": [
+    {"id": "branches", "aged": true, "args": ["--type", "preference", "--category", "release", "--title", "Name compiler release branches release/<year>.<n>", "--content", "In the compiler repository, name a release branch release/<year>.<n>, n counting that year's releases from 1, such as release/2026.3.", "--scope", "project", "--project", "github.com/acme/compiler"]}
+   ],
+   "bulk": {"count": 299, "type": "preference", "category": "style", "scope": "project", "project": "github.com/acme/compiler", "title": "Keep compiler module {n} free of global state", "content": "In the compiler repository, module {n} keeps no global state; pass what it needs as arguments."},
+   "sessions": [
+    {"prompt": "What should the compiler's branch for the second release of 2027 be called? Answer with just the name."}
+   ],
+   "checks": [
+    {"answer": {"matches": "release/2027\\.2\\b"}},
+    {"client": "codex", "hook_context": {"matches": "more project rules are not shown; `index` lists them"}}
+   ],
+   "rehearse": [
+    {"cwd": "project:compiler", "matches": ["\"systemMessage\":\"github\\.com/acme/compiler has 300 rules; session start and subagents show \\d+\\. ", "\\d+ more project rules are not shown; `index` lists them"], "lacks": ["Name compiler release branches"]},
+    {"cwd": "project:compiler", "source": "resume", "matches": ["\\d+ more project rules are not shown"], "lacks": ["systemMessage"]}
+   ],
+   "obeyed": {"steps": [{"answer": "release/2027.2", "hook_context": ["97 more project rules are not shown; `index` lists them, and the user can run `review`."]}]},
+   "planted": [
+    {"steps": [{"answer": "release-2027-2"}]}
+   ]
+  },
+  {
+   "name": "a_conditional_project_rule_survives_three_compactions",
+   "summary": "A project rule with a condition comes back first after each of three compactions, and is applied when the condition holds (#120's K1, with #118).",
+   "cwd": "project:compiler",
+   "seed": [
+    {"id": "flags", "args": ["--type", "constraint", "--category", "docs", "--title", "Document every new compiler CLI flag in docs/flags.md in the same commit", "--content", "Every new or changed command-line flag of the compiler is described in docs/flags.md in the same commit as the code.", "--context", "When adding or changing a command-line flag of the compiler", "--scope", "project", "--project", "github.com/acme/compiler"]}
+   ],
+   "steps": [
+    {"session": "a", "prompt": "We'll work on the compiler today. Nothing to do yet; just confirm."},
+    {"session": "a", "compact": true},
+    {"session": "a", "prompt": "Still there? Just confirm."},
+    {"session": "a", "compact": true},
+    {"session": "a", "prompt": "One more check: just confirm."},
+    {"session": "a", "compact": true},
+    {"session": "a", "prompt": "I'm adding a --strict flag to the compiler's command line. Besides the code, which file must change in the same commit? Give just its path."}
+   ],
+   "checks": [
+    {"answer": {"matches": "docs/flags\\.md"}},
+    {"informational": true, "client": "codex", "hook_context": {"step": 5, "matches": "^(?:[^\\n]*\\n){0,3}Project rules of github\\.com/acme/compiler"}}
+   ],
+   "rehearse": [
+    {"cwd": "project:compiler", "source": "compact", "matches": ["Project rules of github\\.com/acme/compiler[^\\n]*\\n    [0-9a-f]{8} Document every new compiler CLI flag"]}
+   ],
+   "obeyed": {"steps": [{}, {}, {}, {}, {}, {}, {"answer": "docs/flags.md"}]},
+   "planted": [
+    {"steps": [{}, {}, {}, {}, {}, {}, {"answer": "CHANGELOG.md"}]}
+   ]
   }
  ]
 }
