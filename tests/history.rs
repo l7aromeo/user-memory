@@ -635,6 +635,13 @@ fn exports_and_imports_carry_the_history() {
     assert_eq!(imported.len(), 2, "{events:?}");
     assert_eq!(imported[1]["before"], json!({"content":"Brews oolong tea"}));
     assert_eq!(imported[0]["origin"], "chat/tea");
+    // When the import ran, in the form of every other time in the store.
+    for event in &imported {
+        let at = event["imported"].as_str().unwrap();
+        assert_eq!(at.len(), "2026-11-15 07:00:00".len(), "{event}");
+        assert_eq!(&at[10..11], " ", "{event}");
+        assert_eq!(at.len(), event["at"].as_str().unwrap().len(), "{event}");
+    }
     // The import's own event is this store's, never imported.
     assert!(
         events

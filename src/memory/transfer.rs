@@ -1165,10 +1165,8 @@ fn import(
     // import, unless the store already holds the same event.
     let mut added_events = 0;
     if !events.is_empty() && history::kept(&tx)? {
-        let import: String =
-            tx.query_row("SELECT strftime('%Y-%m-%dT%H:%M:%SZ','now')", [], |r| {
-                r.get(0)
-            })?;
+        // In the store's form, as the event's own times are.
+        let import: String = tx.query_row("SELECT datetime('now')", [], |r| r.get(0))?;
         for event in &events {
             added_events += usize::from(history::add_imported(&tx, event, &import, mark)?);
         }

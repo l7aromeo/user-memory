@@ -38,4 +38,4 @@ INSERT INTO memory_events (memory_id,at,last_at,count,op,origin,client,before,im
 ('1a2b3c4d-6666-4aaa-8aaa-000000000006','2026-10-06 09:00:00','2026-10-06 09:00:00',1,'stale','','','{"status":"tentative"}',NULL),
 ('1a2b3c4d-7777-4aaa-8aaa-000000000007','2026-10-07 09:00:00','2026-10-07 09:00:00',1,'record','','',NULL,NULL),
 ('1a2b3c4d-7777-4aaa-8aaa-000000000007','2026-10-08 09:00:00','2026-10-08 09:00:00',1,'forget','','cli',NULL,NULL),
-('1a2b3c4d-4444-4aaa-8aaa-000000000004','2026-09-30 08:00:00','2026-09-30 08:00:00',1,'update','','host:codex','{"evidence":"Asked once"}','2026-10-10T08:00:00Z');
+('1a2b3c4d-4444-4aaa-8aaa-000000000004','2026-09-30 08:00:00','2026-09-30 08:00:00',1,'update','','host:codex','{"evidence":"Asked once"}','2026-10-10 08:00:00');
