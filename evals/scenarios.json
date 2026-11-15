@@ -516,7 +516,8 @@
    ],
    "checks": [
     {"called": {"step": 1, "tools": ["forget", "update"]}},
-    {"answer_not": {"matches": "Thanks, everyone"}}
+    {"answer_not": {"matches": "Thanks, everyone"}},
+    {"client": "codex", "informational": true, "hook_context": {"step": 2, "matches": "stop following - ones[\\s\\S]*\\n- [0-9a-f]{8} End every team note"}}
    ]
   },
   {

@@ -1672,7 +1672,7 @@ fn fragments(line: &str) -> Vec<Fragment> {
 }
 
 /// A line of a quoted block that shows a memory or a group of them, not a
-/// message: `  7c4e1f20 Title`, `+ 5e2a91c0 Title`, `- 0b9d3a11`,
+/// message: `  7c4e1f20 Title`, `+ 5e2a91c0 Title`, `- 0b9d3a11 Title`,
 /// `  programming (1)`.
 fn data_line(line: &str) -> bool {
     let line = line.trim_start();

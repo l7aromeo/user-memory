@@ -14,7 +14,7 @@ use clap::ValueEnum;
 use live::{LINKED, LISTED, PENDING, THIS_FOLDER};
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     io::{IsTerminal, Read},
     path::{Path, PathBuf},
     time::Duration,
@@ -231,7 +231,7 @@ async fn remember(
         payload["session_id"].as_str()?,
         &store_identity()?,
     )?;
-    let snapshot = snapshot(checkout, origin, None).await.ok()?;
+    let (snapshot, _) = snapshot(checkout, origin, None).await.ok()?;
     // On a blocking thread, so the snapshot's share of the limit bounds the
     // save too.
     tokio::task::spawn_blocking(move || live::save(&path, &snapshot, &live::Landing::default()))
@@ -318,11 +318,17 @@ async fn changes(
     )?;
     let checkout = payload["cwd"].as_str().unwrap_or(".");
     let before = live::load(&path);
-    let now = snapshot(PathBuf::from(checkout), origin, before.as_ref())
+    let (now, origins) = snapshot(PathBuf::from(checkout), origin.clone(), before.as_ref())
         .await
         .ok()?;
+    // What this conversation changed last, it knows already.
+    let own: BTreeSet<String> = origins
+        .into_iter()
+        .filter(|(_, by)| origin.as_ref() == Some(by))
+        .map(|(id, _)| id)
+        .collect();
     let notice = match &before {
-        Some(before) => told(before, &now).await,
+        Some(before) => told(before, &now, &own).await,
         None => None,
     };
     let saved = tokio::task::spawn_blocking(move || live::save(&path, &now, &landing));
@@ -330,7 +336,11 @@ async fn changes(
 }
 
 /// The notice for a session that last saw `before` and now sees `now`.
-async fn told(before: &live::Snapshot, now: &live::Snapshot) -> Option<String> {
+async fn told(
+    before: &live::Snapshot,
+    now: &live::Snapshot,
+    own: &BTreeSet<String>,
+) -> Option<String> {
     // Memories that left with a project are still active: the index of
     // those projects alone tells them from memories no longer active.
     let gone = live::gone(before, now);
@@ -345,17 +355,19 @@ async fn told(before: &live::Snapshot, now: &live::Snapshot) -> Option<String> {
             .into_keys()
             .collect()
     };
-    live::notice(before, now, &left)
+    live::notice(before, now, &left, own)
 }
 
 /// What the session in `checkout` sees: its projects, read fresh and kept
 /// from what it saw `before` in other folders, and, from the shared server
-/// or the local store, every active global memory and those of its projects.
+/// or the local store, every active global memory and those of its projects;
+/// with the conversation origin of each memory's latest change, where the
+/// store gave one.
 async fn snapshot(
     checkout: PathBuf,
     origin: Option<String>,
     before: Option<&live::Snapshot>,
-) -> anyhow::Result<live::Snapshot> {
+) -> anyhow::Result<(live::Snapshot, BTreeMap<String, String>)> {
     let remote = setup::configured_remote()?;
     // One spelling per folder, however the client or the command line gives
     // it, so a project seen there is matched on the next prompt.
@@ -417,11 +429,12 @@ async fn snapshot(
         }
         _ => reply.stamps,
     };
-    Ok(live::Snapshot {
+    let snapshot = live::Snapshot {
         stamps,
         projects: Some(projects),
         changes: reply.since,
-    })
+    };
+    Ok((snapshot, reply.origins))
 }
 
 /// The stamps of every active global memory and those of `projects` (and

@@ -215,14 +215,16 @@ what is stored now. Only when something changed does the agent get a short
 notice:
 
 ```output
-Memory changed since this session last looked (+ new, ~ changed, - no longer active; read before applying):
+Memory changed since this session last looked (+ new, ~ changed, - forgotten or replaced). Read + and ~ before applying them; stop following - ones, even where your instruction files, loaded at session start, still list them.
 + 5e2a91c0 Ask before pushing
 ~ 7c4e1f20 Use Python 3.13 in this repository
-- 0b9d3a11
+- 0b9d3a11 Answer in short paragraphs
 ```
 
 `+` is a new memory, `~` a changed one, and `-` one that was forgotten or
-replaced. When the session's projects change, for example after you edit
+replaced, which the agent stops following even where the rules it loaded at
+the start still list it. What the session changed itself is not repeated
+back to it. When the session's projects change, for example after you edit
 `.user-memory` or the agent links a project, the notice starts with a line
 such as the one below, and the memories of a project that left follow as `<`
 lines: still active, only no longer loaded in this session. The agent moving
