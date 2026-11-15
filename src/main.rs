@@ -22,6 +22,7 @@ mod paths;
 mod platform;
 mod private;
 mod project;
+mod registry;
 mod remote;
 mod server;
 mod session;
@@ -64,8 +65,8 @@ enum Command {
     Endpoint,
     /// Serve MCP over stdio; connect remotely when configured.
     Serve,
-    /// Host shared memory over authenticated Streamable HTTP.
-    Host(remote::HostOptions),
+    /// Host shared memory over authenticated Streamable HTTP, or manage its client tokens with `host token`.
+    Host(remote::HostArgs),
     /// Forward a stdio MCP client to a shared remote endpoint.
     Connect(remote::Connection),
     /// Rebuild search indexes for the local or server memory store.
@@ -788,7 +789,7 @@ async fn main() -> Result<()> {
                 std::process::exit(setup::ACTION_NEEDED);
             }
         }
-        Command::Host(options) => remote::host(options).await?,
+        Command::Host(args) => remote::run_host(args).await?,
         Command::Connect(connection) => remote::connect(connection).await?,
         Command::Reindex => {
             if setup::configured_remote()?.is_some() {
