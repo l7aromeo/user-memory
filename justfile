@@ -19,6 +19,15 @@ check:
     cargo clippy --locked --all-targets -- -D warnings
     cargo nextest run --locked
 
+# A release build compiles out the debug-only test seams, which can leave a
+# variable, import or function unused there and nowhere else. CI runs this
+# after `just check` on every platform it checks; `just check` leaves it out
+# to stay fast, since it checks every crate again in the release profile.
+
+# Lints as errors in the release profile, as users get the binary: CI runs it after `just check`.
+check-release:
+    cargo clippy --release --locked --all-targets -- -D warnings
+
 # nextest runs each test in its own process and the test binaries side by
 # side. It runs no doctests, and the crate has none to run: it is a binary
 # without a library, and rustdoc tests only libraries.

@@ -641,6 +641,53 @@ fn the_release_builds_both_windows_targets_on_windows() {
     );
 }
 
+/// The lines of a justfile recipe's body, trimmed.
+fn recipe(justfile: &str, name: &str) -> Vec<String> {
+    justfile
+        .split(&format!("\n{name}:\n"))
+        .nth(1)
+        .unwrap_or_else(|| panic!("the justfile has no {name} recipe"))
+        .lines()
+        .take_while(|line| line.starts_with("    "))
+        .map(|line| line.trim().to_owned())
+        .collect()
+}
+
+// Code compiled only in debug builds can leave a variable, import or function
+// unused in the release build users get, which the debug lints of `just
+// check` cannot see. So wherever CI runs `just check`, the next step lints the
+// release profile; `just check` itself stays as fast as it is.
+#[test]
+fn ci_lints_the_release_profile_right_after_every_check() {
+    let justfile = repo_file("justfile");
+    assert_eq!(
+        recipe(&justfile, "check-release"),
+        ["cargo clippy --release --locked --all-targets -- -D warnings"]
+    );
+    let check = recipe(&justfile, "check");
+    assert!(
+        check.iter().all(|line| !line.contains("--release")),
+        "{check:?}"
+    );
+    for file in ["check.yml", "windows.yml"] {
+        let docs =
+            YamlLoader::load_from_str(&repo_file(&format!(".github/workflows/{file}"))).unwrap();
+        let runs: Vec<&str> = docs[0]["jobs"]["check"]["steps"]
+            .as_vec()
+            .unwrap()
+            .iter()
+            .filter_map(|step| step["run"].as_str())
+            .collect();
+        let at = |run: &str| runs.iter().position(|&r| r == run);
+        let check = at("just check").unwrap_or_else(|| panic!("{file}: no `just check`"));
+        assert_eq!(
+            at("just check-release"),
+            Some(check + 1),
+            "{file}: `just check-release` runs right after `just check`: {runs:?}"
+        );
+    }
+}
+
 // CI reports every failing test in one run, through the nextest profile
 // both workflows select; a local `just check` keeps the default and stops
 // at the first failure.
