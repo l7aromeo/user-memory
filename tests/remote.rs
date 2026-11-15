@@ -1419,6 +1419,33 @@ fn a_host_never_takes_its_own_folders_project_for_the_clients() {
     assert_eq!(linked["added"], json!([key]), "{linked}");
 }
 
+// A `link` that only lists is a read on a server too: while another
+// connection holds the store's write lock, it answers as it would without
+// one instead of waiting the writer out and failing.
+#[test]
+fn a_server_lists_a_conversations_links_during_another_write() {
+    let host = Host::start(root());
+    host.rpc(initialize(1));
+    let text = |reply: Value| reply["result"]["content"][0]["text"].clone();
+    let added = text(host.rpc(call(
+        2,
+        "link",
+        json!({"origin":"claude:session/a","projects":["github.com/acme/tools"]}),
+    )));
+    assert!(added.as_str().unwrap().contains("\"added\""), "{added}");
+    let listing = || text(host.rpc(call(3, "link", json!({"origin":"claude:session/a"}))));
+    let free = listing();
+    assert!(
+        free.as_str().unwrap().contains("github.com/acme/tools"),
+        "{free}"
+    );
+    let writer = rusqlite::Connection::open(host.root.path().join("shared.sqlite3")).unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let held = listing();
+    writer.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(held, free);
+}
+
 // A machine that switches between a server and a local store under one
 // session id keeps a snapshot of each: neither one's prompts hear of the
 // other's memories as changes.
