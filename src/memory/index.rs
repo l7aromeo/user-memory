@@ -49,7 +49,10 @@ use stems::{Field, Stems, Text, stamp, token};
 /// The triggers keep the keys, the queue and the log in step with any
 /// write, whichever program makes it. A memory replaced through
 /// `INSERT OR REPLACE` loses its old key on insert, as SQLite fires no
-/// delete trigger for it.
+/// delete trigger for it. A changed memory already queued is queued by an
+/// upsert, not `INSERT OR IGNORE`: the update's own conflict clause, such as
+/// `UPDATE OR ABORT`, replaces the clauses of the statements in its
+/// triggers, but not an upsert's.
 const SEARCH: &str = "CREATE TABLE IF NOT EXISTS memory_vectors (
     id TEXT PRIMARY KEY NOT NULL,
     model TEXT NOT NULL,
@@ -87,7 +90,7 @@ CREATE TRIGGER IF NOT EXISTS search_inserted AFTER INSERT ON memories BEGIN
 END;
 CREATE TRIGGER IF NOT EXISTS search_changed AFTER UPDATE ON memories BEGIN
     UPDATE search_keys SET id=NEW.id,memory_type=NEW.memory_type,category=NEW.category,scope=NEW.scope,project=NEW.project,source=NEW.source,status=NEW.status,updated_at=NEW.updated_at WHERE id=OLD.id;
-    INSERT OR IGNORE INTO search_pending(key) SELECT key FROM search_keys WHERE id=NEW.id AND (NEW.memory_type IS NOT OLD.memory_type OR NEW.category IS NOT OLD.category OR NEW.title IS NOT OLD.title OR NEW.content IS NOT OLD.content OR NEW.context IS NOT OLD.context OR NEW.reason IS NOT OLD.reason OR NEW.evidence IS NOT OLD.evidence);
+    INSERT INTO search_pending(key) SELECT key FROM search_keys WHERE id=NEW.id AND (NEW.memory_type IS NOT OLD.memory_type OR NEW.category IS NOT OLD.category OR NEW.title IS NOT OLD.title OR NEW.content IS NOT OLD.content OR NEW.context IS NOT OLD.context OR NEW.reason IS NOT OLD.reason OR NEW.evidence IS NOT OLD.evidence) ON CONFLICT(key) DO NOTHING;
     INSERT INTO search_changes(id) VALUES (NEW.id);
 END;
 CREATE TRIGGER IF NOT EXISTS search_deleted AFTER DELETE ON memories BEGIN

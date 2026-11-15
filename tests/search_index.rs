@@ -947,3 +947,134 @@ fn equally_close_memories_by_meaning_list_newest_first() {
         .collect();
     assert_eq!(titles, ["Newer", "Older"], "{answer}");
 }
+
+/// The conflict clauses an UPDATE can carry, the plain one first.
+const CLAUSES: [&str; 6] = [
+    "",
+    "OR IGNORE",
+    "OR REPLACE",
+    "OR ABORT",
+    "OR FAIL",
+    "OR ROLLBACK",
+];
+
+/// A store holding two preferences from different conversations and a
+/// pattern on both; returns their ids.
+fn layout(store: &Store) -> (String, String, String) {
+    let record = |extra: &[&str]| -> String {
+        let mut args = vec!["record", "--scope", "global", "--category", "style"];
+        args.extend_from_slice(extra);
+        let saved = store.run(&args);
+        assert_eq!(saved["stored"], true, "{saved}");
+        saved["id"].as_str().unwrap().to_owned()
+    };
+    let tabs = record(&[
+        "--type",
+        "preference",
+        "--title",
+        "Indent with tabs",
+        "--content",
+        "Indent with tabs",
+        "--origin",
+        "chat/1",
+    ]);
+    let wrap = record(&[
+        "--type",
+        "preference",
+        "--title",
+        "Wrap at 100",
+        "--content",
+        "Wrap at 100",
+        "--origin",
+        "chat/2",
+    ]);
+    let pattern = record(&[
+        "--type",
+        "pattern",
+        "--source",
+        "inferred",
+        "--title",
+        "Cares about layout",
+        "--content",
+        "Cares about layout",
+        "--evidence-id",
+        &tabs,
+        "--evidence-id",
+        &wrap,
+    ]);
+    (tabs, wrap, pattern)
+}
+
+fn one(conn: &rusqlite::Connection, sql: &str, id: &str) -> i64 {
+    conn.query_row(sql, [id], |r| r.get(0)).unwrap()
+}
+
+/// How many times memory `id` is queued for the keyword index.
+fn queued(conn: &rusqlite::Connection, id: &str) -> i64 {
+    one(
+        conn,
+        "SELECT COUNT(*) FROM search_pending WHERE key=(SELECT key FROM search_keys WHERE id=?1)",
+        id,
+    )
+}
+
+// Another program updates a memory already queued for the keyword index,
+// under each conflict clause. The update's clause replaces the clauses of
+// the statements in its triggers, so the trigger's queue insert must hold
+// under any of them: the update succeeds, the memory is queued once, and
+// its history event and its change are recorded.
+#[test]
+fn an_update_under_any_conflict_clause_queues_the_memory_once() {
+    let store = Store::new();
+    let (tabs, _, _) = layout(&store);
+    let conn = store.sql();
+    let mut outcomes = Vec::new();
+    for clause in CLAUSES {
+        // A write by another program leaves the memory queued: only
+        // user-memory's own writes stem what they queue before committing.
+        conn.execute("UPDATE memories SET title=title||'.' WHERE id=?1", [&tabs])
+            .unwrap();
+        assert_eq!(queued(&conn, &tabs), 1, "{clause}");
+        let events = || {
+            one(
+                &conn,
+                "SELECT COUNT(*) FROM memory_events WHERE memory_id=?1",
+                &tabs,
+            )
+        };
+        let change = || {
+            one(
+                &conn,
+                "SELECT change FROM memory_changes WHERE memory_id=?1",
+                &tabs,
+            )
+        };
+        let content = || -> String {
+            conn.query_row("SELECT content FROM memories WHERE id=?1", [&tabs], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        let (events_before, change_before, content_before) = (events(), change(), content());
+        let updated = conn
+            .execute(
+                &format!("UPDATE {clause} memories SET content=content||'!' WHERE id=?1"),
+                [&tabs],
+            )
+            .map_err(|e| e.to_string());
+        outcomes.push(format!(
+            "UPDATE {clause}: {updated:?}, changed {}, queued {}, events +{}, counted {}",
+            content() != content_before,
+            queued(&conn, &tabs),
+            events() - events_before,
+            change() > change_before,
+        ));
+    }
+    let want: Vec<String> = CLAUSES
+        .iter()
+        .map(|clause| {
+            format!("UPDATE {clause}: Ok(1), changed true, queued 1, events +1, counted true")
+        })
+        .collect();
+    assert_eq!(outcomes, want);
+}

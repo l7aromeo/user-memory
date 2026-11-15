@@ -867,3 +867,163 @@ fn a_titles_map_can_come_from_stdin() {
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(version(&db), current_version());
 }
+
+/// Every row of every table of the store at `db` but `store_changes`, whose
+/// store id every migration renews, by table name.
+fn every_row(db: &Path) -> Vec<(String, Vec<String>)> {
+    let conn = Connection::open(db).unwrap();
+    let tables: Vec<String> = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name!='store_changes' ORDER BY name")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    tables
+        .into_iter()
+        .map(|table| {
+            let sql = if table == "search_words" {
+                "SELECT rowid,* FROM search_words ORDER BY rowid".to_owned()
+            } else {
+                format!("SELECT * FROM {table} ORDER BY 1")
+            };
+            let found = rows(&conn, &sql);
+            (table, found)
+        })
+        .collect()
+}
+
+/// The SQL of trigger `name` in the store at `db`.
+fn trigger(db: &Path, name: &str) -> String {
+    Connection::open(db)
+        .unwrap()
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?1",
+            [name],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+/// Turns the store at `db` back into a version 10 store: version 11 only
+/// replaced `search_changed`, so its version 10 text and number are all
+/// that differ.
+fn back_to_v10(db: &Path) {
+    let snapshot = fs::read_to_string(snapshots().join("v10.sql")).unwrap();
+    let old = parse(&snapshot)
+        .into_iter()
+        .find(|statement| statement.contains("TRIGGER search_changed"))
+        .unwrap();
+    let conn = Connection::open(db).unwrap();
+    conn.execute_batch(&format!("DROP TRIGGER search_changed; {old};"))
+        .unwrap();
+    conn.pragma_update(None, "user_version", 10).unwrap();
+}
+
+// Version 11 replaces one trigger and writes nothing: every memory, every
+// row of the keyword index and its queue, and every other table but the
+// store id, as before, with memories queued and with none. The store is
+// made by this binary and turned back to version 10, as the two versions'
+// tables are the same: a real version 10 store made with this stemming
+// differs only in its rows, and one made with another stemming has its
+// index rebuilt, as every_snapshot_migrates_to_the_current_schema_and_keeps_its_data
+// shows from the version 10 snapshot.
+#[test]
+fn migrating_to_version_11_writes_no_row() {
+    for queued in [false, true] {
+        let (dir, db) = fresh();
+        for title in ["Indent with tabs", "Wrap at 100", "Sign every commit"] {
+            let out = user_memory(
+                dir.path(),
+                &db,
+                &[
+                    "record",
+                    "--scope",
+                    "global",
+                    "--type",
+                    "preference",
+                    "--category",
+                    "style",
+                    "--title",
+                    title,
+                    "--content",
+                    title,
+                    "--origin",
+                    "chat/1",
+                ],
+            );
+            assert!(out.status.success(), "{}", stderr(&out));
+        }
+        let new_trigger = trigger(&db, "search_changed");
+        back_to_v10(&db);
+        if queued {
+            // Another program's update leaves its memory queued.
+            Connection::open(&db)
+                .unwrap()
+                .execute(
+                    "UPDATE memories SET title=title||'.' WHERE title='Wrap at 100'",
+                    [],
+                )
+                .unwrap();
+        }
+        let before = every_row(&db);
+        let pending = &before
+            .iter()
+            .find(|(t, _)| t == "search_pending")
+            .unwrap()
+            .1;
+        assert_eq!(pending.len(), usize::from(queued), "queued {queued}");
+        let out = migrate(dir.path(), &db, 10);
+        assert!(out.status.success(), "{}", stderr(&out));
+        assert!(
+            stdout(&out).contains("from schema version 10 to 11"),
+            "{}",
+            stdout(&out)
+        );
+        assert_eq!(backups(dir.path()).len(), 1, "the backup is taken first");
+        assert_eq!(version(&db), 11);
+        assert_eq!(trigger(&db, "search_changed"), new_trigger);
+        assert_eq!(every_row(&db), before, "queued {queued}");
+    }
+}
+
+// A migration that fails after version 11's step has run, as one that
+// finds rows referring to a missing memory does at its last check, rolls
+// the step back with everything else: the store keeps version 10 and its
+// trigger, and migrates once repaired.
+#[test]
+fn a_migration_rolled_back_after_version_11_runs_again() {
+    let dir = tempdir().unwrap();
+    let db = store_from_snapshot(dir.path(), 10);
+    let old_trigger = trigger(&db, "search_changed");
+    let conn = Connection::open(&db).unwrap();
+    conn.pragma_update(None, "foreign_keys", false).unwrap();
+    conn.execute(
+        "INSERT INTO memory_origins(memory_id,origin,first_seen) VALUES ('00000000-0000-4000-8000-000000000099','chat/9','2026-01-01 00:00:00')",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    let before = every_row(&db);
+    let out = migrate(dir.path(), &db, 10);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("Migration rolled back"),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(version(&db), 10);
+    assert_eq!(trigger(&db, "search_changed"), old_trigger);
+    assert_eq!(every_row(&db), before);
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "DELETE FROM memory_origins WHERE memory_id NOT IN (SELECT id FROM memories)",
+            [],
+        )
+        .unwrap();
+    let out = migrate(dir.path(), &db, 10);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(version(&db), 11);
+    assert_ne!(trigger(&db, "search_changed"), old_trigger);
+}

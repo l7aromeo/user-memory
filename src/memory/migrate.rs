@@ -92,7 +92,28 @@ const STEPS: &[Step] = &[
         check: always,
         apply: to_v10,
     },
+    Step {
+        check: always,
+        apply: to_v11,
+    },
 ];
+
+/// Version 11 queues a changed memory for the keyword index by an upsert,
+/// which an update's own conflict clause (`UPDATE OR ABORT`) cannot turn
+/// into a failure when the memory is queued already. Only the trigger is
+/// replaced; no row is written. The SQL is written out as it was at
+/// version 11.
+fn to_v11(conn: &Connection, _: Option<&Titles>) -> Result<()> {
+    conn.execute_batch(
+        "DROP TRIGGER search_changed;
+CREATE TRIGGER search_changed AFTER UPDATE ON memories BEGIN
+    UPDATE search_keys SET id=NEW.id,memory_type=NEW.memory_type,category=NEW.category,scope=NEW.scope,project=NEW.project,source=NEW.source,status=NEW.status,updated_at=NEW.updated_at WHERE id=OLD.id;
+    INSERT INTO search_pending(key) SELECT key FROM search_keys WHERE id=NEW.id AND (NEW.memory_type IS NOT OLD.memory_type OR NEW.category IS NOT OLD.category OR NEW.title IS NOT OLD.title OR NEW.content IS NOT OLD.content OR NEW.context IS NOT OLD.context OR NEW.reason IS NOT OLD.reason OR NEW.evidence IS NOT OLD.evidence) ON CONFLICT(key) DO NOTHING;
+    INSERT INTO search_changes(id) VALUES (NEW.id);
+END;",
+    )?;
+    Ok(())
+}
 
 /// Version 10 counts the store's changes: the store's id and its latest
 /// change, one row per memory changed since, and the triggers that count
