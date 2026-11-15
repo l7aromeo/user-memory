@@ -782,7 +782,10 @@ async fn main() -> Result<()> {
         Command::PostToolUse { client, limit } => {
             Some(session::post_tool_use(*client, limit.context_limit))
         }
-        Command::WorkingSet { .. } | Command::SubagentStart { .. } => {
+        Command::SubagentStart { client, limit } => {
+            Some(session::subagent_start(*client, limit.context_limit).await)
+        }
+        Command::WorkingSet { .. } => {
             session::drain();
             Some(String::new())
         }

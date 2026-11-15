@@ -718,6 +718,30 @@ fn full_rule(m: &Memory) -> String {
     line
 }
 
+/// The heading over project `key`'s rules.
+fn rules_heading(key: &str) -> String {
+    format!("{PROJECT_RULES}{key}{PROJECT_RULES_NOTE}")
+}
+
+/// The project rules part that begins `text`, the session hook's copy:
+/// every line before the index's header; empty when it has none.
+pub fn rules_part(text: &str) -> &str {
+    match text.find(HEADER[0]) {
+        Some(at) => text[..at].trim_end_matches('\n'),
+        None => "",
+    }
+}
+
+/// The headings in a rules part, one per project, as [`rules_heading`]
+/// writes them: the subagent hook looks for each in a forked Codex
+/// sub-agent's transcript to tell that the parent's session start already
+/// gave it these rules.
+pub fn rules_headings(part: &str) -> Vec<&str> {
+    part.lines()
+        .filter(|line| line.starts_with(PROJECT_RULES))
+        .collect()
+}
+
 /// A rule by its title, under its project's heading.
 fn titled_rule(m: &Memory) -> String {
     format!(
@@ -808,7 +832,7 @@ impl ProjectRules<'_> {
         let mut lines = Vec::new();
         let listed = self.has(Shown::Full) || self.has(Shown::Titled);
         if listed {
-            lines.push(format!("{PROJECT_RULES}{}{PROJECT_RULES_NOTE}", self.key));
+            lines.push(rules_heading(self.key));
         }
         let of = |shown: Shown| self.rules.iter().filter(move |(_, _, s)| *s == shown);
         lines.extend(of(Shown::Full).map(|(full, _, _)| full.clone()));

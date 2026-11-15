@@ -8,8 +8,10 @@
 
 mod live;
 mod seen;
+mod subagent;
 mod tools;
 
+pub use subagent::subagent_start;
 #[cfg(test)]
 pub(crate) use tools::CLAUDE_TOOLS;
 pub use tools::{drain, post_tool_use, pre_tool_use};
