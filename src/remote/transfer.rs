@@ -155,6 +155,16 @@ async fn export(State(db): State<PathBuf>, Json(subset): Json<Subset>) -> Respon
 /// Imports the posted document: one line of [`ImportRequest`] JSON, a
 /// newline, then the document. Answers with the import's summary.
 async fn import(State(db): State<PathBuf>, request: Request) -> Response {
+    // A read-only token is refused before the body is read, the preview
+    // included (src/remote/scope.rs).
+    if request
+        .extensions()
+        .get::<super::gate::Access>()
+        .is_some_and(|access| access.scope == crate::registry::Scope::Read)
+    {
+        let url = super::scope::client_url(request.headers());
+        return (StatusCode::FORBIDDEN, super::scope::read_only(&url)).into_response();
+    }
     // A declared length over the limit is refused before any of the body is
     // read; a body without one stops being read at the limit.
     let declared = request
