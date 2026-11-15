@@ -72,7 +72,7 @@ of storing a copy:
 and the agent confirms the existing one:
 
 ```json
-{"stored":true,"id":"e0000001-0000-4000-8000-000000000001","confirmed":true,"confirmations":2}
+{"stored":true,"id":"e0000001-0000-4000-8000-000000000001","confirmed":true,"confirmations":2,"status":"confirmed"}
 ```
 
 Every session on any machine using that server now starts with the rule in

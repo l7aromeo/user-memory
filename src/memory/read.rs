@@ -612,6 +612,7 @@ pub fn read(db: &Path, input: &Read) -> Result<Value> {
             let mut found = candidates(&conn, &selection.filter()?)?;
             found.sort_by(group_order);
             let mut result = paged(found, &input.paging)?;
+            add_observations(&conn, &mut result)?;
             if input.history {
                 add_history(&conn, &mut result)?;
             }
@@ -659,6 +660,7 @@ pub fn read(db: &Path, input: &Read) -> Result<Value> {
         }
     }
     let mut result = json!({ "memories": compact(&memories)? });
+    add_observations(&conn, &mut result)?;
     if input.history {
         add_history(&conn, &mut result)?;
         // A forgotten memory's tombstones say when it went, and by whom.
@@ -684,6 +686,43 @@ pub fn read(db: &Path, input: &Read) -> Result<Value> {
         result["excluded"] = json!(excluded);
     }
     Ok(result)
+}
+
+/// Observations of one memory a read shows, newest first; the rest are
+/// counted, and `history` lists them all. Two keep a read of a note seen
+/// in many conversations within what the memory's own content may hold
+/// (each evidence is at most 2,000 characters, the content 4,000), while
+/// still showing whether the latest sighting agrees with the one before.
+const OBSERVATIONS_READ: usize = 2;
+
+/// Adds to each observed memory of `result` the newest observations its
+/// history holds, as `observations`, and how many more as
+/// `observations_more`. Only an observed memory gains observations; one
+/// the user made their own keeps its sightings in the history, which
+/// `history` shows, so no other memory costs a query.
+fn add_observations(conn: &Connection, result: &mut Value) -> Result<()> {
+    for memory in result["memories"].as_array_mut().into_iter().flatten() {
+        if memory["source"].as_str() != Some(super::Source::Observed.name()) {
+            continue;
+        }
+        let Some(id) = memory["id"]
+            .as_str()
+            .and_then(|id| Uuid::parse_str(id).ok())
+        else {
+            continue;
+        };
+        let mut observations = history::observations(conn, id)?;
+        if observations.is_empty() {
+            continue;
+        }
+        let more = observations.len().saturating_sub(OBSERVATIONS_READ);
+        observations.truncate(OBSERVATIONS_READ);
+        memory["observations"] = json!(observations);
+        if more > 0 {
+            memory["observations_more"] = json!(more);
+        }
+    }
+    Ok(())
 }
 
 /// Adds each memory's events to the memories of `result`, as `history`.

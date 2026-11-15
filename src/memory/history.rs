@@ -167,6 +167,14 @@ pub(super) const UNDO: &str = "undo:";
 /// brought, so an undo can tell an origin another import added since.
 pub(super) const IMPORT_ORIGINS: &str = "import_origins";
 
+/// The key in a `confirm` event's `before` that keeps what each observed
+/// record that confirmed the memory saw: its conversation and its evidence,
+/// which the memory's own `evidence` doesn't take, so a sighting is no
+/// change another session hears of. Not a value the event replaced: history
+/// shows it under its own name, an export carries it, and forgetting the
+/// conversation removes its entries.
+pub(super) const OBSERVATIONS: &str = "observations";
+
 /// The key an undo of the import adds to the import's own event for a
 /// memory it kept, so the undo of a later import that gives the memory back
 /// this import's version can say this one was undone.
@@ -373,9 +381,69 @@ pub(super) fn latest(conn: &Connection, id: Uuid) -> rusqlite::Result<Option<i64
     )
 }
 
-/// Removes the conversation `origin` from every event that names it, as
-/// forgetting that conversation asks.
+/// Adds an observation to the newest event of memory `id`, the `confirm`
+/// this write just made or added to: the conversation `origin` saw it
+/// again, with `evidence`. A conversation keeps one entry, its latest, so
+/// the list grows only with the conversations that saw the memory, as its
+/// confirmations do; an earlier entry from `origin` leaves the event that
+/// held it.
+///
+/// `confirm` writes or merges into that event in the same transaction
+/// before calling this, so the newest event is a `confirm`. An update that
+/// changes no row means that order broke: it returns an error, which rolls
+/// the write back, rather than drop the earlier entry and store nothing.
+pub(super) fn add_observation(
+    conn: &Connection,
+    id: Uuid,
+    origin: &str,
+    evidence: &str,
+) -> rusqlite::Result<()> {
+    without_observations(conn, Some(id), origin)?;
+    match conn.execute(
+        "UPDATE memory_events SET before=json_insert(coalesce(before,'{}'),'$.observations[#]',json_object('origin',?2,'evidence',?3))
+         WHERE seq=(SELECT max(seq) FROM memory_events WHERE memory_id=?1) AND op='confirm'",
+        params![id.to_string(), origin, evidence],
+    )? {
+        1 => Ok(()),
+        changed => Err(rusqlite::Error::StatementChangedRows(changed)),
+    }
+}
+
+/// The observations in memory `id`'s history, newest first: each a
+/// conversation's latest sighting with its evidence.
+pub(super) fn observations(conn: &Connection, id: Uuid) -> rusqlite::Result<Vec<Value>> {
+    conn.prepare_cached(
+        "SELECT o.value FROM memory_events e, json_each(e.before,'$.observations') o
+         WHERE e.memory_id=?1 AND json_valid(e.before) ORDER BY e.seq DESC, o.key DESC",
+    )?
+    .query_map([id.to_string()], |r| r.get::<_, String>(0))?
+    .map(|text| text.map(|text| serde_json::from_str(&text).unwrap_or(Value::String(text))))
+    .collect()
+}
+
+/// Removes the observations of conversation `origin` from the events of
+/// memory `id`, or of every memory with none.
+fn without_observations(
+    conn: &Connection,
+    id: Option<Uuid>,
+    origin: &str,
+) -> rusqlite::Result<usize> {
+    conn.execute(
+        "UPDATE memory_events SET before=CASE
+             WHEN (SELECT count(*) FROM json_each(before,'$.observations') WHERE json_extract(value,'$.origin') IS NOT ?1)=0
+             THEN nullif(json_remove(before,'$.observations'),'{}')
+             ELSE json_set(before,'$.observations',(SELECT json_group_array(json(value)) FROM json_each(before,'$.observations')
+                 WHERE json_extract(value,'$.origin') IS NOT ?1)) END
+         WHERE (?2 IS NULL OR memory_id=?2) AND json_valid(before)
+         AND EXISTS (SELECT 1 FROM json_each(before,'$.observations') WHERE json_extract(value,'$.origin') IS ?1)",
+        params![origin, id.map(|id| id.to_string())],
+    )
+}
+
+/// Removes the conversation `origin` from every event that names it, and
+/// the sightings it added, as forgetting that conversation asks.
 pub(super) fn drop_origin(conn: &Connection, origin: &str) -> rusqlite::Result<usize> {
+    without_observations(conn, None, origin)?;
     conn.execute(
         "UPDATE memory_events SET origin='' WHERE origin=?1",
         [origin],
@@ -404,8 +472,10 @@ fn shown(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
         // The origins an import brought are not a value it replaced: an
         // added memory had none before.
         if let Some(fields) = before.as_object_mut() {
-            if let Some(origins) = fields.remove(IMPORT_ORIGINS) {
-                event.insert(IMPORT_ORIGINS.into(), origins);
+            for key in [IMPORT_ORIGINS, OBSERVATIONS] {
+                if let Some(value) = fields.remove(key) {
+                    event.insert(key.into(), value);
+                }
             }
             fields.remove(UNDO_KEPT);
         }
@@ -768,4 +838,33 @@ pub(super) fn kept(conn: &Connection) -> Result<bool> {
         )
         .optional()?
         .is_some())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ID: &str = "e0000001-0000-4000-8000-000000000001";
+
+    #[test]
+    fn an_observation_with_no_confirm_to_hold_it_is_an_error_and_keeps_the_last() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = connect(&dir.path().join("m.sqlite3")).unwrap();
+        conn.execute_batch(&format!(
+            "INSERT INTO memory_events (memory_id,op,before) VALUES ('{ID}','confirm','{{\"observations\":[{{\"origin\":\"chat/a\",\"evidence\":\"First seen\"}}]}}');
+             INSERT INTO memory_events (memory_id,op) VALUES ('{ID}','update');"
+        ))
+        .unwrap();
+        let id = Uuid::parse_str(ID).unwrap();
+        let tx = conn.transaction().unwrap();
+        assert!(matches!(
+            add_observation(&tx, id, "chat/a", "Seen again"),
+            Err(rusqlite::Error::StatementChangedRows(0))
+        ));
+        drop(tx);
+        assert_eq!(
+            observations(&conn, id).unwrap(),
+            [json!({"origin":"chat/a","evidence":"First seen"})]
+        );
+    }
 }

@@ -30,7 +30,7 @@ const EXPLICIT_NEEDS_STATEMENT: &str = "An explicit memory is the user's own sta
 /// Where a project key comes from, and where to turn without one.
 const PROJECT_NEEDS_KEY: &str = "Project scope requires a project identifier: a key from the session start's Projects line or a git remote URL; with no project, see the user-memory skill's projects playbook";
 /// What each way out of a similarity hold means.
-const RESOLVE: &str = "confirms: an explicit memory said again; supersedes: the user changed their mind; distinct_from: genuinely different; to make a listed observation the user's own, update it with user_confirmed.";
+const RESOLVE: &str = "confirms: an explicit memory said again, or an observation seen again in another conversation, which stays an observation; supersedes: the user changed their mind; distinct_from: genuinely different; to make a listed observation the user's own, update it with user_confirmed.";
 
 fn default_type() -> String {
     "fact".into()
@@ -94,7 +94,7 @@ pub struct Record {
     #[arg(long)]
     #[serde(default)]
     pub merge: bool,
-    /// ID of an active explicit memory with the same scope that the user stated again; records the restatement instead of a new memory.
+    /// ID of an active explicit memory with the same scope that the user stated again, or, with source observed, of an observation seen again in another conversation; records the restatement instead of a new memory.
     #[arg(long)]
     #[serde(default)]
     pub confirms: Option<MemoryRef>,
@@ -604,25 +604,34 @@ fn reported(candidate: &Candidate, m: &Memory) -> Value {
     reported
 }
 
-/// Records the user's restatement of an existing explicit memory: adds this
-/// conversation to it instead of storing a copy. Valid for any active explicit
-/// memory in the same scope, whether or not it was reported as similar, so the
-/// outcome does not depend on the embedder being reachable on this call.
+/// Why a record cannot confirm: only the user's word or an agent's
+/// observation is said or seen again; an inference cites its support.
+const CONFIRM_SOURCE: &str = "Only an explicit or observed record can confirm a memory";
+
+/// Why a `confirms` names a memory this record cannot confirm.
+const CONFIRM_TARGET: &str = "confirms must name an active explicit memory, or an observed memory when the record is observed, with the same scope and project; to make an observation the user's own statement, call update on it with user_confirmed";
+
+/// Records a memory said or seen again: adds this conversation to it
+/// instead of storing a copy. The user's restatement confirms an active
+/// explicit memory; an agent's observation confirms an observation, its
+/// evidence kept with the confirmation in the history, and the memory stays
+/// an observation. Both need the same
+/// scope and project, and hold whether or not the memory was reported as
+/// similar, so the outcome does not depend on the embedder being reachable
+/// on this call.
 fn confirm(conn: &Connection, input: &Record, target: Uuid) -> Result<Value> {
-    if input.source != Source::Explicit {
-        return refused("Only the user's explicit statement can confirm a memory");
+    if input.source == Source::Inferred {
+        return refused(CONFIRM_SOURCE);
     }
-    let usable = get(conn, target)?.is_some_and(|m| {
-        m.source == "explicit"
+    let source = input.source.name();
+    let Some(memory) = get(conn, target)?.filter(|m| {
+        m.source == source
             && matches!(m.status.as_str(), "confirmed" | "tentative")
             && m.scope == input.scope.name()
             && m.project == input.project
-    });
-    if !usable {
-        return refused(
-            "confirms must name an active explicit memory with the same scope and project; to make an observation the user's own statement, call update on it with user_confirmed",
-        );
-    }
+    }) else {
+        return refused(CONFIRM_TARGET);
+    };
     // A confirmation in the same second as the last changes nothing, and
     // still counts in the history.
     history::note(conn, Some("confirm"), Some(target), &input.origin)?;
@@ -631,8 +640,14 @@ fn confirm(conn: &Connection, input: &Record, target: Uuid) -> Result<Value> {
         "UPDATE memories SET last_confirmed_at=CURRENT_TIMESTAMP WHERE id=?1",
         [target.to_string()],
     )?;
+    if input.source == Source::Observed {
+        history::add_observation(conn, target, &input.origin, &input.evidence)?;
+    }
     let confirmations = get(conn, target)?.map_or(0, |m| m.confirmations);
-    Ok(json!({"stored":true,"id":target,"confirmed":true,"confirmations":confirmations}))
+    // "confirmed" says this statement or sighting was recorded; the status
+    // says what the memory is, so an observation isn't read as a rule.
+    Ok(json!({"stored":true,"id":target,"confirmed":true,
+        "confirmations":confirmations,"status":memory.status}))
 }
 
 /// Records that `origin` (if any) stated memory `id`.
