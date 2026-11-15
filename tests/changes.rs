@@ -374,6 +374,19 @@ fn run(s: &Store) {
     });
 }
 
+fn reconcile(s: &Store) {
+    s.record("Use Helix", &[]);
+    // A matching marker: session start reads and writes nothing.
+    s.expect("a session start", false, || {
+        let out = s
+            .command(&["session-start"])
+            .current_dir(s.root.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+    });
+}
+
 type Case = fn(&Store);
 
 /// Every function in src/ that opens a write on the store, with its case.
@@ -391,6 +404,7 @@ const PATHS: &[(&str, Case)] = &[
     ("transfer::import", import),
     ("rekey::move_project", move_project),
     ("migrate::run", run),
+    ("changes::reconcile", reconcile),
 ];
 
 /// The calls that open a write on the store: a write transaction on one
@@ -589,4 +603,31 @@ fn a_restored_store_is_read_whole_after_its_next_write() {
             "{first:?}"
         );
     }
+}
+
+// A marker that missed a change, as after a crash between a commit and its
+// marker, is set right at the next session start: the store takes a new id,
+// so the sessions running on it read it whole at their next prompt. A
+// matching marker is left as it is, and the store unwritten.
+#[test]
+fn session_start_sets_right_a_marker_that_missed_a_change() {
+    let store = Store::new();
+    store.record("Use Helix", &[]);
+    let (id, last) = store.state();
+    let start = |store: &Store| {
+        let out = store
+            .command(&["session-start"])
+            .current_dir(store.root.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+    };
+    start(&store);
+    assert_eq!(store.state(), (id.clone(), last), "a matching marker");
+    fs::write(store.marker_path(), format!("{id} {}\n", last - 1)).unwrap();
+    start(&store);
+    let (renewed, now) = store.state();
+    assert_ne!(renewed, id, "a new id");
+    assert_eq!(now, last);
+    assert_eq!(store.marker(), Some(format!("{renewed} {now}\n")));
 }

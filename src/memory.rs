@@ -13,7 +13,7 @@ use uuid::Uuid;
 pub mod backups;
 mod calibration;
 mod changes;
-pub use changes::marked;
+pub use changes::{marked, reconcile};
 pub mod embedding;
 mod history;
 mod ids;
