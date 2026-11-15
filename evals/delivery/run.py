@@ -394,6 +394,8 @@ def main():
     parser.add_argument("--cost", action="store_true", help="time one lookup on the largest size")
     parser.add_argument("--check-cost", action="store_true", help="fail when the lookup's median is over its limit")
     parser.add_argument("--credit", type=float, help="credit for terms only other passages hold")
+    parser.add_argument("--subcommand", choices=["every", "first", "noted", "after-flag"],
+                        help="which word argument of a command names its subcommand")
     parser.add_argument("--bars", action="append",
                         help="PUSH,FAILURE,HOLD[,anchor][,scale=NAME] to report at instead of the matcher's; "
                              "NAME is what the bars test (score, holders, root, share, mixed, mixed_log, flat); repeatable")
@@ -407,7 +409,7 @@ def main():
     args = parser.parse_args()
     found = binaries(not args.debug)
     sizes = [int(s) for s in args.sizes.split(",")]
-    tuning = {"credit": args.credit}
+    tuning = {"credit": args.credit, "subcommand": args.subcommand}
     if args.cost or args.check_cost:
         worst = cost(found, REPORT_SEEDS[0], max(sizes), args.keep)
         if args.check_cost and worst > LOOKUP_LIMIT_MS:
