@@ -346,8 +346,9 @@ fn own_folder(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir())
 }
 
-/// Session snapshots, the rules each store last showed, instruction-file
-/// write records and anything else in user-memory's state folder.
+/// Session snapshots, the delivery index, the rules each store last showed,
+/// instruction-file write records and anything else in user-memory's state
+/// folder.
 fn state_folder(report: &mut Report) -> Result<()> {
     let Some(folder) = paths::state_dir() else {
         return Ok(());
@@ -358,7 +359,7 @@ fn state_folder(report: &mut Report) -> Result<()> {
                 .with_context(|| format!("Cannot remove {}", folder.display()))?;
         }
         report.removed(format!(
-            "session snapshots, rules last shown and write records ({})",
+            "session snapshots, the delivery index, rules last shown and write records ({})",
             folder.display()
         ));
     }

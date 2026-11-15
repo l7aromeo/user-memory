@@ -229,6 +229,13 @@ pub(super) fn save(path: &Path, snapshot: &Snapshot, landing: &Landing) -> io::R
         let _ = fs::remove_file(&temporary);
     }
     written?;
+    // A copy of the scope for the tool hooks, written at every save, so it
+    // is as old as the snapshot; a save cut off before it leaves the last
+    // one, which the next save puts right.
+    if let Some(projects) = &snapshot.projects {
+        let keys: Vec<String> = projects.iter().map(|p| p.key.clone()).collect();
+        let _ = save_scope(&scope_path(path), &keys);
+    }
     remove_old(dir, SystemTime::now());
     Ok(())
 }
@@ -241,6 +248,51 @@ const MISSED: &str = "missed";
 /// without memory and has not had the index since.
 pub(super) fn missed_path(snapshot: &Path) -> PathBuf {
     snapshot.with_extension(MISSED)
+}
+
+/// The extension of the file beside a session's snapshot that holds the
+/// session's scope: its project keys, one per line, which its tool hooks
+/// read to find the scope's delivery index without reading the snapshot.
+const SCOPE: &str = "scope";
+
+/// The scope file of the session whose snapshot is at `snapshot`.
+pub(super) fn scope_path(snapshot: &Path) -> PathBuf {
+    snapshot.with_extension(SCOPE)
+}
+
+/// Writes `projects` to the scope file at `path`, whole.
+pub(super) fn save_scope(path: &Path, projects: &[String]) -> io::Result<()> {
+    let dir = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    private::create_dir(dir)?;
+    let name = path
+        .file_name()
+        .ok_or(io::ErrorKind::InvalidInput)?
+        .to_string_lossy();
+    let temporary = dir.join(format!(".{name}.{}{TEMPORARY}", std::process::id()));
+    let written = private::create_file(
+        fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true),
+        &temporary,
+    )
+    .and_then(|mut file| io::Write::write_all(&mut file, projects.join("\n").as_bytes()))
+    .and_then(|()| fs::rename(&temporary, path));
+    if written.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    written
+}
+
+/// The project keys in the scope file at `path`; none when it is missing.
+pub(super) fn load_scope(path: &Path) -> Option<Vec<String>> {
+    let text = fs::read_to_string(path).ok()?;
+    Some(
+        text.lines()
+            .filter(|l| !l.is_empty())
+            .map(str::to_owned)
+            .collect(),
+    )
 }
 
 /// Marks at `path` that a session's start has not read memory (an empty
@@ -264,23 +316,10 @@ const HOLD_SNAPSHOT: &str = "USER_MEMORY_HOLD_SNAPSHOT";
 #[cfg(debug_assertions)]
 pub(crate) const HOLD_ABANDON: &str = "USER_MEMORY_HOLD_ABANDON";
 
-/// In debug builds, waits here while the file the environment variable `var`
-/// names exists, after creating that name with `.reached` added, so a test
-/// can order a save against its hook.
 #[cfg(debug_assertions)]
-pub(super) fn hold_for_tests(var: &str) {
-    let Some(hold) = std::env::var_os(var) else {
-        return;
-    };
-    let mut reached = hold.clone();
-    reached.push(".reached");
-    let _ = fs::write(&reached, "");
-    while Path::new(&hold).exists() {
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
+pub(super) use crate::memory::hold_for_tests;
 
-/// Removes the snapshots and [`MISSED`] marks in `dir` last written over
+/// Removes the snapshots, [`MISSED`] marks and [`SCOPE`] files in `dir` last written over
 /// [`SNAPSHOT_AGE`] before `now`, and the temporary files of saves cut off
 /// over [`LEFTOVER_AGE`] before it. The rules each store last showed are
 /// left to session start's own clean-up ([`super::seen::update`]), which
@@ -304,7 +343,10 @@ fn remove_old(dir: &Path, now: SystemTime) {
         } else if super::seen::is_seen_file(&name) {
             false
         } else {
-            age > SNAPSHOT_AGE && path.extension().is_some_and(|e| e == "json" || e == MISSED)
+            age > SNAPSHOT_AGE
+                && path
+                    .extension()
+                    .is_some_and(|e| e == "json" || e == MISSED || e == SCOPE)
         };
         if old {
             let _ = fs::remove_file(path);
@@ -597,13 +639,22 @@ mod tests {
         };
         let old = sessions.join("codex-gone.json");
         let recent = sessions.join("codex-recent.json");
+        let old_scope = sessions.join("codex-gone.scope");
+        let recent_scope = sessions.join("codex-recent.scope");
         let other = sessions.join("notes.txt");
         // Temporary files of saves cut off by their hook's limit.
         let leftover = sessions.join(format!(".codex-cut.json.1{TEMPORARY}"));
         let in_flight = sessions.join(format!(".codex-now.json.2{TEMPORARY}"));
         save(&path, &first, &Landing::default()).unwrap();
         assert_eq!(load(&path).as_ref(), Some(&first));
-        for private in [&path, &sessions] {
+        // The save writes the scope's keys beside the snapshot, keys only.
+        let scope = scope_path(&path);
+        assert_eq!(fs::read_to_string(&scope).unwrap(), "github.com/acme/app");
+        assert_eq!(
+            load_scope(&scope),
+            Some(vec!["github.com/acme/app".to_owned()])
+        );
+        for private in [&path, &sessions, &scope] {
             assert!(
                 private::is_private(private).unwrap(),
                 "{}",
@@ -621,6 +672,8 @@ mod tests {
         for (file, age) in [
             (&old, DAY * 31),
             (&recent, DAY * 29),
+            (&old_scope, DAY * 31),
+            (&recent_scope, DAY * 29),
             (&other, DAY * 31),
             (&leftover, LEFTOVER_AGE * 2),
             (&in_flight, Duration::ZERO),
@@ -645,9 +698,14 @@ mod tests {
         assert!(other.exists(), "only snapshots are removed");
         assert!(!leftover.exists(), "a cut-off save's file is removed");
         assert!(in_flight.exists(), "a save under way keeps its file");
+        assert!(
+            !old_scope.exists(),
+            "a scope file goes with its snapshot's age"
+        );
+        assert!(recent_scope.exists());
         assert_eq!(
             fs::read_dir(&sessions).unwrap().count(),
-            4,
+            6,
             "no temporary file of this save left"
         );
     }

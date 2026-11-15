@@ -3694,6 +3694,13 @@ fn installed() -> (Sandbox, Vec<(std::path::PathBuf, String)>) {
     let snapshots = s.path("home/.local/state/user-memory/sessions");
     fs::create_dir_all(&snapshots).unwrap();
     fs::write(snapshots.join("claude-x.json"), "{}").unwrap();
+    let delivery = s.path("home/.local/state/user-memory/delivery");
+    fs::create_dir_all(&delivery).unwrap();
+    fs::write(
+        delivery.join("0123456789abcdef-fedcba9876543210.index"),
+        "x",
+    )
+    .unwrap();
     (s, own)
 }
 
@@ -3718,6 +3725,7 @@ fn uninstall_removes_only_what_setup_installed_and_keeps_the_users_content() {
         "home/.agents/skills/user-memory",
         "home/skills/user-memory",
         "home/.local/state/user-memory",
+        "home/.local/state/user-memory/delivery",
         "installed tools/.user-memory.json",
         "private memory.sqlite3",
         "private memory.sqlite3.v3-20261017T000000Z.bak",

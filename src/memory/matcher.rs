@@ -15,10 +15,10 @@
 //! compiles it through a `#[path]` mirror of `src/memory`: use only std,
 //! rusqlite and the mirrored modules here.
 
-use super::delivery::{DeliveryIndex, Error, POSTING_BYTES, Row, key, u32_at};
+use super::delivery::{DeliveryIndex, Error, POSTING_BYTES, Row, prefix, u32_at};
 use crate::memory::index::{
     passages::{self, CONTEXT_SLOT},
-    stems::{Field, Stems},
+    stems::{Field, Stems, token},
     weights::{ANCHOR_WEIGHT, rarity, weight},
 };
 use rusqlite::Connection;
@@ -349,6 +349,13 @@ impl Window {
             self.actions.pop_front();
         }
     }
+}
+
+/// How the index keys a term: a stem or an anchor, as its hex token.
+pub(in crate::memory) fn key(anchor: bool, term: &str) -> Vec<u8> {
+    let mut key = vec![prefix(anchor)];
+    key.extend(token(term).into_bytes());
+    key
 }
 
 /// What the window holds of one term.

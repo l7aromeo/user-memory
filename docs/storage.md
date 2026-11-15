@@ -319,7 +319,10 @@ on Windows), each private to you:
   no store and is never read; that session's next prompt starts a new one
   quietly, and the old file goes with the 30-day clean-up. A session whose
   start could not read memory has a `.missed` file beside its snapshot
-  until a prompt gives it the index. `seen-<store key>.json` holds, per
+  until a prompt gives it the index. A `.scope` file beside each snapshot
+  repeats the session's project keys, one per line, written with every
+  snapshot, so the tool hooks find the session's delivery index without
+  reading the snapshot. `seen-<store key>.json` holds, per
   store, the ids and fingerprints of the rules session start last listed,
   and the ids of the memories agents had recorded when you were last told,
   by project key: no memory text or origin. Session start compares against
@@ -328,6 +331,17 @@ on Windows), each private to you:
   Both go after a year unused: every session start of the store marks them
   used. Deleting them loses nothing: the next
   session start writes them again and lists nothing that time.
+- `delivery/`: the delivery index of each store and scope sessions worked
+  in on this machine: `<store key>-<scope key>.index`, a copy of the
+  keyword index's rows for the global memories and the scope's projects
+  (every word's stem in hex and every literal anchor, with each passage's
+  place, no sentence), built at session start; `<store key>-<scope
+  key>.overlay`, the memories changed since, which the tool hooks keep
+  current; `<store key>.lock`, which every writer of the store's files
+  holds; and at times `<store key>.void`, naming files to take as absent. A
+  file not written for a day goes at that store's next session start.
+  Deleting the folder loses nothing: the next session start builds it
+  again.
 - `servers/`: for each memory server this machine is a client of, the
   server's position as its connector last found it (`<key>.changed`, the
   key a hash of the server's address), when a hook last ran
@@ -341,6 +355,6 @@ on Windows), each private to you:
   nobody has saved the file since
   ([instruction files](clients.md#instruction-files)).
 
-Both are only working state. Deleting the folder loses no memory; the next
+All are only working state. Deleting the folder loses no memory; the next
 session start takes a new snapshot, and the next write waits for the file
 to go quiet. Uninstall removes the folder.

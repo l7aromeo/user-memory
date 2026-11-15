@@ -2576,6 +2576,7 @@ fn uninstall_sh_removes_a_native_install_and_keeps_the_memories() {
     let releases = Releases::start();
     let c = native_install(&releases);
     fs::create_dir_all(c.path(".local/state/user-memory/sessions")).unwrap();
+    fs::create_dir_all(c.path(".local/state/user-memory/delivery")).unwrap();
     let out = c.uninstall(c.home.path(), &[]);
     let (stdout, stderr) = text(&out);
     assert!(out.status.success(), "{stdout}\n{stderr}");
