@@ -511,7 +511,9 @@ fn review_with(
                 .into_iter()
                 .map(|i| {
                     let m = &memories[i];
-                    json!({"id":m.id,"title":m.title,"content":m.content,"type":m.memory_type,"category":m.category,"scope":m.scope,"project":m.project,"status":m.status,"source":m.source,"confirmations":m.confirmations})
+                    let mut member = json!({"id":m.id,"title":m.title,"content":m.content,"type":m.memory_type,"category":m.category,"scope":m.scope,"project":m.project,"status":m.status,"source":m.source,"confirmations":m.confirmations});
+                    super::note_tentative(&mut member);
+                    member
                 })
                 .collect();
             let mut group = json!({"kind":kind.name(),"reason":kind.reason(),"members":members});

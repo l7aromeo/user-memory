@@ -102,6 +102,20 @@ impl Scope {
     }
 }
 
+/// What a tentative memory is and what to do with it, given beside its full
+/// text: an agent reading only the content can take an observation for the
+/// user's rule. It is context until the user says otherwise.
+const TENTATIVE_NOTE: &str = "An agent's observation or inference, not the user's rule: don't apply it unasked; you may mention it or ask the user, and only their word makes it a rule.";
+
+/// Adds [`TENTATIVE_NOTE`] as `note` to a memory in a reply when it is tentative.
+fn note_tentative(memory: &mut serde_json::Value) {
+    if memory.get("status").and_then(serde_json::Value::as_str) == Some("tentative")
+        && let Some(fields) = memory.as_object_mut()
+    {
+        fields.insert("note".into(), TENTATIVE_NOTE.into());
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct Memory {
     pub id: Uuid,
