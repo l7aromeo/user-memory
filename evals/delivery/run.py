@@ -15,7 +15,6 @@ reports precision and recall of what the bars deliver
     just delivery-bench --sizes 50            # one size (CI)
     just delivery-bench --sweep               # bars and window on the tuning seeds
     just delivery-bench --cost                # one lookup's time, 10,000 memories
-    just delivery-bench --credit 0.25         # other passages' credit
     just delivery-bench --failure-curve 0.2,0.3,0.4,0.6  # failure-only pushes by bar
 """
 
@@ -44,18 +43,15 @@ SIZES = [50, 1_000, 10_000]
 TUNING_SEEDS = [1, 2, 3]
 REPORT_SEEDS = [11, 12, 13]
 # What the bars test, and the bars a sweep tries on each: the store's
-# score, which grows with the store's size at a fixed number of holders;
-# and quantities free of it (`Matched::holders` in
-# src/memory/delivery.rs). Each grid spans its quantity's deciles on the
-# tuning seeds, with the picked bar inside it, not at an end.
+# score, which orders the matches and grows with the store's size; and the
+# two size-free quantities the matcher's bars test (`Matched::share` and
+# `Matched::mixed` in src/memory/delivery.rs). Each grid spans its
+# quantity's deciles on the tuning seeds, with the picked bar inside it,
+# not at an end.
 SCALES = {
     "score": [0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0],
-    "holders": [0.2, 0.25, 0.3, 0.35, 0.4, 0.5, 0.6, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0],
-    "root": [0.5, 0.6, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 6.0],
     "share": [0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.75, 1.0, 1.25],
     "mixed": [0.2, 0.25, 0.3, 0.35, 0.4, 0.5, 0.6, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0],
-    "mixed_log": [0.2, 0.25, 0.3, 0.35, 0.4, 0.5, 0.6, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0],
-    "flat": [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0],
 }
 # The window settings a sweep tries.
 WINDOWS = [10, 30]
@@ -413,10 +409,9 @@ def main():
     parser.add_argument("--sweep", action="store_true", help="sweep bars and window on the tuning seeds")
     parser.add_argument("--cost", action="store_true", help="time one lookup on the largest size")
     parser.add_argument("--check-cost", action="store_true", help="fail when the lookup's median is over its limit")
-    parser.add_argument("--credit", type=float, help="credit for terms only other passages hold")
     parser.add_argument("--bars", action="append",
                         help="PUSH,FAILURE,HOLD[,anchor][,scale=NAME] to report at instead of the matcher's; "
-                             "NAME is what the bars test (score, holders, root, share, mixed, mixed_log, flat); repeatable")
+                             "NAME is what the bars test (score, share, mixed); repeatable")
     parser.add_argument("--presence", action="store_true",
                         help="how often session start lists what tasks need (evals/delivery/presence.py)")
     parser.add_argument("--prompt-curve", help="prompt bars, on stems alone, to report prompt pushes at")
@@ -427,7 +422,7 @@ def main():
     args = parser.parse_args()
     found = binaries(not args.debug)
     sizes = [int(s) for s in args.sizes.split(",")]
-    tuning = {"credit": args.credit}
+    tuning = {}
     if args.cost or args.check_cost:
         worst = cost(found, REPORT_SEEDS[0], max(sizes), args.keep)
         if args.check_cost and worst > LOOKUP_LIMIT_MS:
@@ -451,7 +446,7 @@ def main():
                                  f"NAME one of {', '.join(SCALES)}")
             variants.append({"push": float(parts[0]), "failure": float(parts[1]),
                              "hold": float(parts[2]), "anchor": "anchor" in extra, "scale": scale})
-    print(f"delivery matching on seeds {seeds}" + (f"; credit {args.credit}" if args.credit else ""))
+    print(f"delivery matching on seeds {seeds}")
     for size in sizes:
         def present(env, folder, drawn, matched, seed):
             return presence.presence(found["user-memory"], env, folder, drawn, matched, variants[0], seed)
@@ -463,7 +458,7 @@ def main():
         for bars in variants:
             total, by_kind = Counter(), {}
             for drawn, matched, _, _ in runs:
-                if args.credit is None and not args.bars:
+                if not args.bars:
                     check_constants(drawn, matched, bars)
                 c, k = counts(drawn, matched, bars)
                 total.update(c)

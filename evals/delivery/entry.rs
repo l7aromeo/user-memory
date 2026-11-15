@@ -99,12 +99,6 @@ struct TuningArgs {
     /// Actions after which a term's weight halves (WINDOW_HALF_LIFE).
     #[arg(long)]
     half_life: Option<f64>,
-    /// Share of a term only other passages hold (OTHER_PASSAGE_CREDIT).
-    #[arg(long)]
-    credit: Option<f64>,
-    /// Adjacent words of a command are anchors too.
-    #[arg(long)]
-    pairs: bool,
 }
 
 impl TuningArgs {
@@ -113,8 +107,6 @@ impl TuningArgs {
         Tuning {
             window_actions: self.window.unwrap_or(base.window_actions),
             half_life: self.half_life.unwrap_or(base.half_life),
-            credit: self.credit.unwrap_or(base.credit),
-            pairs: self.pairs || base.pairs,
         }
     }
 }
@@ -161,11 +153,7 @@ fn matched(index: &DeliveryIndex, m: &Matched) -> Result<Value, String> {
         "start": m.start,
         "length": m.length,
         "score": (m.score * 1e4).round() / 1e4,
-        "holders": (m.holders * 1e4).round() / 1e4,
-        "root": (m.root * 1e4).round() / 1e4,
         "mixed": (m.mixed * 1e4).round() / 1e4,
-        "mixed_log": (m.mixed_log * 1e4).round() / 1e4,
-        "flat": (m.flat * 1e4).round() / 1e4,
         "share": (m.share * 1e4).round() / 1e4,
         "fewest": m.fewest,
         "fired": m.fired,
