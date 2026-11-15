@@ -338,9 +338,10 @@ async fn told(before: &live::Snapshot, now: &live::Snapshot) -> Option<String> {
         BTreeSet::new()
     } else {
         let remote = setup::configured_remote().ok()?;
-        stamps(remote.as_ref(), &gone, None)
+        stamps(remote.as_ref(), &gone, None, None)
             .await
             .ok()?
+            .stamps
             .into_keys()
             .collect()
     };
@@ -369,9 +370,38 @@ async fn snapshot(
         &folder,
     );
     let keys: Vec<String> = projects.iter().map(|p| p.key.clone()).collect();
+    // A snapshot of the same projects asks only for what changed since.
+    let since = before
+        .filter(|b| {
+            b.projects
+                .as_deref()
+                .is_some_and(|was| was.iter().map(|p| &p.key).eq(keys.iter()))
+        })
+        .and_then(|b| b.changes.clone());
+    let reply = stamps(remote.as_ref(), &keys, origin.as_deref(), since).await?;
+    // Says, in debug builds, what the hook read, so tests can tell a read
+    // of the changed memories from a read of every one.
+    #[cfg(debug_assertions)]
+    eprintln!(
+        "user-memory: read {} stamps ({})",
+        reply.stamps.len() + reply.gone.len(),
+        if reply.delta { "changed" } else { "every" }
+    );
+    let stamps = match (reply.delta, before) {
+        (true, Some(before)) => {
+            let mut stamps = before.stamps.clone();
+            for id in &reply.gone {
+                stamps.remove(id);
+            }
+            stamps.extend(reply.stamps);
+            stamps
+        }
+        _ => reply.stamps,
+    };
     Ok(live::Snapshot {
-        stamps: stamps(remote.as_ref(), &keys, origin.as_deref()).await?,
+        stamps,
         projects: Some(projects),
+        changes: reply.since,
     })
 }
 
@@ -382,11 +412,13 @@ async fn stamps(
     remote: Option<&crate::remote::Connection>,
     projects: &[String],
     origin: Option<&str>,
-) -> anyhow::Result<memory::Stamps> {
+    since: Option<memory::Since>,
+) -> anyhow::Result<memory::StampsReply> {
     let input = json!({
         "projects": projects,
         "origin_links": origin,
         "stamps": true,
+        "stamps_since": since.unwrap_or_default(),
     });
     let reply = match remote {
         Some(connection) => connection.call("index", input).await?,
@@ -396,7 +428,7 @@ async fn stamps(
             tokio::task::spawn_blocking(move || memory::index(&db, &input)).await??
         }
     };
-    memory::parse_stamps(&reply).context("The memory server sent no stamps; update it")
+    memory::parse_stamps_reply(&reply).context("The memory server sent no stamps; update it")
 }
 
 /// The lines naming the projects the session in `path` sees, then the index

@@ -49,6 +49,11 @@ pub struct Index {
     #[serde(default)]
     #[schemars(skip)]
     pub stamps: bool,
+    /// Used by user-memory's own session hook with stamps; leave unset. Where the session's snapshot stands in the store's count of changes, so the reply lists only what changed since and says where the store stands. An older server ignores it and lists every memory as before.
+    #[arg(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    pub stamps_since: Option<super::stamps::Since>,
     /// Used by user-memory's own client to add the projects this conversation origin linked; leave unset.
     #[arg(skip)]
     #[serde(default)]
@@ -153,7 +158,10 @@ pub fn index(db: &Path, input: &Index) -> Result<String> {
     }
     let filter = selection.filter()?;
     if input.stamps {
-        return super::stamps::stamps(&conn, &filter);
+        return match &input.stamps_since {
+            Some(since) => super::stamps::stamps_since(&conn, &filter, since),
+            None => super::stamps::stamps(&conn, &filter),
+        };
     }
     match input.fit_room {
         Some(room) => fitted(&conn, input, &selection, &filter, room),

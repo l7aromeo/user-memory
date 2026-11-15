@@ -79,6 +79,16 @@ pub(super) fn counted() -> impl Iterator<Item = &'static str> {
         .map(|(name, _)| *name)
 }
 
+/// An SQL expression over a row of `memories` that changes exactly when a
+/// counted column does: each quoted, so a null differs from any text,
+/// joined by a unit separator. A stamp's digest is its hash.
+pub(super) fn digested() -> String {
+    counted()
+        .map(|column| format!("quote({column})"))
+        .collect::<Vec<_>>()
+        .join("||char(31)||")
+}
+
 /// The tables, index and triggers of the counter, safe to run on every open:
 /// each is created only where missing. The row of `store_changes` is not
 /// here, since an insert takes a write lock even when it adds nothing; a
