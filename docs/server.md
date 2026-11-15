@@ -1,6 +1,6 @@
 # Running the server
 
-The memory server holds your memories and the access token. Agents reach it
+The memory server holds your memories and the access tokens. Agents reach it
 through the `user-memory` client on each machine. You can run it in three
 ways:
 
@@ -13,7 +13,7 @@ ways:
 - [Docker on this machine](#docker-on-this-machine)
 - [Native on this machine](#native-on-this-machine)
 - [A shared server behind HTTPS](#a-shared-server-behind-https)
-- [The access token](#the-access-token)
+- [Access tokens](#access-tokens)
 - [Semantic search](#semantic-search)
 - [Upgrade](#upgrade)
 - [Back up and restore](#back-up-and-restore)
@@ -184,9 +184,10 @@ other than the host connect only through the proxy.
    curl -s -o /dev/null -w '%{http_code}\n' -X POST https://memory.example.com/mcp
    ```
 
-4. On every other machine, save a copy of the host's access token
-   ([the access token](#the-access-token)) in a file only you can read, and
-   install the client with it:
+4. Give every other machine its own token
+   ([access tokens](#access-tokens)): on the host, run
+   `user-memory host token add NAME --out FILE`, copy the file to that
+   machine over a private channel, and install the client there with it:
 
    ```bash
    curl -fsSL https://github.com/l7aromeo/user-memory/releases/latest/download/install.sh | sh -s -- --url https://memory.example.com --token-file /path/to/token
@@ -194,32 +195,96 @@ other than the host connect only through the proxy.
 
    Then run `user-memory doctor` there.
 
-## The access token
+## Access tokens
 
-Anyone with the token can read and change your memories. Treat it like a
-password.
+Anyone with a token that can write can read and change your memories. Treat
+each token like a password: an agent names a token file by its path and
+never opens it.
 
-- The server creates it on first start and never prints it.
-- Each client keeps its copy in `~/.config/user-memory/client-token`,
-  readable only by you.
-- The installer reads it from `--token-file`, or asks for it with hidden
-  input.
+Each machine gets its own token from the server, so you can see when it was
+last used and revoke it alone. The server's shared token file, which the
+installer gives the machine it runs on, keeps working until you
+[retire it](#retire-the-shared-token-file).
 
-To copy the token of the installer's Docker server into a file without
-showing it:
+### Give a machine its own token
+
+On the machine that runs the server:
 
 ```bash
-mkdir -p -m 700 ~/.config/user-memory
-(umask 077; docker compose -f ~/.local/share/user-memory/docker/compose.yaml cp memory:/data/access-token ~/.config/user-memory/client-token)
+user-memory host token add laptop --out laptop.token
 ```
 
-For a server on another host, run that `docker compose cp` there, or copy
-the file over SSH without showing it:
-`(umask 077; ssh <host> 'docker exec <container> cat /data/access-token' > ~/.config/user-memory/client-token)`.
+This writes a new token for `laptop` to `laptop.token`, readable only by
+you; `add` never replaces a file. Copy the file to that machine over a
+private channel, such as `scp` or a password manager, and install there with
+it:
 
-To change the token: delete the server's token file (`/data/access-token` in
-Docker), restart the server so it creates a new one, then run the installer
-again on every machine with the new token.
+```bash
+curl -fsSL https://github.com/l7aromeo/user-memory/releases/latest/download/install.sh | sh -s -- --url https://memory.example.com --token-file /path/to/laptop.token
+```
+
+| Option | Effect |
+|---|---|
+| `--read-only` | The token reads and searches memories, and the session hooks work, but nothing changes a memory: the server refuses `record`, `update`, `forget`, `import`, `review` with `keep`, and `export` with `overwrite`. |
+| `--expires DAYS` | The token stops working after DAYS days. |
+
+Every token also stops working after 90 days unused. Without `--out`, `add`
+shows the token only on a terminal. On the machine of the installer's
+Docker server, `host token` runs in its container; for a native server,
+give `--db` with the server's store.
+
+### See and revoke tokens
+
+```bash
+user-memory host token list
+```
+
+```bash
+user-memory host token revoke laptop
+```
+
+`list` shows each token's name, scope, creation, last use (to the hour) and
+expiry. The server refuses a revoked or expired token from its next request,
+without a restart, and that machine tells its user why and what to do:
+ask the server's operator for a new token file and run the installer with
+it. A machine that leaves the server can revoke its own token with
+`DELETE /auth/token`.
+
+### Retire the shared token file
+
+The shared token file (`/data/access-token` in Docker) lets in anyone who
+holds it until it is retired. Once every machine has its own token:
+
+```bash
+user-memory host token retire-shared
+```
+
+On the installer's Docker server, this first gives this machine's client its
+own token, `docker-host`; if the server's healthcheck still reads the shared
+file, run the installer again first, as the command says. For a native
+server, give the file and the store:
+`user-memory host token retire-shared --token-file /path/to/access-token --db /path/to/memories.sqlite3`.
+It refuses while no client token can write, so the shared file is never the
+last way in.
+
+The server refuses the shared token from its next request, and the file gets
+a new value that no machine holds. If the command stops partway, run it
+again; it finishes from where it stopped. Until it has finished, a server
+rolled back to a release without client tokens would still accept the old
+shared token.
+
+### Where tokens are kept
+
+The server keeps each token's SHA-256, never the token, in
+`accounts.sqlite3` beside the store, which the first `add` creates. Neither
+automatic backups nor exports include it: after restoring a server
+elsewhere, issue its machines new tokens. A damaged registry stops the
+server answering until it is moved aside
+([troubleshooting](troubleshooting.md)).
+
+To change the shared token: delete the server's token file
+(`/data/access-token` in Docker), restart the server so it creates a new one,
+then run the installer again on every machine that uses it.
 
 ## Semantic search
 
