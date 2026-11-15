@@ -73,6 +73,10 @@ const TEST_TRACE: &str = "USER_MEMORY_TEST_TRACE";
 /// (docs/dev/development.md); the next start runs. After an `exec` there is
 /// no old process to fall back to, so only a check that ran counts.
 const KILLED_CHECKS: u32 = 3;
+/// How a hand-over state file's name starts and ends:
+/// `handover-<pid>-<nanoseconds>.json`.
+const STATE_PREFIX: &str = "handover-";
+const STATE_SUFFIX: &str = ".json";
 /// The `_meta` key that names a 2026-07-28 request's protocol version
 /// (specification 2026-07-28, basic/index, "`_meta`"; server/discover).
 const META_PROTOCOL: &str = "io.modelcontextprotocol/protocolVersion";
@@ -467,7 +471,10 @@ fn write_state(session: &Session, pending: &[u8]) -> Result<PathBuf> {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.subsec_nanos());
-    let path = dir.join(format!("handover-{}-{nanos}.json", std::process::id()));
+    let path = dir.join(format!(
+        "{STATE_PREFIX}{}-{nanos}{STATE_SUFFIX}",
+        std::process::id()
+    ));
     let mut file =
         crate::private::create_file(fs::OpenOptions::new().write(true).create_new(true), &path)
             .with_context(|| format!("Cannot create {}", path.display()))?;
@@ -488,7 +495,15 @@ fn write_state(session: &Session, pending: &[u8]) -> Result<PathBuf> {
 /// read from the state file [`ENV`] names, which is deleted. `None` for a
 /// new session.
 fn take_session() -> Option<(Session, Vec<u8>)> {
-    let path = env::var_os(ENV)?;
+    let path = PathBuf::from(env::var_os(ENV)?);
+    if !is_state_file(&path) {
+        // Never read or delete a file the hand-over didn't write.
+        eprintln!(
+            "user-memory: {} is not a hand-over file in user-memory's state folder; serving this session as a new one",
+            path.display()
+        );
+        return None;
+    }
     let read = fs::read(&path);
     let _ = fs::remove_file(&path);
     let parsed = read.map_err(|err| err.to_string()).and_then(|bytes| {
@@ -513,6 +528,27 @@ fn take_session() -> Option<(Session, Vec<u8>)> {
             None
         }
     }
+}
+
+/// Whether `path` is a hand-over state file: a plain file in this user's
+/// state folder, named as [`write_state`] names one.
+fn is_state_file(path: &Path) -> bool {
+    let named = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix(STATE_PREFIX)?.strip_suffix(STATE_SUFFIX))
+        .is_some_and(|ids| {
+            let mut parts = ids.split('-');
+            let number = |part: Option<&str>| {
+                part.is_some_and(|part| {
+                    !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit())
+                })
+            };
+            number(parts.next()) && number(parts.next()) && parts.next().is_none()
+        });
+    named
+        && crate::paths::state_dir().is_some_and(|dir| path.parent() == Some(dir.as_path()))
+        && fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_file())
 }
 
 /// Whether this platform hands over by relaying: Windows, which has no

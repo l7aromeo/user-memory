@@ -1040,3 +1040,34 @@ fn a_cancelled_call_does_not_hold_a_hand_over_back() {
         );
     }
 }
+
+/// `serve` takes a hand-over only from its own state files: a file
+/// elsewhere, or of another name in the state folder, is neither read nor
+/// deleted, and the session starts as a new one.
+#[test]
+fn a_hand_over_names_only_its_own_state_files() {
+    let place = Place::new();
+    let state = sandbox::folder(place.dir.path(), "state");
+    fs::create_dir_all(&state).unwrap();
+    for (case, file) in [
+        ("elsewhere", place.dir.path().join("handover-1-1.json")),
+        ("another name", state.join("notes.json")),
+    ] {
+        fs::write(&file, "not a session\n").unwrap();
+        let mut session = place.serve(
+            Way::Exec,
+            &[("USER_MEMORY_HANDOVER", file.to_str().unwrap())],
+        );
+        let reply = session.call("call", "index");
+        assert_eq!(reply["result"]["isError"], false, "{case}: {reply}");
+        let stderr = session.close();
+        assert!(file.exists(), "{case}: the file was deleted");
+        assert!(
+            stderr.contains(&format!(
+                "user-memory: {} is not a hand-over file in user-memory's state folder; serving this session as a new one",
+                file.display()
+            )),
+            "{case}: {stderr}"
+        );
+    }
+}
