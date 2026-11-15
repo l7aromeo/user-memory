@@ -428,9 +428,15 @@ fn retire_shared(registry_path: &Path, file: &Path) -> Result<()> {
         Some(conn) if registry::has_writer(&conn, registry::now())? => conn,
         _ => bail!(NO_WRITER),
     };
-    let current = fs::read_to_string(file)
-        .with_context(|| format!("Cannot read the shared token file {}", file.display()))?;
-    let current = registry::hash(current.trim());
+    // Only a file holding one token is replaced: any other file given by
+    // mistake is refused before anything is written.
+    let current = super::read_token(file).map_err(|err| {
+        anyhow::anyhow!(
+            "{} is not a token file ({err:#}), so it was left unchanged; give the shared token file that `host --token-file` names.",
+            file.display()
+        )
+    })?;
+    let current = registry::hash(&current);
     if registry::tokens(&conn)?
         .iter()
         .any(|token| token.hash == current)
