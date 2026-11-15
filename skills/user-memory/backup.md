@@ -36,6 +36,7 @@ Restore or import:
    - `will_stale`: patterns that will go stale because a memory they cite changes.
    - `similar_to_existing`: new memories that resemble existing ones.
    - With filters (the same fields as `read`): `selected` and `skipped`; `file_selection` when the file is itself a filtered export.
+   - `source_note`: the file was written by a different store than this one; say so before the user approves, since importing adds its memories here.
    - `dropped_distinct_pairs` and `skipped.unsupported_inferences`: pairs and patterns left out because a memory they need is neither in the import nor in the store. A superseded memory whose replacement is missing is imported with its link, and counted.
 3. Warn that restoring an older backup brings back memories the user has forgotten since it was made.
    A backup from before titles existed (export format version 1) imports only with a title for each memory the store does not already hold (those keep their titles), and the preview lists the ids without one. Ask the user to run `user-memory import FILE` on the command line, which lists each with its content; propose a title for each as "Titles for the upgrade" in [upgrade.md](upgrade.md) describes, get the user's approval, and pass the approved map as `titles` (CLI: `--titles FILE`).

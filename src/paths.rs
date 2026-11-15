@@ -90,6 +90,16 @@ pub fn same(a: &Path, b: &Path) -> bool {
     equal(OS, &resolved(a), &resolved(b))
 }
 
+/// The identity of the memories behind `server`'s address, or of the local
+/// store at `db` without one: its path spelled the same before the store
+/// file is created as after.
+pub(crate) fn identity(server: Option<&str>, db: &Path) -> String {
+    match server {
+        Some(url) => format!("server {url}"),
+        None => format!("store {}", crate::paths::resolved(db).to_string_lossy()),
+    }
+}
+
 /// One spelling of `path`, the same before and after it is created: its
 /// longest existing ancestor as the file system resolves it (links
 /// followed, long names on Windows), with the rest appended as given.
@@ -226,6 +236,36 @@ mod tests {
 
     use super::*;
     use std::collections::HashMap;
+
+    // Each server, and each local store, names snapshots of its own: two
+    // servers differ, and a server differs from a store at any path.
+    #[test]
+    fn every_store_and_server_has_its_own_identity() {
+        let db = Path::new("/home/u/.local/share/user-memory/memories.sqlite3");
+        let identities: std::collections::BTreeSet<String> = [
+            identity(Some("https://a.example.com/mcp"), db),
+            identity(Some("https://b.example.com/mcp"), db),
+            identity(None, db),
+            identity(None, Path::new("/tmp/dev/memories.sqlite3")),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(identities.len(), 4, "{identities:?}");
+        assert_eq!(
+            identity(Some("https://a.example.com/mcp"), db),
+            "server https://a.example.com/mcp"
+        );
+        assert_eq!(
+            identity(None, db),
+            format!("store {}", crate::paths::resolved(db).to_string_lossy())
+        );
+        // A store named by a bare file name is the one in the current folder.
+        let bare = identity(None, Path::new("memories.sqlite3"));
+        assert!(
+            Path::new(bare.trim_start_matches("store ")).is_absolute(),
+            "{bare}"
+        );
+    }
 
     // A path is spelled the same before its file exists as after: on macOS
     // a temporary folder is reached through a link, /var to /private/var.
