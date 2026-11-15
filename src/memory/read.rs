@@ -6,9 +6,9 @@
 //! by the field that holds it (category, title, type, then the text), adds
 //! the topic's literal anchors a memory holds, and scores a memory by its
 //! best passage, read from the keyword index when it is current and from
-//! every candidate's own text otherwise, with the same result; each hit
-//! carries that passage. With an embedding endpoint
-//! configured it is fused with semantic similarity by reciprocal rank. A
+//! every candidate's own text otherwise, with the same result; the hit of a
+//! memory with more than one passage carries that passage. With an
+//! embedding endpoint configured it is fused with semantic similarity by reciprocal rank. A
 //! project memory's fused score counts [`PROJECT_BONUS`] more, so it wins an
 //! equal match but not a clearly stronger one; without a topic, project
 //! memories come first.
@@ -591,7 +591,10 @@ pub fn search(db: &Path, input: &Search) -> Result<Value> {
     let mut shown = compact(&memories)?;
     for (hit, m) in shown.as_array_mut().into_iter().flatten().zip(&memories) {
         let (text, count) = passage(m, best.get(&m.id).copied().unwrap_or(0));
-        hit["passage"] = json!(text);
+        // A memory of one passage is that passage: its content says it once.
+        if count > 1 {
+            hit["passage"] = json!(text);
+        }
         hit["passages"] = json!(count);
     }
     let mut result = json!({ "memories": shown });

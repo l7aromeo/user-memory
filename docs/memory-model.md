@@ -213,8 +213,8 @@ on the command line) returns them, oldest first:
 ## Passages
 
 Search reads a memory's text in passages, so a long memory is found by the
-part that matters and a hit returns that part as `passage`
-([search](tools.md#search)). Nothing changes in what is recorded; the
+part that matters, and the hit of a memory with more than one passage
+returns that part as `passage` ([search](tools.md#search)). Nothing changes in what is recorded; the
 passages are worked out again whenever the memory is indexed.
 
 - The content is split at list items, lines and sentence ends, never inside
