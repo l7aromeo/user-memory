@@ -1,5 +1,10 @@
 //! How much a matched word or anchor counts: by the field that holds it and
 //! by how rare it is. Keyword search ranks with these.
+//!
+//! Also compiled by the delivery benchmark's binary (`user-memory-bench`,
+//! evals/delivery/entry.rs) through a `#[path]` mirror of `src/memory`:
+//! use only std, rust-stemmers and modules inside that mirror here, or that
+//! binary stops building (docs/dev/development.md).
 
 use super::stems::Field;
 

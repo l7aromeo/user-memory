@@ -5,6 +5,11 @@
 //! place in the text (a byte range), never a copy of it. Its anchors are the
 //! words that only match as written: code spans, paths, identifiers and a
 //! command's name with its subcommand.
+//!
+//! Also compiled by the delivery benchmark's binary (`user-memory-bench`,
+//! evals/delivery/entry.rs) through a `#[path]` mirror of `src/memory`:
+//! use only std, rust-stemmers and modules inside that mirror here, or that
+//! binary stops building (docs/dev/development.md).
 
 use std::{collections::BTreeSet, ops::Range};
 

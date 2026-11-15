@@ -1,5 +1,10 @@
 //! The words keyword search matches: each word of a memory stemmed, as the
 //! keyword index stores them.
+//!
+//! Also compiled by the delivery benchmark's binary (`user-memory-bench`,
+//! evals/delivery/entry.rs) through a `#[path]` mirror of `src/memory`:
+//! use only std, rust-stemmers and modules inside that mirror here, or that
+//! binary stops building (docs/dev/development.md).
 
 use crate::memory::words::{CATEGORY_ALIASES, STOP, tokenize};
 use rust_stemmers::{Algorithm, Stemmer};

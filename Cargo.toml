@@ -15,6 +15,14 @@ path = "tests/fake/cli.rs"
 test = false
 doc = false
 
+# The delivery benchmark's entry into the matcher (evals/delivery/entry.rs),
+# which no shipped command calls yet. Releases build only `--bin
+# user-memory`, so it never ships; its tests run the matcher's unit tests.
+[[bin]]
+name = "user-memory-bench"
+path = "evals/delivery/entry.rs"
+doc = false
+
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
