@@ -615,17 +615,27 @@ target; move what it needs into a mirrored file instead.
 
 For each store size and seed, `evals/delivery/run.py` draws a synthetic
 world from `evals/delivery/world.py`: a project's commands, files and
-components, notes and lessons about them with look-alikes about something
-else, rules, long merged memories, filler from `evals/scale`'s vocabulary,
+components; notes, traps and lessons about them, with look-alikes about
+something else; busy commands with several notes each; rules; a project's
+essentials; long merged memories; filler from `evals/scale`'s vocabulary;
 and whole tasks of five kinds of work, each action with the memories it
-needs then. It writes the memories into a throwaway store, indexes them
-with `user-memory reindex`, builds the delivery index, runs every task
-through `user-memory-bench match` and reports precision and recall by way,
-signal, shape and kind of work, with timing, holds and failures
-(`evals/delivery/metrics.py`). It also says whether each wrong delivery was
-about the action or about something else, and why each missed need was
-missed: its memory holds no anchor, its anchor matched nothing, or it
-matched below the bar:
+needs then. A stated share of actions spell their command or path another
+way (an alias, a wrapper, a flag before the subcommand, a path from the
+root). It writes the memories into a throwaway store, indexes them with
+`user-memory reindex`, builds the delivery index, runs every task through
+`user-memory-bench match` and reports what the bars deliver, at most three
+pushes an action (`evals/delivery/metrics.py`):
+
+- precision three ways: needed at that moment, about the action, about
+  something else; and by when each delivery was seen against its
+  command's run;
+- recall over all needs and over needs whose point an anchor can match,
+  by holders of the anchor and by how the action spells it, with timing;
+- holds, the commands they deny per task and per session, and failures;
+- why each missed need was missed: its memory holds no anchor, its anchor
+  matched nothing, or it matched below the bar.
+
+Commands:
 
     just delivery-bench                  # 50, 1,000 and 10,000 memories
     just delivery-bench --sizes 50       # one size
@@ -637,12 +647,13 @@ others, so the report isn't graded on what set them. The sweep tries the
 bars on the store's score and on quantities free of the store's size, such
 as each term's worth by how many memories hold it alone. `--bars` reports at
 other bars, on any of those quantities with `scale=NAME` (repeat it to
-compare several on the same stores), `--credit`
-with credit for a memory's other passages, `--prompt-curve` at several
-prompt bars on stems alone, and `--keep DIR` keeps the built stores.
-`--presence` adds how often session start already lists what the tasks
-need: today's, from `user-memory session-start`, and a model of the
-index ordered by use, whose constants are in `evals/delivery/presence.py`. The measures' own tests run with
+compare several on the same stores), `--credit` with credit for a memory's
+other passages, `--prompt-curve` at several prompt bars on stems alone,
+`--failure-curve` at several failure bars with and without an anchor, and
+`--keep DIR` keeps the built stores. `--presence` adds how often session
+start already lists what the tasks need: today's, from `user-memory
+session-start`, and a model of the index ordered by use, whose constants
+are in `evals/delivery/presence.py`. The measures' own tests run with
 `python3 -I evals/delivery/test_bench.py`.
 
 ## Repository rules
