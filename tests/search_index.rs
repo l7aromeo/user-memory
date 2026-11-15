@@ -1022,12 +1022,22 @@ fn queued(conn: &rusqlite::Connection, id: &str) -> i64 {
 // under each conflict clause. The update's clause replaces the clauses of
 // the statements in its triggers, so the trigger's queue insert must hold
 // under any of them: the update succeeds, the memory is queued once, and
-// its history event and its change are recorded.
+// its history event and its change are recorded. The memory supports a
+// pattern, so the same update also stales that pattern from inside a
+// trigger, under the same clause.
 #[test]
 fn an_update_under_any_conflict_clause_queues_the_memory_once() {
     let store = Store::new();
-    let (tabs, _, _) = layout(&store);
+    let (tabs, _, pattern) = layout(&store);
     let conn = store.sql();
+    let status = || -> String {
+        conn.query_row("SELECT status FROM memories WHERE id=?1", [&pattern], |r| {
+            r.get(0)
+        })
+        .unwrap()
+    };
+    let fresh = status();
+    assert_ne!(fresh, "stale");
     let mut outcomes = Vec::new();
     for clause in CLAUSES {
         // A write by another program leaves the memory queued: only
@@ -1035,6 +1045,11 @@ fn an_update_under_any_conflict_clause_queues_the_memory_once() {
         conn.execute("UPDATE memories SET title=title||'.' WHERE id=?1", [&tabs])
             .unwrap();
         assert_eq!(queued(&conn, &tabs), 1, "{clause}");
+        conn.execute(
+            "UPDATE memories SET status=?2 WHERE id=?1",
+            [&pattern, &fresh],
+        )
+        .unwrap();
         let events = || {
             one(
                 &conn,
@@ -1063,17 +1078,20 @@ fn an_update_under_any_conflict_clause_queues_the_memory_once() {
             )
             .map_err(|e| e.to_string());
         outcomes.push(format!(
-            "UPDATE {clause}: {updated:?}, changed {}, queued {}, events +{}, counted {}",
+            "UPDATE {clause}: {updated:?}, changed {}, queued {}, events +{}, counted {}, pattern {}",
             content() != content_before,
             queued(&conn, &tabs),
             events() - events_before,
             change() > change_before,
+            status(),
         ));
     }
     let want: Vec<String> = CLAUSES
         .iter()
         .map(|clause| {
-            format!("UPDATE {clause}: Ok(1), changed true, queued 1, events +1, counted true")
+            format!(
+                "UPDATE {clause}: Ok(1), changed true, queued 1, events +1, counted true, pattern stale"
+            )
         })
         .collect();
     assert_eq!(outcomes, want);
