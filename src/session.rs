@@ -486,7 +486,11 @@ async fn snapshot(
         Some(remote) => crate::remote::marker::position(&remote.url),
     };
     let still = before.filter(|b| {
-        b.projects.is_some() && b.changes.is_some() && b.changes.as_ref() == marked.as_ref()
+        b.projects.is_some()
+            && b.changes
+                .as_ref()
+                .zip(marked.as_ref())
+                .is_some_and(|(seen, marked)| seen.same_change(marked))
     });
     let seen = match still {
         // A link moves the store's count, so the session's links are those
@@ -520,7 +524,8 @@ async fn snapshot(
         .and_then(|b| b.changes.clone());
     let unchanged = since
         .as_ref()
-        .is_some_and(|since| marked.as_ref() == Some(since));
+        .zip(marked.as_ref())
+        .is_some_and(|(since, marked)| since.same_change(marked));
     let reply = if unchanged {
         memory::StampsReply {
             since,

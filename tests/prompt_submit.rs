@@ -793,6 +793,21 @@ fn a_session_is_not_told_of_its_own_changes() {
         home.notice("s").lines().nth(1),
         Some(format!("+ {} Signs every commit", id8(&theirs)).as_str())
     );
+    // Another conversation changes it, then this one does, before the next
+    // prompt: the other's change is still told.
+    for (origin, content) in [
+        ("claude:session/other", "Signs every commit with an SSH key"),
+        (
+            "claude:session/s",
+            "Signs every commit with an SSH key, ed25519",
+        ),
+    ] {
+        home.cli(&["update", &theirs, "--content", content, "--origin", origin]);
+    }
+    assert_eq!(
+        home.notice("s").lines().nth(1),
+        Some(format!("~ {} Signs every commit", id8(&theirs)).as_str())
+    );
 }
 
 /// Opens what a prompt gives a session whose start could not read memory.

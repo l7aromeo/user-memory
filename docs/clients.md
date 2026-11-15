@@ -270,8 +270,9 @@ are still active, only no longer loaded here. `+` is a new memory, `~` one
 changed in what an agent acts on (a confirmation is not a change), and `-` one no longer active
 (forgotten, superseded or stale), with the title the session last saw: its
 instruction files, read at session start, may still list it, and the notice
-wins. A change this conversation made itself, its origin on the memory's
-latest change, is left out: the agent already knows it. Ten changes are listed;
+wins. A memory only this conversation changed since the session last
+looked, by the origin on each change, is left out: the agent already knows
+it. One another conversation changed too is told. Ten changes are listed;
 more are counted, with a pointer to `index`. The projects line names 20
 projects at most and counts the rest, and the notice keeps to the same
 limits as session start. Global rules are never repeated
