@@ -432,6 +432,31 @@ fn a_server_names_the_client_of_each_write() {
     assert_eq!(last(&store, id)["client"], "test");
 }
 
+// An import that brings only a later confirmation records an import event
+// with the time the file holds, rather than counting it as a confirmation
+// made here.
+#[test]
+fn an_imported_confirmation_is_an_import_not_a_local_confirmation() {
+    let store = Store::new();
+    let id = store.record("tea", "Drinks green tea", &[]);
+    store.value(&["update", &id]);
+    let file = store.root.path().join("export.json");
+    store.output(&["export", file.to_str().unwrap()]);
+    let mut document: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    for memory in document["memories"].as_array_mut().unwrap() {
+        if memory["id"] == id.as_str() {
+            memory["last_confirmed_at"] = json!("2099-01-01 00:00:00");
+        }
+    }
+    fs::write(&file, document.to_string()).unwrap();
+    store.output(&["import", file.to_str().unwrap(), "--apply"]);
+    let events = store.history(&id);
+    let ops: Vec<&str> = events.iter().map(|e| e["op"].as_str().unwrap()).collect();
+    assert_eq!(ops, ["record", "confirm", "import"], "{events:?}");
+    assert!(events[1].get("count").is_none(), "{events:?}");
+    assert_eq!(events[2]["client"], "cli");
+}
+
 // Ten confirmations in a row, by confirms or an update changing nothing,
 // are one event; one after a change is a new event.
 #[test]

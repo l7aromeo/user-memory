@@ -193,6 +193,8 @@ on the command line) returns them, oldest first:
 | `imported` | For an event an import brought in: when that import ran. Imported events are kept as the file had them; nothing reads them as this store's own. |
 
 - Undo a wrong correction by `update` with the values in `before`.
+- An import that changes a memory, even only its last confirmation, is an
+  `import` event of its own, never counted as a confirmation made here.
 - Forgetting a memory reduces its history to tombstones: each event's `op`
   and times, nothing else. `read` with `history: true` lists a forgotten id
   under `forgotten`, with those tombstones.
