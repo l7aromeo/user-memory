@@ -20,7 +20,7 @@ use std::{
     io::Write,
     net::TcpListener,
     path::{Path, PathBuf},
-    process::{Command, Output, Stdio},
+    process::{Child, Command, Output, Stdio},
 };
 use tempfile::{TempDir, tempdir};
 
@@ -83,6 +83,12 @@ impl Home {
     }
     /// Runs a hook for a session whose working folder is now `cwd`.
     fn hook_in(&self, hook: &str, session: &str, cwd: &Path, env: &[(&str, &str)]) -> Output {
+        let out = time::finish(self.spawn_hook(hook, session, cwd, env), "the hook");
+        assert!(out.status.success(), "{out:?}");
+        out
+    }
+    /// Starts a hook for a session working in `cwd`, without waiting for it.
+    fn spawn_hook(&self, hook: &str, session: &str, cwd: &Path, env: &[(&str, &str)]) -> Child {
         let payload = json!({"session_id": session, "cwd": cwd, "hook_event_name": hook});
         let subcommand = if hook == "SessionStart" {
             "session-start"
@@ -104,9 +110,7 @@ impl Home {
             .unwrap()
             .write_all(payload.to_string().as_bytes())
             .unwrap();
-        let out = time::finish(child, "the hook");
-        assert!(out.status.success(), "{out:?}");
-        out
+        child
     }
     /// What the prompt hook adds to the session's context, or "" for nothing.
     fn notice(&self, session: &str) -> String {
@@ -233,6 +237,127 @@ fn a_session_without_a_snapshot_gets_one_and_no_notice() {
         home.notice("late").lines().nth(1),
         Some(format!("+ {} Ask before pushing", id8(&added)).as_str())
     );
+}
+
+// A snapshot save that does not finish in time never holds the prompt past
+// the hook's limit, and never records a change the session was not told:
+// the snapshot stays as it was, and the change comes with the next prompt.
+#[test]
+fn a_save_cut_off_by_the_limit_leaves_the_change_for_the_next_prompt() {
+    let home = Home::new();
+    home.record("Prefer Rust for tools");
+    home.hook("SessionStart", "s", &[]);
+    let added = home.record("Ask before pushing");
+    let snapshot = home.snapshot("s");
+    let told = std::fs::read(&snapshot).unwrap();
+    let hold = home.path().join("hold");
+    std::fs::write(&hold, "").unwrap();
+    let out = home.hook(
+        "UserPromptSubmit",
+        "s",
+        &[
+            ("USER_MEMORY_HOLD_SNAPSHOT", hold.to_str().unwrap()),
+            HOOK_LIMITS,
+        ],
+    );
+    assert!(
+        home.path().join("hold.reached").exists(),
+        "the save was under way"
+    );
+    assert!(out.stdout.is_empty(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("the prompt hook stopped at its time limit"),
+        "{out:?}"
+    );
+    assert_eq!(std::fs::read(&snapshot).unwrap(), told);
+    std::fs::remove_file(&hold).unwrap();
+    assert_eq!(
+        home.notice("s").lines().nth(1),
+        Some(format!("+ {} Ask before pushing", id8(&added)).as_str())
+    );
+}
+
+// A save and its hook's limit race, and whichever comes first decides: a
+// save that replaced the snapshot before the hook, past its limit, abandoned
+// it is told, though the notice then ends past the limit by the rename's
+// time. The order is set by holding each side, not by timing.
+#[test]
+fn a_save_that_lands_before_the_hook_abandons_it_is_told() {
+    let home = Home::new();
+    home.record("Prefer Rust for tools");
+    home.hook("SessionStart", "s", &[]);
+    let added = home.record("Ask before pushing");
+    let snapshot = home.snapshot("s");
+    let told = std::fs::read(&snapshot).unwrap();
+    let save = home.path().join("hold-save");
+    let abandon = home.path().join("hold-abandon");
+    for hold in [&save, &abandon] {
+        std::fs::write(hold, "").unwrap();
+    }
+    let hook = home.spawn_hook(
+        "UserPromptSubmit",
+        "s",
+        home.path(),
+        &[
+            ("USER_MEMORY_HOLD_SNAPSHOT", save.to_str().unwrap()),
+            ("USER_MEMORY_HOLD_ABANDON", abandon.to_str().unwrap()),
+            HOOK_LIMITS,
+        ],
+    );
+    // Past its limit, about to abandon the save, which has not landed.
+    time::until("the hook reaching its limit", || {
+        home.path().join("hold-abandon.reached").exists()
+    });
+    assert!(home.path().join("hold-save.reached").exists());
+    assert_eq!(std::fs::read(&snapshot).unwrap(), told);
+    std::fs::remove_file(&save).unwrap();
+    time::until("the save landing", || {
+        std::fs::read(&snapshot).unwrap() != told
+    });
+    std::fs::remove_file(&abandon).unwrap();
+    let out = time::finish(hook, "the hook");
+    assert!(out.status.success(), "{out:?}");
+    assert!(!out.stdout.is_empty(), "the landed change went untold");
+    let reply: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        reply["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .lines()
+            .nth(1),
+        Some(format!("+ {} Ask before pushing", id8(&added)).as_str())
+    );
+    assert_eq!(home.notice("s"), "", "told once");
+}
+
+// Session start's first snapshot has its share of the limit: a save that
+// does not finish in it never holds the index back, and the session then
+// starts as one without a snapshot.
+#[test]
+fn a_first_snapshot_cut_off_by_its_share_still_shows_the_index() {
+    let home = Home::new();
+    home.record("Prefer Rust for tools");
+    let hold = home.path().join("hold");
+    std::fs::write(&hold, "").unwrap();
+    let out = home.hook(
+        "SessionStart",
+        "s",
+        &[
+            ("USER_MEMORY_HOLD_SNAPSHOT", hold.to_str().unwrap()),
+            HOOK_LIMITS,
+        ],
+    );
+    assert!(
+        home.path().join("hold.reached").exists(),
+        "the save was under way"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("Prefer Rust for tools"),
+        "{out:?}"
+    );
+    std::fs::remove_file(&hold).unwrap();
+    assert_eq!(home.notice("s"), "", "a session without a snapshot");
+    assert!(home.snapshot("s").is_file());
 }
 
 #[test]
