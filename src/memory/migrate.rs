@@ -139,9 +139,104 @@ DELETE FROM search_state;",
 
 /// Version 7 adds each memory's history: the events table, the writer row
 /// and the triggers that fill them. History starts empty; no memory
-/// changes.
+/// changes. The SQL is written out as it was at version 7.
 fn to_v7(conn: &Connection, _: Option<&Titles>) -> Result<()> {
-    conn.execute_batch(super::history::EVENTS)?;
+    conn.execute_batch(
+        "CREATE TABLE memory_events (
+    seq INTEGER PRIMARY KEY,
+    memory_id TEXT NOT NULL,
+    at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    count INTEGER NOT NULL DEFAULT 1 CHECK(count >= 1),
+    op TEXT NOT NULL CHECK(op IN ('record','confirm','update','supersede','merge','forget','import','revive','distinct','stale','move','origin_removed')),
+    origin TEXT NOT NULL DEFAULT '',
+    client TEXT NOT NULL DEFAULT '',
+    before TEXT CHECK(before IS NULL OR json_valid(before)),
+    imported TEXT
+);
+CREATE INDEX memory_events_by_memory ON memory_events(memory_id, seq);
+CREATE TABLE memory_writer (
+    id INTEGER PRIMARY KEY CHECK(id=1),
+    client TEXT NOT NULL DEFAULT '',
+    op TEXT,
+    subject TEXT,
+    origin TEXT NOT NULL DEFAULT ''
+);
+CREATE TRIGGER memory_event_recorded AFTER INSERT ON memories BEGIN
+    INSERT INTO memory_events(memory_id,op,origin,client)
+    VALUES (NEW.id,
+        CASE (SELECT op FROM memory_writer WHERE id=1) WHEN 'merge' THEN 'merge' WHEN 'import' THEN 'import' ELSE 'record' END,
+        coalesce((SELECT origin FROM memory_writer WHERE id=1),''),
+        coalesce((SELECT client FROM memory_writer WHERE id=1),''));
+END;
+CREATE TRIGGER memory_event_changed AFTER UPDATE ON memories BEGIN
+    UPDATE memory_events SET last_at=CURRENT_TIMESTAMP,count=count+1,
+        origin=coalesce(nullif((SELECT origin FROM memory_writer WHERE id=1),''),origin),
+        client=coalesce((SELECT client FROM memory_writer WHERE id=1),'')
+    WHERE seq=(SELECT max(seq) FROM memory_events WHERE memory_id=NEW.id) AND op='confirm' AND imported IS NULL
+    AND NOT EXISTS (SELECT 1 FROM memory_writer WHERE id=1 AND op='import')
+    AND (OLD.memory_type,OLD.category,OLD.context,OLD.title,OLD.content,OLD.reason,OLD.scope,OLD.project,OLD.source,OLD.status,OLD.evidence,OLD.evidence_ids,OLD.superseded_by)
+        IS (NEW.memory_type,NEW.category,NEW.context,NEW.title,NEW.content,NEW.reason,NEW.scope,NEW.project,NEW.source,NEW.status,NEW.evidence,NEW.evidence_ids,NEW.superseded_by)
+    AND (OLD.last_confirmed_at IS NOT NEW.last_confirmed_at OR EXISTS (SELECT 1 FROM memory_writer WHERE id=1 AND op IN ('update','confirm') AND subject=NEW.id));
+    INSERT INTO memory_events(memory_id,op,origin,client,before)
+    SELECT NEW.id,
+        CASE
+            WHEN (SELECT op FROM memory_writer WHERE id=1)='import' THEN 'import'
+            WHEN (OLD.memory_type,OLD.category,OLD.context,OLD.title,OLD.content,OLD.reason,OLD.scope,OLD.project,OLD.source,OLD.status,OLD.evidence,OLD.evidence_ids,OLD.superseded_by)
+                IS (NEW.memory_type,NEW.category,NEW.context,NEW.title,NEW.content,NEW.reason,NEW.scope,NEW.project,NEW.source,NEW.status,NEW.evidence,NEW.evidence_ids,NEW.superseded_by) THEN 'confirm'
+            WHEN NEW.status='stale' AND (OLD.memory_type,OLD.category,OLD.context,OLD.title,OLD.content,OLD.reason,OLD.scope,OLD.project,OLD.source,OLD.evidence,OLD.evidence_ids,OLD.superseded_by)
+                IS (NEW.memory_type,NEW.category,NEW.context,NEW.title,NEW.content,NEW.reason,NEW.scope,NEW.project,NEW.source,NEW.evidence,NEW.evidence_ids,NEW.superseded_by) THEN 'stale'
+            WHEN NEW.status='superseded' AND OLD.status IS NOT 'superseded' THEN 'supersede'
+            WHEN OLD.status='superseded' AND NEW.status IS NOT 'superseded' THEN 'revive'
+            WHEN (OLD.memory_type,OLD.category,OLD.context,OLD.title,OLD.content,OLD.reason,OLD.source,OLD.status,OLD.evidence,OLD.evidence_ids,OLD.superseded_by)
+                IS (NEW.memory_type,NEW.category,NEW.context,NEW.title,NEW.content,NEW.reason,NEW.source,NEW.status,NEW.evidence,NEW.evidence_ids,NEW.superseded_by)
+                AND NOT EXISTS (SELECT 1 FROM memory_writer WHERE id=1 AND op='update' AND subject=NEW.id) THEN 'move'
+            ELSE 'update'
+        END,
+        coalesce((SELECT origin FROM memory_writer WHERE id=1),''),
+        coalesce((SELECT client FROM memory_writer WHERE id=1),''),
+        CASE WHEN (OLD.memory_type,OLD.category,OLD.context,OLD.title,OLD.content,OLD.reason,OLD.scope,OLD.project,OLD.source,OLD.status,OLD.evidence,OLD.evidence_ids,OLD.superseded_by)
+            IS (NEW.memory_type,NEW.category,NEW.context,NEW.title,NEW.content,NEW.reason,NEW.scope,NEW.project,NEW.source,NEW.status,NEW.evidence,NEW.evidence_ids,NEW.superseded_by) THEN NULL
+        ELSE json_remove(json_object(
+            'type',OLD.memory_type,'category',OLD.category,'context',OLD.context,'title',OLD.title,
+            'content',OLD.content,'reason',OLD.reason,'scope',OLD.scope,'project',OLD.project,
+            'source',OLD.source,'status',OLD.status,'evidence',OLD.evidence,
+            'evidence_ids',CASE WHEN json_valid(OLD.evidence_ids) THEN json(OLD.evidence_ids) ELSE OLD.evidence_ids END,
+            'superseded_by',OLD.superseded_by),
+            CASE WHEN OLD.memory_type IS NEW.memory_type THEN '$.type' ELSE '$._' END,
+            CASE WHEN OLD.category IS NEW.category THEN '$.category' ELSE '$._' END,
+            CASE WHEN OLD.context IS NEW.context THEN '$.context' ELSE '$._' END,
+            CASE WHEN OLD.title IS NEW.title THEN '$.title' ELSE '$._' END,
+            CASE WHEN OLD.content IS NEW.content THEN '$.content' ELSE '$._' END,
+            CASE WHEN OLD.reason IS NEW.reason THEN '$.reason' ELSE '$._' END,
+            CASE WHEN OLD.scope IS NEW.scope THEN '$.scope' ELSE '$._' END,
+            CASE WHEN OLD.project IS NEW.project THEN '$.project' ELSE '$._' END,
+            CASE WHEN OLD.source IS NEW.source THEN '$.source' ELSE '$._' END,
+            CASE WHEN OLD.status IS NEW.status THEN '$.status' ELSE '$._' END,
+            CASE WHEN OLD.evidence IS NEW.evidence THEN '$.evidence' ELSE '$._' END,
+            CASE WHEN OLD.evidence_ids IS NEW.evidence_ids THEN '$.evidence_ids' ELSE '$._' END,
+            CASE WHEN OLD.superseded_by IS NEW.superseded_by THEN '$.superseded_by' ELSE '$._' END)
+        END
+    WHERE (OLD.memory_type,OLD.category,OLD.context,OLD.title,OLD.content,OLD.reason,OLD.scope,OLD.project,OLD.source,OLD.status,OLD.evidence,OLD.evidence_ids,OLD.superseded_by)
+        IS NOT (NEW.memory_type,NEW.category,NEW.context,NEW.title,NEW.content,NEW.reason,NEW.scope,NEW.project,NEW.source,NEW.status,NEW.evidence,NEW.evidence_ids,NEW.superseded_by)
+    OR (OLD.last_confirmed_at IS NOT NEW.last_confirmed_at AND EXISTS (SELECT 1 FROM memory_writer WHERE id=1 AND op='import'))
+    OR ((OLD.last_confirmed_at IS NOT NEW.last_confirmed_at OR EXISTS (SELECT 1 FROM memory_writer WHERE id=1 AND op IN ('update','confirm') AND subject=NEW.id))
+        AND NOT EXISTS (SELECT 1 FROM memory_events WHERE seq=(SELECT max(seq) FROM memory_events WHERE memory_id=NEW.id) AND op='confirm' AND imported IS NULL));
+END;
+CREATE TRIGGER memory_event_forgotten AFTER DELETE ON memories BEGIN
+    UPDATE memory_events SET origin='',client='',before=NULL,imported=NULL WHERE memory_id=OLD.id;
+    INSERT INTO memory_events(memory_id,op,client) VALUES (OLD.id,'forget',coalesce((SELECT client FROM memory_writer WHERE id=1),''));
+END;
+CREATE TRIGGER memory_event_origin_removed AFTER DELETE ON memory_origins
+WHEN EXISTS (SELECT 1 FROM memories WHERE id=OLD.memory_id) BEGIN
+    INSERT INTO memory_events(memory_id,op,client) VALUES (OLD.memory_id,'origin_removed',coalesce((SELECT client FROM memory_writer WHERE id=1),''));
+END;
+CREATE TRIGGER memory_event_distinct AFTER INSERT ON memory_distinct BEGIN
+    INSERT INTO memory_events(memory_id,op,origin,client)
+    SELECT value,'distinct',coalesce((SELECT origin FROM memory_writer WHERE id=1),''),coalesce((SELECT client FROM memory_writer WHERE id=1),'')
+    FROM (SELECT NEW.a AS value UNION ALL SELECT NEW.b);
+END;",
+    )?;
     Ok(())
 }
 
