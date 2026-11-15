@@ -137,7 +137,9 @@ fn ten_points() -> Vec<String> {
 }
 
 // A word of the seventh of ten points finds the memory, and search returns
-// that point; a one-line memory is one passage, its content.
+// that point. A one-line memory is one passage: its hit carries no
+// `passage`, as its content is that passage. A context makes it two, so
+// the hit carries one again.
 #[test]
 fn a_point_of_a_long_memory_is_found_and_returned_as_its_passage() {
     let store = Store::new();
@@ -148,8 +150,17 @@ fn a_point_of_a_long_memory_is_found_and_returned_as_its_passage() {
     assert_eq!(hit["passage"], points[6].as_str(), "{hit}");
     assert_eq!(hit["passages"], 10, "{hit}");
     let hit = store.hit("login shell", &line);
-    assert_eq!(hit["passage"], "Uses zsh as the login shell", "{hit}");
+    assert!(hit.get("passage").is_none(), "{hit}");
     assert_eq!(hit["passages"], 1, "{hit}");
+    let framed = store.record(
+        "editor",
+        "Edits in helix",
+        "Edits code in helix",
+        &["--context", "When pairing over ssh"],
+    );
+    let hit = store.hit("helix pairing", &framed);
+    assert_eq!(hit["passage"], "When pairing over ssh", "{hit}");
+    assert_eq!(hit["passages"], 2, "{hit}");
 }
 
 // A hit carries every field it did before, as `read` returns them, beside

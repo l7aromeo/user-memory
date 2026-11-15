@@ -116,10 +116,12 @@ topic as `topic`, or `query`.
   keywords, and `false` without a topic, without an endpoint, or when the
   endpoint failed. A search with no match and `semantic: false` may have
   missed a memory phrased differently.
-- Each result carries `passage`, the text of its best-matching passage,
-  and `passages`, how many the memory has. A memory found by meaning alone,
-  by its title or without a topic shows its first passage. Read the memory
-  for the rest.
+- Each result carries `passages`, how many passages the memory has. A
+  memory with more than one (a non-empty context counts as one) also
+  carries `passage`, the text of its best-matching passage; one found by
+  meaning alone, by its title or without a topic shows its first. Read the
+  memory for the rest. A memory with one passage has no `passage`: its
+  content is that passage.
 
 ## The index
 
