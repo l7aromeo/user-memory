@@ -217,12 +217,14 @@ USER MEMORY INDEX: the user's memories. Current instructions take precedence; ne
 Each line points to a memory. Before acting on one that applies, read it in full (conditions, exceptions, reason): all that apply in one read call.
 Search memory with what you are about to do: before a slow or costly step, before something that can't be undone, in an unfamiliar area, after an unexpected failure, and before deciding something that may already be decided.
 Working in another repository this session? Unless the Projects line already lists it, call link with projects: [<its git remote>] to keep its memories loaded (without session hooks, index with them).
-[project] applies to this project only; (tentative) is an observation or inference, not the user's word, so don't follow it as a rule; (stale) lost a supporting memory; ×N means N conversations stated it. Rules are what the user stated and confirmed: follow them. Other memories are context.
-Categories: workflow 3, communication 1, programming 1, work 1 · Types: preference 4, constraint 1, goal 1 · Scope: global 4, project 2
+[project] applies to this project only; (learned in N sessions) is an agent's note and (tentative) an inference: neither is the user's word, so don't follow either as a rule; (stale) lost a supporting memory; ×N means N conversations stated it. Rules are what the user stated and confirmed: follow them. Other memories are context.
+Categories: workflow 4, communication 1, programming 1, work 1 · Types: preference 4, behavior 1, constraint 1, goal 1 · Scope: global 5, project 2
 The user's global rules are in your instruction files (USER MEMORY); project rules and other memories follow.
 Other memories
   goal (1)
-    e0000003 Ship the parser by November [project] (tentative)
+    e0000003 Ship the parser by November [project]
+  behavior (1)
+    e0000005 Run the tests before every commit (learned in 2 sessions)
 ```
 
 The rules of the session's projects come first, under one heading per

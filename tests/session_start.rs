@@ -380,7 +380,7 @@ const HEADER: [&str; 5] = [
     "Each line points to a memory. Before acting on one that applies, read it in full (conditions, exceptions, reason): all that apply in one read call.",
     "Search memory with what you are about to do: before a slow or costly step, before something that can't be undone, in an unfamiliar area, after an unexpected failure, and before deciding something that may already be decided.",
     "Working in another repository this session? Unless the Projects line already lists it, call link with projects: [<its git remote>] to keep its memories loaded (without session hooks, index with them).",
-    "[project] applies to this project only; (tentative) is an observation or inference, not the user's word, so don't follow it as a rule; (stale) lost a supporting memory; ×N means N conversations stated it. Rules are what the user stated and confirmed: follow them. Other memories are context.",
+    "[project] applies to this project only; (learned in N sessions) is an agent's note and (tentative) an inference: neither is the user's word, so don't follow either as a rule; (stale) lost a supporting memory; ×N means N conversations stated it. Rules are what the user stated and confirmed: follow them. Other memories are context.",
 ];
 const NO_PROJECT: &str = "No project: this folder has no git remote and no .user-memory-key. If it holds several repositories, link each one you work in; to load some in every session here, run `user-memory project-id --include <folder>` when the user asks for that, or propose it first. If it is one new project, run `user-memory project-id --set <key>` here when the user names its key, or propose one (such as its planned remote, github.com/<owner>/<name>) and run it after their yes. Record nothing about this work as global without the user's yes.";
 const SHORTENED: &str = "Shortened to fit the session start: rules first, then other memories, each group sharing the room; each counts what it does not list; index lists every line.";
@@ -2072,7 +2072,8 @@ fn the_index_keeps_project_rules_unless_asked_for_them_apart() {
 
 /// A store in `home` with 600 facts of project app and no rules: the 100
 /// newest about the parser and the export, the 500 older about the cache,
-/// the fonts, the benchmarks and the containers.
+/// the fonts, the benchmarks and the containers, four to three to two to
+/// one, so how many the index lists never ties them.
 fn facts_without_rules(home: &Path) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_user-memory"));
     command.arg("index");
@@ -2089,7 +2090,18 @@ fn facts_without_rules(home: &Path) {
         let word = if i < 100 {
             ["parser", "export"][i % 2]
         } else {
-            ["cache", "fonts", "benchmarks", "containers"][i % 4]
+            [
+                "cache",
+                "cache",
+                "cache",
+                "cache",
+                "fonts",
+                "fonts",
+                "fonts",
+                "benchmarks",
+                "benchmarks",
+                "containers",
+            ][i % 10]
         };
         let title = format!("{i:03} notes how the app handles its {word}");
         let changed = format!("2026-11-01 {:02}:{:02}:00", 23 - i / 60, 59 - i % 60);
@@ -2123,7 +2135,7 @@ fn a_partial_index_ends_with_a_map_of_what_it_leaves_out() {
     assert_eq!(
         map,
         format!(
-            "{listed} of 600 listed. Not listed: {} facts (benchmarks, cache, containers, fonts). `search` finds them.",
+            "{listed} of 600 listed. Not listed: {} facts (cache, fonts, benchmarks, containers). `search` finds them.",
             600 - listed
         ),
         "{hook}"

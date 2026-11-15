@@ -1381,7 +1381,7 @@ fn the_index_lists_rules_then_patterns_goals_and_the_other_types() {
         position("  goal (1)"),
         position("Ship the parser"),
         position("  behavior (1)"),
-        position("Asked for a demonstration (tentative)"),
+        position("Asked for a demonstration (learned in 1 session)"),
         position("  fact (1)"),
         position("Works on a parser"),
     ];
@@ -1397,6 +1397,59 @@ fn the_index_lists_rules_then_patterns_goals_and_the_other_types() {
     let mut expected = vec![goal.as_str(), fact.as_str()];
     expected.sort();
     assert_eq!(cited, expected);
+}
+
+// An observation's mark says how many conversations saw it, so a note
+// seen in three reads apart from one seen once, and neither as a rule.
+#[test]
+fn the_index_says_how_many_sessions_learned_an_observation() {
+    let s = Store::new();
+    let seen = |origin: &str, extra: &[&str]| {
+        let mut args = vec![
+            "record",
+            "--type",
+            "behavior",
+            "--category",
+            "workflow",
+            "--content",
+            "Run the tests before every commit",
+            "--source",
+            "observed",
+            "--evidence",
+            "A commit made without running the tests broke the build",
+            "--origin",
+            origin,
+        ];
+        args.extend_from_slice(extra);
+        let reply = s.value(&args);
+        assert_eq!(reply["stored"], true, "{reply}");
+        reply["id"].as_str().unwrap().to_owned()
+    };
+    let index = || String::from_utf8(s.run(&["index"]).stdout).unwrap();
+    let id = seen("chat/a", &[]);
+    let line = |index: &str| {
+        index
+            .lines()
+            .find(|l| l.starts_with(&format!("    {}", &id[..8])))
+            .unwrap_or_else(|| panic!("{id} missing from {index}"))
+            .to_owned()
+    };
+    assert!(
+        line(&index()).ends_with(" Run the tests before every commit (learned in 1 session)"),
+        "{}",
+        index()
+    );
+    seen("chat/b", &["--confirms", &id]);
+    seen("chat/c", &["--confirms", &id]);
+    let after = index();
+    assert!(
+        line(&after).ends_with(" Run the tests before every commit (learned in 3 sessions)"),
+        "{after}"
+    );
+    assert!(
+        after.contains("(learned in N sessions) is an agent's note and (tentative) an inference: neither is the user's word, so don't follow either as a rule;"),
+        "{after}"
+    );
 }
 
 #[test]
@@ -3513,6 +3566,40 @@ fn index_category_reads_and_search_page_through_a_large_store() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("page_size must be between 1 and 200"));
 }
 
+/// `line` without an observation's mark, " (learned in N session(s))", and
+/// nothing else: a title that merely says "(learned in …)" keeps it.
+fn without_learned(line: &str) -> &str {
+    let Some((title, mark)) = line.rsplit_once(" (learned in ") else {
+        return line;
+    };
+    let count = mark
+        .strip_suffix(" sessions)")
+        .or_else(|| mark.strip_suffix(" session)"));
+    match count {
+        Some(n) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => title,
+        _ => line,
+    }
+}
+
+#[test]
+fn only_an_observations_mark_is_taken_off_a_title() {
+    assert_eq!(
+        without_learned("Run the tests (learned in 3 sessions)"),
+        "Run the tests"
+    );
+    assert_eq!(
+        without_learned("Run the tests (learned in 1 session)"),
+        "Run the tests"
+    );
+    for kept in [
+        "Notes (learned in class)",
+        "Notes (learned in N sessions)",
+        "Notes (learned in 2 sessions) again",
+    ] {
+        assert_eq!(without_learned(kept), kept);
+    }
+}
+
 /// Titles of the memories a search, read or index returns, sorted.
 fn titles(s: &Store, args: &[&str]) -> Vec<String> {
     let out = s.run(args);
@@ -3528,7 +3615,7 @@ fn titles(s: &Store, args: &[&str]) -> Vec<String> {
             .filter(|l| l.starts_with("    "))
             .map(|l| {
                 // The title without the line's markers.
-                let mut title = l.trim().split_once(' ').unwrap().1;
+                let mut title = without_learned(l.trim().split_once(' ').unwrap().1);
                 for marker in [" ×2", " ×3", " (tentative)", " (stale)", " [project]"] {
                     title = title.strip_suffix(marker).unwrap_or(title);
                 }

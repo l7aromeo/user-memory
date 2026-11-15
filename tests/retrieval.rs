@@ -733,7 +733,7 @@ fn the_index_lists_every_rule_and_every_other_memory() {
     // An explicit decision and a tentative observed preference are not rules.
     for other in [
         "Chose SQLite",
-        "Skims long answers (tentative)",
+        "Skims long answers (learned in 1 session)",
         "Goal 0",
         "Goal 3",
     ] {

@@ -125,7 +125,7 @@ const HEADER: [&str; 5] = [
     "Each line points to a memory. Before acting on one that applies, read it in full (conditions, exceptions, reason): all that apply in one read call.",
     "Search memory with what you are about to do: before a slow or costly step, before something that can't be undone, in an unfamiliar area, after an unexpected failure, and before deciding something that may already be decided.",
     "Working in another repository this session? Unless the Projects line already lists it, call link with projects: [<its git remote>] to keep its memories loaded (without session hooks, index with them).",
-    "[project] applies to this project only; (tentative) is an observation or inference, not the user's word, so don't follow it as a rule; (stale) lost a supporting memory; ×N means N conversations stated it. Rules are what the user stated and confirmed: follow them. Other memories are context.",
+    "[project] applies to this project only; (learned in N sessions) is an agent's note and (tentative) an inference: neither is the user's word, so don't follow either as a rule; (stale) lost a supporting memory; ×N means N conversations stated it. Rules are what the user stated and confirmed: follow them. Other memories are context.",
 ];
 const RULES: &str = "Rules";
 const OTHERS: &str = "Other memories";
@@ -775,6 +775,14 @@ pub(super) fn line(m: &Memory) -> String {
 /// confirmation.
 fn status_marks(m: &Memory) -> String {
     let mut marks = String::new();
+    // An observation is tentative by construction, so its mark says how
+    // many conversations saw it instead, and that count replaces "×N".
+    if m.source == "observed" && m.status == "tentative" {
+        let sessions = m.confirmations.max(1);
+        let unit = if sessions == 1 { "session" } else { "sessions" };
+        marks.push_str(&format!(" (learned in {sessions} {unit})"));
+        return marks;
+    }
     if matches!(m.status.as_str(), "tentative" | "stale") {
         marks.push_str(&format!(" ({})", m.status));
     }
@@ -1552,24 +1560,66 @@ mod tests {
     fn a_line_shows_the_short_id_title_and_markers() {
         let m = Memory {
             id: uuid::Uuid::parse_str("e0000003-0000-4000-8000-000000000003").unwrap(),
-            title: "Ship the parser by November".into(),
+            title: "Prefers small pull requests".into(),
             scope: "project".into(),
             status: "tentative".into(),
+            source: "inferred".into(),
             confirmations: 3,
             ..Memory::default()
         };
         assert_eq!(
             line(&m),
-            "    e0000003 Ship the parser by November [project] (tentative) ×3"
+            "    e0000003 Prefers small pull requests [project] (tentative) ×3"
+        );
+        let stale = Memory {
+            status: "stale".into(),
+            ..m.clone()
+        };
+        assert_eq!(
+            line(&stale),
+            "    e0000003 Prefers small pull requests [project] (stale) ×3"
         );
         let plain = Memory {
             title: "Prefer Rust".into(),
             scope: "global".into(),
             status: "confirmed".into(),
+            source: "explicit".into(),
             confirmations: 1,
-            ..m
+            ..m.clone()
         };
         assert_eq!(line(&plain), "    e0000003 Prefer Rust");
+        let stated = Memory {
+            confirmations: 2,
+            ..plain
+        };
+        assert_eq!(line(&stated), "    e0000003 Prefer Rust ×2");
+    }
+
+    #[test]
+    fn an_observation_says_how_many_sessions_learned_it_and_no_count() {
+        let m = Memory {
+            id: uuid::Uuid::parse_str("e0000005-0000-4000-8000-000000000005").unwrap(),
+            title: "Run the tests before every commit".into(),
+            scope: "global".into(),
+            status: "tentative".into(),
+            source: "observed".into(),
+            confirmations: 3,
+            ..Memory::default()
+        };
+        assert_eq!(
+            line(&m),
+            "    e0000005 Run the tests before every commit (learned in 3 sessions)"
+        );
+        for confirmations in [0, 1] {
+            let once = Memory {
+                confirmations,
+                ..m.clone()
+            };
+            assert_eq!(
+                line(&once),
+                "    e0000005 Run the tests before every commit (learned in 1 session)"
+            );
+        }
     }
 
     /// An index of `count` memory lines for `name`, as the hook fetches one.
@@ -1599,7 +1649,10 @@ mod tests {
                 index: project_index("big", 40),
             },
         ];
-        let budget = 1500;
+        // Room past the header for the core and both projects: the small one
+        // fits whole and the big one is shared, whatever the header says.
+        let header: usize = HEADER.iter().map(|l| l.len() + 1).sum();
+        let budget = header + 501;
         let text = tiered(&whole, &core, &projects, budget, FitUnit::Utf8Bytes);
         assert!(text.chars().count() <= budget, "{text}");
         assert!(text.chars().count() * 10 > budget * 9, "{text}");

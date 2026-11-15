@@ -177,7 +177,9 @@ USER MEMORY INDEX: the user's memories. Current instructions take precedence; ne
 …
 Other memories
   goal (1)
-    e0000003 Ship the parser by November [project] (tentative)
+    e0000003 Ship the parser by November [project]
+  behavior (1)
+    e0000005 Run the tests before every commit (learned in 2 sessions)
 ```
 
 - **Conversation origin** names this conversation. Every memory recorded in it
@@ -196,8 +198,11 @@ Other memories
   can merge them with `review`.
 - **The index** lists every other memory in scope, one line each: an
   8-character id and the title. Marks: `[project]` for a project memory,
-  `(tentative)` for one not confirmed, `×N` when N conversations said it.
-  The agent reads a memory in full before it acts on it.
+  `(learned in N sessions)` for an agent's observation seen in N
+  conversations, `(tentative)` for an inference, `(stale)` for one that
+  lost a support, and `×N` when N conversations stated it. The agent reads
+  a memory in full before it acts on it, and never follows an observation
+  or an inference as a rule.
 
 Your global rules are not repeated when the client's instruction file already
 holds them. A very long index lists what fits, line by line, rules first,
