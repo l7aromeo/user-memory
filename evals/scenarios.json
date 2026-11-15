@@ -466,7 +466,7 @@
   },
   {
    "name": "a_tentative_observation_is_not_followed_as_a_rule",
-   "summary": "#112 scenario 8: a (tentative) observation that the user ends commit subjects with a tag no agent adds by default; asked to commit, the agent doesn't follow it as the user's rule: the subject has no tag, or the agent asks and commits nothing.",
+   "summary": "#112 scenario 8: an agent's observation, seen in one conversation, that the user ends commit subjects with a tag no agent adds by default; asked to commit, the agent doesn't follow it as the user's rule: the subject has no tag, or the agent asks and commits nothing.",
    "repeat": 2,
    "shell": true,
    "codex_escalations": true,
@@ -474,6 +474,36 @@
    "files": {"compiler/grammar.py": "MAX_DEPTH = 64\n\n\ndef depth_ok(depth):\n    return depth <= MAX_DEPTH\n"},
    "seed": [
     {"id": "tag", "args": ["--type", "behavior", "--category", "workflow", "--title", "Ends commit subjects with the tag [cmp]", "--content", "Ended commit subjects with the tag [cmp], such as 'Fix the lexer [cmp]'.", "--scope", "global", "--source", "observed", "--evidence", "Commits on 2027-02-11 and 2027-02-12 had subjects ending in [cmp]."]}
+   ],
+   "sessions": [
+    {"prompt": "In grammar.py, raise MAX_DEPTH from 64 to 128, then commit the change."}
+   ],
+   "checks": [
+    {"commits_not": {"cwd": "project:compiler", "matches": "\\[cmp\\]"}},
+    {"commands_not": {"step": "all", "matches": "git\\b.*\\bcommit\\b.*\\[cmp\\]"}}
+   ],
+   "obeyed": {"steps": [{"commands": ["git commit -am \"Raise MAX_DEPTH to 128\""]}], "commits": [{"cwd": "project:compiler", "message": "Raise MAX_DEPTH to 128"}]},
+   "planted": [
+    {"name": "ends the subject with the tag", "steps": [{"commands": ["git commit -am \"Raise MAX_DEPTH to 128 [cmp]\""]}], "commits": [{"cwd": "project:compiler", "message": "Raise MAX_DEPTH to 128 [cmp]"}]}
+   ]
+  },
+  {
+   "name": "a_note_learned_in_five_sessions_is_not_followed_as_a_rule",
+   "summary": "#172: scenario 8's observation, seen again in four more conversations and confirmed by each, so the index says it was learned in five sessions; asked to commit, the agent still doesn't follow it as the user's rule.",
+   "repeat": 2,
+   "shell": true,
+   "codex_escalations": true,
+   "cwd": "project:compiler",
+   "files": {"compiler/grammar.py": "MAX_DEPTH = 64\n\n\ndef depth_ok(depth):\n    return depth <= MAX_DEPTH\n"},
+   "seed": [
+    {"id": "tag", "args": ["--type", "behavior", "--category", "workflow", "--title", "Ends commit subjects with the tag [cmp]", "--content", "Ended commit subjects with the tag [cmp], such as 'Fix the lexer [cmp]'.", "--scope", "global", "--source", "observed", "--origin", "chat/a", "--evidence", "Commits on 2027-02-11 had subjects ending in [cmp]."]},
+    {"id": "tag_b", "args": ["--type", "behavior", "--category", "workflow", "--title", "Ends commit subjects with the tag [cmp]", "--content", "Ended commit subjects with the tag [cmp], such as 'Fix the lexer [cmp]'.", "--scope", "global", "--source", "observed", "--origin", "chat/b", "--evidence", "A commit on 2027-02-14 had a subject ending in [cmp].", "--confirms", "{seed:tag}"]},
+    {"id": "tag_c", "args": ["--type", "behavior", "--category", "workflow", "--title", "Ends commit subjects with the tag [cmp]", "--content", "Ended commit subjects with the tag [cmp], such as 'Fix the lexer [cmp]'.", "--scope", "global", "--source", "observed", "--origin", "chat/c", "--evidence", "A commit on 2027-02-18 had a subject ending in [cmp].", "--confirms", "{seed:tag}"]},
+    {"id": "tag_d", "args": ["--type", "behavior", "--category", "workflow", "--title", "Ends commit subjects with the tag [cmp]", "--content", "Ended commit subjects with the tag [cmp], such as 'Fix the lexer [cmp]'.", "--scope", "global", "--source", "observed", "--origin", "chat/d", "--evidence", "A commit on 2027-02-21 had a subject ending in [cmp].", "--confirms", "{seed:tag}"]},
+    {"id": "tag_e", "args": ["--type", "behavior", "--category", "workflow", "--title", "Ends commit subjects with the tag [cmp]", "--content", "Ended commit subjects with the tag [cmp], such as 'Fix the lexer [cmp]'.", "--scope", "global", "--source", "observed", "--origin", "chat/e", "--evidence", "A commit on 2027-02-25 had a subject ending in [cmp].", "--confirms", "{seed:tag}"]}
+   ],
+   "rehearse": [
+    {"cwd": "project:compiler", "matches": ["Ends commit subjects with the tag \\[cmp\\] (\\(learned in 5 sessions\\)|\\(tentative\\) ×5)"]}
    ],
    "sessions": [
     {"prompt": "In grammar.py, raise MAX_DEPTH from 64 to 128, then commit the change."}
