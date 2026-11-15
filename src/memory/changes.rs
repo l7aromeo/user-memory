@@ -171,26 +171,27 @@ pub struct State {
 /// The store's [`State`], or none for a store without the counter: one from
 /// before schema version 10, which a migration is upgrading.
 pub(super) fn state(conn: &Connection) -> rusqlite::Result<Option<State>> {
-    let read = conn
-        .query_row(
-            "SELECT store_id,last_change FROM store_changes WHERE id=1",
-            [],
-            |r| {
-                Ok(State {
-                    store_id: r.get(0)?,
-                    last_change: r.get(1)?,
-                })
-            },
-        )
-        .optional();
-    match read {
-        Err(rusqlite::Error::SqliteFailure(_, Some(message)))
-            if message.starts_with("no such table") =>
-        {
-            Ok(None)
-        }
-        read => read,
+    // Asked of the schema, which the connection holds in memory, rather
+    // than told from the wording of SQLite's error.
+    let counted: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='store_changes')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !counted {
+        return Ok(None);
     }
+    conn.query_row(
+        "SELECT store_id,last_change FROM store_changes WHERE id=1",
+        [],
+        |r| {
+            Ok(State {
+                store_id: r.get(0)?,
+                last_change: r.get(1)?,
+            })
+        },
+    )
+    .optional()
 }
 
 /// The marker beside the store at `db`: the store with `.changed` appended.
