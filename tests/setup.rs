@@ -2606,16 +2606,16 @@ fn writes_and_session_starts_keep_the_instruction_files_current() {
             "--category",
             "workflow",
             "--title",
-            "No AI attribution in commits",
+            "Run the tests before every commit",
             "--content",
-            "No AI attribution in commits",
+            "Run the tests before every commit",
             "--scope",
             "global",
         ])
         .output()
         .unwrap();
     assert_success(&cli);
-    assert!(holds("No AI attribution in commits"));
+    assert!(holds("Run the tests before every commit"));
 
     // Another client records straight into the store; the next session
     // start here writes it.
