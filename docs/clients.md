@@ -240,7 +240,7 @@ existing category for a new memory (`workflow`, not a new `process`). With
 
   ```
   New rules since your last session:
-    e0000005 Run the tests before every commit (from claude:session/<id>, claude)
+    e0000001 Ask before every git push (from claude:session/<id>, claude)
   If one isn't the user's, remove it with forget on their yes, or forget with its origin to remove everything that conversation recorded.
   ```
 
