@@ -618,20 +618,22 @@ year of synthetic changes.
 
 ## Delivery benchmark
 
-`just delivery-bench` measures delivery matching (`src/memory/delivery.rs`):
-what an agent's actions match among a store's passages, and what the bars
-push after an action, push after a failed one, or hold before a command. No
-hook calls the matcher yet, so the shipped binary doesn't include it. The
-benchmark reaches it through `user-memory-bench`, a second binary
-(`evals/delivery/entry.rs`) that releases never build, as they never build
-`user-memory-fake`.
+`just delivery-bench` measures delivery matching (`src/memory/matcher.rs`,
+over the index file of `src/memory/delivery.rs`): what an agent's actions
+match among a store's passages, and what the bars push after an action,
+push after a failed one, or hold before a command. No hook calls the
+matcher yet, so the shipped binary declares both modules for its tests
+only. The benchmark reaches them through `user-memory-bench`, a second
+binary (`evals/delivery/entry.rs`) that releases never build, as they never
+build `user-memory-fake`.
 
 That binary compiles the matcher and the modules it uses from their own
 files, through a `#[path]` mirror of `src/memory`: `delivery.rs`,
-`words.rs`, `index/passages.rs`, `index/stems.rs` and `index/weights.rs`.
-Each says so at its top. A mirrored file that starts using a module outside
-the mirror breaks that binary's build, which `just check` builds with every
-target; move what it needs into a mirrored file instead.
+`matcher.rs`, `words.rs`, `index/passages.rs`, `index/stems.rs` and
+`index/weights.rs`. Each says so at its top. A mirrored file that starts
+using a module outside the mirror breaks that binary's build, which `just
+check` builds with every target; move what it needs into a mirrored file
+instead.
 
 For each store size and seed, `evals/delivery/run.py` draws a synthetic
 world from `evals/delivery/world.py`: a project's commands, files and

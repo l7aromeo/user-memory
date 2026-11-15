@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""How well delivery matching (src/memory/delivery.rs) finds what whole
+"""How well delivery matching (src/memory/matcher.rs) finds what whole
 tasks need, on synthetic stores of 50, 1,000 and 10,000 memories (issue
 #125). Nothing here touches the user's own store or settings: each store
 is built in a throwaway home by the real binary.
@@ -45,7 +45,7 @@ REPORT_SEEDS = [11, 12, 13]
 # What the bars test, and the bars a sweep tries on each: the store's
 # score, which orders the matches and grows with the store's size; and the
 # two size-free quantities the matcher's bars test (`Matched::share` and
-# `Matched::mixed` in src/memory/delivery.rs). Each grid spans its
+# `Matched::mixed` in src/memory/matcher.rs). Each grid spans its
 # quantity's deciles on the tuning seeds, with the picked bar inside it,
 # not at an end.
 SCALES = {
@@ -310,7 +310,7 @@ def bars_of_matcher():
     """The matcher's own bars, read from its source so the report states
     them: a command's passages on share, every other action's on mixed, and
     every push needing an anchor of the action that fired."""
-    source = (ROOT / "src/memory/delivery.rs").read_text()
+    source = (ROOT / "src/memory/matcher.rs").read_text()
 
     def const(name):
         line = next(l for l in source.splitlines() if l.startswith(f"pub(crate) const {name}: f64 = "))

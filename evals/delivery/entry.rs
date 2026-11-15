@@ -1,4 +1,4 @@
-//! The delivery benchmark's way into the matcher (`src/memory/delivery.rs`),
+//! The delivery benchmark's way into the matcher (`src/memory/matcher.rs`),
 //! which no shipped command calls yet. `just delivery-bench` builds it as
 //! `user-memory-bench`; releases build only `--bin user-memory`, so it never
 //! ships.
@@ -25,6 +25,7 @@
 #[path = "../../src/memory"]
 mod memory {
     pub mod delivery;
+    pub mod matcher;
     pub mod words;
     pub mod index {
         pub mod passages;
@@ -34,7 +35,10 @@ mod memory {
 }
 
 use clap::{Parser, Subcommand};
-use memory::delivery::{self, Action, DeliveryIndex, Kind, Matched, Tuning, Window};
+use memory::{
+    delivery::{self, DeliveryIndex},
+    matcher::{self, Action, Kind, Matched, Tuning, Window},
+};
 use rusqlite::{Connection, OpenFlags};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -231,7 +235,7 @@ fn run(cli: Cli) -> Result<(), String> {
                 let mut value = matched(&index, m)?;
                 if let Some(conn) = &conn {
                     value["text"] = json!(
-                        delivery::text(conn, index.id(m.memory).map_err(|e| e.to_string())?, m)
+                        matcher::text(conn, index.id(m.memory).map_err(|e| e.to_string())?, m)
                             .map_err(|e| e.to_string())?
                     );
                 }
