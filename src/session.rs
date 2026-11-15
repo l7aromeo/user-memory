@@ -378,14 +378,33 @@ async fn snapshot(
                 .is_some_and(|was| was.iter().map(|p| &p.key).eq(keys.iter()))
         })
         .and_then(|b| b.changes.clone());
-    let reply = stamps(remote.as_ref(), &keys, origin.as_deref(), since).await?;
+    // A store on this machine whose marker still says what the snapshot
+    // saw has changed nothing since: no read at all. A write that has not
+    // yet rewritten the marker is told at the next prompt.
+    let unchanged = remote.is_none()
+        && since
+            .as_ref()
+            .is_some_and(|since| memory::marked(&db_path()).as_ref() == Some(since));
+    let reply = if unchanged {
+        memory::StampsReply {
+            since,
+            delta: true,
+            ..memory::StampsReply::default()
+        }
+    } else {
+        stamps(remote.as_ref(), &keys, origin.as_deref(), since).await?
+    };
     // Says, in debug builds, what the hook read, so tests can tell a read
     // of the changed memories from a read of every one.
     #[cfg(debug_assertions)]
     eprintln!(
         "user-memory: read {} stamps ({})",
         reply.stamps.len() + reply.gone.len(),
-        if reply.delta { "changed" } else { "every" }
+        match (unchanged, reply.delta) {
+            (true, _) => "none: the marker is unchanged",
+            (false, true) => "changed",
+            (false, false) => "every",
+        }
     );
     let stamps = match (reply.delta, before) {
         (true, Some(before)) => {

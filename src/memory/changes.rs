@@ -202,12 +202,22 @@ pub fn marker_path(db: &Path) -> PathBuf {
 
 /// The [`State`] the marker beside the store at `db` holds, or none when it
 /// is missing or unreadable.
-pub fn read_marker(db: &Path) -> Option<State> {
+fn read_marker(db: &Path) -> Option<State> {
     let text = fs::read_to_string(marker_path(db)).ok()?;
     let (store_id, last_change) = text.trim_end().split_once(' ')?;
     Some(State {
         store_id: store_id.to_owned(),
         last_change: last_change.parse().ok()?,
+    })
+}
+
+/// Where the store at `db` stands as its marker says, for a session hook
+/// that compares it with its snapshot without opening the store; none when
+/// the marker is missing or unreadable.
+pub fn marked(db: &Path) -> Option<super::Since> {
+    read_marker(db).map(|state| super::Since {
+        store_id: state.store_id,
+        change: state.last_change,
     })
 }
 
