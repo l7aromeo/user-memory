@@ -166,11 +166,13 @@ impl Scope {
         }
     }
 
+    /// The scope stored as `text`; anything but "write" is the lesser
+    /// access, so a value this version does not know never grants writing.
     fn parse(text: &str) -> Self {
-        if text == "read" {
-            Self::Read
-        } else {
+        if text == "write" {
             Self::Write
+        } else {
+            Self::Read
         }
     }
 }
@@ -433,6 +435,17 @@ mod tests {
                 .all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b))
         );
         assert_ne!(new_token(), token);
+    }
+
+    #[test]
+    fn only_a_stored_write_scope_can_write() {
+        assert_eq!(Scope::parse("write"), Scope::Write);
+        for text in ["read", "", "Write", "admin", "write "] {
+            assert_eq!(Scope::parse(text), Scope::Read, "{text:?}");
+        }
+        for scope in [Scope::Write, Scope::Read] {
+            assert_eq!(Scope::parse(scope.as_str()), scope);
+        }
     }
 
     #[test]
