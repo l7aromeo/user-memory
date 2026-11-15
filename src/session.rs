@@ -30,7 +30,8 @@ const INDEX_CHARS: usize = 9000;
 /// The instruction-file sync's share of [`LIMIT`]: a slow one is cut off and
 /// the hook shows the whole index, with time left to fetch it.
 const SYNC_SHARE: Duration = Duration::from_secs(2);
-/// The largest index page, so the hook reads the whole index in few requests.
+/// The largest index page, so the hook reads an older server's whole index,
+/// which it lists only page by page, in few requests.
 const INDEX_PAGE: usize = 200;
 /// Hook payloads are small JSON objects; anything larger is ignored.
 const PAYLOAD_BYTES: usize = 64 * 1024;
@@ -365,10 +366,10 @@ async fn stamps(
 }
 
 /// The lines naming the projects the session in `path` sees, then the index
-/// of them, from the shared server or the local store: every page of it, so
-/// shortening it to the hook's share of the output still lists or counts
-/// each memory. When the client's instruction file holds the global rules,
-/// they are left out rather than repeated.
+/// of them, from the shared server or the local store, shortened to the
+/// hook's share of the output so that it still lists or counts each memory.
+/// When the client's instruction file holds the global rules, they are left
+/// out rather than repeated.
 async fn index(
     path: PathBuf,
     client: Option<HookClient>,
@@ -392,16 +393,6 @@ async fn index(
             &[],
         ),
     };
-    let remote = remote.as_ref();
-    let whole = whole_of(
-        remote,
-        json!({
-            "projects": seen.keys(),
-            "origin_links": origin,
-            "without_global_rules": rules_elsewhere,
-        }),
-    )
-    .await?;
     // Only a session with no project at all needs the folder's checkouts
     // named, so it can link one without asking the user for its remote.
     let repositories = if seen.projects.is_empty() {
@@ -411,55 +402,92 @@ async fn index(
     };
     let line = projects_lines(&seen, &repositories);
     let room = INDEX_CHARS.saturating_sub(line.chars().count() + 1);
+    let remote = remote.as_ref();
+    let mut fetch = async |input: Value| -> anyhow::Result<String> {
+        let page = match remote {
+            Some(connection) => connection.call("index", input).await?,
+            None => {
+                let input: memory::Index = serde_json::from_value(input)?;
+                let db = db_path();
+                tokio::task::spawn_blocking(move || memory::index(&db, &input)).await??
+            }
+        };
+        // A page that reports the index unavailable is an error, so it is
+        // never shown or merged as if it were the index.
+        match page.strip_prefix(memory::INDEX_UNAVAILABLE) {
+            Some(reason) => anyhow::bail!("{reason}"),
+            None => Ok(page),
+        }
+    };
+    let index = fitted(&mut fetch, &seen, origin.as_deref(), rules_elsewhere, room).await?;
+    Ok(format!("{line}\n{index}"))
+}
+
+/// The index of what the session sees within `room` characters, asked of
+/// `fetch` (one index call) in one request: the store builds the whole
+/// index once and shortens it. An older server ignores the room and lists
+/// one page, with a cursor when more follow, so the index is then read page
+/// by page and shortened here, as it was before.
+async fn fitted(
+    fetch: &mut impl AsyncFnMut(Value) -> anyhow::Result<String>,
+    seen: &Seen,
+    origin: Option<&str>,
+    rules_elsewhere: bool,
+    room: usize,
+) -> anyhow::Result<String> {
+    let input = json!({
+        "projects": seen.keys(),
+        "origin_links": origin,
+        "without_global_rules": rules_elsewhere,
+    });
+    let mut asked = input.clone();
+    asked["fit_room"] = json!(room);
+    asked["fit_whole_projects"] = json!(seen.core);
+    let reply = fetch(asked).await?;
+    if memory::next_cursor(&reply).is_none() && reply.chars().count() <= room {
+        return Ok(reply);
+    }
+    let whole = whole_of(fetch, input).await?;
     let others: Vec<&live::Project> = seen
         .projects
         .iter()
         .filter(|p| !seen.core.contains(&p.key))
         .collect();
-    let index = if whole.chars().count() <= room || others.is_empty() {
-        memory::shorten(&whole, room)
-    } else {
-        // Too large with every project: global memories and the folder's
-        // own projects first, then a share of the room for each other one.
-        let core = whole_of(
-            remote,
-            json!({"projects": seen.core, "without_global_rules": rules_elsewhere}),
-        )
-        .await?;
-        let mut projects = Vec::new();
-        for p in others {
-            let index = whole_of(remote, json!({"projects": [&p.key], "scope": "project"})).await?;
-            projects.push(memory::ProjectIndex {
-                key: p.key.clone(),
-                // The Projects line names where each comes from.
-                label: p.key.clone(),
-                index,
-            });
-        }
-        memory::tiered(&whole, &core, &projects, room)
-    };
-    Ok(format!("{line}\n{index}"))
+    if whole.chars().count() <= room || others.is_empty() {
+        return Ok(memory::shorten(&whole, room));
+    }
+    // Too large with every project: global memories and the folder's own
+    // projects first, then a share of the room for each other one.
+    let core = whole_of(
+        fetch,
+        json!({"projects": seen.core, "without_global_rules": rules_elsewhere}),
+    )
+    .await?;
+    let mut projects = Vec::new();
+    for p in others {
+        let index = whole_of(fetch, json!({"projects": [&p.key], "scope": "project"})).await?;
+        projects.push(memory::ProjectIndex {
+            key: p.key.clone(),
+            // The Projects line names where each comes from.
+            label: p.key.clone(),
+            index,
+        });
+    }
+    Ok(memory::tiered(&whole, &core, &projects, room))
 }
 
-/// Every page of the index `input` asks for, merged, from the shared
-/// server or the local store.
+/// Every page of the index `input` asks for, merged, from `fetch`.
 async fn whole_of(
-    remote: Option<&crate::remote::Connection>,
+    fetch: &mut impl AsyncFnMut(Value) -> anyhow::Result<String>,
     input: Value,
 ) -> anyhow::Result<String> {
-    let mut fetch = async |cursor: Option<String>| -> anyhow::Result<String> {
+    let mut page = async |cursor: Option<String>| -> anyhow::Result<String> {
         let mut input = input.clone();
         input["page_size"] = json!(INDEX_PAGE);
         input["cursor"] = json!(cursor);
-        if let Some(connection) = remote {
-            connection.call("index", input).await
-        } else {
-            let input: memory::Index = serde_json::from_value(input)?;
-            let db = db_path();
-            tokio::task::spawn_blocking(move || memory::index(&db, &input)).await?
-        }
+        fetch(input).await
     };
-    Ok(memory::merge(&whole_index(&mut fetch).await?))
+    Ok(memory::merge(&whole_index(&mut page).await?))
 }
 
 /// The projects a conversation linked, from the shared server or the local
@@ -792,6 +820,111 @@ fn capped(text: String, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fills the store at `db` with `per` memories globally and in each of
+    /// `projects`, of rule and other types, across a few categories.
+    fn fill(db: &Path, per: usize, projects: &[&str]) {
+        let conn = memory::connect(db).unwrap();
+        let types = [
+            "preference",
+            "constraint",
+            "fact",
+            "decision",
+            "goal",
+            "lesson",
+        ];
+        let categories = ["workflow", "tooling", "testing"];
+        let mut n = 0;
+        for project in std::iter::once("").chain(projects.iter().copied()) {
+            let scope = if project.is_empty() {
+                "global"
+            } else {
+                "project"
+            };
+            for i in 0..per {
+                n += 1;
+                conn.execute(
+                    "INSERT INTO memories (id,memory_type,category,title,content,scope,project) VALUES (?1,?2,?3,?4,?4,?5,?6)",
+                    rusqlite::params![
+                        format!("{n:08x}-0000-4000-8000-{n:012x}"),
+                        types[i % types.len()],
+                        categories[i % categories.len()],
+                        format!("Memory {n} about the work in this place, one line long"),
+                        scope,
+                        project,
+                    ],
+                )
+                .unwrap();
+            }
+        }
+    }
+
+    // Session start asks for its index in one request, and reads what the
+    // walk of every page read: an older server, which knows no fit_room,
+    // is walked page by page and the result shortened here as before.
+    #[tokio::test]
+    async fn the_session_index_is_one_request_and_reads_as_the_page_walk_did() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = "github.com/acme/app";
+        let others = ["github.com/acme/web", "github.com/acme/api"];
+        for (case, per, listed) in [
+            ("fits", 5, &[][..]),
+            ("shortened", 150, &[][..]),
+            ("tiered", 40, &others[..]),
+        ] {
+            let db = dir.path().join(format!("{case}.sqlite3"));
+            let mut projects = vec![app];
+            projects.extend(listed);
+            fill(&db, per, &projects);
+            let project = |key: &str, source: &str| live::Project {
+                key: key.into(),
+                source: source.into(),
+                folders: Vec::new(),
+            };
+            let mut seen_projects = vec![project(app, THIS_FOLDER)];
+            seen_projects.extend(listed.iter().map(|key| project(key, LISTED)));
+            let seen = Seen {
+                projects: seen_projects,
+                core: vec![app.to_owned()],
+                notes: Vec::new(),
+            };
+            let calls = std::cell::Cell::new(0);
+            let mut store = async |input: Value| -> anyhow::Result<String> {
+                calls.set(calls.get() + 1);
+                memory::index(&db, &serde_json::from_value(input)?)
+            };
+            let one = fitted(&mut store, &seen, None, false, INDEX_CHARS)
+                .await
+                .unwrap();
+            assert_eq!(calls.get(), 1, "{case}");
+            let pages = std::cell::Cell::new(0);
+            let mut older = async |mut input: Value| -> anyhow::Result<String> {
+                pages.set(pages.get() + 1);
+                let fields = input.as_object_mut().unwrap();
+                fields.remove("fit_room");
+                fields.remove("fit_whole_projects");
+                memory::index(&db, &serde_json::from_value(input)?)
+            };
+            let walked = fitted(&mut older, &seen, None, false, INDEX_CHARS)
+                .await
+                .unwrap();
+            assert_eq!(one, walked, "{case}");
+            assert!(one.chars().count() <= INDEX_CHARS, "{case}");
+            let shortened = one.contains("Shortened to fit the session start");
+            let tiered = one.contains(" more (index projects: [");
+            assert_eq!(
+                (shortened, tiered),
+                match case {
+                    "fits" => (false, false),
+                    "shortened" => (true, false),
+                    _ => (true, true),
+                },
+                "{case}: {one}"
+            );
+            // An index that fits is one page from any server.
+            assert_eq!(pages.get() > 1, case != "fits", "{case}: pages");
+        }
+    }
 
     // Each server, and each local store, names snapshots of its own: two
     // servers differ, and a server differs from a store at any path.

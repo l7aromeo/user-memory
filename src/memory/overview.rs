@@ -8,7 +8,7 @@ use super::{
     page::{Paging, page},
     read::{SHORT_ID, group_order, rank, standing_rule},
     schema::connect,
-    selection::{ScopeFilter, Selection, candidates},
+    selection::{Filter, ScopeFilter, Selection, candidates},
     similar::tokenize,
 };
 use anyhow::Result;
@@ -54,6 +54,16 @@ pub struct Index {
     #[serde(default)]
     #[schemars(skip)]
     pub origin_links: Option<String>,
+    /// Used by user-memory's own session hook; leave unset. The whole index in one reply, shortened to this many characters as the session start shows it. An older server ignores it and lists the index page by page.
+    #[arg(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    pub fit_room: Option<usize>,
+    /// Used by user-memory's own session hook with fit_room; leave unset. Projects listed whole with the global memories when the index of every project does not fit: the folder's own project and a key waiting for a move. An older server ignores it.
+    #[arg(skip)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(skip)]
+    pub fit_whole_projects: Vec<String>,
 }
 
 /// Memories a topic may pull to the front by meaning alone: enough to surface
@@ -106,25 +116,92 @@ pub fn index(db: &Path, input: &Index) -> Result<String> {
     let conn = connect(db)?;
     // The projects the session hook's conversation linked join the folder's
     // own, which the hook passes first; links never replace it.
-    let filter = match &input.origin_links {
-        Some(origin) => {
-            let mut selection = input.selection.clone();
-            for project in super::links::linked(&conn, origin)? {
-                if !selection.projects.contains(&project) {
-                    selection.projects.push(project);
-                }
+    let mut selection = input.selection.clone();
+    if let Some(origin) = &input.origin_links {
+        for project in super::links::linked(&conn, origin)? {
+            if !selection.projects.contains(&project) {
+                selection.projects.push(project);
             }
-            selection.filter()?
         }
-        None => input.selection.filter()?,
-    };
+    }
+    let filter = selection.filter()?;
     if input.stamps {
         return super::stamps::stamps(&conn, &filter);
     }
+    match input.fit_room {
+        Some(chars) => fitted(&conn, input, &selection, &filter, chars),
+        None => render(&conn, input, &filter, Some(&input.paging)),
+    }
+}
+
+/// The whole index of `selection` (whose filter is `filter`) within `chars`
+/// characters, built once here so the session hook asks for it in one call:
+/// [`shorten`] when it fits with every project or the session sees only the
+/// folder's own (`input.fit_whole_projects`), else [`tiered`], with the global memories
+/// and the folder's projects listed whole and every other project in part.
+fn fitted(
+    conn: &rusqlite::Connection,
+    input: &Index,
+    selection: &Selection,
+    filter: &Filter,
+    chars: usize,
+) -> Result<String> {
+    let whole = render(conn, input, filter, None)?;
+    let others: Vec<&String> = selection
+        .projects
+        .iter()
+        .filter(|p| !input.fit_whole_projects.contains(p))
+        .collect();
+    if whole.chars().count() <= chars || others.is_empty() {
+        return Ok(shorten(&whole, chars));
+    }
+    let part = |selection: Selection, without_global_rules: bool| {
+        let index = Index {
+            selection,
+            without_global_rules,
+            ..Index::default()
+        };
+        render(conn, &index, &index.selection.filter()?, None)
+    };
+    let core = part(
+        Selection {
+            projects: input.fit_whole_projects.clone(),
+            ..Selection::default()
+        },
+        input.without_global_rules,
+    )?;
+    let mut projects = Vec::new();
+    for key in others {
+        let index = part(
+            Selection {
+                projects: vec![key.clone()],
+                scope: Some(ScopeFilter::Project),
+                ..Selection::default()
+            },
+            false,
+        )?;
+        projects.push(ProjectIndex {
+            key: key.clone(),
+            // The Projects line names where each comes from.
+            label: key.clone(),
+            index,
+        });
+    }
+    Ok(tiered(&whole, &core, &projects, chars))
+}
+
+/// The index of `filter`'s memories as `input` asks for it: the page
+/// `paging` names, or every line without paging.
+fn render(
+    conn: &rusqlite::Connection,
+    input: &Index,
+    filter: &Filter,
+    paging: Option<&Paging>,
+) -> Result<String> {
     let matched: Vec<_> = if tokenize(&input.topic).is_empty() {
         Vec::new()
     } else {
-        rank(&conn, &filter, &input.topic, TOPIC_MATCHES)?.ids
+        rank(conn, filter, &input.topic, TOPIC_MATCHES)?.ids
     };
     let relevance = |m: &Memory| {
         matched
@@ -132,7 +209,7 @@ pub fn index(db: &Path, input: &Index) -> Result<String> {
             .position(|id| *id == m.id)
             .unwrap_or(matched.len())
     };
-    let mut all: Vec<Memory> = candidates(&conn, &filter)?;
+    let mut all: Vec<Memory> = candidates(conn, filter)?;
     if all.is_empty() {
         let stored: i64 =
             conn.query_row("SELECT EXISTS (SELECT 1 FROM memories)", [], |r| r.get(0))?;
@@ -162,8 +239,13 @@ pub fn index(db: &Path, input: &Index) -> Result<String> {
             );
         }
     }
-    let ids: Vec<_> = placed.iter().map(|(_, _, _, m)| m.id).collect();
-    let (shown, next) = page(placed, &ids, &input.paging)?;
+    let (shown, next) = match paging {
+        Some(paging) => {
+            let ids: Vec<_> = placed.iter().map(|(_, _, _, m)| m.id).collect();
+            page(placed, &ids, paging)?
+        }
+        None => (placed, None),
+    };
     let mut lines: Vec<String> = HEADER.iter().map(|line| (*line).to_owned()).collect();
     lines.push(counted);
     if input.without_global_rules {
