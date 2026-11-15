@@ -291,8 +291,9 @@ every minute once no hook ran for two minutes, and keeps it in the
 machine, so a prompt whose snapshot holds it sends the server no request.
 A change made elsewhere reaches a session's notice within about 5 seconds;
 one a session on this machine makes through its connector, at the other
-sessions' next prompt, since the connector drops the position once the
-server has answered the write. Several connectors on one machine share the
+sessions' next prompt: once the server has answered the write, the
+connector sets the position aside as old, so those prompts ask the server,
+and polls again at once. Several connectors on one machine share the
 polls. A position older than
 three polls, as with no connector running or after a quiet spell, counts
 as moved: the prompt asks the server itself, and the connector goes back to
