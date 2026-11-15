@@ -3,6 +3,6 @@
 # also name (tests/ci.rs holds the three together). rustfmt and clippy are
 # what `just check` runs beyond the compiler.
 [toolchain]
-channel = "1.99.1"
+channel = "1.100.0"
 components = ["rustfmt", "clippy"]
 profile = "minimal"

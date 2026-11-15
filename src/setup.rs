@@ -814,17 +814,14 @@ fn failure(output: &Output) -> String {
 /// Whether `path` is a program this system runs: on Unix a file with an
 /// execute bit; on Windows any file, whose extension says how it runs.
 fn executable(path: &Path) -> bool {
-    if !path.is_file() {
-        return false;
-    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+        fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
     }
     #[cfg(not(unix))]
     {
-        true
+        path.is_file()
     }
 }
 
@@ -2132,6 +2129,31 @@ mod tests {
             program_files("claude", true, Some(OsStr::new(" "))),
             ["claude.com", "claude.exe", "claude.bat", "claude.cmd"]
         );
+    }
+
+    /// A folder named like a program, such as one earlier on PATH, is never
+    /// the program, though on Unix it has execute bits.
+    #[test]
+    fn only_a_file_is_a_program() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("codex");
+        fs::write(&program, "").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert!(!executable(&program), "a file without an execute bit");
+            fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert!(executable(&program));
+        let folder = dir.path().join("claude");
+        fs::create_dir(&folder).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&folder, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert!(!executable(&folder));
+        assert!(!executable(&dir.path().join("missing")));
     }
 
     #[tokio::test]
