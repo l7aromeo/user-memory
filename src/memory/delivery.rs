@@ -188,8 +188,13 @@ fn assignment(word: &str) -> bool {
 
 /// A shell command's terms: each segment's program with its subcommand,
 /// as a memory's code span names them (`cargo publish`), and its path
-/// arguments, as anchors and as words.
-fn command_terms(line: &str, stems: &mut Stems, terms: &mut Terms) {
+/// arguments, as anchors and as words. Any word argument may be the
+/// subcommand, as a program's own flags and their values can come first
+/// (`git -C repo status`), so the program is paired with each as an anchor;
+/// a pair no memory names has no holders and weighs nothing. With `pairs`,
+/// each two adjacent words are an anchor too, so a wrapper no table names
+/// (`npx`, a proxy) still yields the command it runs.
+fn command_terms(line: &str, stems: &mut Stems, terms: &mut Terms, pairs: bool) {
     for words in segments(line) {
         let mut rest = words
             .iter()
@@ -205,8 +210,23 @@ fn command_terms(line: &str, stems: &mut Stems, terms: &mut Terms) {
         terms.anchors.extend(passages::anchors(program));
         terms.words(stems, program);
         if let Some(sub) = sub {
-            terms.anchors.insert(format!("{name} {sub}").to_lowercase());
             terms.words(stems, sub);
+        }
+        for arg in args.iter().filter(|arg| word_argument(arg)) {
+            terms.anchors.insert(format!("{name} {arg}").to_lowercase());
+        }
+        if pairs {
+            for pair in words.windows(2) {
+                if let [first, second] = pair
+                    && word_argument(first)
+                    && word_argument(second)
+                {
+                    let first = first.rsplit('/').next().unwrap_or(first);
+                    terms
+                        .anchors
+                        .insert(format!("{first} {second}").to_lowercase());
+                }
+            }
         }
         for arg in args.iter().filter(|arg| !arg.starts_with('-')) {
             let found = passages::anchors(arg);
@@ -216,6 +236,14 @@ fn command_terms(line: &str, stems: &mut Stems, terms: &mut Terms) {
             }
         }
     }
+}
+
+/// Whether a command's argument is a word a subcommand could be: it starts
+/// with a letter and holds no space, so no flag, path or quoted message.
+fn word_argument(arg: &str) -> bool {
+    arg.starts_with(|c: char| c.is_ascii_alphabetic())
+        && !arg.contains(char::is_whitespace)
+        && !assignment(arg)
 }
 
 /// A file's terms: its path relative to the project root, every tail of it
@@ -242,11 +270,11 @@ fn file_terms(path: &str, stems: &mut Stems, terms: &mut Terms) {
     }
 }
 
-/// The terms `action` adds to the window.
-pub(in crate::memory) fn terms(action: &Action, stems: &mut Stems) -> Terms {
+/// The terms `action` adds to the window; `pairs` as in [`command_terms`].
+pub(in crate::memory) fn terms(action: &Action, stems: &mut Stems, pairs: bool) -> Terms {
     let mut terms = Terms::default();
     match action.kind {
-        Kind::Command => command_terms(&action.text, stems, &mut terms),
+        Kind::Command => command_terms(&action.text, stems, &mut terms, pairs),
         Kind::File => file_terms(&action.text, stems, &mut terms),
         Kind::Prompt | Kind::Task | Kind::Plan | Kind::Message | Kind::Search => {
             terms.words(stems, &action.text);
@@ -263,6 +291,8 @@ pub(crate) struct Tuning {
     pub(crate) window_actions: usize,
     pub(crate) half_life: f64,
     pub(crate) credit: f64,
+    /// Adjacent words of a command are anchors too (see `command_terms`).
+    pub(crate) pairs: bool,
 }
 
 impl Default for Tuning {
@@ -271,6 +301,7 @@ impl Default for Tuning {
             window_actions: WINDOW_ACTIONS,
             half_life: WINDOW_HALF_LIFE,
             credit: OTHER_PASSAGE_CREDIT,
+            pairs: false,
         }
     }
 }
@@ -302,7 +333,7 @@ impl Window {
     /// Adds `action`, the one that fires the next match; the oldest past
     /// [`WINDOW_ACTIONS`] falls out.
     pub(crate) fn push(&mut self, action: &Action) {
-        let terms = terms(action, &mut self.stems);
+        let terms = terms(action, &mut self.stems, self.tuning.pairs);
         self.actions.push_back((action.kind, terms, action.failed));
         while self.actions.len() > self.tuning.window_actions {
             self.actions.pop_front();
@@ -1048,7 +1079,11 @@ mod tests {
     }
 
     fn of(kind: Kind, text: &str) -> Terms {
-        terms(&action(kind, text), &mut Stems::new())
+        of_with(kind, text, false)
+    }
+
+    fn of_with(kind: Kind, text: &str, pairs: bool) -> Terms {
+        terms(&action(kind, text), &mut Stems::new(), pairs)
     }
 
     fn stems(text: &str) -> BTreeSet<String> {
@@ -1071,10 +1106,18 @@ mod tests {
         ] {
             assert!(terms.anchors.contains(anchor), "{anchor}: {terms:?}");
         }
-        // A flag is no subcommand, and neither the variable nor `sudo` is
-        // the program.
+        // A flag is no subcommand, but a word after it may be: each word
+        // argument pairs with the program, so `git -C repo status` names
+        // `git status` (and `git repo`, which no memory holds). Neither the
+        // variable nor `sudo` is the program.
+        for anchor in ["git status", "git repo", "cargo internal"] {
+            assert!(terms.anchors.contains(anchor), "{anchor}: {terms:?}");
+        }
         assert!(
-            !terms.anchors.iter().any(|a| a.starts_with("git ")),
+            !terms
+                .anchors
+                .iter()
+                .any(|a| a.starts_with("git -") || a.starts_with("cargo -")),
             "{terms:?}"
         );
         assert!(
@@ -1085,7 +1128,7 @@ mod tests {
             "{terms:?}"
         );
         // Words of the programs, subcommands and paths, never of flags or
-        // other arguments.
+        // other arguments: a word paired with the program is an anchor only.
         assert!(
             terms
                 .stems
@@ -1096,6 +1139,30 @@ mod tests {
         ] {
             assert!(!terms.stems.contains(word), "{word}: {terms:?}");
         }
+    }
+
+    #[test]
+    fn a_subcommand_after_a_flag_or_behind_a_wrapper_is_still_named() {
+        let terms = of(
+            Kind::Command,
+            "cargo --locked test && kubectl -n prod apply -f deploy.yml",
+        );
+        for anchor in ["cargo test", "kubectl apply", "kubectl prod"] {
+            assert!(terms.anchors.contains(anchor), "{anchor}: {terms:?}");
+        }
+        // A wrapper no table names hides the command, unless adjacent
+        // words are anchors too.
+        let line = "npx --yes prettier check && proxychains git push";
+        let plain = of(Kind::Command, line);
+        assert!(!plain.anchors.contains("git push"), "{plain:?}");
+        let paired = of_with(Kind::Command, line, true);
+        for anchor in ["git push", "proxychains git", "prettier check"] {
+            assert!(paired.anchors.contains(anchor), "{anchor}: {paired:?}");
+        }
+        assert!(
+            !paired.anchors.iter().any(|a| a.contains("--yes")),
+            "{paired:?}"
+        );
     }
 
     #[test]
