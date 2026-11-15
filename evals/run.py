@@ -566,12 +566,23 @@ def user_memory_hooks(sandbox):
             if "user-memory" in hook.get("command", "")]
 
 
+# The events setup gives user-memory's hooks in each client: Claude Code's
+# settings keys, and Codex's events as `hooks/list` names them, with how
+# many handlers Codex lists (two on session start: the index and, on
+# compact, the working set).
+CLAUDE_HOOK_EVENTS = ["PostToolUse", "PostToolUseFailure", "PreToolUse", "SessionStart",
+                      "SubagentStart", "UserPromptSubmit"]
+CODEX_HOOK_EVENTS = ["postToolUse", "preToolUse", "sessionStart", "subagentStart",
+                     "userPromptSubmit"]
+CODEX_HOOK_HANDLERS = 6
+
+
 def approve_codex_hooks(sandbox):
     """Approves the trial's user-memory hooks the way a user does in /hooks:
     Codex records each hook's current hash as trusted in config.toml."""
     hooks = user_memory_hooks(sandbox)
-    if len(hooks) != 2:
-        raise RuntimeError(f"Codex lists {len(hooks)} user-memory hooks, not 2")
+    if len(hooks) != CODEX_HOOK_HANDLERS:
+        raise RuntimeError(f"Codex lists {len(hooks)} user-memory hooks, not {CODEX_HOOK_HANDLERS}")
     config = sandbox.codex_home / "config.toml"
     text = config.read_text() if config.exists() else ""
     for hook in hooks:
@@ -2081,7 +2092,7 @@ def rehearsal_notes(scenario, client, sandbox, projects):
         settings_file = sandbox.claude_dir / "settings.json"
         settings = json.loads(settings_file.read_text()) if settings_file.exists() else {}
         events = sorted((settings.get("hooks") or {}).keys())
-        want = ["SessionStart", "UserPromptSubmit"] if hooks else []
+        want = CLAUDE_HOOK_EVENTS if hooks else []
         if events != want:
             notes.append(f"Claude hooks {events}, want {want}")
         state_file = sandbox.claude_dir / ".claude.json"
@@ -2090,7 +2101,7 @@ def rehearsal_notes(scenario, client, sandbox, projects):
             notes.append("no user-memory MCP server in the trial's .claude.json")
     else:
         trust = {h["eventName"]: h["trustStatus"] for h in user_memory_hooks(sandbox)}
-        want = {"sessionStart": "trusted", "userPromptSubmit": "trusted"} if hooks else {}
+        want = {event: "trusted" for event in CODEX_HOOK_EVENTS} if hooks else {}
         if trust != want:
             notes.append(f"Codex hook trust {trust}, want {want}")
         config_file = sandbox.codex_home / "config.toml"

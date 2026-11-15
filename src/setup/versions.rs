@@ -353,6 +353,38 @@ pub(crate) fn claude_step(output: &str, windows: bool) -> Option<ClaudeStep> {
     }
 }
 
+/// The oldest Codex that reads a hook handler's `additionalContextLimit`:
+/// the key is in `HookHandlerConfig` (codex-rs/config/src/hook_config.rs)
+/// from the `rust-v0.145.0` tag on and in no tag from `rust-v0.140.0` to
+/// `rust-v0.144.0`. Those older ones cut a hook's text at 2,500 tokens
+/// (`HOOK_OUTPUT_TOKEN_LIMIT` in codex-rs/hooks/src/output_spill.rs) and
+/// ignore the key, since only the hooks file's top level refuses unknown
+/// fields: setup writes the limit only for this release or a later one.
+/// Read in Codex's source at those tags; no older Codex runs here.
+pub(crate) const CODEX_CONTEXT_LIMIT_SINCE: Version = Version {
+    major: 0,
+    minor: 145,
+    patch: 0,
+};
+
+/// What starts the line `codex --version` prints before the version.
+const CODEX_MARKER: &str = "codex-cli ";
+
+/// The version in `codex --version`'s output (`codex-cli 0.163.0`): the
+/// first line that names it so. `None` when no line does.
+pub(crate) fn codex(output: &str) -> Option<Version> {
+    output.lines().map(clean).find_map(|line| {
+        Version::parse(line.strip_prefix(CODEX_MARKER)?.split_whitespace().next()?)
+    })
+}
+
+/// Whether the Codex whose `codex --version` printed `output` (empty when
+/// it could not run) reads a handler's `additionalContextLimit`: never when
+/// its version cannot be read.
+pub(crate) fn codex_reads_context_limit(output: &str) -> bool {
+    codex(output).is_some_and(|version| version >= CODEX_CONTEXT_LIMIT_SINCE)
+}
+
 /// One line of output without a byte order mark or surrounding spaces.
 fn clean(line: &str) -> &str {
     line.trim_start_matches('\u{feff}').trim()
@@ -863,6 +895,24 @@ mod tests {
     fn other_platforms_are_never_told_about_claude_code_versions() {
         for output in ["2.1.138 (Claude Code)", "", "command not found"] {
             assert_eq!(claude_step(output, false), None, "{output:?}");
+        }
+    }
+
+    /// Only a Codex whose version reads as the floor or later gets the
+    /// context limit; one whose version cannot be read never does.
+    #[test]
+    fn the_context_limit_needs_a_codex_that_reads_it() {
+        for (output, reads) in [
+            ("codex-cli 0.163.0\n", true),
+            ("codex-cli 0.145.0", true),
+            ("WARNING: proceeding\ncodex-cli 1.0.0", true),
+            ("codex-cli 0.144.9", false),
+            ("codex-cli 0.130.0", false),
+            ("codex-cli 0.145.0-alpha.1", false),
+            ("0.163.0", false),
+            ("", false),
+        ] {
+            assert_eq!(codex_reads_context_limit(output), reads, "{output:?}");
         }
     }
 }

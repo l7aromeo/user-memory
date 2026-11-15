@@ -200,7 +200,7 @@ broken. The installer still finishes, and its last lines name the step:
 
 ```output
 Still to do before memory works everywhere:
-  Codex session hooks: Codex has not approved them yet, so they never run; open Codex and approve them once: at startup Codex says hooks need review, or run /hooks and choose Trust for user-memory's SessionStart and UserPromptSubmit hooks
+  Codex session hooks: Codex has not approved them yet, so they never run; open Codex and approve them once: at startup Codex says hooks need review, or run /hooks and choose Trust for user-memory's SessionStart, UserPromptSubmit, SubagentStart, PreToolUse and PostToolUse hooks
 ```
 
 `user-memory doctor` shows the same step until you have done it.
@@ -321,7 +321,12 @@ It removes what setup added, each on one line, and keeps your memories:
 Uninstalling user memory…
   Removed: Claude Code registration
   Removed: Claude Code SessionStart hook (~/.claude/settings.json)
+  Removed: Claude Code SessionStart (compact) hook (~/.claude/settings.json)
   Removed: Claude Code UserPromptSubmit hook (~/.claude/settings.json)
+  Removed: Claude Code SubagentStart hook (~/.claude/settings.json)
+  Removed: Claude Code PreToolUse hook (~/.claude/settings.json)
+  Removed: Claude Code PostToolUse hook (~/.claude/settings.json)
+  Removed: Claude Code PostToolUseFailure hook (~/.claude/settings.json)
   Removed: skill (~/.agents/skills/user-memory, linked from ~/.claude/skills/user-memory)
   Removed: the user-memory rules in ~/.claude/rules/user-memory.md
   Removed: the global git ignore lines # user-memory, .user-memory, .user-memory-key (~/.config/git/ignore)

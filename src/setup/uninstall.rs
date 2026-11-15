@@ -254,7 +254,11 @@ fn session_hooks(kind: Client, report: &mut Report) -> Result<()> {
             hooks::apply(&file, hook, None)?;
         }
         removed_any = true;
-        report.removed(format!("{label} {} hook ({})", hook.event, file.display()));
+        report.removed(format!(
+            "{label} {} hook ({})",
+            hook.label(),
+            file.display()
+        ));
     }
     // A file this run emptied holds nothing of the user's: setup created it
     // for the hooks.

@@ -121,7 +121,7 @@ impl Sandbox {
         self.codex_trusts(status, status);
     }
     /// Makes the fake Codex report `start` for the installed session-start
-    /// hook and `prompt` for the prompt hook.
+    /// hook and every hook but the prompt hook, and `prompt` for that one.
     fn codex_trusts(&self, start: &str, prompt: &str) {
         let binary = self.path("installed tools/user-memory");
         let hook = |subcommand: &str, event: &str, status: &str| {
@@ -133,7 +133,11 @@ impl Sandbox {
         };
         let reply = serde_json::json!({"id":1,"result":{"data":[{"cwd":"/tmp","warnings":[],"errors":[],"hooks":[
             hook("session-start", "sessionStart", start),
-            hook("prompt-submit", "userPromptSubmit", prompt)]}]}});
+            hook("working-set", "sessionStart", start),
+            hook("prompt-submit", "userPromptSubmit", prompt),
+            hook("subagent-start", "subagentStart", start),
+            hook("pre-tool-use", "preToolUse", start),
+            hook("post-tool-use", "postToolUse", start)]}]}});
         fs::write(self.path("home/codex-hooks.json"), format!("{reply}\n")).unwrap();
     }
     fn args(&self, client: &str) -> Vec<String> {
@@ -788,23 +792,113 @@ fn setup_replaces_an_outdated_claude_registration() {
     assert!(!fs::read_to_string(&config).unwrap().contains("old.sqlite3"));
 }
 
-/// The commands of the session-start and prompt hooks in `file`, checking
-/// each event holds one group and the session hook covers resumed sessions.
-fn hook_commands(file: &std::path::Path) -> (String, String) {
+/// Every handler in `file` as (event, matcher, command, context limit), in
+/// the file's order, each group holding one handler.
+fn hook_handlers(file: &std::path::Path) -> Vec<(String, Option<String>, String, Option<u64>)> {
     let config: serde_json::Value = serde_json::from_slice(&fs::read(file).unwrap()).unwrap();
-    let command = |event: &str| {
-        let groups = config["hooks"][event].as_array().unwrap();
-        assert_eq!(groups.len(), 1, "{config}");
-        groups[0]["hooks"][0]["command"]
-            .as_str()
-            .unwrap()
-            .to_owned()
+    let mut handlers = Vec::new();
+    for (event, groups) in config["hooks"].as_object().unwrap() {
+        for group in groups.as_array().unwrap() {
+            let hooks = group["hooks"].as_array().unwrap();
+            assert_eq!(hooks.len(), 1, "{config}");
+            handlers.push((
+                event.clone(),
+                group["matcher"].as_str().map(str::to_owned),
+                hooks[0]["command"].as_str().unwrap().to_owned(),
+                hooks[0]["additionalContextLimit"].as_u64(),
+            ));
+        }
+    }
+    handlers
+}
+
+/// The handlers setup writes for `client` with the binary `quoted`, and for
+/// Codex the context limit `limit`, as [`hook_handlers`] reads them.
+fn hook_set(
+    client: &str,
+    quoted: &str,
+    limit: Option<u64>,
+) -> Vec<(String, Option<String>, String, Option<u64>)> {
+    let pre = if client == "codex" {
+        "*"
+    } else {
+        "Bash|PowerShell|Monitor|Agent|Task|SendMessage"
     };
-    assert_eq!(
-        config["hooks"]["SessionStart"][0]["matcher"],
-        "startup|resume|clear|compact"
+    let mut set = vec![
+        (
+            "SessionStart",
+            Some("startup|resume|clear|compact"),
+            "session-start",
+        ),
+        ("SessionStart", Some("compact"), "working-set"),
+        ("UserPromptSubmit", None, "prompt-submit"),
+        ("SubagentStart", None, "subagent-start"),
+        ("PreToolUse", Some(pre), "pre-tool-use"),
+        ("PostToolUse", None, "post-tool-use"),
+    ];
+    if client == "claude" {
+        set.push(("PostToolUseFailure", None, "post-tool-use"));
+    }
+    set.into_iter()
+        .map(|(event, matcher, subcommand)| {
+            let flag = limit.map_or(String::new(), |limit| format!(" --context-limit {limit}"));
+            (
+                event.to_owned(),
+                matcher.map(str::to_owned),
+                format!("{quoted} {subcommand} --client {client}{flag}"),
+                limit,
+            )
+        })
+        .collect()
+}
+
+/// What setup says it wrote of the whole hook set, every hook new.
+const HOOKS_ADDED: &str = "session hooks SessionStart added, SessionStart (compact) added, UserPromptSubmit added, SubagentStart added, PreToolUse added, PostToolUse added";
+
+/// A Codex that reads a handler's context limit gets it on every handler
+/// and its command; an older one, or one whose version cannot be read, gets
+/// today's shape. Doctor names a file written for the other side of the
+/// floor, either way.
+#[test]
+fn codex_gets_the_context_limit_only_when_it_reads_one() {
+    let s = Sandbox::new();
+    s.client("codex", false);
+    let codex = s.path("home/.codex/hooks.json");
+    let quoted = format!("'{}'", s.path("installed tools/user-memory").display());
+    let version = s.path("home/codex.version");
+    for (printed, limit) in [
+        ("codex-cli 0.145.0", Some(7_500)),
+        ("codex-cli 0.163.0", Some(7_500)),
+        ("codex-cli 0.144.0", None),
+        ("error: no such command", None),
+    ] {
+        fs::write(&version, printed).unwrap();
+        assert_success(&s.run(&["setup", "--client", "codex"]));
+        assert_eq!(
+            hook_handlers(&codex),
+            hook_set("codex", &quoted, limit),
+            "{printed}"
+        );
+    }
+    // Written for an older Codex, then Codex is upgraded.
+    fs::write(&version, "codex-cli 0.163.0").unwrap();
+    let doctor = s.run(&["doctor", "--client", "codex"]);
+    assert!(!doctor.status.success());
+    assert!(
+        stderr(&doctor).contains("were written for a Codex older than 0.145.0, so session start gets less room than this Codex allows. Run setup again."),
+        "{}",
+        stderr(&doctor)
     );
-    (command("SessionStart"), command("UserPromptSubmit"))
+    // Written for a newer Codex, then Codex is downgraded.
+    assert_success(&s.run(&["setup", "--client", "codex"]));
+    fs::write(&version, "codex-cli 0.144.0").unwrap();
+    let doctor = s.run(&["doctor", "--client", "codex"]);
+    assert!(!doctor.status.success());
+    assert!(
+        stderr(&doctor).contains("carry a context limit that only Codex 0.145.0 or later reads, so this Codex cuts what session start prints. Run setup again."),
+        "{}",
+        stderr(&doctor)
+    );
 }
 
 #[test]
@@ -818,33 +912,26 @@ fn setup_adds_session_hooks_that_load_the_project_index() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let claude = s.path("home/settings.json");
     let codex = s.path("home/.codex/hooks.json");
-    let added = "session hooks SessionStart added, UserPromptSubmit added";
     assert!(
-        stdout.contains(&format!("{added} ({})", claude.display())),
+        stdout.contains(&format!(
+            "{HOOKS_ADDED}, PostToolUseFailure added ({})",
+            claude.display()
+        )),
         "{stdout}"
     );
     assert!(
         stdout.contains(&format!(
-            "{added} ({}); Codex skips them until you open Codex and approve them once: at startup Codex says hooks need review, or run /hooks and choose Trust for user-memory's SessionStart and UserPromptSubmit hooks",
+            "{HOOKS_ADDED} ({}); Codex skips them until you open Codex and approve them once: at startup Codex says hooks need review, or run /hooks and choose Trust for user-memory's SessionStart, UserPromptSubmit, SubagentStart, PreToolUse and PostToolUse hooks",
             codex.display()
         )),
         "{stdout}"
     );
     let binary = s.path("installed tools/user-memory");
     let quoted = format!("'{}'", binary.display());
-    let (command, prompt_command) = hook_commands(&claude);
-    assert_eq!(command, format!("{quoted} session-start --client claude"));
-    assert_eq!(
-        prompt_command,
-        format!("{quoted} prompt-submit --client claude")
-    );
-    assert_eq!(
-        hook_commands(&codex),
-        (
-            format!("{quoted} session-start --client codex"),
-            format!("{quoted} prompt-submit --client codex")
-        )
-    );
+    // The fake Codex is older than the context limit: today's shape.
+    assert_eq!(hook_handlers(&claude), hook_set("claude", &quoted, None));
+    assert_eq!(hook_handlers(&codex), hook_set("codex", &quoted, None));
+    let command = hook_handlers(&claude)[0].2.clone();
 
     let conn = rusqlite::Connection::open(s.path("private memory.sqlite3")).unwrap();
     conn.execute("INSERT INTO memories(id,memory_type,category,content,title) VALUES ('e0000001-0000-4000-8000-000000000001','preference','programming','Prefer Rust','Prefer Rust')", []).unwrap();
@@ -912,7 +999,7 @@ fn setup_adds_session_hooks_that_load_the_project_index() {
     let stdout = String::from_utf8_lossy(&again.stdout);
     assert_eq!(
         stdout
-            .matches("session hooks SessionStart unchanged, UserPromptSubmit unchanged")
+            .matches("session hooks SessionStart unchanged, SessionStart (compact) unchanged, UserPromptSubmit unchanged")
             .count(),
         2,
         "{stdout}"
@@ -980,7 +1067,7 @@ fn doctor_trusts_only_what_codex_reports_about_hook_approval() {
         assert!(action.starts_with(message), "{status}: {report}");
         assert!(
             action.ends_with(
-                "run /hooks and choose Trust for user-memory's SessionStart and UserPromptSubmit hooks"
+                "run /hooks and choose Trust for user-memory's SessionStart, UserPromptSubmit, SubagentStart, PreToolUse and PostToolUse hooks"
             ),
             "{report}"
         );
@@ -1327,7 +1414,19 @@ fn setup_keeps_unrelated_client_settings_and_refuses_invalid_files() {
     assert_eq!(fs::read_to_string(&codex).unwrap(), "{ not json");
     let updated: serde_json::Value = serde_json::from_slice(&fs::read(&settings).unwrap()).unwrap();
     let mut expected: serde_json::Value = serde_json::from_str(original).unwrap();
-    for event in ["SessionStart", "UserPromptSubmit"] {
+    // The user's own pre-tool hook stays first, ours after it.
+    assert_eq!(
+        updated["hooks"]["PreToolUse"][0],
+        expected["hooks"]["PreToolUse"][0]
+    );
+    for event in [
+        "PreToolUse",
+        "SessionStart",
+        "UserPromptSubmit",
+        "SubagentStart",
+        "PostToolUse",
+        "PostToolUseFailure",
+    ] {
         expected["hooks"][event] = updated["hooks"][event].clone();
     }
     assert_eq!(updated, expected);
@@ -1339,7 +1438,14 @@ fn setup_keeps_unrelated_client_settings_and_refuses_invalid_files() {
             .unwrap()
             .keys()
             .collect::<Vec<_>>(),
-        ["PreToolUse", "SessionStart", "UserPromptSubmit"]
+        [
+            "PreToolUse",
+            "SessionStart",
+            "UserPromptSubmit",
+            "SubagentStart",
+            "PostToolUse",
+            "PostToolUseFailure"
+        ]
     );
 }
 
@@ -1378,7 +1484,7 @@ fn doctor_reports_missing_hooks_and_no_hooks_removes_them() {
     let updated = s.run(&["setup", "--client", "claude"]);
     assert!(
         String::from_utf8_lossy(&updated.stdout)
-            .contains("session hooks SessionStart updated, UserPromptSubmit added"),
+            .contains("session hooks SessionStart updated, SessionStart (compact) unchanged, UserPromptSubmit added, SubagentStart unchanged"),
         "{}",
         String::from_utf8_lossy(&updated.stdout)
     );
@@ -1390,7 +1496,7 @@ fn doctor_reports_missing_hooks_and_no_hooks_removes_them() {
     assert_success(&out);
     assert!(
         String::from_utf8_lossy(&out.stdout)
-            .contains("session hooks SessionStart removed, UserPromptSubmit removed")
+            .contains("session hooks SessionStart removed, SessionStart (compact) removed, UserPromptSubmit removed, SubagentStart removed, PreToolUse removed, PostToolUse removed, PostToolUseFailure removed")
     );
     assert_eq!(fs::read_to_string(&settings).unwrap(), "{}");
     // The saved choice keeps doctor from expecting a hook.
@@ -1476,13 +1582,13 @@ fn opting_out_of_hooks_survives_reruns_until_opting_back_in() {
     assert_success(&out);
     assert!(
         String::from_utf8_lossy(&out.stdout)
-            .contains("session hooks SessionStart removed, UserPromptSubmit removed")
+            .contains("session hooks SessionStart removed, SessionStart (compact) removed, UserPromptSubmit removed, SubagentStart removed, PreToolUse removed, PostToolUse removed, PostToolUseFailure removed")
     );
     let rerun = s.run(&["setup", "--client", "claude"]);
     assert_success(&rerun);
     assert!(
         String::from_utf8_lossy(&rerun.stdout)
-            .contains("session hooks SessionStart unchanged, UserPromptSubmit unchanged"),
+            .contains("session hooks SessionStart unchanged, SessionStart (compact) unchanged, UserPromptSubmit unchanged, SubagentStart unchanged, PreToolUse unchanged, PostToolUse unchanged, PostToolUseFailure unchanged"),
         "{}",
         String::from_utf8_lossy(&rerun.stdout)
     );
@@ -1500,10 +1606,9 @@ fn opting_out_of_hooks_survives_reruns_until_opting_back_in() {
     );
     let back = s.run(&["setup", "--client", "claude", "--hooks"]);
     assert_success(&back);
-    assert!(
-        String::from_utf8_lossy(&back.stdout)
-            .contains("session hooks SessionStart added, UserPromptSubmit added")
-    );
+    assert!(String::from_utf8_lossy(&back.stdout).contains(
+        "session hooks SessionStart added, SessionStart (compact) added, UserPromptSubmit added"
+    ));
     assert_success(&s.run(&["setup", "--client", "claude"]));
     assert!(
         fs::read_to_string(&settings)
