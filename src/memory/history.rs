@@ -363,7 +363,9 @@ pub(super) fn prune(db: &Path) -> Result<usize> {
         "DELETE FROM memory_events WHERE last_at < datetime('now', ?1)",
         [KEPT_FOR],
     )?;
-    if dropped > 0 {
+    // Forgotten memories' rows of the change counter go on the same day.
+    let removed = super::changes::prune(&tx)?;
+    if dropped + removed > 0 {
         tx.commit_removing()?;
     } else {
         tx.rollback()?;

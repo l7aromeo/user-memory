@@ -100,8 +100,14 @@ fn log(store: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(format!("{}-{suffix}", store.display()))
 }
 
-// The printed commands delete the store's log files, which may or may not
-// be there, and copy the newest backup over the store: afterwards the store
+/// The marker of the store's changes, which a restore removes so the next
+/// write gives the restored store a new id.
+fn marker(store: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.changed", store.display()))
+}
+
+// The printed commands delete the store's log files and the marker of its
+// changes, which may or may not be there, and copy the newest backup over the store: afterwards the store
 // is that backup, byte for byte, in both PowerShells.
 #[test]
 fn the_restore_commands_run_in_both_powershells() {
@@ -143,6 +149,7 @@ fn the_restore_commands_run_in_both_powershells() {
             if leftover {
                 fs::write(log(&store, "wal"), "stale").unwrap();
                 fs::write(log(&store, "shm"), "stale").unwrap();
+                fs::write(marker(&store), "stale").unwrap();
             }
             let out = run(shell, dir.path(), &commands);
             assert!(
@@ -152,6 +159,7 @@ fn the_restore_commands_run_in_both_powershells() {
             );
             assert!(!log(&store, "wal").exists(), "{shell}: -wal is still there");
             assert!(!log(&store, "shm").exists(), "{shell}: -shm is still there");
+            assert!(!marker(&store).exists(), "{shell}: .changed is still there");
             assert_eq!(
                 fs::read(&store).unwrap(),
                 fs::read(&backups[0]).unwrap(),

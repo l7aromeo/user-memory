@@ -26,7 +26,8 @@ use, SQLite keeps two working files beside it, `memories.sqlite3-wal` and
 `memories.sqlite3-shm`, which can hold recent changes. All three are
 readable only by their owner; copy, move or delete them together. An empty
 `memories.sqlite3.lock` beside them lets one writer at a time in; it holds
-no data. The store is not encrypted. user-memory has no secret scanner, so
+no data. `memories.sqlite3.changed` holds the store's id and the number of
+its latest change, no text. The store is not encrypted. user-memory has no secret scanner, so
 never ask an agent to store passwords, keys, tokens, source code or
 sensitive personal details.
 
@@ -81,6 +82,8 @@ restoring one of them brings the memory back:
 - every export made before the forget, wherever you keep it;
 - the session files on each machine, which keep the memory's title until
   they go unused for 30 days;
+- the store's count of its changes, which keeps the memory's id and the time
+  it was forgotten, no text, for 30 days, so running sessions learn it went;
 - the instruction files on your other machines, which keep a forgotten
   global rule's title until their next session start (the machine that
   forgot it updates its own at once);

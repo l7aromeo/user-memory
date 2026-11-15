@@ -345,15 +345,16 @@ replacing that day's backup. Doctor on the server reports the newest.
 docker compose -f ~/.local/share/user-memory/docker/compose.yaml exec memory user-memory backup list
 ```
 
-To restore one, stop the server, delete the log files and copy the backup
-over the store inside the volume, then start it again:
+To restore one, stop the server, delete the log files and the marker of the
+store's changes, and copy the backup over the store inside the volume, then
+start it again:
 
 ```bash
 docker compose -f ~/.local/share/user-memory/docker/compose.yaml stop memory
 ```
 
 ```bash
-docker compose -f ~/.local/share/user-memory/docker/compose.yaml run --rm --entrypoint rm memory -f /data/memories.sqlite3-wal /data/memories.sqlite3-shm
+docker compose -f ~/.local/share/user-memory/docker/compose.yaml run --rm --entrypoint rm memory -f /data/memories.sqlite3-wal /data/memories.sqlite3-shm /data/memories.sqlite3.changed
 ```
 
 ```bash

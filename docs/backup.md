@@ -40,7 +40,7 @@ Automatic backups in <store dir>/backups, newest first (the newest 7 are kept):
   memories-2026-10-18.sqlite3  made 2026-10-18T09:12Z  412 memories  1.3 MB
   memories-2026-10-17.sqlite3  made 2026-10-17T08:47Z  409 memories  1.3 MB
 To restore one, stop every client and server using the store, then run, with the backup you choose:
-  rm -f <store>-wal <store>-shm
+  rm -f <store>-wal <store>-shm <store>.changed
   cp <store dir>/backups/memories-2026-10-18.sqlite3 <store>
 ```
 
@@ -61,14 +61,16 @@ On Windows it prints the two commands for PowerShell:
 
 ```output
 To restore one, stop every client and server using the store, then run in PowerShell, with the backup you choose:
-  Get-Item -Force -LiteralPath '<store>-wal', '<store>-shm' -ErrorAction Ignore | Remove-Item -Force
+  Get-Item -Force -LiteralPath '<store>-wal', '<store>-shm', '<store>.changed' -ErrorAction Ignore | Remove-Item -Force
   Copy-Item -Force -LiteralPath '<store dir>\backups\memories-2026-10-18.sqlite3' -Destination '<store>'
 ```
 
 To restore one, quit your agents, then run the two commands `backup list`
 prints, with the backup you choose. Delete the log files first: SQLite
 applies a leftover log to whatever store sits beside it, which would bring
-later changes into the restored store. Restoring replaces the store, so
+later changes into the restored store. The `.changed` file tells sessions
+how far the store has changed; without it, the next write marks the store
+as new and every session reads it whole. Restoring replaces the store, so
 memories recorded since that backup are lost, and memories forgotten since
 come back.
 

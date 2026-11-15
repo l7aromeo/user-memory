@@ -451,6 +451,51 @@ impl FileTurn {
     }
 }
 
+/// The store's write turn, in this process and then in every process, for a
+/// writer that opens its own transaction, as a migration and a project move
+/// do: it calls [`StoreTurn::begin`] inside its transaction and
+/// [`StoreTurn::publish`] after its commit, as every [`Write`] does, so the
+/// store's marker ([`super::changes`]) stays right.
+pub struct StoreTurn {
+    // Fields drop in order: the file's turn passes on before this process's.
+    file: Option<FileTurn>,
+    #[allow(dead_code, reason = "held for its drop")]
+    turn: Option<Turn>,
+    db: std::path::PathBuf,
+}
+
+/// Takes the write turn on the store at `db`, waiting as a write does.
+pub fn store_turn(db: &Path) -> Result<StoreTurn> {
+    let turn = WRITERS.enter(turn_wait())?;
+    let file = match turn {
+        Some(_) => Some(FileTurn::take(&lock_path(db), turn_wait())?),
+        None => None,
+    };
+    Ok(StoreTurn {
+        file,
+        turn,
+        db: db.to_owned(),
+    })
+}
+
+impl StoreTurn {
+    /// Inside the writer's transaction: renews the store's id when its
+    /// marker does not match it.
+    pub fn begin(&self, tx: &Connection) -> Result<()> {
+        if self.file.is_some() {
+            super::changes::begin(tx, &self.db)?;
+        }
+        Ok(())
+    }
+
+    /// After the writer's commit: rewrites the marker.
+    pub fn publish(&self, conn: &Connection) {
+        if self.file.is_some() {
+            super::changes::publish(conn, &self.db);
+        }
+    }
+}
+
 /// A write transaction (`BEGIN IMMEDIATE`) that waits its turn behind the
 /// other writers, in this process and then in every process. A server runs
 /// many calls at once and every agent session runs a server, and SQLite
@@ -484,6 +529,11 @@ fn write_at<'c>(gate: &'static Gate, conn: &'c Connection, wait: Duration) -> Re
     };
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     let named = super::history::begin(&tx)?;
+    if file.is_some()
+        && let Some(db) = conn.path()
+    {
+        super::changes::begin(&tx, Path::new(db))?;
+    }
     Ok(Write {
         tx,
         named,
@@ -632,6 +682,13 @@ impl Write<'_> {
         }
         super::index::settle(&tx)?;
         tx.commit()?;
+        // Before the turns pass on, so no other writer's marker comes
+        // between this commit and its own.
+        if file.is_some()
+            && let Some(db) = conn.path()
+        {
+            super::changes::publish(conn, Path::new(db));
+        }
         drop(file);
         let outermost = turn.is_some();
         drop(turn);

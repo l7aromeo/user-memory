@@ -14,6 +14,18 @@
 //! The counter is not a column of `memories`: a trigger could set one only
 //! with a second update of the row, which the history would record as a
 //! change nobody made and the keyword index would index again.
+//!
+//! Beside the store, `<store>.changed` repeats the store's id and latest
+//! change, so a hook learns with one stat whether anything changed. Every
+//! writer rewrites it after its commit while holding the write turn.
+
+use crate::private;
+use rusqlite::{Connection, OptionalExtension};
+use std::{
+    fs,
+    io::{self, Write},
+    path::{Path, PathBuf},
+};
 
 /// Whether a change to a column of `memories` moves the store's counter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -131,6 +143,152 @@ END;",
 /// changes yet.
 pub(super) const START: &str =
     "INSERT INTO store_changes(id,store_id) VALUES (1,lower(hex(randomblob(16))));";
+
+/// Gives the store a new id, so every session reads it whole once.
+const RENEW: &str = "UPDATE store_changes SET store_id=lower(hex(randomblob(16))) WHERE id=1";
+
+/// What the store says of its changes, and what its marker repeats: its id
+/// and the number of its latest change.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct State {
+    pub store_id: String,
+    pub last_change: i64,
+}
+
+/// The store's [`State`], or none for a store without the counter: one from
+/// before schema version 10, which a migration is upgrading.
+pub(super) fn state(conn: &Connection) -> rusqlite::Result<Option<State>> {
+    let read = conn
+        .query_row(
+            "SELECT store_id,last_change FROM store_changes WHERE id=1",
+            [],
+            |r| {
+                Ok(State {
+                    store_id: r.get(0)?,
+                    last_change: r.get(1)?,
+                })
+            },
+        )
+        .optional();
+    match read {
+        Err(rusqlite::Error::SqliteFailure(_, Some(message)))
+            if message.starts_with("no such table") =>
+        {
+            Ok(None)
+        }
+        read => read,
+    }
+}
+
+/// The marker beside the store at `db`: the store with `.changed` appended.
+/// A session hook reads it with one stat and one small read, where opening
+/// the store would cost far more, and the store's own files move on writes
+/// that change no memory.
+pub fn marker_path(db: &Path) -> PathBuf {
+    let mut path = db.as_os_str().to_owned();
+    path.push(".changed");
+    path.into()
+}
+
+/// The [`State`] the marker beside the store at `db` holds, or none when it
+/// is missing or unreadable.
+pub fn read_marker(db: &Path) -> Option<State> {
+    let text = fs::read_to_string(marker_path(db)).ok()?;
+    let (store_id, last_change) = text.trim_end().split_once(' ')?;
+    Some(State {
+        store_id: store_id.to_owned(),
+        last_change: last_change.parse().ok()?,
+    })
+}
+
+/// Replaces the marker beside the store at `db` with `state`, through a
+/// temporary file and a rename, so a reader never sees half of it.
+fn write_marker(db: &Path, state: &State) -> io::Result<()> {
+    let marker = marker_path(db);
+    let mut temporary = marker.as_os_str().to_owned();
+    temporary.push(format!(".{}", std::process::id()));
+    let temporary = PathBuf::from(temporary);
+    let written = (|| {
+        let mut file = private::create_file(
+            fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true),
+            &temporary,
+        )?;
+        file.write_all(format!("{} {}\n", state.store_id, state.last_change).as_bytes())?;
+        fs::rename(&temporary, &marker)
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    written
+}
+
+/// At the start of a write to the store at `db`, inside its transaction and
+/// holding the store's write turn. A marker that does not match the store
+/// (missing, unreadable, behind it, ahead of it or of another id) means the
+/// store changed without it: a crash between a commit and its marker, a
+/// restored backup, an edit by hand, or another program. The store then
+/// takes a new id, so every session reads it whole once rather than trust a
+/// count that may not hold.
+pub(super) fn begin(conn: &Connection, db: &Path) -> rusqlite::Result<()> {
+    let Some(state) = state(conn)? else {
+        return Ok(());
+    };
+    if read_marker(db).as_ref() != Some(&state) {
+        conn.execute(RENEW, [])?;
+    }
+    Ok(())
+}
+
+/// After a write to the store at `db` committed, still holding the write
+/// turn, so no other writer's marker can come between: rewrites the marker
+/// when the store's state differs from it. The write already succeeded, so
+/// a marker that cannot be written is only reported; the next write finds
+/// it behind and renews the store's id.
+pub(super) fn publish(conn: &Connection, db: &Path) {
+    let Ok(Some(state)) = state(conn) else {
+        return;
+    };
+    if read_marker(db).as_ref() != Some(&state)
+        && let Err(err) = write_marker(db, &state)
+    {
+        eprintln!(
+            "user-memory: writing {} failed: {err}",
+            marker_path(db).display()
+        );
+    }
+}
+
+/// How long a forgotten memory's row stays, in SQLite's date terms: as long
+/// as a session's snapshot unused (`SNAPSHOT_AGE` in `session/live.rs`), so a
+/// session still running learns the memory is gone, and one idle longer has
+/// lost its snapshot and reads everything anyway.
+const REMOVED_KEPT_FOR: &str = "-30 days";
+
+/// Drops the rows of memories forgotten over [`REMOVED_KEPT_FOR`] ago, and
+/// records the latest change dropped, below which a session must read the
+/// store whole. Returns how many went.
+pub(super) fn prune(conn: &Connection) -> rusqlite::Result<usize> {
+    conn.execute(
+        "UPDATE store_changes SET pruned_through=max(pruned_through,coalesce((SELECT max(change) FROM memory_changes WHERE removed_at < datetime('now',?1)),0)) WHERE id=1",
+        [REMOVED_KEPT_FOR],
+    )?;
+    conn.execute(
+        "DELETE FROM memory_changes WHERE removed_at < datetime('now',?1)",
+        [REMOVED_KEPT_FOR],
+    )
+}
+
+/// Gives the store a new id inside a migration, so every session reads it
+/// whole once after an upgrade.
+pub(super) fn renew(conn: &Connection) -> rusqlite::Result<()> {
+    if state(conn)?.is_some() {
+        conn.execute(RENEW, [])?;
+    }
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
@@ -276,6 +434,34 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM memory_changes", [], |r| r.get(0))
             .unwrap();
         assert_eq!(rows, 1);
+    }
+
+    #[test]
+    fn a_forgotten_memory_goes_from_the_count_after_its_days_and_marks_how_far() {
+        let (_dir, conn) = store();
+        let pruned = || -> i64 {
+            conn.query_row("SELECT pruned_through FROM store_changes", [], |r| r.get(0))
+                .unwrap()
+        };
+        conn.execute("DELETE FROM memories WHERE id=?1", [ID])
+            .unwrap();
+        let (forgotten, _) = counted_state(&conn);
+        assert_eq!(prune(&conn).unwrap(), 0, "a fresh removal stays");
+        assert_eq!(pruned(), 0);
+        // Just inside the days, then just past them.
+        for (age, kept) in [("-29 days", true), ("-31 days", false)] {
+            conn.execute(
+                "UPDATE memory_changes SET removed_at=datetime('now',?1)",
+                [age],
+            )
+            .unwrap();
+            assert_eq!(prune(&conn).unwrap(), usize::from(!kept), "{age}");
+            assert_eq!(counted_state(&conn).1.is_some(), kept, "{age}");
+            assert_eq!(pruned(), if kept { 0 } else { forgotten }, "{age}");
+        }
+        // A later prune with nothing to drop keeps the mark.
+        assert_eq!(prune(&conn).unwrap(), 0);
+        assert_eq!(pruned(), forgotten);
     }
 
     #[test]
