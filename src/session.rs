@@ -65,11 +65,70 @@ const ADDED_ROOM: usize = 500;
 /// the cut's: above it, whole groups collapse into counted lines, so the cut
 /// stays a last resort.
 const INDEX_MARGIN: usize = 500;
-/// The most room the project rules take before the index. Counted on
-/// synthetic rules: a rule in full is a median 187 characters (242 at the
-/// 90th percentile) and by its title 71, so this holds about 30 rules in full
-/// or 84 by title, and leaves the index the rest of the room.
+/// The least room the project rules get when they have any: about 20
+/// rules in full or 56 by title. Counted on synthetic rules: a rule in full
+/// is a median 187 characters (242 at the 90th percentile), by its title 71.
+const PROJECT_RULE_FLOOR: usize = 4_000;
+/// The most room the project rules take: about 30 rules in full or 84 by
+/// title, counted as for [`PROJECT_RULE_FLOOR`]; the index gets the rest.
 const PROJECT_RULE_CHARS: usize = 6_000;
+
+/// A row of session start's table of parts: what it prints after the
+/// conversation origin, the version line and the projects lines, which take
+/// what they need. A part with something to print first gets its floor, in
+/// order, so none is squeezed out; the room left then goes in order, each
+/// part up to its ceiling. A part with nothing to print takes no room.
+#[derive(Clone, Copy, Debug)]
+struct Part {
+    floor: usize,
+    ceiling: usize,
+}
+
+/// The rules added or changed since the last session (#42).
+const NEW_RULES_PART: Part = Part {
+    floor: NEW_RULES_FLOOR,
+    ceiling: NEW_RULES_CHARS,
+};
+/// The project rules, from the store with the index.
+const PROJECT_RULES_PART: Part = Part {
+    floor: PROJECT_RULE_FLOOR,
+    ceiling: PROJECT_RULE_CHARS,
+};
+/// The index: its header and its map at least, then what remains.
+const INDEX_PART: Part = Part {
+    floor: memory::INDEX_FLOOR,
+    ceiling: usize::MAX,
+};
+/// Session start's parts, in the order it prints them.
+const PARTS: [Part; 3] = [NEW_RULES_PART, PROJECT_RULES_PART, INDEX_PART];
+
+/// The room the parts share in a client's `limit` in `unit`, after the
+/// projects `lines`: the conversation origin and version line take
+/// [`ADDED_ROOM`], and [`INDEX_MARGIN`] is kept free so the last-resort cut
+/// stays one.
+fn parts_room(limit: usize, unit: FitUnit, lines: &str) -> usize {
+    limit
+        .saturating_sub(ADDED_ROOM + INDEX_MARGIN)
+        .saturating_sub(unit.len(lines) + 1)
+}
+
+/// The room each of [`PARTS`] gets out of `total`, when part `i` would fill
+/// `wants[i]` (0 for nothing to print): floors first, in order, then each up
+/// to its ceiling, in order.
+fn rooms(total: usize, wants: [usize; PARTS.len()]) -> [usize; PARTS.len()] {
+    let mut rooms = [0; PARTS.len()];
+    let mut left = total;
+    for (room, (part, want)) in rooms.iter_mut().zip(PARTS.iter().zip(wants)) {
+        *room = want.min(part.floor).min(left);
+        left -= *room;
+    }
+    for (room, (part, want)) in rooms.iter_mut().zip(PARTS.iter().zip(wants)) {
+        let more = want.min(part.ceiling).saturating_sub(*room).min(left);
+        *room += more;
+        left -= more;
+    }
+    rooms
+}
 /// Said where [`capped`] cut session start's index.
 const INDEX_CUT: &str = "(index cut to fit; index lists every line)";
 /// Said where [`capped`] cut the prompt hook's notice.
@@ -244,6 +303,7 @@ pub async fn start(
         .ok()
         .flatten()
     };
+    let path_again = path.clone();
     let (seen, index, versions) = tokio::join!(
         tokio::time::timeout_at(deadline, snapshot),
         tokio::time::timeout_at(
@@ -277,22 +337,45 @@ pub async fn start(
         }
         _ => false,
     };
-    let block = found.as_ref().and_then(|(found, snapshot, reply)| {
-        new_rules_block(found, snapshot, reply, unit, read_only)
-    });
-    let told = found.and_then(|(found, ..)| found.told);
+    let block = |room: usize| {
+        found.as_ref().and_then(|(found, snapshot, reply)| {
+            new_rules_block(found, snapshot, reply, unit, read_only, room)
+        })
+    };
     let index = match index {
-        Ok(Ok((lines, index))) => {
+        Ok(Ok((lines, index, rules_elsewhere))) => {
             if let Some(missed) = &missed {
                 let _ = std::fs::remove_file(missed);
             }
-            let text = match &block {
-                // The block's room comes out of the index's, only when it
-                // has lines: otherwise the index is as it always was.
-                Some(block) => {
-                    let room = (limit - ADDED_ROOM - INDEX_MARGIN)
-                        .saturating_sub(unit.len(&lines) + unit.len(block) + 2);
-                    format!("{lines}\n{block}\n{}", memory::shorten(&index, room, unit))
+            let text = match block(NEW_RULES_CHARS) {
+                // The list of new rules comes before the project rules and
+                // the index, which were asked for without it: they are asked
+                // again in the rooms the table gives them beside it, only
+                // when they no longer fit.
+                Some(full) => {
+                    let total = parts_room(limit, unit, &lines);
+                    let [block_room, rules_room, index_room] =
+                        rooms(total, [unit.len(&full) + 1, PROJECT_RULE_CHARS, usize::MAX]);
+                    // Both count the list with its line break.
+                    let listed = block(block_room).unwrap_or(full);
+                    let room = rules_room + index_room;
+                    let index = if unit.len(&index) <= room {
+                        index
+                    } else {
+                        let again = self::index(
+                            path_again,
+                            client,
+                            context_limit,
+                            origin.clone(),
+                            rules_elsewhere,
+                            unit.len(&listed) + 1,
+                        );
+                        match tokio::time::timeout_at(deadline, again).await {
+                            Ok(Ok((_, index))) => index,
+                            _ => memory::shorten(&index, room, unit),
+                        }
+                    };
+                    format!("{lines}\n{listed}\n{index}")
                 }
                 None => format!("{lines}\n{index}"),
             };
@@ -309,6 +392,7 @@ pub async fn start(
         }
         Err(_) => format!("User memory unavailable: timed out. {UNAVAILABLE_NEXT}"),
     };
+    let told = found.and_then(|(found, ..)| found.told);
     let index = match origin {
         Some(origin) => format!(
             "Conversation origin: {origin} (use it as origin when recording, linking, or forgetting what this conversation recorded)\n{index}"
@@ -378,10 +462,28 @@ const NEW_RULES: &str = "New rules since your last session:";
 const NEW_RULES_REMOVE: &str = "If one isn't the user's, remove it with forget on their yes, or forget with its origin to remove everything that conversation recorded.";
 /// Closes it for a machine whose token can't change memories.
 const NEW_RULES_REMOVE_READ_ONLY: &str = "This machine's token is read-only: if one isn't the user's, the server's operator can remove it.";
-/// The most room the list of new rules takes, in the client's unit, out of
-/// the index's: about a dozen rule lines, a fifth of the smaller client's
-/// limit. Rules past it are counted, and `review` lists them.
-const NEW_RULES_CHARS: usize = 2_000;
+/// Counts the rules the list of new rules leaves out.
+fn new_rules_more(count: usize) -> String {
+    format!("  ...and {count} more: review lists them.")
+}
+/// The most room the list of new rules takes, in the client's unit: about
+/// five rule lines of 145 characters (id, title, origin and client) and the
+/// count. The rule itself is in the project rules or the instruction
+/// files; this list says what is new and where it came from. Rules past it
+/// are counted, and `review` lists them.
+const NEW_RULES_CHARS: usize = 1_000;
+/// The least room the list of new rules gets when there is one: its
+/// opening, a line counting every rule, and its longer closing, so it says
+/// how many are new and how to remove one. These lines are ASCII, the same
+/// length in either client's unit; the count is taken at four digits.
+const NEW_RULES_FLOOR: usize = NEW_RULES.len()
+    + "  ...and 9999 more: review lists them.".len()
+    + if NEW_RULES_REMOVE.len() > NEW_RULES_REMOVE_READ_ONLY.len() {
+        NEW_RULES_REMOVE.len()
+    } else {
+        NEW_RULES_REMOVE_READ_ONLY.len()
+    }
+    + 2;
 
 /// Whether the hook payload says the session is a new one, as both clients
 /// name it, rather than one resumed, cleared or compacted.
@@ -434,14 +536,15 @@ async fn new_rules(
 
 /// The list of the rules `found` names, global ones first, then by project
 /// and title, each with its id, title and where its latest change came
-/// from, within [`NEW_RULES_CHARS`] in `unit`, closed by who can remove one
-/// for a `read_only` token or not; `None` when there are none.
+/// from, within `room` in `unit`, closed by who can remove one for a
+/// `read_only` token or not; `None` when there are none.
 fn new_rules_block(
     found: &seen::Found,
     snapshot: &live::Snapshot,
     reply: &memory::StampsReply,
     unit: FitUnit,
     read_only: bool,
+    room: usize,
 ) -> Option<String> {
     if found.rules.is_empty() {
         return None;
@@ -475,18 +578,24 @@ fn new_rules_block(
             false => format!("  {short} {title} (from {})", by.join(", ")),
         }
     };
-    let more = |n: usize| format!("  ...and {n} more: review lists them.");
+    let more = new_rules_more;
     let mut lines = vec![NEW_RULES.to_owned()];
     let mut used = unit.len(NEW_RULES) + unit.len(close) + 2;
-    for (at, rule) in rules.iter().enumerate() {
-        let next = line(*rule);
+    let lines_of: Vec<String> = rules.iter().map(|rule| line(*rule)).collect();
+    // From each rule on, the room the rest takes: when it all fits, no count
+    // line is needed, and none is kept free for one.
+    let mut rest = vec![0; lines_of.len() + 1];
+    for at in (0..lines_of.len()).rev() {
+        rest[at] = rest[at + 1] + unit.len(&lines_of[at]) + 1;
+    }
+    for (at, next) in lines_of.into_iter().enumerate() {
         let left = rules.len() - at - 1;
-        let reserve = if left > 0 {
+        let reserve = if left > 0 && used + rest[at] > room {
             unit.len(&more(left)) + 1
         } else {
             0
         };
-        if used + unit.len(&next) + 1 + reserve > NEW_RULES_CHARS {
+        if used + unit.len(&next) + 1 + reserve > room {
             lines.push(more(rules.len() - at));
             break;
         }
@@ -656,9 +765,16 @@ async fn changes(
                 tokio::task::spawn_blocking(|| live::hold_for_tests(live::HOLD_LATE_INDEX)).await;
             // The global rules come too: a session that started without
             // memory may hold none, or an old copy, in its instruction files.
-            index(checkout.clone(), Some(client), None, origin.clone(), false)
-                .await
-                .map(|(lines, index)| format!("{lines}\n{index}"))
+            index(
+                checkout.clone(),
+                Some(client),
+                None,
+                origin.clone(),
+                false,
+                0,
+            )
+            .await
+            .map(|(lines, index)| format!("{lines}\n{index}"))
         };
         tokio::time::timeout_at(deadline - hook_time(LATE_INDEX_MARGIN), index)
             .await
@@ -871,7 +987,7 @@ async fn start_index(
     client: Option<HookClient>,
     context_limit: Option<usize>,
     origin: Option<String>,
-) -> anyhow::Result<(String, String)> {
+) -> anyhow::Result<(String, String, bool)> {
     // Changes made from other machines reach the instruction files here,
     // before the client reads them at its next launch.
     let current = tokio::time::timeout(hook_time(SYNC_SHARE), setup::sync_instructions())
@@ -880,19 +996,23 @@ async fn start_index(
         .and_then(Result::ok)
         .unwrap_or_default();
     let rules_elsewhere = client.is_some_and(|client| current.contains(&client.installed()));
-    index(path, client, context_limit, origin, rules_elsewhere).await
+    let (lines, index) = index(path, client, context_limit, origin, rules_elsewhere, 0).await?;
+    Ok((lines, index, rules_elsewhere))
 }
 
-/// The lines naming the projects the session in `path` sees, and the index
-/// of them, from the shared server or the local store, shortened to the
-/// hook's share of the output so that it still lists or counts each memory;
-/// without the global rules when `rules_elsewhere`.
+/// The lines naming the projects the session in `path` sees, and the
+/// project rules and the index of them, from the shared server or the local
+/// store, in the rooms [`rooms`] gives them after `new_rules` (the room the
+/// list of new rules takes, 0 for none), shortened so that the index still
+/// lists or counts each memory; without the global rules when
+/// `rules_elsewhere`.
 async fn index(
     path: PathBuf,
     client: Option<HookClient>,
     context_limit: Option<usize>,
     origin: Option<String>,
     rules_elsewhere: bool,
+    new_rules: usize,
 ) -> anyhow::Result<(String, String)> {
     let remote = setup::configured_remote()?;
     let here = path.clone();
@@ -913,7 +1033,10 @@ async fn index(
     };
     let line = projects_lines(&seen, &repositories);
     let (limit, unit) = hook_limit(client, context_limit);
-    let room = (limit - ADDED_ROOM - INDEX_MARGIN).saturating_sub(unit.len(&line) + 1);
+    let [_, rules_room, index_room] = rooms(
+        parts_room(limit, unit, &line),
+        [new_rules, PROJECT_RULE_CHARS, usize::MAX],
+    );
     let remote = remote.as_ref();
     let mut fetch = async |input: Value| -> anyhow::Result<String> {
         let page = match remote {
@@ -936,7 +1059,7 @@ async fn index(
         &seen,
         origin.as_deref(),
         rules_elsewhere,
-        room,
+        (rules_room + index_room, rules_room),
         unit,
     )
     .await?;
@@ -953,7 +1076,7 @@ async fn fitted(
     seen: &Seen,
     origin: Option<&str>,
     rules_elsewhere: bool,
-    room: usize,
+    (room, rules_room): (usize, usize),
     unit: FitUnit,
 ) -> anyhow::Result<String> {
     let input = json!({
@@ -965,7 +1088,7 @@ async fn fitted(
     asked["fit_room"] = json!(room);
     asked["fit_whole_projects"] = json!(seen.core);
     asked["fit_unit"] = json!(unit);
-    asked["fit_rules_room"] = json!(PROJECT_RULE_CHARS.min(room));
+    asked["fit_rules_room"] = json!(rules_room);
     let reply = fetch(asked).await?;
     if memory::next_cursor(&reply).is_none() && unit.len(&reply) <= room {
         return Ok(reply);
@@ -1468,6 +1591,64 @@ mod tests {
         }
     }
 
+    // Every part full: floors first in order, then ceilings in order, the
+    // index taking what remains; a part with nothing takes no room, and one
+    // wanting less than its floor takes only that; short of room, every
+    // part keeps its floor and the ceilings give way in order.
+    #[test]
+    fn the_parts_get_their_floors_then_their_ceilings_in_order() {
+        let all = usize::MAX;
+        let total = 10_000;
+        assert_eq!(
+            rooms(total, [NEW_RULES_CHARS, PROJECT_RULE_CHARS, all]),
+            [NEW_RULES_CHARS, PROJECT_RULE_CHARS, 3_000]
+        );
+        assert_eq!(
+            rooms(total, [0, PROJECT_RULE_CHARS, all]),
+            [0, 6_000, 4_000]
+        );
+        assert_eq!(rooms(total, [0, 0, all]), [0, 0, total]);
+        assert_eq!(rooms(total, [50, 300, all]), [50, 300, 9_650]);
+        let floors = NEW_RULES_FLOOR + PROJECT_RULE_FLOOR + memory::INDEX_FLOOR;
+        assert_eq!(
+            rooms(floors + 100, [NEW_RULES_CHARS, PROJECT_RULE_CHARS, all]),
+            [
+                NEW_RULES_FLOOR + 100,
+                PROJECT_RULE_FLOOR,
+                memory::INDEX_FLOOR
+            ]
+        );
+    }
+
+    // The floors fit the room the parts share in the smaller limit, after a
+    // projects line of one project; the list of new rules at its floor holds
+    // its opening, a four-digit count and its longer closing.
+    #[test]
+    fn the_floors_fit_the_room_the_parts_share() {
+        let seen = Seen {
+            projects: vec![live::Project {
+                key: "github.com/an-organisation/a-repository-with-a-long-name".into(),
+                source: THIS_FOLDER.into(),
+                folders: Vec::new(),
+            }],
+            core: Vec::new(),
+            notes: Vec::new(),
+        };
+        let lines = projects_lines(&seen, &Repositories::default());
+        let shared = parts_room(CODEX_LIMIT, FitUnit::Utf8Bytes, &lines);
+        let floors: usize = PARTS.iter().map(|part| part.floor).sum();
+        assert!(floors <= shared, "{floors} > {shared}");
+        let longest_close = NEW_RULES_REMOVE.len().max(NEW_RULES_REMOVE_READ_ONLY.len());
+        assert_eq!(
+            NEW_RULES_FLOOR,
+            [NEW_RULES, &new_rules_more(9_999)]
+                .iter()
+                .map(|line| line.len() + 1)
+                .sum::<usize>()
+                + longest_close
+        );
+    }
+
     // Session start asks for its index in one request, and reads what the
     // walk of every page read: an older server, which knows no fit_room,
     // is walked page by page and the result shortened here as before. The
@@ -1507,9 +1688,16 @@ mod tests {
             };
             let room = CODEX_LIMIT - ADDED_ROOM - INDEX_MARGIN;
             let unit = FitUnit::Utf8Bytes;
-            let one = fitted(&mut store, &seen, None, false, room, unit)
-                .await
-                .unwrap();
+            let one = fitted(
+                &mut store,
+                &seen,
+                None,
+                false,
+                (room, PROJECT_RULE_CHARS),
+                unit,
+            )
+            .await
+            .unwrap();
             assert_eq!(calls.get(), 1, "{case}");
             let pages = std::cell::Cell::new(0);
             let mut older = async |mut input: Value| -> anyhow::Result<String> {
@@ -1519,9 +1707,16 @@ mod tests {
                 fields.remove("fit_whole_projects");
                 memory::index(&db, &serde_json::from_value(input)?)
             };
-            let walked = fitted(&mut older, &seen, None, false, room, unit)
-                .await
-                .unwrap();
+            let walked = fitted(
+                &mut older,
+                &seen,
+                None,
+                false,
+                (room, PROJECT_RULE_CHARS),
+                unit,
+            )
+            .await
+            .unwrap();
             assert_eq!(one, walked, "{case}");
             assert!(one.len() <= room, "{case}");
             let shortened = one.contains("Shortened to fit the session start");

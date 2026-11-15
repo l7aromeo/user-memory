@@ -238,6 +238,30 @@ fn fitted(
 /// cache, fonts, benchmarks)"), so seven types with four words each and the
 /// sentence around them.
 pub const UNLISTED_MAP_CHARS: usize = 400;
+/// The room kept for the index's counts line: the three synthetic stores
+/// of 50 to 750 memories gave 245 to 300 characters, and a store with a few
+/// more categories or types gets more.
+const COUNTS_LINE_ROOM: usize = 400;
+
+/// The least room the session hook's index gets: its header, the line
+/// about the instruction files, the longer note on shortening, the counts
+/// line and the map, each with its line break, counted in bytes, which
+/// are never fewer than either client's unit.
+pub const INDEX_FLOOR: usize = {
+    let mut floor = COUNTS_LINE_ROOM + 1 + UNLISTED_MAP_CHARS + 1 + RULES_ELSEWHERE.len() + 1;
+    floor += if SHORTENED.len() > SHORTENED_PROJECTS.len() {
+        SHORTENED.len()
+    } else {
+        SHORTENED_PROJECTS.len()
+    } + 1;
+    let mut line = 0;
+    while line < HEADER.len() {
+        floor += HEADER[line].len() + 1;
+        line += 1;
+    }
+    floor
+};
+
 /// The words the map gives each type at most.
 const MAP_WORDS: usize = 4;
 /// The shortest word the map shows: shorter ones say little about a topic.
