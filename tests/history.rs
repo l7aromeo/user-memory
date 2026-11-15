@@ -259,10 +259,11 @@ fn import(s: &Store) -> &'static str {
         .into_iter()
         .find(|e| e["op"] == "import" && e.get("imported").is_none())
         .unwrap();
-    assert_eq!(
-        event["before"],
-        json!({"content":"Listens to jazz while coding"})
-    );
+    assert_eq!(event["before"]["content"], "Listens to jazz while coding");
+    // With the origins and times an undo puts back, beside the fields.
+    for key in ["origins", "created_at", "last_confirmed_at"] {
+        assert!(event["before"].get(key).is_some(), "{event}");
+    }
     assert_eq!(event["client"], "cli");
     "import"
 }
@@ -732,6 +733,123 @@ fn exports_and_imports_carry_the_history() {
     assert_eq!(summary["applied"], true, "{summary}");
     assert!(summary.get("history").is_none(), "{summary}");
     assert_eq!(fourth.ops(&id), ["import"]);
+}
+
+// An applied import is named by its file, its time and the file's hash.
+// Each memory it adds or replaces carries that name in its import event,
+// one it found identical does not, and an export leaves the name out.
+#[test]
+fn an_import_marks_what_it_adds_and_replaces_with_its_name() {
+    let store = Store::new();
+    let replaced = store.record("tea", "Drinks green tea", &["--origin", "chat/one"]);
+    let same = store.record("dogs", "Walks the dog at seven", &[]);
+    let added = "0b9e2c1e-4f5a-4d7b-9c3e-1a2b3c4d5e6f";
+    let export = store.root.path().join("export.json");
+    store.output(&["export", export.to_str().unwrap()]);
+    let mut document: Value = serde_json::from_slice(&fs::read(&export).unwrap()).unwrap();
+    let memories = document["memories"].as_array_mut().unwrap();
+    let mut new = memories
+        .iter()
+        .find(|m| m["id"] == same.as_str())
+        .unwrap()
+        .clone();
+    new["id"] = json!(added);
+    new["title"] = json!("Reads novels on trains");
+    new["content"] = json!("Reads novels on trains");
+    new["origins"] = json!([{"origin":"chat/three","first_seen":"2026-01-01 00:00:00"}]);
+    for memory in memories.iter_mut() {
+        if memory["id"] == replaced.as_str() {
+            memory["content"] = json!("Drinks black tea");
+            memory["origins"] = json!([{"origin":"chat/two","first_seen":"2026-01-02 00:00:00"}]);
+        } else if memory["id"] == same.as_str() {
+            memory["last_confirmed_at"] = json!("2099-01-01 00:00:00");
+        }
+    }
+    memories.push(new);
+    let import = |name: &str, document: &Value| -> String {
+        let file = store.root.path().join(name);
+        fs::write(&file, document.to_string()).unwrap();
+        let summary = store.value(&[
+            "import",
+            file.to_str().unwrap(),
+            "--apply",
+            "--on-conflict",
+            "use-file",
+        ]);
+        assert_eq!(summary["applied"], true, "{summary}");
+        summary["import"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{summary}"))
+            .to_owned()
+    };
+    let name = import("my rules @ 'v2'.json", &document);
+    // Characters a shell or a reader could stumble on become `_`.
+    let (file, rest) = name.rsplit_once('@').unwrap();
+    assert_eq!(file, "my rules _ _v2_.json", "{name}");
+    let (time, hash) = rest.rsplit_once('.').unwrap();
+    assert_eq!(time.len(), "2026-11-15T10:42:07Z".len(), "{name}");
+    assert!(time.ends_with('Z') && &time[10..11] == "T", "{name}");
+    assert_eq!(hash.len(), 8, "{name}");
+    assert!(hash.bytes().all(|b| b.is_ascii_hexdigit()), "{name}");
+
+    let marked = |id: &str| -> Vec<Value> {
+        store
+            .history(id)
+            .into_iter()
+            .filter(|e| e.get("import").is_some())
+            .collect()
+    };
+    let new = marked(added);
+    assert_eq!(new.len(), 1, "{new:?}");
+    assert_eq!(new[0]["op"], "import");
+    assert_eq!(new[0]["import"], name.as_str());
+    let old = marked(&replaced);
+    assert_eq!(old.len(), 1, "{old:?}");
+    assert_eq!(old[0]["import"], name.as_str());
+    let before = &old[0]["before"];
+    assert_eq!(before["content"], "Drinks green tea", "{before}");
+    // What an undo needs that the change's own values do not hold: the
+    // conversations the import took away and the times it replaced.
+    assert_eq!(before["origins"][0]["origin"], "chat/one", "{before}");
+    assert!(before["created_at"].is_string(), "{before}");
+    assert!(before.get("last_confirmed_at").is_some(), "{before}");
+    assert!(marked(&same).is_empty());
+    assert!(
+        store.history(&same).iter().any(|e| e["op"] == "import"),
+        "its later confirmation is still an import event"
+    );
+
+    // The name stays in this store: an export leaves it out.
+    let exported = String::from_utf8(store.output(&["export", "-"]).stdout).unwrap();
+    assert!(!exported.contains("my rules"), "{exported}");
+    let copy: Value = serde_json::from_str(&exported).unwrap();
+    assert!(
+        copy["history"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["op"] == "import" && e["memory_id"] == added),
+        "{exported}"
+    );
+
+    // The same file changed again is a new import with a new name; a name
+    // in any script keeps its letters.
+    let memories = document["memories"].as_array_mut().unwrap();
+    for memory in memories.iter_mut() {
+        if memory["id"] == replaced.as_str() {
+            memory["content"] = json!("Drinks oolong tea");
+        }
+    }
+    let again = import("my rules @ 'v2'.json", &document);
+    assert_ne!(again, name);
+    assert!(again.starts_with("my rules _ _v2_.json@"), "{again}");
+    for memory in document["memories"].as_array_mut().unwrap() {
+        if memory["id"] == replaced.as_str() {
+            memory["content"] = json!("Drinks white tea");
+        }
+    }
+    let unicode = import("規則 café.json", &document);
+    assert!(unicode.starts_with("規則 café.json@"), "{unicode}");
 }
 
 // A reason a correction replaced comes back from the history.

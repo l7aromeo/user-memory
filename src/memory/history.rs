@@ -24,8 +24,11 @@ use uuid::Uuid;
 ///   `last_at` when it last happened, which differ only for confirmations
 ///   merged into one event (`count` of them). `before` holds the changed
 ///   fields' previous values, as a JSON object under their export names.
-///   `imported` marks an event an import brought in, by that import's time.
-///   It has no foreign key: a forgotten memory's events stay as tombstones.
+///   `imported` marks an event an import brought in from its file, by that
+///   import's time; on the `import` event an import's own write made for a
+///   memory it added or replaced, it holds that import's name instead (see
+///   [`IMPORT_MARK`]). It has no foreign key: a forgotten memory's events
+///   stay as tombstones.
 /// - `memory_writer` holds, only inside a write transaction, the client
 ///   writing, and for the write functions the operation and the memory it
 ///   is about (`subject`) and the conversation (`origin`).
@@ -148,6 +151,11 @@ pub(super) const OPS: [&str; 12] = [
     "move",
     "origin_removed",
 ];
+
+/// The character that tells an import's name from a time in `imported`:
+/// every name holds it between the file name and the time, and no stored
+/// time does.
+pub(super) const IMPORT_MARK: char = '@';
 
 /// How long events are kept, as SQLite's date modifier: history is for
 /// undoing recent mistakes, and a year covers a correction noticed late
@@ -303,7 +311,12 @@ fn shown(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
         );
     }
     if let Some(imported) = r.get::<_, Option<String>>("imported")? {
-        event.insert("imported".into(), json!(imported));
+        let field = if imported.contains(IMPORT_MARK) {
+            "import"
+        } else {
+            "imported"
+        };
+        event.insert(field.into(), json!(imported));
     }
     Ok(Value::Object(event))
 }
@@ -391,7 +404,9 @@ pub(super) fn exported(conn: &Connection, ids: &[Uuid]) -> Result<Vec<Value>> {
             "origin": r.get::<_, String>(5)?,
             "client": r.get::<_, String>(6)?,
             "before": before.map(|b| serde_json::from_str::<Value>(&b).unwrap_or(Value::String(b))),
-            "imported": r.get::<_, Option<String>>(8)?,
+            // An import's name holds a file name the user gave this store,
+            // which no other store could use: it stays here.
+            "imported": r.get::<_, Option<String>>(8)?.filter(|i| !i.contains(IMPORT_MARK)),
         }))
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -556,6 +571,53 @@ pub(super) fn add_imported(
         ],
     )?;
     Ok(true)
+}
+
+/// Marks the import `named` on its own `import` events after event number
+/// `mark`: those of the memories it `added`, and those of the memories it
+/// replaced, whose replaced values gain what an undo needs beyond the
+/// fields (`earlier`: each one's origins and times before the import). A
+/// memory it found identical keeps an unmarked event, if any.
+pub(super) fn mark_import(
+    conn: &Connection,
+    named: &str,
+    mark: i64,
+    added: &[Uuid],
+    earlier: &[(Uuid, Value)],
+) -> Result<()> {
+    let ids: Vec<String> = added
+        .iter()
+        .chain(earlier.iter().map(|(id, _)| id))
+        .map(Uuid::to_string)
+        .collect();
+    conn.execute(
+        "UPDATE memory_events SET imported=?1 WHERE seq>?2 AND op='import' AND imported IS NULL AND memory_id IN (SELECT value FROM json_each(?3))",
+        params![named, mark, serde_json::to_string(&ids)?],
+    )?;
+    // json_set rather than json_patch, which drops a key whose value is
+    // null, as a memory never confirmed has.
+    let mut keep = conn.prepare(
+        "UPDATE memory_events SET before=json_set(coalesce(before,'{}'),'$.origins',json(?3),'$.created_at',?4,'$.last_confirmed_at',?5) WHERE imported=?1 AND memory_id=?2",
+    )?;
+    for (id, values) in earlier {
+        keep.execute(params![
+            named,
+            id.to_string(),
+            values["origins"].to_string(),
+            values["created_at"].as_str(),
+            values["last_confirmed_at"].as_str(),
+        ])?;
+    }
+    Ok(())
+}
+
+/// Whether an import named `named` marked any event here.
+pub(super) fn import_seen(conn: &Connection, named: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM memory_events WHERE imported=?1)",
+        [named],
+        |r| r.get(0),
+    )
 }
 
 /// Whether the store behind `conn` keeps history (schema version 7 on).

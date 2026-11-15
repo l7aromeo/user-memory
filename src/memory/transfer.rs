@@ -58,6 +58,20 @@ const TITLELESS_VERSION: u64 = 1;
 /// Longest file name an agent may use in the exports directory.
 const NAME_LIMIT: usize = 255;
 const ORIGIN_LIMIT: usize = 240;
+/// Longest file name in an import's name, which people read in a summary
+/// and type back to undo the import: long enough for any real file name,
+/// short enough to stay on one line.
+const IMPORT_NAME_CHARS: usize = 80;
+/// Hex characters of the file's SHA-256 in an import's name: 32 bits tell
+/// two versions of one file apart, and the time tells imports of the same.
+const IMPORT_HASH_CHARS: usize = 8;
+/// The file name in an import's name when the file gave none that is left
+/// after cleaning: it claims nothing about the file.
+const UNNAMED_FILE: &str = "file";
+/// Characters besides letters and digits, in any script, that an import's
+/// name keeps: none of them needs quoting inside double quotes in a shell,
+/// PowerShell or cmd, so the undo command runs as printed.
+const NAME_PUNCTUATION: &str = " .-_+=,()[]~";
 
 /// What import does with a memory whose id exists with different contents.
 #[derive(
@@ -111,6 +125,9 @@ pub struct ImportMemories {
 /// the memory server's import endpoint.
 #[derive(Default, Deserialize, Serialize)]
 pub struct ImportRequest {
+    /// The file's base name, which names the import on the server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     #[serde(default)]
     pub apply: bool,
     #[serde(default)]
@@ -765,6 +782,7 @@ enum Plan {
 /// skipped.
 pub fn import_document(
     db: &Path,
+    name: &str,
     document: &str,
     apply: bool,
     on_conflict: OnConflict,
@@ -773,13 +791,61 @@ pub fn import_document(
 ) -> Result<Value> {
     import(
         db,
-        document,
+        File { name, document },
         apply,
         on_conflict,
         titles,
         subset,
         Untitled::WithContent,
     )
+}
+
+/// The name of the import being written in `conn`: the cleaned name of
+/// `file`, the time and the hash of `document`, as
+/// `shared.json@2026-11-15T10:42:07Z.3f9a1c2b`, with `.2`, `.3` and so on
+/// after a name an earlier import here already took in the same second.
+fn import_name(conn: &Connection, file: &str, document: &str) -> Result<String> {
+    let time: String = conn.query_row("SELECT strftime('%Y-%m-%dT%H:%M:%SZ','now')", [], |r| {
+        r.get(0)
+    })?;
+    let hash = &crate::setup::sha256(document.as_bytes())[..IMPORT_HASH_CHARS];
+    let base = format!(
+        "{}{}{time}.{hash}",
+        import_file_name(file),
+        history::IMPORT_MARK
+    );
+    let mut named = base.clone();
+    let mut again = 1;
+    while history::import_seen(conn, &named)? {
+        again += 1;
+        named = format!("{base}.{again}");
+    }
+    Ok(named)
+}
+
+/// The file name an import's name holds: the base name of `file`, each
+/// character that is not a letter, a digit or in [`NAME_PUNCTUATION`] as
+/// `_`, spaces as one, cut to [`IMPORT_NAME_CHARS`].
+fn import_file_name(file: &str) -> String {
+    let base = file.rsplit(['/', '\\']).next().unwrap_or_default();
+    let kept: String = base
+        .chars()
+        .map(|c| {
+            if c.is_whitespace() {
+                ' '
+            } else if c.is_alphanumeric() || NAME_PUNCTUATION.contains(c) {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let name = clean(&kept, IMPORT_NAME_CHARS);
+    if name.is_empty() {
+        UNNAMED_FILE.to_owned()
+    } else {
+        name
+    }
 }
 
 /// The ids of `rows` that `filter` covers, by the store's own query run
@@ -796,15 +862,22 @@ fn covered(rows: &[Entry], filter: &Filter) -> Result<HashSet<Uuid>> {
         .collect())
 }
 
+/// An export file to import: its text and the name it was read under.
+struct File<'a> {
+    name: &'a str,
+    document: &'a str,
+}
+
 fn import(
     db: &Path,
-    document: &str,
+    file: File<'_>,
     apply: bool,
     on_conflict: OnConflict,
     titles: Option<&Titles>,
     subset: &Subset,
     listing: Untitled,
 ) -> Result<Value> {
+    let File { name, document } = file;
     let filter = subset.filter()?;
     if document.len() as u64 > MAX_BYTES {
         bail!("Export files are limited to 64 MiB");
@@ -1149,6 +1222,33 @@ fn import(
             insert(&tx, entry)?;
         }
     }
+    let added_ids: Vec<Uuid> = rows
+        .iter()
+        .zip(&plans)
+        .filter(|(_, plan)| matches!(plan, Plan::Add))
+        .map(|(entry, _)| entry.id)
+        .collect();
+    let named = if history::kept(&tx)? && !(added_ids.is_empty() && replaced.is_empty()) {
+        let named = import_name(&tx, name, document)?;
+        let earlier: Vec<(Uuid, Value)> = replaced
+            .iter()
+            .filter_map(|id| store.get(id))
+            .map(|old| {
+                (
+                    old.id,
+                    json!({
+                        "origins": old.origins,
+                        "created_at": old.created_at,
+                        "last_confirmed_at": old.last_confirmed_at,
+                    }),
+                )
+            })
+            .collect();
+        history::mark_import(&tx, &named, mark, &added_ids, &earlier)?;
+        Some(named)
+    } else {
+        None
+    };
     for (entry, plan) in rows.iter().zip(&plans) {
         let replaced = matches!(plan, Plan::Conflict) && on_conflict == OnConflict::UseFile;
         if !replaced {
@@ -1188,6 +1288,9 @@ fn import(
         tx.commit()?;
     }
     summary.insert("applied".into(), json!(true));
+    if let Some(named) = named {
+        summary.insert("import".into(), json!(named));
+    }
     summary.remove("will_stale");
     summary.insert("staled".into(), json!(staled));
     let mut summary = Value::Object(summary);
@@ -1425,7 +1528,10 @@ pub fn import_named(db: &Path, input: &ImportMemories) -> Result<Value> {
     let document = read_regular(&dir.join(name)).map_err(|err| anyhow!("{name}: {err}"))?;
     let mut summary = import(
         db,
-        &document,
+        File {
+            name,
+            document: &document,
+        },
         input.apply && input.user_confirmed,
         input.on_conflict,
         input.titles.as_ref(),
@@ -1673,7 +1779,16 @@ mod tests {
     }
 
     fn import(s: &Store, document: &str, apply: bool, mode: OnConflict) -> Value {
-        import_document(&s.db, document, apply, mode, None, &Subset::default()).unwrap()
+        import_document(
+            &s.db,
+            "export.json",
+            document,
+            apply,
+            mode,
+            None,
+            &Subset::default(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -1754,6 +1869,7 @@ mod tests {
         let before = fs::read(&fresh.db).unwrap();
         let result = import_document(
             &fresh.db,
+            "export.json",
             &document,
             false,
             OnConflict::Abort,
@@ -2159,6 +2275,7 @@ mod tests {
         ] {
             let result = import_document(
                 &fresh.db,
+                "export.json",
                 &bad,
                 true,
                 OnConflict::Abort,
@@ -2190,6 +2307,7 @@ mod tests {
         ] {
             let err = import_document(
                 &fresh.db,
+                "export.json",
                 bad,
                 true,
                 OnConflict::Abort,
@@ -2386,6 +2504,7 @@ mod tests {
         let mut padding = " ".repeat(MAX_BYTES as usize + 1);
         let err = import_document(
             &fresh.db,
+            "export.json",
             &padding,
             false,
             OnConflict::Abort,
@@ -2397,6 +2516,7 @@ mod tests {
         padding.pop();
         let err = import_document(
             &fresh.db,
+            "export.json",
             &padding,
             false,
             OnConflict::Abort,
@@ -2530,6 +2650,7 @@ mod tests {
         let fresh = store();
         let err = import_document(
             &fresh.db,
+            "export.json",
             r#"{"format":"user-memory-export","format_version":0,"memories":[]}"#,
             false,
             OnConflict::Abort,
@@ -2900,6 +3021,44 @@ mod tests {
                 .unwrap_err()
                 .to_string();
             assert!(err.contains("Cannot read the exports directory"), "{err}");
+        }
+    }
+
+    #[test]
+    fn an_imports_file_name_is_its_base_name_cleaned_and_capped() {
+        for (file, named) in [
+            ("shared.json", "shared.json"),
+            ("/home/someone/exports/shared.json", "shared.json"),
+            ("C:\\Users\\someone\\shared.json", "shared.json"),
+            ("my  rules\t'v2'.json", "my rules _v2_.json"),
+            ("a\u{7}b$c`d\"e.json", "a_b_c_d_e.json"),
+            ("規則 café.json", "規則 café.json"),
+            ("", UNNAMED_FILE),
+            ("/", UNNAMED_FILE),
+            ("  ", UNNAMED_FILE),
+        ] {
+            assert_eq!(import_file_name(file), named, "{file:?}");
+        }
+        let long = "x".repeat(IMPORT_NAME_CHARS * 2);
+        assert_eq!(import_file_name(&long).chars().count(), IMPORT_NAME_CHARS);
+    }
+
+    #[test]
+    fn a_name_an_import_here_took_gets_a_number() {
+        let s = store();
+        let first = import_name(&s.conn, "shared.json", "{}").unwrap();
+        s.conn
+            .execute(
+                "INSERT INTO memory_events(memory_id,op,imported) VALUES (?1,'import',?2)",
+                params![Uuid::new_v4().to_string(), first],
+            )
+            .unwrap();
+        let second = import_name(&s.conn, "shared.json", "{}").unwrap();
+        assert_ne!(second, first);
+        // In the same second it takes a number; in the next, the new time.
+        let (named, _) = first.rsplit_once('.').unwrap();
+        if second.starts_with(named) {
+            assert_eq!(second, format!("{first}.2"));
         }
     }
 }

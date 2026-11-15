@@ -1716,6 +1716,10 @@ fn a_client_exports_and_imports_through_its_server_as_with_a_local_store() {
         b"",
     ));
     assert_eq!(applied["applied"], true, "{applied}");
+    // The server names the import by this client's file: its name alone,
+    // never the path to it.
+    let import = applied["import"].as_str().unwrap();
+    assert!(import.starts_with("backup.json@"), "{applied}");
     // This client refuses reindex, so the advice names where it runs.
     let next = applied["next"].as_str().unwrap();
     assert!(
