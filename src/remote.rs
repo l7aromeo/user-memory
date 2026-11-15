@@ -363,15 +363,17 @@ pub async fn host(options: HostOptions) -> Result<()> {
 
 pub async fn connect(connection: Connection) -> Result<()> {
     let (input, output) = stdio();
-    connect_over(connection, input, output).await
+    connect_over(connection, input, output, false).await
 }
 
 /// The bridge to the memory server for a client on `input` and `output`:
-/// `serve`'s, behind its hand-over front, and `connect`'s on stdio.
+/// `serve`'s, behind its hand-over front, and `connect`'s on stdio, with
+/// no front.
 pub async fn connect_over(
     connection: Connection,
     input: impl tokio::io::AsyncRead + Send + Unpin + 'static,
     output: impl tokio::io::AsyncWrite + Send + Unpin + 'static,
+    behind_front: bool,
 ) -> Result<()> {
     let remote = connection.transport()?;
     let local = rmcp::transport::async_rw::AsyncRwTransport::new_server(input, output);
@@ -383,6 +385,7 @@ pub async fn connect_over(
         || connection.transport(),
         &endpoint,
         &token_file,
+        behind_front,
     )
     .await
 }
@@ -481,6 +484,69 @@ fn answered(message: &impl serde::Serialize) -> Option<serde_json::Value> {
 /// handshake, so a reconnect waits no longer than a hook would.
 const RECONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long the bridge waits for its server to answer a session's first
+/// request before it answers the handshake and the tool list itself
+/// ([`StandIn`]). Both apps give a server 30 seconds to start (Codex's
+/// `DEFAULT_STARTUP_TIMEOUT`, Claude Code's `MCP_TIMEOUT`), but neither
+/// waits for it before the first turn; only the session-start hook, which
+/// gives up after 5 seconds, holds Claude Code's first turn back. Measured
+/// with Claude Code 2.1.325 and Codex 0.163.0 against a fake model: at 3
+/// seconds Claude Code has the tools in its first turn whether the server
+/// refuses, never answers, or answers after 4 or 6 seconds, and Codex,
+/// whose first turn starts after about a second, from its next one. A
+/// shorter wait would stand in for reachable servers that are far away.
+const FIRST_ANSWER: Duration = Duration::from_secs(3);
+
+/// The messages the [`StandIn`] answers: the handshake, the tool list and
+/// `ping`, which is all an app asks before its first call.
+fn stands_in_for(method: &str) -> bool {
+    matches!(
+        method,
+        "initialize" | "server/discover" | "notifications/initialized" | "tools/list" | "ping"
+    )
+}
+
+/// This build's own server without a store, which answers a session's
+/// handshake, tool list and `ping` while its memory server has not been
+/// reached, as `serve` on this machine would. Client and server are the
+/// same program, and their contract only adds, so a server of another
+/// version accepts what this one describes. It is never given a call.
+struct StandIn {
+    transport: rmcp::transport::async_rw::AsyncRwTransport<
+        RoleClient,
+        tokio::io::ReadHalf<tokio::io::DuplexStream>,
+        tokio::io::WriteHalf<tokio::io::DuplexStream>,
+    >,
+}
+
+impl StandIn {
+    fn start() -> Self {
+        let (bridge, server_side) = tokio::io::duplex(crate::handover::PIPE_BUFFER);
+        let server = crate::UserMemoryServer {
+            db: PathBuf::new(),
+            in_client_folder: true,
+        };
+        tokio::spawn(async move {
+            // It ends when the bridge drops its side.
+            if let Ok(service) = server.serve(tokio::io::split(server_side)).await {
+                let _ = service.waiting().await;
+            }
+        });
+        let (read, write) = tokio::io::split(bridge);
+        Self {
+            transport: rmcp::transport::async_rw::AsyncRwTransport::new_client(read, write),
+        }
+    }
+}
+
+/// The stand-in's next message; none while there is no stand-in.
+async fn from_stand_in(stand_in: &mut Option<StandIn>) -> Option<RxJsonRpcMessage<RoleClient>> {
+    match stand_in {
+        Some(stand_in) => Transport::<RoleClient>::receive(&mut stand_in.transport).await,
+        None => std::future::pending().await,
+    }
+}
+
 /// A server reached again: its transport, what its handshake said, and the
 /// tools it lists when the bridge asked.
 struct Reconnected<R> {
@@ -574,6 +640,7 @@ async fn forward<R: Transport<RoleClient>>(
     mut new_remote: impl FnMut() -> Result<R>,
     endpoint: &str,
     token_file: &Path,
+    behind_front: bool,
 ) -> Result<()> {
     let mut sends = tokio::task::JoinSet::<Result<()>>::new();
     let mut outgoing = tokio::task::JoinSet::<Result<()>>::new();
@@ -593,6 +660,17 @@ async fn forward<R: Transport<RoleClient>>(
     // `tools/list`, to ask a server reached again for its own.
     let mut given_tools: Option<serde_json::Value> = None;
     let mut tools_params: Option<serde_json::Value> = None;
+    // Whether the server has answered this session. Until it has, the
+    // messages the stand-in answers are kept for it, in order, and the
+    // first request waits for the server until `first_answer`.
+    let mut reached = false;
+    let mut held: Vec<RxJsonRpcMessage<RoleServer>> = Vec::new();
+    let mut first_answer: Option<tokio::time::Instant> = None;
+    let mut stand_in: Option<StandIn> = None;
+    // The requests the stand-in has not answered, with their methods; never
+    // in `pending`, so a failed call leaves them be.
+    let mut standing: Vec<(serde_json::Value, String)> = Vec::new();
+    let mut to_stand_in = tokio::task::JoinSet::<Result<()>>::new();
     let mut disconnected = false;
     let mut error = None;
     loop {
@@ -611,6 +689,25 @@ async fn forward<R: Transport<RoleClient>>(
                 }
                 if let Some(id) = value.get("id") && value.get("method").is_some() {
                     pending.push((id.clone(), method.to_owned()));
+                    if !reached && first_answer.is_none() {
+                        first_answer = Some(tokio::time::Instant::now() + FIRST_ANSWER);
+                    }
+                }
+                if !reached && stands_in_for(method) {
+                    if let Some(stand_in) = &mut stand_in {
+                        if let Some(id) = value.get("id") {
+                            pending.retain(|(request_id, _)| request_id != id);
+                            standing.push((id.clone(), method.to_owned()));
+                        }
+                        let send = Transport::<RoleClient>::send(&mut stand_in.transport, message);
+                        start_in_order(&mut to_stand_in, async move { send.await.context("The stand-in stopped") });
+                        continue;
+                    }
+                    held.push(message.clone());
+                }
+                if disconnected && !reached && value.get("id").is_none() {
+                    // Nothing to say to a server not reached yet.
+                    continue;
                 }
                 if disconnected {
                     if method == "initialize" || method == "server/discover" {
@@ -633,10 +730,23 @@ async fn forward<R: Transport<RoleClient>>(
                             Ok(Ok(Reconnected { remote: next, handshake, tools })) => {
                                 remote = next;
                                 disconnected = false;
+                                if !reached {
+                                    // The first real handshake: the stand-in's
+                                    // part is over.
+                                    reached = true;
+                                    held.clear();
+                                    stand_in = None;
+                                }
                                 let version = handshake.as_ref().and_then(crate::setup::versions::server_version).cloned();
+                                if initial_version.is_none() {
+                                    initial_version.clone_from(&version);
+                                }
                                 let line = handshake.as_ref().and_then(|result| crate::setup::versions::server_line(crate::setup::versions::running(), endpoint, result));
                                 if line.is_some() && line != version_line {
                                     notices.extend(line.clone());
+                                }
+                                if behind_front && handshake.is_some() && line != version_line {
+                                    tell_front_the_line(&mut local, &mut sends, line.as_deref())?;
                                 }
                                 version_line = line;
                                 if given_tools.is_some() {
@@ -673,11 +783,16 @@ async fn forward<R: Transport<RoleClient>>(
                 let Some(message) = message else {
                     outgoing.shutdown().await;
                     let message = Failure::Unanswered.message(endpoint, token_file);
+                    if !reached {
+                        stand_in = Some(start_standing(&mut held, &mut pending, &mut standing, &mut to_stand_in));
+                    }
                     fail_pending(&mut local, &mut sends, &mut pending, &message)?;
                     writes.clear();
                     disconnected = true;
                     continue;
                 };
+                reached = true;
+                held.clear();
                 let value = serde_json::to_value(&message)?;
                 if initial_version.is_none() && let Some(version) = value.get("result").and_then(crate::setup::versions::server_version) {
                     initial_version = Some(version.clone());
@@ -708,9 +823,45 @@ async fn forward<R: Transport<RoleClient>>(
                 if let Err(err) = result.context("Connector send task disappeared").and_then(|r| r.context("Connector send task failed")).and_then(|r| r) {
                     outgoing.shutdown().await;
                     let message = Failure::of(&err).message(endpoint, token_file);
+                    if !reached && stand_in.is_none() {
+                        stand_in = Some(start_standing(&mut held, &mut pending, &mut standing, &mut to_stand_in));
+                    }
                     fail_pending(&mut local, &mut sends, &mut pending, &message)?;
                     writes.clear();
                     disconnected = true;
+                }
+            }
+            () = tokio::time::sleep_until(first_answer.unwrap_or_else(tokio::time::Instant::now)), if !reached && !disconnected && first_answer.is_some() => {
+                // The server has not answered in time: the session goes on
+                // with the stand-in, and the next call tries again.
+                outgoing.shutdown().await;
+                stand_in = Some(start_standing(&mut held, &mut pending, &mut standing, &mut to_stand_in));
+                let message = Failure::Unanswered.message(endpoint, token_file);
+                fail_pending(&mut local, &mut sends, &mut pending, &message)?;
+                writes.clear();
+                disconnected = true;
+            }
+            message = from_stand_in(&mut stand_in) => {
+                let Some(message) = message else {
+                    stand_in = None;
+                    continue;
+                };
+                let value = serde_json::to_value(&message)?;
+                if let Some(id) = value.get("id")
+                    && let Some(at) = standing.iter().position(|(request_id, _)| request_id == id)
+                {
+                    let (_, method) = standing.swap_remove(at);
+                    if method == "tools/list" && let Some(tools) = value.pointer("/result/tools") {
+                        given_tools = Some(tools.clone());
+                    }
+                }
+                let send = Transport::<RoleServer>::send(&mut local, message);
+                start_in_order(&mut sends, async move { send.await.context("Cannot send memory server response to client") });
+            }
+            result = to_stand_in.join_next(), if !to_stand_in.is_empty() => {
+                if let Some(Ok(Err(err)) | Err(err)) = result.map(|r| r.map_err(anyhow::Error::from)) {
+                    error = Some(err);
+                    break;
                 }
             }
             result = sends.join_next(), if !sends.is_empty() => {
@@ -722,6 +873,7 @@ async fn forward<R: Transport<RoleClient>>(
         }
     }
     outgoing.shutdown().await;
+    to_stand_in.shutdown().await;
     sends.shutdown().await;
     let _ = tokio::time::timeout(crate::session::hook_time(crate::setup::SYNC_LIMIT), async {
         while syncs.join_next().await.is_some() {}
@@ -775,6 +927,53 @@ impl Failure {
             ),
         }
     }
+}
+
+/// Starts the stand-in for a session whose server was not reached, and
+/// gives it the messages held for it, in order. The requests among them
+/// leave `pending` for `standing`: the stand-in answers them.
+fn start_standing(
+    held: &mut Vec<RxJsonRpcMessage<RoleServer>>,
+    pending: &mut Vec<(serde_json::Value, String)>,
+    standing: &mut Vec<(serde_json::Value, String)>,
+    to_stand_in: &mut tokio::task::JoinSet<Result<()>>,
+) -> StandIn {
+    let mut stand_in = StandIn::start();
+    for message in held.drain(..) {
+        if let Ok(value) = serde_json::to_value(&message)
+            && let Some(id) = value.get("id")
+            && let Some(at) = pending.iter().position(|(request_id, _)| request_id == id)
+        {
+            standing.push(pending.remove(at));
+        }
+        let send = Transport::<RoleClient>::send(&mut stand_in.transport, message);
+        start_in_order(to_stand_in, async move {
+            send.await.context("The stand-in stopped")
+        });
+    }
+    stand_in
+}
+
+/// The method of the private notice that gives the front the version line a
+/// re-handshake left the bridge with, so the front never says it again
+/// after a hand-over. The front keeps it from the app.
+pub(crate) const SERVER_LINE_NOTICE: &str = "notifications/user-memory/server_line";
+
+/// Gives the front the bridge's version line, `None` once there is none.
+fn tell_front_the_line(
+    local: &mut impl Transport<RoleServer>,
+    sends: &mut tokio::task::JoinSet<Result<()>>,
+    line: Option<&str>,
+) -> Result<()> {
+    let notice: TxJsonRpcMessage<RoleServer> = serde_json::from_value(
+        serde_json::json!({"jsonrpc":"2.0","method":SERVER_LINE_NOTICE,"params":{"line":line}}),
+    )?;
+    let send = Transport::<RoleServer>::send(local, notice);
+    start_in_order(sends, async move {
+        send.await
+            .context("Cannot send memory server response to client")
+    });
+    Ok(())
 }
 
 /// The id of the `tools/list` the bridge sends a server it reached again;
@@ -1126,6 +1325,7 @@ mod tests {
             || Err(anyhow::anyhow!("not used")),
             "test",
             Path::new("token"),
+            false,
         ));
         runtime.block_on(async {
             while written.lock().unwrap().len() < 2 || sent.lock().unwrap().len() < 3 {
@@ -1156,7 +1356,7 @@ mod tests {
                 let local = Local { incoming, written: written.clone() };
                 let remote = Remote { replies, sent: sent.clone() };
                 let mut next = Some(Remote { replies: next_replies, sent: resumed.clone() });
-                let task = tokio::spawn(forward(local, remote, move || next.take().context("no transport"), "test", Path::new("token")));
+                let task = tokio::spawn(forward(local, remote, move || next.take().context("no transport"), "test", Path::new("token"), false));
                 let wait_for = |log: Log, n| async move {
                     tokio::time::timeout(Duration::from_secs(5), async {
                         while log.lock().unwrap().len() < n {

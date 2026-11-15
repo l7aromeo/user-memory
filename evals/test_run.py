@@ -999,5 +999,43 @@ class Rehearsal(unittest.TestCase):
             run.subprocess.run = original
 
 
+class OutageAtSessionStart(unittest.TestCase):
+    """#130's scenario: the session starts with the server down, and grades
+    what the agent does in the later turn, once the server is back."""
+
+    NAME = "a_session_started_in_an_outage_records_once_the_server_is_back"
+
+    def setUp(self):
+        scenarios = json.loads((HERE / "scenarios.json").read_text())["scenarios"]
+        self.scenario = next(s for s in scenarios if s["name"] == self.NAME)
+
+    def test_the_server_is_down_when_the_session_opens_and_back_for_the_next_turn(self):
+        # Steps run their server change before their turn, and the first
+        # turn opens the session, so it opens with the server down.
+        plan = run.steps(self.scenario)
+        self.assertEqual([step["session"] for step in plan], ["a", "a"])
+        self.assertEqual(plan[0]["server"], {"stop": "main"})
+        self.assertEqual(plan[1]["server"], {"start": "main"})
+        self.assertEqual(run.session_opens(self.scenario), 1)
+
+    def failed(self, records, memories):
+        """The scenario's checks that `records` and `memories` fail."""
+        return [check for check in self.scenario["checks"]
+                if not run.grade(check, None, records, memories)[0]]
+
+    def test_a_record_in_the_later_turn_passes_and_each_way_to_miss_it_fails(self):
+        note = {"answer": "Release 2.4 is out.", "tool_calls": []}
+        saved = {"answer": "Saved: release notes list breaking changes first.",
+                 "tool_calls": [("record", {"scope": "global"})]}
+        memory = {"status": "confirmed", "content": "Release notes list breaking changes first.",
+                  "scope": "global"}
+        self.assertEqual(self.failed([note, saved], [memory]), [])
+        # The tools were never listed, so the agent says so and records nothing.
+        gone = {"answer": "The user-memory tools aren't available in this session.", "tool_calls": []}
+        self.assertEqual(len(self.failed([note, gone], [])), 3)
+        # Recorded for this project only.
+        self.assertEqual(len(self.failed([note, saved], [{**memory, "scope": "project"}])), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

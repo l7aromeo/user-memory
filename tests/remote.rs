@@ -1969,6 +1969,17 @@ struct Said {
     /// Answers `tools/list` only after [`SLOW_TOOLS`], as a server under
     /// load may, while it answers other requests at once.
     slow_tools: bool,
+    /// The token it accepts; any request without it gets 401. Unset, it
+    /// accepts any.
+    token: Option<String>,
+    /// Its handshake reply in full, in place of the one built from the
+    /// fields above.
+    handshake: Option<Value>,
+    /// Holds each handshake reply until set, as a server that has not
+    /// answered yet.
+    held: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// The protocol version it agrees, in place of the one asked for.
+    protocol: Option<String>,
 }
 
 type Shared = std::sync::Arc<std::sync::Mutex<Said>>;
@@ -1984,6 +1995,24 @@ const SLOW_TOOLS: std::time::Duration = std::time::Duration::from_millis(500);
 fn versioned_endpoint(said: &Shared) -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap().to_string();
+    serve_fake(listener, said);
+    format!("http://{address}/mcp")
+}
+
+/// An endpoint where nothing listens yet, and what starts the fake server
+/// of [`versioned_endpoint`] there: a server down when a session starts.
+fn endpoint_down(said: &Shared) -> (String, impl FnOnce()) {
+    let address = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let said = said.clone();
+    let start = move || serve_fake(std::net::TcpListener::bind(address).unwrap(), &said);
+    (format!("http://{address}/mcp"), start)
+}
+
+/// Serves the fake memory server of [`versioned_endpoint`] on `listener`.
+fn serve_fake(listener: std::net::TcpListener, said: &Shared) {
     let said = said.clone();
     std::thread::spawn(move || {
         for stream in listener.incoming() {
@@ -1992,7 +2021,6 @@ fn versioned_endpoint(said: &Shared) -> String {
             std::thread::spawn(move || answer_fake(stream, &said));
         }
     });
-    format!("http://{address}/mcp")
 }
 
 /// Answers one request to the fake server of [`versioned_endpoint`].
@@ -2000,6 +2028,7 @@ fn answer_fake(mut stream: std::net::TcpStream, said: &Shared) {
     let mut reader = BufReader::new(stream.try_clone().unwrap());
     let mut request = String::new();
     let mut length = 0;
+    let mut authorization = None;
     if reader.read_line(&mut request).is_err() {
         return;
     }
@@ -2008,10 +2037,12 @@ fn answer_fake(mut stream: std::net::TcpStream, said: &Shared) {
         if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
             break;
         }
-        if let Some((key, value)) = line.split_once(':')
-            && key.eq_ignore_ascii_case("content-length")
-        {
-            length = value.trim().parse().unwrap();
+        if let Some((key, value)) = line.split_once(':') {
+            if key.eq_ignore_ascii_case("content-length") {
+                length = value.trim().parse().unwrap();
+            } else if key.eq_ignore_ascii_case("authorization") {
+                authorization = Some(value.trim().to_owned());
+            }
         }
     }
     let mut body = vec![0; length];
@@ -2019,10 +2050,24 @@ fn answer_fake(mut stream: std::net::TcpStream, said: &Shared) {
         return;
     }
     let message: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let held = said.lock().unwrap().held.clone();
+    if message["method"] == "initialize"
+        && let Some(held) = held
+    {
+        while !held.load(std::sync::atomic::Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
     let mut said = said.lock().unwrap();
     let slow = said.slow_tools && message["method"] == "tools/list";
+    let refused = said
+        .token
+        .as_ref()
+        .is_some_and(|token| authorization != Some(format!("Bearer {token}")));
     let (status, reply) = if !request.starts_with("POST") {
         (405, Value::Null)
+    } else if refused {
+        (401, Value::Null)
     } else if said.fail_next && message["method"] == "tools/call" {
         said.fail_next = false;
         // The connection ends with no answer, as a server stopping.
@@ -2038,12 +2083,19 @@ fn answer_fake(mut stream: std::net::TcpStream, said: &Shared) {
                 }
                 json!({"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":capabilities,"ttlMs":0,"cacheScope":"private","_meta":{"io.modelcontextprotocol/serverInfo":{"name":"user-memory","version":said.version}}}})
             }
+            Some("initialize") if said.handshake.is_some() => {
+                json!({"result": said.handshake.clone()})
+            }
             Some("initialize") => {
                 let mut capabilities = json!({"tools":{}});
                 if let Some(min) = &said.min_client {
                     capabilities["experimental"] = json!({"user-memory": {"min_client": min}});
                 }
-                json!({"result":{"protocolVersion":message["params"]["protocolVersion"],"capabilities":capabilities,"serverInfo":{"name":"user-memory","version":said.version}}})
+                let protocol = said
+                    .protocol
+                    .clone()
+                    .map_or_else(|| message["params"]["protocolVersion"].clone(), Value::from);
+                json!({"result":{"protocolVersion":protocol,"capabilities":capabilities,"serverInfo":{"name":"user-memory","version":said.version}}})
             }
             Some("tools/list") => {
                 json!({"result":{"tools":said.tools.clone().unwrap_or_else(|| json!([]))}})
@@ -2069,9 +2121,15 @@ fn answer_fake(mut stream: std::net::TcpStream, said: &Shared) {
     } else {
         reply.to_string()
     };
+    // A refusal names its scheme, as the real host's does.
+    let challenge = if status == 401 {
+        "WWW-Authenticate: Bearer\r\n"
+    } else {
+        ""
+    };
     let _ = write!(
         stream,
-        "HTTP/1.1 {status} Reply\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status} Reply\r\n{challenge}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
 }
@@ -2327,6 +2385,19 @@ impl App {
         Self::over(command)
     }
 
+    /// `serve` on a local store in `home`: what a server of this build says.
+    fn local(home: &Path) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_user-memory"));
+        command
+            .arg("serve")
+            .sandboxed(home)
+            .env("USER_MEMORY_DB", home.join("local.sqlite3"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        Self::over(command)
+    }
+
     fn over(mut command: Command) -> Self {
         let mut child = ChildGuard(command.spawn().unwrap());
         let input = child.0.stdin.take();
@@ -2363,6 +2434,22 @@ impl App {
 
     fn ask(&mut self, message: &Value) -> Value {
         serde_json::from_str(&self.ask_line(message)).unwrap()
+    }
+
+    /// The handshake and the tool list, as an app opens a session.
+    fn open(&mut self) -> (Value, Value) {
+        let handshake = self.ask(&initialize(1));
+        self.send(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+        let tools = self.ask(&json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}));
+        (handshake, tools)
+    }
+
+    /// How many tool list changes the app was told of.
+    fn told_changed(&self) -> usize {
+        self.others
+            .iter()
+            .filter(|message| message["method"] == "notifications/tools/list_changed")
+            .count()
     }
 
     /// Ends the session; serve's stderr and the lines it printed meanwhile.
@@ -2649,4 +2736,328 @@ fn a_change_is_told_before_the_reply_to_the_call_that_reconnected() {
         app.others
     );
     app.close();
+}
+
+/// A session whose first handshake finds the server down gets this
+/// build's own handshake and tools, the outage reply for a call, and the
+/// server once it is up: the next call is served on the same session, and
+/// the app is told once that the tools changed.
+#[test]
+fn a_session_started_in_an_outage_gets_its_tools_and_recovers() {
+    let home = tempdir().unwrap();
+    let token = home.path().join("token");
+    fs::write(&token, TOKEN).unwrap();
+    let mut local = App::local(home.path());
+    let (local_handshake, local_tools) = local.open();
+    local.close();
+    let state = said(env!("CARGO_PKG_VERSION"), None);
+    let (url, start) = endpoint_down(&state);
+    let mut app = App::start(home.path(), &url, &token, &[]);
+    let (handshake, tools) = app.open();
+    assert_eq!(handshake, local_handshake);
+    assert_eq!(tools, local_tools);
+    let failed = app.ask(&call(3, "index", json!({})));
+    assert_eq!(failed["result"]["isError"], true, "{failed}");
+    assert_eq!(texts(&failed), [unanswered(&url)]);
+    assert_eq!(app.told_changed(), 0, "told before the server answered");
+    start();
+    assert_eq!(texts(&app.ask(&call(4, "index", json!({})))), ["served"]);
+    assert_eq!(texts(&app.ask(&call(5, "index", json!({})))), ["served"]);
+    // The fake server lists no tools, unlike this build.
+    assert_eq!(app.told_changed(), 1, "{:?}", app.others);
+    let (errors, rest) = app.close();
+    assert!(!errors.contains(TOKEN) && !rest.concat().contains(TOKEN));
+}
+
+/// A server this build serves itself, down when the session starts:
+/// nothing changed, so the app is told nothing.
+#[test]
+fn a_session_started_in_an_outage_of_its_own_build_is_told_no_change() {
+    let mut host = Host::start(root());
+    host.child.kill().unwrap();
+    host.child.wait().unwrap();
+    let home = tempdir().unwrap();
+    let token = home.path().join("token");
+    fs::write(&token, TOKEN).unwrap();
+    let url = format!("http://{}/mcp", host.address);
+    let mut app = App::start(home.path(), &url, &token, &[]);
+    let (handshake, tools) = app.open();
+    assert!(handshake.get("result").is_some(), "{handshake}");
+    assert!(tools.get("result").is_some(), "{tools}");
+    host.restart();
+    let served = app.ask(&call(3, "index", json!({})));
+    assert_ne!(served["result"]["isError"], true, "{served}");
+    app.ask(&call(4, "index", json!({})));
+    assert_eq!(app.told_changed(), 0, "{:?}", app.others);
+    app.close();
+}
+
+/// A refused token at the first handshake: the session opens, each call
+/// gets the refused-token reply naming the file, and a replaced token
+/// works at the next call. Neither token is ever printed.
+#[test]
+fn a_refused_token_at_the_first_handshake_recovers_with_a_new_token() {
+    let home = tempdir().unwrap();
+    let token = home.path().join("token");
+    fs::write(&token, TOKEN).unwrap();
+    let replaced = "f".repeat(64);
+    let state = said(env!("CARGO_PKG_VERSION"), None);
+    state.lock().unwrap().token = Some(replaced.clone());
+    let url = versioned_endpoint(&state);
+    let mut app = App::start(home.path(), &url, &token, &[]);
+    let (handshake, tools) = app.open();
+    assert!(handshake.get("result").is_some(), "{handshake}");
+    assert!(tools.get("result").is_some(), "{tools}");
+    let refused = app.ask(&call(3, "index", json!({})));
+    assert_eq!(refused["result"]["isError"], true, "{refused}");
+    assert_eq!(
+        texts(&refused),
+        [format!(
+            "The memory server at {url} refused this machine's access token ({}); the call was not run. Tell the user the token in that file needs replacing (user-memory doctor shows it); don't open the file. Memory tries again on the next call.",
+            token.display()
+        )]
+    );
+    fs::write(&token, &replaced).unwrap();
+    assert_eq!(texts(&app.ask(&call(4, "index", json!({})))), ["served"]);
+    let (errors, rest) = app.close();
+    for secret in [TOKEN, replaced.as_str()] {
+        assert!(!errors.contains(secret), "a token is in serve's stderr");
+        assert!(!rest.concat().contains(secret));
+        assert!(
+            !refused.to_string().contains(secret),
+            "a token is in a reply"
+        );
+    }
+}
+
+/// However the server can't be reached, the handshake is answered and the
+/// tools listed: a refused connection, a name that doesn't resolve, and a
+/// connection that is accepted and never answered.
+#[test]
+fn an_unreachable_server_never_holds_the_first_handshake() {
+    let home = tempdir().unwrap();
+    let token = home.path().join("token");
+    fs::write(&token, TOKEN).unwrap();
+    let refused = endpoint_down(&said("0.10.0", None)).0;
+    // Listening, so a connection is made, but never accepted or answered.
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let silent_url = format!("http://{}/mcp", silent.local_addr().unwrap());
+    for url in [
+        refused.as_str(),
+        "https://memory.invalid/mcp",
+        silent_url.as_str(),
+    ] {
+        let mut app = App::start(home.path(), url, &token, &[]);
+        let (handshake, tools) = app.open();
+        assert!(handshake.get("result").is_some(), "{url}: {handshake}");
+        assert!(
+            !tools["result"]["tools"].as_array().unwrap().is_empty(),
+            "{url}: {tools}"
+        );
+        drop(app);
+    }
+    drop(silent);
+}
+
+/// A reachable server's handshake reply reaches the app as it did before a
+/// bridge could answer a handshake itself, field for field and in order.
+#[test]
+fn a_reachable_servers_handshake_reaches_the_app_unchanged() {
+    let home = tempdir().unwrap();
+    let token = home.path().join("token");
+    fs::write(&token, TOKEN).unwrap();
+    let state = said("0.10.0", None);
+    state.lock().unwrap().handshake = Some(json!({
+        "protocolVersion": "2025-06-18",
+        "capabilities": {"tools": {"listChanged": true}, "experimental": {"user-memory": {"min_client": "0.8.0"}}},
+        "serverInfo": {"name": "user-memory", "version": "0.10.0", "title": "Shared memory"},
+        "instructions": "Fake instructions."
+    }));
+    let url = versioned_endpoint(&state);
+    let mut app = App::start(home.path(), &url, &token, &[]);
+    let line = app.ask_line(&initialize(1));
+    assert_eq!(
+        line,
+        r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{"experimental":{"user-memory":{"min_client":"0.8.0"}},"tools":{"listChanged":true}},"serverInfo":{"name":"user-memory","title":"Shared memory","version":"0.10.0"},"instructions":"Fake instructions."}}"#
+    );
+    app.close();
+}
+
+/// A server that answers the first handshake only after the bridge
+/// answered it itself: its reply is the real handshake, which the app never
+/// sees; the app is told the tools changed, and calls are served.
+#[test]
+fn a_late_handshake_reply_becomes_the_real_handshake() {
+    let home = tempdir().unwrap();
+    let token = home.path().join("token");
+    fs::write(&token, TOKEN).unwrap();
+    let state = said(env!("CARGO_PKG_VERSION"), None);
+    let gate = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    state.lock().unwrap().held = Some(gate.clone());
+    let url = versioned_endpoint(&state);
+    let mut app = App::start(home.path(), &url, &token, &[]);
+    let (handshake, tools) = app.open();
+    assert!(handshake.get("result").is_some(), "{handshake}");
+    assert!(tools.get("result").is_some(), "{tools}");
+    gate.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(texts(&app.ask(&call(3, "index", json!({})))), ["served"]);
+    app.ask(&call(4, "index", json!({})));
+    assert_eq!(app.told_changed(), 1, "{:?}", app.others);
+    assert!(
+        app.others.iter().all(|message| message["id"] != 1),
+        "the server's handshake reached the app: {:?}",
+        app.others
+    );
+    app.close();
+}
+
+/// #100's version lines come with the first call the server answers when
+/// the session started without it: once, after the call's own content.
+#[test]
+fn the_version_lines_come_at_the_first_real_handshake() {
+    let home = tempdir().unwrap();
+    let token = home.path().join("token");
+    fs::write(&token, TOKEN).unwrap();
+    for (version, min, line) in [
+        (
+            "0.7.0",
+            None,
+            "This machine runs user-memory 0.10.0, which needs the memory server at {url} to run 0.8.0 or newer (it runs 0.7.0). Upgrade the server on its machine.",
+        ),
+        (
+            "0.11.0",
+            Some("0.10.1"),
+            "The memory server at {url} runs user-memory 0.11.0 and needs 0.10.1 or newer on this machine (0.10.0). Upgrade: user-memory upgrade",
+        ),
+    ] {
+        let state = said(version, min);
+        let (url, start) = endpoint_down(&state);
+        let mut app = App::start(
+            home.path(),
+            &url,
+            &token,
+            &[("USER_MEMORY_TEST_VERSION", "0.10.0")],
+        );
+        let (handshake, _) = app.open();
+        assert!(handshake.get("result").is_some(), "{handshake}");
+        app.ask(&call(3, "index", json!({})));
+        start();
+        assert_eq!(
+            texts(&app.ask(&call(4, "index", json!({})))),
+            ["served".to_owned(), line.replace("{url}", &url)]
+        );
+        assert_eq!(texts(&app.ask(&call(5, "index", json!({})))), ["served"]);
+        app.close();
+    }
+}
+
+/// Claude Code's opening, `server/discover` and a listen stream, with the
+/// server down: discover and the tools come from this build's own server,
+/// a call gets the outage reply, and once the server is up the stream is
+/// told once that the tools changed.
+#[test]
+fn a_2026_session_started_in_an_outage_gets_its_tools_and_recovers() {
+    let home = tempdir().unwrap();
+    let token = home.path().join("token");
+    fs::write(&token, TOKEN).unwrap();
+    let discover = on_2026(json!({"jsonrpc":"2.0","id":1,"method":"server/discover","params":{}}));
+    let list = on_2026(json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}));
+    let mut local = App::local(home.path());
+    let (local_discover, local_tools) = (local.ask(&discover), local.ask(&list));
+    local.close();
+    let state = said(env!("CARGO_PKG_VERSION"), None);
+    let (url, start) = endpoint_down(&state);
+    let mut app = App::start(home.path(), &url, &token, &[]);
+    assert_eq!(app.ask(&discover), local_discover);
+    app.send(&on_2026(
+        json!({"jsonrpc":"2.0","id":"tools-stream","method":"subscriptions/listen","params":{"notifications":{"toolsListChanged":true}}}),
+    ));
+    assert_eq!(app.ask(&list), local_tools);
+    let failed = app.ask(&on_2026(call(3, "index", json!({}))));
+    assert_eq!(texts(&failed), [unanswered(&url)]);
+    start();
+    assert_eq!(
+        texts(&app.ask(&on_2026(call(4, "index", json!({}))))),
+        ["served"]
+    );
+    app.ask(&on_2026(call(5, "index", json!({}))));
+    let changes: Vec<&Value> = app
+        .others
+        .iter()
+        .filter(|message| message["method"] == "notifications/tools/list_changed")
+        .collect();
+    assert_eq!(
+        changes,
+        [
+            &json!({"jsonrpc":"2.0","method":"notifications/tools/list_changed","params":{"_meta":{"io.modelcontextprotocol/subscriptionId":"tools-stream"}}})
+        ],
+        "{:?}",
+        app.others
+    );
+    app.close();
+}
+
+/// A server reached after the bridge answered the handshake itself that
+/// agrees an older protocol than the app's: the session goes on, as it does
+/// after any reconnect, and calls are served.
+#[test]
+fn a_server_on_an_older_protocol_still_serves_a_session_started_without_it() {
+    let home = tempdir().unwrap();
+    let token = home.path().join("token");
+    fs::write(&token, TOKEN).unwrap();
+    let state = said(env!("CARGO_PKG_VERSION"), None);
+    state.lock().unwrap().protocol = Some("2025-03-26".into());
+    let (url, start) = endpoint_down(&state);
+    let mut app = App::start(home.path(), &url, &token, &[]);
+    let (handshake, _) = app.open();
+    assert_eq!(handshake["result"]["protocolVersion"], "2025-06-18");
+    app.ask(&call(3, "index", json!({})));
+    start();
+    assert_eq!(texts(&app.ask(&call(4, "index", json!({})))), ["served"]);
+    app.close();
+}
+
+/// `connect` has no front: what the bridge tells `serve`'s front after a
+/// re-handshake never reaches its app.
+#[test]
+fn connect_never_prints_what_the_bridge_tells_the_front() {
+    let home = tempdir().unwrap();
+    let token = home.path().join("token");
+    fs::write(&token, TOKEN).unwrap();
+    let state = said("0.10.0", Some("0.8.0"));
+    let url = versioned_endpoint(&state);
+    let mut command = Command::new(env!("CARGO_BIN_EXE_user-memory"));
+    command
+        .args(["connect", "--url", &url, "--token-file"])
+        .arg(&token)
+        .sandboxed(home.path())
+        .env_remove("USER_MEMORY_DB")
+        .env("USER_MEMORY_TEST_VERSION", "0.10.0")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut app = App::over(command);
+    let (handshake, _) = app.open();
+    assert!(handshake.get("result").is_some(), "{handshake}");
+    assert_eq!(texts(&app.ask(&call(3, "index", json!({})))), ["served"]);
+    {
+        let mut state = state.lock().unwrap();
+        state.min_client = Some("0.11.0".into());
+        state.fail_next = true;
+    }
+    app.ask(&call(4, "index", json!({})));
+    assert_eq!(texts(&app.ask(&call(5, "index", json!({})))).len(), 2);
+    let others = std::mem::take(&mut app.others);
+    let (_, rest) = app.close();
+    let printed: Vec<Value> = others
+        .into_iter()
+        .chain(rest.iter().map(|line| serde_json::from_str(line).unwrap()))
+        .collect();
+    assert!(
+        printed.iter().all(|message| !message["method"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("notifications/user-memory/")),
+        "{printed:?}"
+    );
 }

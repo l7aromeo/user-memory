@@ -305,6 +305,20 @@ and the next call reconnects ([troubleshooting](troubleshooting.md#from-doctor))
 Clients don't restart for a server restart or upgrade, only when their own
 client is upgraded.
 
+A session that starts while the server is down, or while it refuses the
+client's token, still gets its memory tools. If the server hasn't answered
+within 3 seconds, the client answers the agent app's handshake and tool
+list itself, with its own version's. Claude Code has the tools from the
+session's first turn; Codex, which starts its first turn before its tools
+are in, from the next one, unless the server refused the connection at
+once. Each call then gets the reply for the outage or the refused token. Once the server answers, the next call
+reaches it, and the session recovers by itself. When the server's tools
+differ from the client's own, the app is told. Session start's index is
+not loaded again; the agent calls `index` itself. A server that no longer
+speaks the protocol version the client agreed with the app still gets the
+session's requests as they are, as after any reconnect, and answers any it
+can't read with an error.
+
 ## Back up and restore
 
 The server backs its store up once a day, as a native store does
