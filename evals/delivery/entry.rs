@@ -154,9 +154,9 @@ fn action(input: &ActionInput) -> Result<Action, String> {
     })
 }
 
-fn matched(index: &DeliveryIndex, m: &Matched) -> Value {
-    json!({
-        "id": index.id(m.memory),
+fn matched(index: &DeliveryIndex, m: &Matched) -> Result<Value, String> {
+    Ok(json!({
+        "id": index.id(m.memory).map_err(|e| e.to_string())?,
         "slot": m.slot,
         "start": m.start,
         "length": m.length,
@@ -175,7 +175,7 @@ fn matched(index: &DeliveryIndex, m: &Matched) -> Value {
         "push": m.push(),
         "failure": m.failure(),
         "hold": m.hold(),
-    })
+    }))
 }
 
 fn run(cli: Cli) -> Result<(), String> {
@@ -205,8 +205,11 @@ fn run(cli: Cli) -> Result<(), String> {
                 for (i, input) in task.actions.iter().enumerate() {
                     window.push(&action(input)?);
                     let found = index.rank(&window).map_err(|e| e.to_string())?;
-                    let shown: Vec<Value> =
-                        found.iter().take(top).map(|m| matched(&index, m)).collect();
+                    let shown = found
+                        .iter()
+                        .take(top)
+                        .map(|m| matched(&index, m))
+                        .collect::<Result<Vec<Value>, String>>()?;
                     writeln!(
                         out,
                         "{}",
@@ -237,10 +240,11 @@ fn run(cli: Cli) -> Result<(), String> {
                 .map_err(|e| e.to_string())?;
             let mut shown = Vec::new();
             for m in passing {
-                let mut value = matched(&index, m);
+                let mut value = matched(&index, m)?;
                 if let Some(conn) = &conn {
                     value["text"] = json!(
-                        delivery::text(conn, index.id(m.memory), m).map_err(|e| e.to_string())?
+                        delivery::text(conn, index.id(m.memory).map_err(|e| e.to_string())?, m)
+                            .map_err(|e| e.to_string())?
                     );
                 }
                 shown.push(value);
