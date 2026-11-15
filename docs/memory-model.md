@@ -190,7 +190,7 @@ on the command line) returns them, oldest first:
 | `origin` | The conversation, when the change named one. |
 | `client` | Who wrote it: the MCP client's name from its handshake, such as `claude-code`; `cli` for the command line; `host:<name>` through a shared server. Empty for a change made outside user-memory. |
 | `before` | The changed fields' previous values, by their export names. |
-| `imported` | For an event an import brought in: when that import ran. Imported events are kept as the file had them; nothing reads them as this store's own. |
+| `imported` | For an event an import brought in: when that import ran, in the same form as `at`. Imported events are kept as the file had them; nothing reads them as this store's own. |
 
 - Undo a wrong correction by `update` with the values in `before`.
 - An import that changes a memory, even only its last confirmation, is an
