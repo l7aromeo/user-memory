@@ -21,11 +21,11 @@ const CURSOR_TAG: &str = "p1";
 
 #[derive(Args, Clone, Default, Deserialize, Serialize, JsonSchema)]
 pub struct Paging {
-    /// The next_cursor of the previous page, to continue that result.
+    /// The previous page's next_cursor, to continue.
     #[arg(long)]
     #[serde(default)]
     pub cursor: Option<String>,
-    /// Memories per page, at most 200: unless set, 20 for search and 100 for index and a category read.
+    /// Memories per page, at most 200; unless set, 20 for search and 100 for index and a category read.
     #[arg(long)]
     // `limit` is the name agents reach for; unknown names are ignored, so
     // without it a limited search returned a full page.

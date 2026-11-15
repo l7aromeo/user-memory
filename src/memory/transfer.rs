@@ -80,7 +80,7 @@ const UNNAMED_FILE: &str = "file";
 /// PowerShell or cmd, so the undo command runs as printed.
 const NAME_PUNCTUATION: &str = " .-_+=,()[]~";
 
-/// What import does with a memory whose id exists with different contents.
+/// For a memory whose id exists with different contents.
 #[derive(
     Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum, Deserialize, Serialize, JsonSchema,
 )]
@@ -97,7 +97,7 @@ pub enum OnConflict {
 
 #[derive(Deserialize, JsonSchema)]
 pub struct ExportMemories {
-    /// File name in the exports directory beside the memory store, such as backup-2026-10-15.json. A name, never a path.
+    /// A file name in the exports directory, such as backup-2026-10-15.json; never a path.
     pub name: String,
     /// Replace an existing export with that name.
     #[serde(default)]
@@ -109,9 +109,9 @@ pub struct ExportMemories {
 
 #[derive(Deserialize, JsonSchema)]
 pub struct ImportMemories {
-    /// File name of an export in the exports directory beside the memory store.
+    /// An export's file name in the exports directory.
     pub name: String,
-    /// Write the import; without it (or without user_confirmed) the result is a preview, which stores nothing but holds the store's write lock while it tries replacements, so a large use-file preview takes about as long as applying.
+    /// Write the import; without it, or without user_confirmed, the result is a preview that stores nothing (a use-file preview holds the store's write lock about as long as applying).
     #[serde(default)]
     pub apply: bool,
     /// For memories whose id exists with different contents: abort (default), keep-store or use-file.
