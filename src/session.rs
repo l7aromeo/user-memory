@@ -466,7 +466,33 @@ async fn snapshot(
         .unwrap_or_else(|_| checkout.clone())
         .to_string_lossy()
         .into_owned();
-    let seen = look(checkout, origin.as_deref(), remote.as_ref()).await?;
+    // A store whose marker still says what the snapshot saw has changed
+    // nothing since: no read at all. A write that has not yet rewritten the
+    // marker is told at the next prompt. A server's marker is its
+    // connector's last poll, and counts only while the connector polls.
+    let marked = match &remote {
+        None => memory::marked(&db_path()),
+        Some(remote) => crate::remote::marker::position(&remote.url),
+    };
+    let still = before.filter(|b| {
+        b.projects.is_some() && b.changes.is_some() && b.changes.as_ref() == marked.as_ref()
+    });
+    let seen = match still {
+        // A link moves the store's count, so the session's links are those
+        // it last saw: only its folder is read again.
+        Some(before) => {
+            let linked: Vec<String> = before
+                .projects
+                .iter()
+                .flatten()
+                .filter(|p| p.source == live::LINKED)
+                .map(|p| p.key.clone())
+                .collect();
+            let folder = tokio::task::spawn_blocking(move || project::folder(&checkout)).await?;
+            seen(&folder, &linked)
+        }
+        None => look(checkout, origin.as_deref(), remote.as_ref()).await?,
+    };
     let projects = live::kept(
         seen.projects,
         before.and_then(|b| b.projects.as_deref()),
@@ -481,13 +507,9 @@ async fn snapshot(
                 .is_some_and(|was| was.iter().map(|p| &p.key).eq(keys.iter()))
         })
         .and_then(|b| b.changes.clone());
-    // A store on this machine whose marker still says what the snapshot
-    // saw has changed nothing since: no read at all. A write that has not
-    // yet rewritten the marker is told at the next prompt.
-    let unchanged = remote.is_none()
-        && since
-            .as_ref()
-            .is_some_and(|since| memory::marked(&db_path()).as_ref() == Some(since));
+    let unchanged = since
+        .as_ref()
+        .is_some_and(|since| marked.as_ref() == Some(since));
     let reply = if unchanged {
         memory::StampsReply {
             since,

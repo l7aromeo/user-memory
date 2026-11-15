@@ -293,7 +293,7 @@ export made with the version that created it.
 
 ## The state folder
 
-user-memory keeps two kinds of file in its state folder,
+user-memory keeps three kinds of file in its state folder,
 `${XDG_STATE_HOME:-~/.local/state}/user-memory/` (`%LOCALAPPDATA%\user-memory\state\`
 on Windows), each private to you:
 
@@ -304,7 +304,16 @@ on Windows), each private to you:
   setup using another store, or a machine moving from its store to a
   server, keeps a snapshot of its own. A snapshot from before 0.9.0 names
   no store and is never read; that session's next prompt starts a new one
-  quietly, and the old file goes with the 30-day clean-up.
+  quietly, and the old file goes with the 30-day clean-up. A session whose
+  start could not read memory has a `.missed` file beside its snapshot
+  until a prompt gives it the index.
+- `servers/`: for each memory server this machine is a client of, the
+  server's position as its connector last found it (`<key>.changed`, the
+  key a hash of the server's address), when a hook last ran
+  (`<key>.wanted`) and when a connector last started to ask
+  (`<key>.polling`), all empty or a few bytes. A prompt whose snapshot
+  holds that position asks the server nothing
+  ([session hooks](clients.md#session-hooks)).
 - `instructions/`: one record per instruction file user-memory wrote, with
   its path, time, size and the SHA-256 of its text, so the next write knows
   nobody has saved the file since

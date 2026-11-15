@@ -32,6 +32,7 @@ use std::{
 };
 use subtle::ConstantTimeEq;
 
+pub(crate) mod marker;
 mod transfer;
 
 #[derive(Clone, Args, Serialize, Deserialize)]
@@ -392,7 +393,10 @@ pub async fn connect_over(
     let local = rmcp::transport::async_rw::AsyncRwTransport::new_server(input, output);
     let endpoint = connection.url.clone();
     let token_file = connection.token_file.clone();
-    forward(
+    // Beside the relay, never in it: the hooks on this machine read the
+    // server's position from the marker it keeps.
+    let poller = tokio::spawn(marker::poll(connection.clone()));
+    let relayed = forward(
         local,
         remote,
         || connection.transport(),
@@ -400,7 +404,9 @@ pub async fn connect_over(
         &token_file,
         behind_front,
     )
-    .await
+    .await;
+    poller.abort();
+    relayed
 }
 
 /// Starts a send before the next message is read, then lets it finish
