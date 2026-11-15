@@ -244,6 +244,21 @@ pub(in crate::memory) struct Row {
     pub(in crate::memory) place: Range<usize>,
 }
 
+/// A memory's fields that hold its words.
+impl<'a> From<&'a Memory> for Text<'a> {
+    fn from(m: &'a Memory) -> Self {
+        Self {
+            memory_type: &m.memory_type,
+            category: &m.category,
+            title: &m.title,
+            content: &m.content,
+            context: &m.context,
+            reason: &m.reason,
+            evidence: &m.evidence,
+        }
+    }
+}
+
 /// The rows a memory is indexed and ranked in. Slot 0 holds the category,
 /// title, type, reason and evidence, which say what the whole memory is
 /// about, so they count for each passage; then a row for each passage of
