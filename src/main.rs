@@ -943,14 +943,19 @@ async fn main() -> Result<()> {
                     subset,
                 };
                 let mut summary = remote.import(&request, &document).await?;
-                // The server's advice names its own commands; this client
-                // refuses reindex, so name where it runs instead.
-                match memory::import_next(&summary, &on_the_server_command(&remote.url, "reindex"))
-                {
-                    Some(next) => summary["next"] = json!(next),
-                    None => {
-                        if let Some(fields) = summary.as_object_mut() {
-                            fields.remove("next");
+                // The server's advice after an applied import names its own
+                // commands; this client refuses reindex, so name where it
+                // runs instead. A preview's next names no command and stays.
+                if summary["applied"] == true {
+                    match memory::import_next(
+                        &summary,
+                        &on_the_server_command(&remote.url, "reindex"),
+                    ) {
+                        Some(next) => summary["next"] = json!(next),
+                        None => {
+                            if let Some(fields) = summary.as_object_mut() {
+                                fields.remove("next");
+                            }
                         }
                     }
                 }

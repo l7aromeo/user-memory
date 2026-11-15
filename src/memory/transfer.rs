@@ -1277,6 +1277,20 @@ fn import(
         );
     }
     if !apply || blocked {
+        // A preview that apply would carry out: the agent shows it and
+        // waits, since the server cannot see whether the user said yes.
+        let writes = summary["added"]
+            .as_object()
+            .is_some_and(|counts| counts.values().any(|n| n.as_u64() != Some(0)))
+            || summary["conflicts"]
+                .as_array()
+                .is_some_and(|found| !found.is_empty())
+            || summary["origins_merged"]
+                .as_u64()
+                .is_some_and(|merged| merged != 0);
+        if !blocked && writes {
+            summary.insert("next".into(), json!(PREVIEWED));
+        }
         return Ok(Value::Object(summary));
     }
 
@@ -1390,8 +1404,8 @@ fn import(
 /// review when imported memories resemble stored ones; when memories were
 /// added, `reindex` (the command that runs it where the store lives) to
 /// embed them now, which is optional, since search embeds missing memories
-/// as it goes; and how to undo the import when it has a name. A preview
-/// gets none, since nothing was written.
+/// as it goes; and how to undo the import when it has a name. None for a
+/// preview, whose `next` (to wait for the user's answer) the import sets.
 pub fn import_next(summary: &Value, reindex: &str) -> Option<String> {
     if summary["applied"] != true {
         return None;
@@ -1658,6 +1672,10 @@ const EXPORTED_HERE: &str = "The file is in user-memory's exports folder beside 
 /// machine, as the installer's Docker server does: its folders are still
 /// the server's.
 const EXPORTED_ON_SERVER: &str = "The file is in the memory server's exports folder, on the server, not among this machine's files. For a copy here, the user runs `user-memory export FILE`.";
+
+/// The next step after a preview that would write something and that apply
+/// would not refuse: the user's answer, which the server cannot see.
+const PREVIEWED: &str = "Nothing is imported yet: show the user this preview and wait for their answer before applying.";
 
 /// Said by an import asked to apply without user_confirmed.
 const NOT_APPLIED: &str =
@@ -2067,6 +2085,32 @@ mod tests {
             .unwrap()
             .parse()
             .unwrap()
+    }
+
+    // A preview tells the agent to wait for the user's answer only when
+    // applying would write something and would not be refused.
+    #[test]
+    fn a_preview_says_to_wait_for_the_answer_only_when_apply_would_write() {
+        let (s, [a, ..]) = populated();
+        let (document, _) = export_document(&s.db, &Subset::default()).unwrap();
+        assert_eq!(
+            import(&store(), &document, false, OnConflict::Abort)["next"],
+            PREVIEWED
+        );
+        let same = import(&s, &document, false, OnConflict::Abort);
+        assert!(same.get("next").is_none(), "nothing to write: {same}");
+        let changed = edited(&document, a, |m| {
+            m["content"] = json!("Use Kakoune as the text editor");
+            m["updated_at"] = json!("2026-10-16 01:00:00");
+        });
+        let refused = import(&s, &changed, false, OnConflict::Abort);
+        assert!(refused.get("next").is_none(), "apply refuses: {refused}");
+        assert_eq!(
+            import(&s, &changed, false, OnConflict::UseFile)["next"],
+            PREVIEWED
+        );
+        let applied = import(&s, &changed, true, OnConflict::UseFile);
+        assert_ne!(applied["next"], PREVIEWED, "{applied}");
     }
 
     #[test]
