@@ -13,6 +13,7 @@ mod time;
 
 use serde_json::{Value, json};
 use std::{
+    fs,
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -960,5 +961,117 @@ fn link_without_an_origin_says_where_to_find_it() {
             .unwrap()
             .starts_with("link needs the conversation origin printed at session start"),
         "{answer}"
+    );
+}
+
+// ─── The tool definitions ───────────────────────────────────────────────────
+
+/// The `tools/list` reply of a fresh `user-memory serve`: its line as a
+/// client receives it, and its tools.
+fn tools_list() -> (String, Vec<Value>) {
+    let tmp = tempdir().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_user-memory"))
+        .arg("serve")
+        .sandboxed(tmp.path())
+        .env("USER_MEMORY_DB", tmp.path().join("memory.sqlite3"))
+        .env_remove("USER_MEMORY_URL")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    for msg in [
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"integration-test","version":"1"}}}),
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}),
+    ] {
+        writeln!(input, "{msg}").unwrap();
+        input.flush().unwrap();
+    }
+    let line = loop {
+        let mut line = String::new();
+        assert!(output.read_line(&mut line).unwrap() > 0);
+        let msg: Value = serde_json::from_str(&line).unwrap();
+        if msg["id"] == 2 {
+            break line.trim_end().to_owned();
+        }
+    };
+    drop(input);
+    child.wait().unwrap();
+    let reply: Value = serde_json::from_str(&line).unwrap();
+    let tools = reply["result"]["tools"].as_array().unwrap().clone();
+    (line, tools)
+}
+
+/// A schema with every `"description": <string>` pair removed, at any depth.
+/// Only string values go: a property named `description` is an object and
+/// stays.
+fn without_descriptions(value: &Value) -> Value {
+    match value {
+        Value::Object(fields) => Value::Object(
+            fields
+                .iter()
+                .filter(|(key, value)| !(key.as_str() == "description" && value.is_string()))
+                .map(|(key, value)| (key.clone(), without_descriptions(value)))
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(without_descriptions).collect()),
+        other => other.clone(),
+    }
+}
+
+/// The tools' published shape: each tool's name and input schema without its
+/// descriptions, so a reworded doc keeps it and a renamed field, a changed
+/// type or default, or an added value changes it.
+fn tools_shape(tools: &[Value]) -> String {
+    let shape: Vec<Value> = tools
+        .iter()
+        .map(|tool| json!({"name": tool["name"], "inputSchema": without_descriptions(&tool["inputSchema"])}))
+        .collect();
+    serde_json::to_string_pretty(&shape).unwrap() + "\n"
+}
+
+fn committed_tools_shape() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tools/shape.json")
+}
+
+// Changing a tool's fields, types, defaults or values without updating the
+// committed shape fails here; rewording a doc never does.
+#[test]
+fn the_tools_keep_their_committed_shape() {
+    let (_, tools) = tools_list();
+    let expected = tools_shape(&tools);
+    let path = committed_tools_shape();
+    let committed = fs::read_to_string(&path).unwrap_or_default();
+    if committed != expected {
+        let written = Path::new(env!("CARGO_TARGET_TMPDIR")).join("tools-shape.json");
+        fs::write(&written, &expected).unwrap();
+        panic!(
+            "{} does not match the tools' fields, types, defaults or values. If that change is meant, copy {} there; a reworded doc never needs it.",
+            path.display(),
+            written.display()
+        );
+    }
+}
+
+#[test]
+fn only_description_strings_leave_the_shape() {
+    let schema = json!({
+        "description": "A tool's input.",
+        "properties": {
+            "description": {"description": "A field named description.", "type": "string"},
+            "status": {"oneOf": [{"description": "Every status.", "const": "all"}]},
+        },
+    });
+    assert_eq!(
+        without_descriptions(&schema),
+        json!({
+            "properties": {
+                "description": {"type": "string"},
+                "status": {"oneOf": [{"const": "all"}]},
+            },
+        })
     );
 }
