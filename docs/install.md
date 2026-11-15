@@ -191,9 +191,10 @@ curl -fsSL https://github.com/l7aromeo/user-memory/releases/latest/download/inst
 ## Approve the hooks in Codex
 
 Codex runs a new or changed hook only after you approve it once. Start Codex,
-run `/hooks`, and choose **Trust** for user-memory's **SessionStart** hook
-("Loading user memory") and its **UserPromptSubmit** hook. Claude Code needs
-no approval.
+run `/hooks`, and choose **Trust** for user-memory's two **SessionStart**
+hooks (one shows ``Loading user memory``) and its **UserPromptSubmit**,
+**SubagentStart**, **PreToolUse** and **PostToolUse** hooks. Claude Code
+needs no approval.
 
 Until you approve them, memory does not run in Codex, though nothing is
 broken. The installer still finishes, and its last lines name the step:
