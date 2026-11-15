@@ -45,10 +45,11 @@ const FRAGMENT_CHARS: usize = 3;
 
 /// The most matching work one quote may take, in matcher steps. Counted,
 /// not timed, so a slow machine fails nothing: a doc's quotes take at most
-/// about 210,000 steps, and the longest No-project line the code can print
-/// 3.2 million. A matcher that backtracked over hole boundaries took tens
-/// of millions on one doc quote (17 s), so a slowdown that size fails here
-/// instead of creeping into every `just check`.
+/// about 17,000 steps, and the longest No-project line the code can print
+/// about 260,000. A matcher that backtracks over hole boundaries, or that
+/// matches patterns which cannot change the answer, takes millions on that
+/// line, so a slowdown that size fails here instead of creeping into every
+/// `just check`.
 const QUOTE_STEPS: usize = 10_000_000;
 
 fn repo_file(name: &str) -> PathBuf {
@@ -383,7 +384,7 @@ fn every_documented_command_runs_as_written() {
 
 // ─── Output ─────────────────────────────────────────────────────────────────
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum Piece {
     Text(Vec<char>),
     Hole,
@@ -392,38 +393,103 @@ enum Piece {
 /// The source patterns, with each text piece also kept as a string, so the
 /// cheap tests before a match allocate nothing.
 struct Corpus {
+    /// Each distinct pattern once. The code prints many alike, such as
+    /// `{}.{}.{}` for each version, and matching a copy again finds nothing
+    /// new: kept, each copy would add its work to every quote.
     patterns: Vec<Vec<Piece>>,
     /// Each pattern's text pieces, as strings.
     texts: Vec<Vec<String>>,
     /// Every text piece, one per line: a quote found in it is part of one
     /// string as written.
     joined: String,
+    /// Where in a pattern a quote may start, its earlier text left out: at
+    /// any character of a text piece, or at a hole. Many patterns end
+    /// alike, such as every one that ends in a hole, so each distinct rest
+    /// of a pattern is kept once, and in an order of its own, whatever
+    /// order the code holds the patterns in: a pattern added to the code
+    /// adds only its own starts.
+    starts: Vec<Start>,
+    /// The starts in text, by their first character.
+    text_starts: HashMap<char, Vec<usize>>,
+    /// The starts at a hole, which may start at any character.
+    hole_starts: Vec<usize>,
+}
+
+/// A place a quote may start: a pattern, a piece of it, and an offset into
+/// that piece's text.
+#[derive(Clone, Copy)]
+struct Start {
+    pattern: usize,
+    piece: usize,
+    offset: usize,
 }
 
 fn corpus() -> Corpus {
-    let patterns = source_patterns();
-    let texts: Vec<Vec<String>> = patterns
-        .iter()
-        .map(|pattern| {
-            pattern
-                .iter()
-                .filter_map(|piece| match piece {
-                    Piece::Text(text) => Some(text.iter().collect()),
-                    Piece::Hole => None,
-                })
-                .collect()
-        })
-        .collect();
-    let joined = texts
-        .iter()
-        .flatten()
-        .map(String::as_str)
-        .collect::<Vec<_>>()
-        .join("\n");
-    Corpus {
-        patterns,
-        texts,
-        joined,
+    Corpus::new(source_patterns())
+}
+
+impl Corpus {
+    fn new(mut patterns: Vec<Vec<Piece>>) -> Self {
+        let mut seen = HashSet::new();
+        patterns.retain(|pattern| seen.insert(pattern.clone()));
+        let texts: Vec<Vec<String>> = patterns
+            .iter()
+            .map(|pattern| {
+                pattern
+                    .iter()
+                    .filter_map(|piece| match piece {
+                        Piece::Text(text) => Some(text.iter().collect()),
+                        Piece::Hole => None,
+                    })
+                    .collect()
+            })
+            .collect();
+        let joined = texts
+            .iter()
+            .flatten()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join("\n");
+        // Each distinct rest of a pattern, from one of its pieces, once.
+        let mut rests: HashMap<&[Piece], (usize, usize)> = HashMap::new();
+        for (pattern, pieces) in patterns.iter().enumerate() {
+            for piece in 0..pieces.len() {
+                rests.entry(&pieces[piece..]).or_insert((pattern, piece));
+            }
+        }
+        let mut rests: Vec<(&[Piece], (usize, usize))> = rests.into_iter().collect();
+        rests.sort_unstable_by(|a, b| a.0.cmp(b.0));
+        let mut starts = Vec::new();
+        for (rest, (pattern, piece)) in rests {
+            let offsets = match &rest[0] {
+                Piece::Text(text) => text.len(),
+                Piece::Hole => 1,
+            };
+            starts.extend((0..offsets).map(|offset| Start {
+                pattern,
+                piece,
+                offset,
+            }));
+        }
+        let mut text_starts: HashMap<char, Vec<usize>> = HashMap::new();
+        let mut hole_starts = Vec::new();
+        for (index, start) in starts.iter().enumerate() {
+            match &patterns[start.pattern][start.piece] {
+                Piece::Text(text) => text_starts
+                    .entry(text[start.offset])
+                    .or_default()
+                    .push(index),
+                Piece::Hole => hole_starts.push(index),
+            }
+        }
+        Self {
+            patterns,
+            texts,
+            joined,
+            starts,
+            text_starts,
+            hole_starts,
+        }
     }
 }
 
@@ -764,6 +830,18 @@ fn substantive(pattern: &[Piece]) -> bool {
     })
 }
 
+/// Whether a pattern's text holds a space, so that inside a hole it can
+/// print text a chain of words cannot reach. Text without one lies within a
+/// word, which a word segment reaches already, and its holes reach only what
+/// the chain does: such a pattern, `{}.{}.{}` or `{}/{}`, adds no end to a
+/// segment, only work.
+fn crosses_space(pattern: &[Piece]) -> bool {
+    pattern.iter().any(|piece| match piece {
+        Piece::Text(text) => text.iter().any(|c| c.is_whitespace()),
+        Piece::Hole => false,
+    })
+}
+
 fn has_word(text: &[char]) -> bool {
     text.split(|c| !c.is_alphabetic())
         .any(|word| word.len() >= PATTERN_WORD)
@@ -788,10 +866,11 @@ struct Matcher<'a> {
     /// its end: the only places a hole before that text can end.
     occurrences: HashMap<Vec<char>, Rc<Vec<usize>>>,
     /// The patterns whose every text piece occurs in the fragment: the only
-    /// ones that can print a part of it in full.
+    /// ones that can print a part of it in full. Only those that cross a
+    /// space count (see `crosses_space`).
     whole: Vec<usize>,
     /// The patterns that start with text: the ones that may print the end of
-    /// a quote that stops partway.
+    /// a quote that stops partway. Only those that cross a space count.
     text_first: Vec<usize>,
     /// Where each pattern, matched from its start at a position, can end:
     /// one match serves every end asked about, which keeps a long quote's
@@ -838,13 +917,16 @@ impl<'a> Matcher<'a> {
         let patterns = &corpus.patterns;
         let whole = (0..patterns.len())
             .filter(|&i| {
-                corpus.texts[i]
-                    .iter()
-                    .all(|text| fragment.contains(text.as_str()))
+                crosses_space(&patterns[i])
+                    && corpus.texts[i]
+                        .iter()
+                        .all(|text| fragment.contains(text.as_str()))
             })
             .collect();
         let text_first = (0..patterns.len())
-            .filter(|&i| matches!(patterns[i].first(), Some(Piece::Text(_))))
+            .filter(|&i| {
+                crosses_space(&patterns[i]) && matches!(patterns[i].first(), Some(Piece::Text(_)))
+            })
             .collect();
         let fragment: Vec<char> = fragment.chars().collect();
         let mut space_after = vec![fragment.len(); fragment.len() + 1];
@@ -902,31 +984,28 @@ impl<'a> Matcher<'a> {
         for x in (0..len).rev() {
             self.reach(x);
         }
-        let first = self.fragment[0];
+        let corpus = self.corpus;
         let patterns = self.patterns;
         // Windows ending at their pattern's end, by where they end.
         let mut frontier = Vec::new();
-        for pattern in patterns {
-            let mut starts: Vec<(usize, usize)> = Vec::new();
-            for (t, piece) in pattern.iter().enumerate() {
-                match piece {
-                    Piece::Text(text) => starts.extend(
-                        text.iter()
-                            .enumerate()
-                            .filter(|&(o, &c)| (t == 0 && o == 0) || c == first)
-                            .map(|(o, _)| (t, o)),
-                    ),
-                    // A quote may also start at a hole, its text left out.
-                    Piece::Hole => starts.push((t, 0)),
-                }
+        // Text that starts with another character cannot start the quote.
+        let mut tried: Vec<usize> = corpus
+            .text_starts
+            .get(&self.fragment[0])
+            .into_iter()
+            .flatten()
+            .chain(&corpus.hole_starts)
+            .copied()
+            .collect();
+        tried.sort_unstable();
+        for index in tried {
+            let start = corpus.starts[index];
+            let rest = &patterns[start.pattern][start.piece..];
+            let reach = self.run(rest, start.offset, 0, true);
+            if reach.cut || reach.ends.contains(&len) {
+                return true;
             }
-            for (t, o) in starts {
-                let reach = self.run(&pattern[t..], o, 0, true);
-                if reach.cut || reach.ends.contains(&len) {
-                    return true;
-                }
-                frontier.extend(reach.ends);
-            }
+            frontier.extend(reach.ends);
         }
         let mut seen = vec![false; len + 1];
         while let Some(at) = frontier.pop() {
@@ -1467,10 +1546,8 @@ fn a_message_the_code_does_not_print_is_caught() {
 }
 
 /// The longest header line the code prints: the No-project line naming as
-/// many repositories as it lists, then counting the rest. It must match
-/// within the step bound, so no quote of it can be too slow.
-#[test]
-fn the_longest_no_project_line_matches_in_time() {
+/// many repositories as it lists, then counting the rest.
+fn longest_no_project_line() -> String {
     let session = fs::read_to_string(repo_file("src/session.rs")).unwrap();
     let listed: usize = session
         .lines()
@@ -1492,7 +1569,14 @@ fn the_longest_no_project_line_matches_in_time() {
         .map(|i| format!("repo{i:02} (github.com/acme/repo{i:02})"))
         .collect();
     repositories.push("and 3 more".into());
-    let longest = quote.replace(example, &repositories.join(", "));
+    quote.replace(example, &repositories.join(", "))
+}
+
+/// The longest header line must match within the step bound, so no quote
+/// of it can be too slow.
+#[test]
+fn the_longest_no_project_line_matches_in_time() {
+    let longest = longest_no_project_line();
     let corpus = corpus();
     for fragment in fragments(&longest) {
         let mut matcher = Matcher::new(&corpus, &fragment);
@@ -1504,6 +1588,88 @@ fn the_longest_no_project_line_matches_in_time() {
             fragment.len()
         );
     }
+}
+
+/// Matching work follows the patterns that can print part of a quote, not
+/// how many patterns the code holds. The longest line is matched again with
+/// the code's patterns all repeated, with new patterns of holes and
+/// punctuation, the kind that matches inside any word, and with as many
+/// again that share no text with it. Only the last add work: one step, each
+/// pass, for each place one could start, its first text or a hole, to rule
+/// it out.
+#[test]
+fn matching_work_does_not_grow_with_the_code_s_patterns() {
+    let longest = longest_no_project_line();
+    let fragment = fragments(&longest)
+        .into_iter()
+        .max_by_key(String::len)
+        .expect("the longest line has a fragment");
+    let patterns = source_patterns();
+    // The same patterns with every character moved into a private use
+    // plane, which no doc quotes.
+    let unrelated = Corpus::new(
+        patterns
+            .iter()
+            .map(|pattern| {
+                pattern
+                    .iter()
+                    .map(|piece| match piece {
+                        Piece::Text(text) => Piece::Text(
+                            text.iter()
+                                .map(|&c| {
+                                    char::from_u32(0xF_0000 | (u32::from(c) & 0xFFFF))
+                                        .expect("plane 15 holds every such value")
+                                })
+                                .collect(),
+                        ),
+                        Piece::Hole => Piece::Hole,
+                    })
+                    .collect()
+            })
+            .collect(),
+    )
+    .patterns;
+    let starts: usize = unrelated
+        .iter()
+        .map(|pattern| {
+            pattern
+                .iter()
+                .enumerate()
+                .filter(|&(t, piece)| t == 0 || *piece == Piece::Hole)
+                .count()
+        })
+        .sum();
+    let punctuation = [
+        "{}:{}",
+        "{}|{}",
+        "{}{}{}",
+        "{}-{}.{}",
+        ".{}{}{}{}",
+        "{}/{}/{}",
+    ]
+    .map(holes);
+    let steps = |corpus: &Corpus| {
+        let mut matcher = Matcher::new(corpus, &fragment);
+        assert!(matcher.covers(), "{fragment}");
+        (matcher.steps, matcher.pass)
+    };
+    let (alone, _) = steps(&Corpus::new(patterns.clone()));
+    // The unrelated ones first, so they are tried before any match ends
+    // the search.
+    let (crowded, passes) = steps(&Corpus::new(
+        unrelated
+            .into_iter()
+            .chain(patterns.iter().cloned())
+            .chain(patterns.iter().cloned())
+            .chain(punctuation)
+            .collect(),
+    ));
+    assert!(
+        crowded <= alone + passes * starts,
+        "{crowded} steps with the added patterns, {alone} without: more than one \
+         step for each of the {starts} places an unrelated pattern could start, \
+         in each of {passes} passes"
+    );
 }
 
 /// The repository's own pages on GitHub, which release notes and the
