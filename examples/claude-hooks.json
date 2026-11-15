@@ -11,6 +11,16 @@
             "statusMessage": "Loading user memory"
           }
         ]
+      },
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'/ABS/PATH/TO/user-memory' working-set --client claude",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [
@@ -19,6 +29,51 @@
           {
             "type": "command",
             "command": "'/ABS/PATH/TO/user-memory' prompt-submit --client claude",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'/ABS/PATH/TO/user-memory' subagent-start --client claude",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|PowerShell|Monitor|Agent|Task|SendMessage",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'/ABS/PATH/TO/user-memory' pre-tool-use --client claude",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'/ABS/PATH/TO/user-memory' post-tool-use --client claude",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'/ABS/PATH/TO/user-memory' post-tool-use --client claude",
             "timeout": 5
           }
         ]

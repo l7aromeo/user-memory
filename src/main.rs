@@ -42,6 +42,14 @@ struct Cli {
     command: Command,
 }
 
+/// The room a client gives a hook's text, when its handler says so.
+#[derive(clap::Args, Clone, Copy, Debug)]
+struct ContextLimit {
+    /// The client's limit on this hook's text, in the client's tokens of four bytes (Codex's additionalContextLimit); setup writes it beside that limit, and a hook without it, or with less than setup writes, keeps to the client's default.
+    #[arg(long, value_name = "TOKENS")]
+    context_limit: Option<usize>,
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Install and connect memory to detected Codex/Claude clients.
@@ -155,12 +163,48 @@ enum Command {
         /// prints the conversation origin.
         #[arg(long, value_enum)]
         client: Option<session::HookClient>,
+        #[command(flatten)]
+        limit: ContextLimit,
     },
     /// Print what changed in memory since a client session last looked, for its prompt hook; always exits successfully.
     PromptSubmit {
         /// Client running the hook, with its JSON payload on stdin.
         #[arg(long, value_enum)]
         client: session::HookClient,
+        #[command(flatten)]
+        limit: ContextLimit,
+    },
+    /// Print what a compacted context was working on, for its session hook; always exits successfully.
+    WorkingSet {
+        /// Client running the hook, with its JSON payload on stdin.
+        #[arg(long, value_enum)]
+        client: session::HookClient,
+        #[command(flatten)]
+        limit: ContextLimit,
+    },
+    /// Print the project's rules for a starting subagent, for its hook; always exits successfully.
+    SubagentStart {
+        /// Client running the hook, with its JSON payload on stdin.
+        #[arg(long, value_enum)]
+        client: session::HookClient,
+        #[command(flatten)]
+        limit: ContextLimit,
+    },
+    /// Read a tool call before it runs, for the client's tool hook; always exits successfully.
+    PreToolUse {
+        /// Client running the hook, with its JSON payload on stdin.
+        #[arg(long, value_enum)]
+        client: session::HookClient,
+        #[command(flatten)]
+        limit: ContextLimit,
+    },
+    /// Read a tool call's result, for the client's tool hook; always exits successfully.
+    PostToolUse {
+        /// Client running the hook, with its JSON payload on stdin.
+        #[arg(long, value_enum)]
+        client: session::HookClient,
+        #[command(flatten)]
+        limit: ContextLimit,
     },
     /// Print the memory project key for a folder, or name its project with --set.
     ProjectId {
@@ -729,6 +773,28 @@ async fn main() -> Result<()> {
             }
             err.exit()
         });
+    // The hooks that run on every tool call or subagent go first, past
+    // everything else this program does before a command.
+    let quiet = match &cli.command {
+        Command::PreToolUse { client, limit } => {
+            Some(session::pre_tool_use(*client, limit.context_limit))
+        }
+        Command::PostToolUse { client, limit } => {
+            Some(session::post_tool_use(*client, limit.context_limit))
+        }
+        Command::WorkingSet { .. } | Command::SubagentStart { .. } => {
+            session::drain();
+            Some(String::new())
+        }
+        _ => None,
+    };
+    if let Some(text) = quiet {
+        if !text.is_empty() {
+            println!("{text}");
+        }
+        io::stdout().flush()?;
+        std::process::exit(0);
+    }
     match &mut cli.command {
         Command::Index(input) => resolve_projects(&mut input.selection.projects)?,
         Command::Read(input) => resolve_projects(&mut input.selection.projects)?,
@@ -752,13 +818,23 @@ async fn main() -> Result<()> {
     if let Command::Server { command } = cli.command {
         std::process::exit(server::run(command));
     }
-    if let Command::SessionStart { path, client } = cli.command {
-        println!("{}", session::start(path, client).await);
+    if let Command::SessionStart {
+        path,
+        client,
+        limit,
+    } = cli.command
+    {
+        println!(
+            "{}",
+            session::start(path, client, limit.context_limit).await
+        );
         // Exit now: a timed-out blocking task must not hold the runtime open.
         io::stdout().flush()?;
         std::process::exit(0);
     }
-    if let Command::PromptSubmit { client } = cli.command {
+    // The prompt hook keeps to the client's default room: what it says is
+    // short, and it takes the limit only so its handler's shape is final.
+    if let Command::PromptSubmit { client, .. } = cli.command {
         let notice = session::prompt_submit(client).await;
         if !notice.is_empty() {
             println!("{notice}");
@@ -1210,7 +1286,13 @@ async fn main() -> Result<()> {
         ),
         Command::SecureFile { path } => private::restrict(&path)
             .with_context(|| format!("Cannot make {} private", path.display()))?,
-        Command::SessionStart { .. } | Command::PromptSubmit { .. } | Command::Server { .. } => {
+        Command::SessionStart { .. }
+        | Command::PromptSubmit { .. }
+        | Command::WorkingSet { .. }
+        | Command::SubagentStart { .. }
+        | Command::PreToolUse { .. }
+        | Command::PostToolUse { .. }
+        | Command::Server { .. } => {
             unreachable!("handled before connecting")
         }
     }

@@ -477,27 +477,42 @@ impl InstalledClient {
         if self.kind != Client::Claude || !hooks || !cfg!(windows) {
             return None;
         }
-        let printed = Command::new(&self.command)
+        versions::claude_step(&self.version_output(), cfg!(windows))
+    }
+    /// What the client's `--version` printed; empty when it could not run.
+    fn version_output(&self) -> String {
+        Command::new(&self.command)
             .arg("--version")
             .output()
             .ok()
             .filter(|output| output.status.success())
             .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
-            .unwrap_or_default();
-        versions::claude_step(&printed, cfg!(windows))
+            .unwrap_or_default()
+    }
+    /// Where this client's hooks go: for a Codex that reads a handler's
+    /// context limit, with that limit; for any other, or one whose version
+    /// cannot be read, without.
+    fn hook_target(&self) -> hooks::Target {
+        let mut target = hooks::Target::new(self.hook_client());
+        if self.kind == Client::Codex && versions::codex_reads_context_limit(&self.version_output())
+        {
+            target.context_limit = Some(crate::session::CODEX_CONTEXT_TOKENS);
+        }
+        target
     }
     /// Installs or removes the session hooks and describes what changed.
     fn set_hook(&self, paths: &Paths, enabled: bool) -> Result<String> {
         let file = self.hook_file()?;
+        let target = self.hook_target();
         let mut changes = Vec::new();
-        for hook in hooks::HOOKS {
-            let wanted = enabled.then(|| hooks::entry(hook, &paths.binary, self.hook_client()));
+        for hook in hooks::for_client(self.hook_client()) {
+            let wanted = enabled.then(|| hooks::entry(hook, &paths.binary, target));
             let change = hooks::apply(&file, hook, wanted.as_ref())?;
-            changes.push(format!("{} {}", hook.event, change.describe()));
+            changes.push(format!("{} {}", hook.label(), change.describe()));
         }
         let mut note = format!("session hooks {} ({})", changes.join(", "), file.display());
         if enabled && self.kind == Client::Codex {
-            match self.codex_trust(paths)? {
+            match self.codex_trust(paths, target)? {
                 codex_trust::Trust::Approved => {}
                 codex_trust::Trust::Unverifiable(_) => {
                     note.push_str(&format!(
@@ -515,10 +530,9 @@ impl InstalledClient {
         }
         Ok(note)
     }
-    fn codex_trust(&self, paths: &Paths) -> Result<codex_trust::Trust> {
-        let commands: Vec<String> = hooks::HOOKS
-            .iter()
-            .map(|hook| hooks::command(*hook, &paths.binary, self.hook_client()))
+    fn codex_trust(&self, paths: &Paths, target: hooks::Target) -> Result<codex_trust::Trust> {
+        let commands: Vec<String> = hooks::for_client(target.client)
+            .map(|hook| hooks::command(hook, &paths.binary, target))
             .collect();
         Ok(codex_trust::trust(
             &self.command,
@@ -530,20 +544,46 @@ impl InstalledClient {
     /// applies, or waiting for a step only the user can take.
     fn verify_hook(&self, paths: &Paths) -> Result<HookState> {
         let file = self.hook_file()?;
-        for hook in hooks::HOOKS {
-            let wanted = hooks::entry(hook, &paths.binary, self.hook_client());
-            if !hooks::verify(&file, hook, &wanted)? {
-                bail!(
-                    "The {} hook in {} is missing or outdated. Run setup again.",
-                    hook.event,
-                    file.display()
-                );
+        let target = self.hook_target();
+        for hook in hooks::for_client(self.hook_client()) {
+            let wanted = hooks::entry(hook, &paths.binary, target);
+            if hooks::verify(&file, hook, &wanted)? {
+                continue;
             }
+            // Written for the other side of Codex's limit floor: the Codex
+            // here was upgraded or downgraded across it since setup ran.
+            let other = hooks::Target {
+                context_limit: match target.context_limit {
+                    Some(_) => None,
+                    None => Some(crate::session::CODEX_CONTEXT_TOKENS),
+                },
+                ..target
+            };
+            if self.kind == Client::Codex
+                && hooks::verify(&file, hook, &hooks::entry(hook, &paths.binary, other))?
+            {
+                let floor = versions::CODEX_CONTEXT_LIMIT_SINCE;
+                match target.context_limit {
+                    None => bail!(
+                        "The Codex hooks in {} carry a context limit that only Codex {floor} or later reads, so this Codex cuts what session start prints. Run setup again.",
+                        file.display()
+                    ),
+                    Some(_) => bail!(
+                        "The Codex hooks in {} were written for a Codex older than {floor}, so session start gets less room than this Codex allows. Run setup again.",
+                        file.display()
+                    ),
+                }
+            }
+            bail!(
+                "The {} hook in {} is missing or outdated. Run setup again.",
+                hook.label(),
+                file.display()
+            );
         }
         if self.kind != Client::Codex {
             return Ok(HookState::Fine(None));
         }
-        let mut note = match self.codex_trust(paths)? {
+        let mut note = match self.codex_trust(paths, target)? {
             codex_trust::Trust::Approved => "approved in Codex".to_owned(),
             codex_trust::Trust::Unapproved => {
                 return Ok(HookState::Action(format!(

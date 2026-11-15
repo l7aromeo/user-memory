@@ -2378,8 +2378,9 @@ fn a_step_left_for_the_user_ends_the_install_and_does_not_fail_it() {
     assert!(at > stdout.rfind("--token-file").unwrap(), "{stdout}");
     let tail = &stdout[at..];
     assert!(
-        tail.trim_end()
-            .ends_with("SessionStart and UserPromptSubmit hooks"),
+        tail.trim_end().ends_with(
+            "SessionStart, UserPromptSubmit, SubagentStart, PreToolUse and PostToolUse hooks"
+        ),
         "{stdout}"
     );
     assert!(
@@ -2410,9 +2411,9 @@ fn a_real_problem_still_fails_the_install_after_saying_everything() {
         "{stdout}"
     );
     assert!(
-        stdout
-            .trim_end()
-            .ends_with("SessionStart and UserPromptSubmit hooks"),
+        stdout.trim_end().ends_with(
+            "SessionStart, UserPromptSubmit, SubagentStart, PreToolUse and PostToolUse hooks"
+        ),
         "{stdout}"
     );
 }

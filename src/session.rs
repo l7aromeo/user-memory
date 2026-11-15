@@ -8,6 +8,11 @@
 
 mod live;
 mod seen;
+mod tools;
+
+#[cfg(test)]
+pub(crate) use tools::CLAUDE_TOOLS;
+pub use tools::{drain, post_tool_use, pre_tool_use};
 
 use crate::{db_path, memory, memory::FitUnit, project, setup};
 use anyhow::Context;
@@ -32,6 +37,21 @@ const CODEX_LIMIT: usize = 2_500 * 4;
 /// Claude Code saves a hook's text over 10,000 characters to a file and
 /// shows the agent a preview.
 const CLAUDE_LIMIT: usize = 10_000;
+/// The `additionalContextLimit` setup writes on every Codex handler, for a
+/// Codex that reads one, and passes to the hook as `--context-limit`, in
+/// Codex's tokens of [`CODEX_TOKEN_BYTES`]: [`CLAUDE_LIMIT`] UTF-16 units of
+/// any text are at most 30,000 UTF-8 bytes ([`UTF8_PER_UTF16`]), 7,500
+/// tokens, so Codex keeps whole what is sized for Claude Code.
+pub(crate) const CODEX_CONTEXT_TOKENS: usize = 7_500;
+/// The bytes Codex counts as one token (`APPROX_BYTES_PER_TOKEN` in
+/// codex-rs/utils/string/src/truncate.rs), measured with Codex 0.163.0:
+/// 12,000 bytes were cut at a limit of 2,900 tokens and whole at 3,100.
+const CODEX_TOKEN_BYTES: usize = 4;
+/// The most UTF-8 bytes one UTF-16 unit takes: a character of the basic
+/// plane is one unit and up to three bytes; any other is two units and four.
+const UTF8_PER_UTF16: usize = 3;
+// Any text of CLAUDE_LIMIT units fits the limit in Codex's tokens.
+const _: () = assert!(CLAUDE_LIMIT * UTF8_PER_UTF16 <= CODEX_CONTEXT_TOKENS * CODEX_TOKEN_BYTES);
 /// What Claude Code counts [`CLAUDE_LIMIT`] in: UTF-16 units, as measured
 /// with Claude Code 2.1.325 against a fake model. A session-start text of
 /// 9,900 emoji (19,784 units) reached the model as a preview, and one of
@@ -114,11 +134,20 @@ impl HookClient {
 }
 
 /// How long a hook's text may be before `client` cuts it, and the unit it
-/// counts in; with no client named, the stricter: Codex's bytes.
-fn hook_limit(client: Option<HookClient>) -> (usize, FitUnit) {
-    match client {
-        Some(HookClient::Claude) => (CLAUDE_LIMIT, CLAUDE_UNIT),
-        Some(HookClient::Codex) | None => (CODEX_LIMIT, FitUnit::Utf8Bytes),
+/// counts in; with no client named, the stricter: Codex's bytes. A Codex
+/// handler that carries a context limit (`context_limit`, in Codex's tokens)
+/// of at least [`CODEX_CONTEXT_TOKENS`] keeps whole Claude Code's room in
+/// UTF-16 units, which session start's text is sized for. A smaller limit,
+/// which setup never writes, gets the room of a handler without one, so an
+/// edited hooks file never shrinks or unbounds the text: 10,000 bytes is
+/// never more than 10,000 units of the same text.
+fn hook_limit(client: Option<HookClient>, context_limit: Option<usize>) -> (usize, FitUnit) {
+    match (client, context_limit) {
+        (Some(HookClient::Claude), _) => (CLAUDE_LIMIT, CLAUDE_UNIT),
+        (Some(HookClient::Codex), Some(tokens)) if tokens >= CODEX_CONTEXT_TOKENS => {
+            (CLAUDE_LIMIT, FitUnit::Utf16Units)
+        }
+        (Some(HookClient::Codex) | None, _) => (CODEX_LIMIT, FitUnit::Utf8Bytes),
     }
 }
 
@@ -158,7 +187,11 @@ const LATE_INDEX_MARGIN: Duration = Duration::from_millis(250);
 const REPOSITORIES_LISTED: usize = 20;
 
 /// Hook output for the checkout at `path`.
-pub async fn start(path: PathBuf, client: Option<HookClient>) -> String {
+pub async fn start(
+    path: PathBuf,
+    client: Option<HookClient>,
+    context_limit: Option<usize>,
+) -> String {
     let deadline = tokio::time::Instant::now() + hook_time(LIMIT);
     let payload = match client {
         Some(_) => tokio::time::timeout_at(deadline, payload())
@@ -208,7 +241,10 @@ pub async fn start(path: PathBuf, client: Option<HookClient>) -> String {
     };
     let (seen, index, versions) = tokio::join!(
         tokio::time::timeout_at(deadline, snapshot),
-        tokio::time::timeout_at(deadline, start_index(path, client, origin.clone())),
+        tokio::time::timeout_at(
+            deadline,
+            start_index(path, client, context_limit, origin.clone()),
+        ),
         tokio::time::timeout_at(deadline, version_line())
     );
     if let Some(reconcile) = reconcile {
@@ -216,7 +252,7 @@ pub async fn start(path: PathBuf, client: Option<HookClient>) -> String {
         let until = (tokio::time::Instant::now() + hook_time(RECONCILE_GRACE)).min(deadline);
         let _ = tokio::time::timeout_at(until, reconcile).await;
     }
-    let (limit, unit) = hook_limit(client);
+    let (limit, unit) = hook_limit(client, context_limit);
     let found = match (seen.ok().flatten(), &index) {
         // Only beside an index: a start without one says nothing is new.
         (Some((snapshot, reply)), Ok(Ok(_))) => {
@@ -255,7 +291,7 @@ pub async fn start(path: PathBuf, client: Option<HookClient>) -> String {
                 }
                 None => format!("{lines}\n{index}"),
             };
-            capped(text, limit - ADDED_ROOM, unit, INDEX_CUT)
+            capped(text, limit.saturating_sub(ADDED_ROOM), unit, INDEX_CUT)
         }
         Ok(Err(err)) => {
             let reason = err.to_string();
@@ -564,7 +600,7 @@ pub async fn prompt_submit(client: HookClient) -> String {
     if let (Some(_), Some(missed)) = (&notice, &missed) {
         let _ = std::fs::remove_file(missed);
     }
-    let (limit, unit) = hook_limit(Some(client));
+    let (limit, unit) = hook_limit(Some(client), None);
     notice
         .map(|text| capped(text, limit, unit, NOTICE_CUT))
         .map(|text| {
@@ -615,7 +651,7 @@ async fn changes(
                 tokio::task::spawn_blocking(|| live::hold_for_tests(live::HOLD_LATE_INDEX)).await;
             // The global rules come too: a session that started without
             // memory may hold none, or an old copy, in its instruction files.
-            index(checkout.clone(), Some(client), origin.clone(), false)
+            index(checkout.clone(), Some(client), None, origin.clone(), false)
                 .await
                 .map(|(lines, index)| format!("{lines}\n{index}"))
         };
@@ -828,6 +864,7 @@ async fn stamps(
 async fn start_index(
     path: PathBuf,
     client: Option<HookClient>,
+    context_limit: Option<usize>,
     origin: Option<String>,
 ) -> anyhow::Result<(String, String)> {
     // Changes made from other machines reach the instruction files here,
@@ -838,7 +875,7 @@ async fn start_index(
         .and_then(Result::ok)
         .unwrap_or_default();
     let rules_elsewhere = client.is_some_and(|client| current.contains(&client.installed()));
-    index(path, client, origin, rules_elsewhere).await
+    index(path, client, context_limit, origin, rules_elsewhere).await
 }
 
 /// The lines naming the projects the session in `path` sees, and the index
@@ -848,6 +885,7 @@ async fn start_index(
 async fn index(
     path: PathBuf,
     client: Option<HookClient>,
+    context_limit: Option<usize>,
     origin: Option<String>,
     rules_elsewhere: bool,
 ) -> anyhow::Result<(String, String)> {
@@ -869,7 +907,7 @@ async fn index(
         Repositories::default()
     };
     let line = projects_lines(&seen, &repositories);
-    let (limit, unit) = hook_limit(client);
+    let (limit, unit) = hook_limit(client, context_limit);
     let room = (limit - ADDED_ROOM - INDEX_MARGIN).saturating_sub(unit.len(&line) + 1);
     let remote = remote.as_ref();
     let mut fetch = async |input: Value| -> anyhow::Result<String> {
@@ -1618,6 +1656,37 @@ mod tests {
         assert_eq!(
             capped(text.into(), 10, FitUnit::Utf8Bytes, note),
             format!("éé\n{note}")
+        );
+    }
+
+    /// A Codex handler with setup's limit or more keeps whole what Claude
+    /// Code does, counted the same way; any other Codex, a smaller limit
+    /// included, keeps to its default's bytes.
+    #[test]
+    fn a_codex_handler_with_setups_limit_gets_claude_codes_room() {
+        for limit in [CODEX_CONTEXT_TOKENS, usize::MAX] {
+            assert_eq!(
+                hook_limit(Some(HookClient::Codex), Some(limit)),
+                (CLAUDE_LIMIT, FitUnit::Utf16Units),
+                "{limit}"
+            );
+        }
+        for (client, limit) in [
+            (Some(HookClient::Codex), None),
+            (Some(HookClient::Codex), Some(0)),
+            (Some(HookClient::Codex), Some(CODEX_CONTEXT_TOKENS - 1)),
+            (None, None),
+            (None, Some(CODEX_CONTEXT_TOKENS)),
+        ] {
+            assert_eq!(
+                hook_limit(client, limit),
+                (CODEX_LIMIT, FitUnit::Utf8Bytes),
+                "{client:?} {limit:?}"
+            );
+        }
+        assert_eq!(
+            hook_limit(Some(HookClient::Claude), Some(3_000)),
+            (CLAUDE_LIMIT, CLAUDE_UNIT)
         );
     }
 

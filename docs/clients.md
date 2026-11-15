@@ -121,10 +121,32 @@ workflow
 
 ## Session hooks
 
-Setup adds a `SessionStart` and a `UserPromptSubmit` hook to Claude Code's
-user settings (`$CLAUDE_CONFIG_DIR/settings.json`, default
-`~/.claude/settings.json`) and to Codex's user hooks (`$CODEX_HOME/hooks.json`,
-default `~/.codex/hooks.json`):
+Setup adds one set of hooks to Claude Code's user settings
+(`$CLAUDE_CONFIG_DIR/settings.json`, default `~/.claude/settings.json`) and
+to Codex's user hooks (`$CODEX_HOME/hooks.json`, default
+`~/.codex/hooks.json`), the whole set at once, so Codex asks you to review
+them once:
+
+| Event | Command | Prints |
+|---|---|---|
+| `SessionStart` (startup, resume, clear, compact) | `session-start` | the index, below |
+| `SessionStart` (compact) | `working-set` | nothing at present |
+| `UserPromptSubmit` | `prompt-submit` | a notice when something changed, [below](#changes-during-a-session) |
+| `SubagentStart` | `subagent-start` | nothing at present |
+| `PreToolUse` | `pre-tool-use` | nothing at present |
+| `PostToolUse`, and Claude Code's `PostToolUseFailure` | `post-tool-use` | nothing at present |
+
+Claude Code's `PreToolUse` hook runs for the tools it acts on:
+`Bash|PowerShell|Monitor|Agent|Task|SendMessage`. Codex's runs before every
+tool call (matcher `*`), and the binary decides by the tool's name: Codex
+asks for a new review whenever a hook's matcher changes, and the binary can
+change its list in a release without one. For a tool it does not act on,
+the hook reads its input and exits, printing nothing, in a few
+milliseconds.
+
+The Claude Code set as setup writes it is in
+[examples/claude-hooks.json](../examples/claude-hooks.json); the first two
+entries:
 
 ```json
 {"SessionStart": [{"matcher": "startup|resume|clear|compact",
@@ -135,7 +157,17 @@ default `~/.codex/hooks.json`):
               "timeout": 5}]}]}
 ```
 
-Codex gets the same entries with `--client codex`. On Windows, Claude Code's
+Codex cuts a hook's text at about 10,000 bytes unless the handler sets
+`additionalContextLimit`, in its tokens of four bytes; a store in a language
+whose characters take three bytes fills that with a third of the lines
+Claude Code shows. For Codex 0.145.0 or later, which reads the limit, setup
+adds `"additionalContextLimit": 7500` and `--context-limit 7500` to each
+Codex handler, and session start then fills the same room as in Claude
+Code. A smaller `--context-limit` gets the room of a handler without one.
+`doctor` reports a hooks file written for the other side of 0.145.0;
+run setup again after updating Codex.
+
+Codex's entries are the same with `--client codex`. On Windows, Claude Code's
 entries name the binary in exec form, run without a shell (Claude Code
 2.1.139 or newer), and Codex's are a `cmd.exe` line:
 

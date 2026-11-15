@@ -1590,3 +1590,231 @@ fn a_folder_of_many_repositories_names_twenty_and_counts_the_rest() {
         no_project_with(&format!("{}, and 3 more", listed.join(", ")))
     );
 }
+
+/// What `limit` (Codex's `additionalContextLimit`, in its tokens of four
+/// bytes) keeps whole, in bytes.
+const CODEX_TOKEN_BYTES: usize = 4;
+
+// A Codex handler that carries setup's limit says so with --context-limit,
+// and session start then fills the room that limit keeps whole: as many
+// UTF-16 units as Claude Code's, more bytes than Codex's default allows. A
+// handler from before (no argument) keeps to the default.
+#[test]
+fn only_a_codex_handler_that_carries_the_limit_gets_more_room() {
+    let home = tempdir().unwrap();
+    large_store_titled(home.path(), 600, &|i| {
+        format!("{i:03} 構築と検索の設定は作業木ごとに確認してから進めること")
+    });
+    let start = |session: &str, args: &[&str]| {
+        let payload = format!(r#"{{"session_id":"{session}"}}"#);
+        text(&with_payload(
+            home.path(),
+            args,
+            payload.as_bytes(),
+            true,
+            HOOK_ROOM,
+        ))
+    };
+    let old = start("old-handler", &["--client", "codex"]);
+    assert!(old.len() <= CLIENT_LIMIT, "{} bytes", old.len());
+    assert!(
+        old.len() * 10 > CLIENT_LIMIT * 8,
+        "only {} bytes",
+        old.len()
+    );
+    for limit in ["7500", LARGEST_LIMIT] {
+        let limited = start(
+            &format!("limited-{limit}"),
+            &["--client", "codex", "--context-limit", limit],
+        );
+        assert!(limited.len() > CLIENT_LIMIT, "only {} bytes", limited.len());
+        assert!(limited.len() <= 7_500 * CODEX_TOKEN_BYTES);
+        let units = limited.encode_utf16().count();
+        assert!(units <= CLIENT_LIMIT, "{units} units");
+        assert!(units * 10 > CLIENT_LIMIT * 8, "only {units} units");
+    }
+    // A limit smaller than setup's, from an edited hooks file, gets the
+    // room of a handler without one: never less, never unbounded.
+    for limit in ["1", "100", "7499"] {
+        let small = start(
+            &format!("small-{limit}"),
+            &["--client", "codex", "--context-limit", limit],
+        );
+        assert!(
+            small.len() <= CLIENT_LIMIT,
+            "{limit}: {} bytes",
+            small.len()
+        );
+        assert!(
+            small.len() * 10 > CLIENT_LIMIT * 8,
+            "{limit}: only {} bytes",
+            small.len()
+        );
+    }
+}
+
+/// The largest `--context-limit` the flag parses: `usize::MAX` on a 64-bit
+/// target, so a limit multiplied into bytes would overflow.
+const LARGEST_LIMIT: &str = "18446744073709551615";
+
+// The prompt hook takes the limit too, so its handler's shape is final, but
+// says what it said without it: a notice cut to Codex's default room stays
+// cut there.
+#[test]
+fn the_prompt_hook_says_the_same_with_the_context_limit() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path();
+    let app = repository(home, "app", "git@github.com:acme/app.git");
+    let prompt = |session: &str, limit: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_user-memory"));
+        command.args(["prompt-submit", "--client", "codex"]);
+        if limit {
+            command.args(["--context-limit", "7500"]);
+        }
+        let mut child = in_folder(command, home, home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let payload = json!({"session_id":session,"cwd":&app,"hook_event_name":"UserPromptSubmit"});
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload.to_string().as_bytes())
+            .unwrap();
+        text(&child.wait_with_output().unwrap())
+    };
+    for (session, limit) in [("plain", false), ("limited", true)] {
+        assert_eq!(prompt(session, limit), "");
+        let keys: Vec<String> = (0..20)
+            .map(|i| format!("local:{i:02}{}", "漢".repeat(200)))
+            .collect();
+        link(
+            home,
+            &app,
+            json!({"origin":format!("codex:thread/{session}"),"projects":keys}),
+        );
+    }
+    let plain = prompt("plain", false);
+    let notice: Value = serde_json::from_str(&plain).unwrap();
+    let notice = notice["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(notice.ends_with("(cut to fit; index lists every memory)"));
+    assert!(client_length("codex", notice) <= CLIENT_LIMIT, "{notice}");
+    assert_eq!(prompt("limited", true), plain);
+}
+
+/// How soon the pre-tool hook must be done with a tool it does not act on.
+/// Codex runs it before every tool call, so this is a cost on each one; the
+/// binary itself starts in under 10 ms, and the hook only reads its input.
+const PASSED_OVER: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Runs the tool hook `hook` for `client` with `payload` on stdin, as the
+/// client does, and how long it took from start to exit.
+fn tool_hook(
+    home: &Path,
+    hook: &str,
+    client: &str,
+    payload: &Value,
+) -> (Output, std::time::Duration) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_user-memory"));
+    command.args([hook, "--client", client]);
+    let begun = Instant::now();
+    let mut child = in_folder(command, home, home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    let out = time::finish(child, hook);
+    (out, begun.elapsed())
+}
+
+/// A tool call's payload as `client` sends it to its `event` hook.
+fn tool_call(client: &str, event: &str, tool: &str) -> Value {
+    let session = if client == "codex" { "thr_1" } else { "s-1" };
+    json!({
+        "session_id": session,
+        "hook_event_name": event,
+        "tool_name": tool,
+        "tool_input": {"command": "ls"},
+        "tool_use_id": "call_1",
+    })
+}
+
+// Codex runs the pre-tool hook before every tool call; for a tool the
+// binary does not act on, the hook reads its input and exits at once,
+// printing nothing. Timed as the fastest of five runs: a shared runner or a
+// busy machine can stall any one start, and the fastest run is the hook's
+// own cost.
+#[test]
+fn a_tool_the_hook_does_not_act_on_is_passed_over_at_once() {
+    let _alone = MEASURING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tmp = tempdir().unwrap();
+    for (client, tool) in [("codex", "apply_patch"), ("claude", "mcp__probe__Bash")] {
+        let payload = tool_call(client, "PreToolUse", tool);
+        let mut times: Vec<_> = (0..5)
+            .map(|_| {
+                let (out, took) = tool_hook(tmp.path(), "pre-tool-use", client, &payload);
+                assert!(out.status.success(), "{client} {tool}: {out:?}");
+                assert_eq!(text(&out), "", "{client} {tool}");
+                assert!(out.stderr.is_empty(), "{client} {tool}: {out:?}");
+                took
+            })
+            .collect();
+        times.sort();
+        eprintln!(
+            "{client} pre-tool hook, {tool}: fastest {:?}, median {:?}",
+            times[0], times[2]
+        );
+        assert!(times[0] < PASSED_OVER, "{client} {tool}: {times:?}");
+    }
+}
+
+// The tools the hook acts on, and every tool's result, print nothing yet
+// and exit 0. A result far larger than a pipe holds is read whole, so the
+// client never writes to a hook that has gone.
+#[test]
+fn the_tool_hooks_read_their_whole_payload_and_print_nothing_yet() {
+    let tmp = tempdir().unwrap();
+    for (client, tool) in [
+        ("claude", "Bash"),
+        ("claude", "Agent"),
+        ("codex", "Bash"),
+        ("codex", "spawn_agent"),
+    ] {
+        let (out, _) = tool_hook(
+            tmp.path(),
+            "pre-tool-use",
+            client,
+            &tool_call(client, "PreToolUse", tool),
+        );
+        assert!(out.status.success(), "{client} {tool}: {out:?}");
+        assert_eq!(text(&out), "", "{client} {tool}");
+        let mut result = tool_call(client, "PostToolUse", tool);
+        result["tool_response"] = json!("x".repeat(1 << 20));
+        let (out, _) = tool_hook(tmp.path(), "post-tool-use", client, &result);
+        assert!(out.status.success(), "{client} {tool}: {out:?}");
+        assert_eq!(text(&out), "", "{client} {tool}");
+    }
+    for hook in ["working-set", "subagent-start"] {
+        for client in ["claude", "codex"] {
+            let payload =
+                json!({"session_id":"s-1","hook_event_name":"SessionStart","source":"compact"});
+            let (out, _) = tool_hook(tmp.path(), hook, client, &payload);
+            assert!(out.status.success(), "{hook} {client}: {out:?}");
+            assert_eq!(text(&out), "", "{hook} {client}");
+        }
+    }
+}

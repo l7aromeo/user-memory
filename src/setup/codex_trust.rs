@@ -32,8 +32,10 @@ pub(super) enum Trust {
     Unverifiable(String),
 }
 
-/// The exact one-time step that makes Codex run the hooks.
-pub(super) const APPROVE: &str = "open Codex and approve them once: at startup Codex says hooks need review, or run /hooks and choose Trust for user-memory's SessionStart and UserPromptSubmit hooks";
+/// The exact one-time step that makes Codex run the hooks. It names every
+/// event setup writes for Codex, so the user knows what the one review
+/// covers.
+pub(super) const APPROVE: &str = "open Codex and approve them once: at startup Codex says hooks need review, or run /hooks and choose Trust for user-memory's SessionStart, UserPromptSubmit, SubagentStart, PreToolUse and PostToolUse hooks";
 
 /// Asks `codex app-server` for the trust status of the hooks running
 /// `commands` from `hooks_file`: approved only when every one is, otherwise

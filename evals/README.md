@@ -20,7 +20,7 @@ first; neither runs a session:
 each client will use, whether the eval logins are in place, and what the
 guard watches. `--rehearse` installs
 one trial per scenario and client and checks what setup wrote (instruction
-files with the seeded rules, both hooks or none, the MCP registration, and
+files with the seeded rules, every hook or none, the MCP registration, and
 Codex's approval of the hooks), plus the session-start header a scenario's
 `rehearse` entries describe, and grades a scenario's checks on its
 [planted transcripts](#planted-transcripts). `--budget` refuses a batch that would take the
@@ -130,7 +130,7 @@ Each trial gets its own `HOME`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
 then the trial's binary and the client CLI, so `git` is always the system
 one; the harness itself runs git and user-memory by absolute path). Seeds are recorded first; then
 `user-memory setup --client <client>` installs the trial exactly as a user
-would: instruction files with the user's rules, both hooks (or none, with
+would: instruction files with the user's rules, every hook (or none, with
 `"hooks": false`), the skill and the MCP registration. For Codex the trial's
 hooks are then approved the way a user approves them in `/hooks`: their
 current hashes are recorded as trusted in the trial's `config.toml`.

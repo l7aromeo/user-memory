@@ -1,6 +1,13 @@
-//! Client session hooks: one loads the index of user memories when a session
-//! starts or resumes, the other tells a running session before each prompt
-//! what changed in memory since it last looked.
+//! Client session hooks: session start loads the index of user memories
+//! into every new, resumed, cleared or compacted context, a subagent's start
+//! gives it the project's rules, the prompt hook tells a running session
+//! what changed in memory since it last looked, and the tool hooks see the
+//! session's actions.
+//!
+//! The set is written whole, once: Codex asks the user to review every
+//! handler that is new or changed, so a handler added in a later release
+//! would cost every Codex user another review. What each handler does is
+//! decided in the binary, which can change it without one.
 //!
 //! Claude Code reads hooks from its user settings file and Codex from
 //! `hooks.json` in its home; both use the same JSON shape. Edits keep every
@@ -18,15 +25,20 @@ use std::{
 };
 
 /// A hook this tool installs: the client event that runs it, which sources
-/// of that event do, and the subcommand it runs.
+/// or tools of that event do, and the subcommand it runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Hook {
     pub(super) event: &'static str,
     matcher: Option<&'static str>,
+    /// Codex's matcher, where its names differ from Claude Code's.
+    codex_matcher: Option<&'static str>,
     subcommand: &'static str,
     /// The command bounds itself well under this; it is the client's backstop.
     timeout_seconds: u64,
     status_message: Option<&'static str>,
+    /// Whether Codex has this event; a Claude Code-only one is never
+    /// written to Codex's file.
+    codex: bool,
 }
 
 /// Loads the index into every new, cleared, compacted or resumed context: a
@@ -34,9 +46,24 @@ pub(super) struct Hook {
 pub(super) const SESSION_START: Hook = Hook {
     event: "SessionStart",
     matcher: Some("startup|resume|clear|compact"),
+    codex_matcher: None,
     subcommand: "session-start",
     timeout_seconds: 10,
     status_message: Some("Loading user memory"),
+    codex: true,
+};
+
+/// After compaction, what the context was working on. A handler of its own,
+/// since both clients cap each handler's text on its own: it then takes no
+/// room from session start's.
+pub(super) const WORKING_SET: Hook = Hook {
+    event: "SessionStart",
+    matcher: Some("compact"),
+    codex_matcher: None,
+    subcommand: "working-set",
+    timeout_seconds: 10,
+    status_message: None,
+    codex: true,
 };
 
 /// Tells a running session what changed in memory before each prompt. It
@@ -45,13 +72,125 @@ pub(super) const SESSION_START: Hook = Hook {
 pub(super) const PROMPT_SUBMIT: Hook = Hook {
     event: "UserPromptSubmit",
     matcher: None,
+    codex_matcher: None,
     subcommand: "prompt-submit",
     timeout_seconds: 5,
     status_message: None,
+    codex: true,
+};
+
+/// Gives every subagent the project's rules: neither client passes it
+/// session start's text, except a forked Codex sub-agent.
+pub(super) const SUBAGENT_START: Hook = Hook {
+    event: "SubagentStart",
+    matcher: None,
+    codex_matcher: None,
+    subcommand: "subagent-start",
+    timeout_seconds: 10,
+    status_message: None,
+    codex: true,
+};
+
+/// The tools whose calls the pre-tool hook sees in Claude Code: its shells
+/// (`Bash`, `PowerShell` on Windows, and `Monitor`, which runs a command)
+/// and the tools that start a subagent or message one (`Agent`, earlier
+/// `Task`, and `SendMessage`). Only letters and `|`, which Claude Code, as
+/// Codex, matches as a list of whole names: a tool merely containing one,
+/// such as `mcp__x__BashTool`, is not matched (measured with Claude Code
+/// 2.1.325). The handler still ignores a tool it does not know.
+const CLAUDE_PRE_TOOLS: &str = "Bash|PowerShell|Monitor|Agent|Task|SendMessage";
+
+/// The same for Codex: every tool. Codex names its tools by namespace and
+/// name, which moved between releases (`spawn_agent`, then
+/// `collaborationspawn_agent`; `send_input` or `multi_agent_v1send_input`),
+/// and a matcher that missed a new name could only be corrected with another
+/// review; the handler decides by name inside the binary instead. Codex
+/// matches `*` as every tool (`HookMatcher::All` in
+/// codex-rs/hooks/src/engine/matcher.rs, 0.163.0).
+const CODEX_PRE_TOOLS: &str = "*";
+
+/// Sees each shell command and each subagent's task or message before it
+/// runs.
+pub(super) const PRE_TOOL_USE: Hook = Hook {
+    event: "PreToolUse",
+    matcher: Some(CLAUDE_PRE_TOOLS),
+    codex_matcher: Some(CODEX_PRE_TOOLS),
+    subcommand: "pre-tool-use",
+    timeout_seconds: 5,
+    status_message: None,
+    codex: true,
+};
+
+/// Sees each tool's result.
+pub(super) const POST_TOOL_USE: Hook = Hook {
+    event: "PostToolUse",
+    matcher: None,
+    codex_matcher: None,
+    subcommand: "post-tool-use",
+    timeout_seconds: 5,
+    status_message: None,
+    codex: true,
+};
+
+/// Sees each failed tool call, which Claude Code reports apart from the
+/// ones that succeed; Codex reports both as `PostToolUse`.
+pub(super) const POST_TOOL_USE_FAILURE: Hook = Hook {
+    event: "PostToolUseFailure",
+    matcher: None,
+    codex_matcher: None,
+    subcommand: "post-tool-use",
+    timeout_seconds: 5,
+    status_message: None,
+    codex: false,
 };
 
 /// Every hook this tool installs, in the order setup reports them.
-pub(super) const HOOKS: [Hook; 2] = [SESSION_START, PROMPT_SUBMIT];
+pub(super) const HOOKS: [Hook; 7] = [
+    SESSION_START,
+    WORKING_SET,
+    PROMPT_SUBMIT,
+    SUBAGENT_START,
+    PRE_TOOL_USE,
+    POST_TOOL_USE,
+    POST_TOOL_USE_FAILURE,
+];
+
+impl Hook {
+    /// The hook as setup and doctor name it: its event, and for the
+    /// working set, which shares session start's, the source it runs on.
+    pub(super) fn label(self) -> String {
+        if self.subcommand == WORKING_SET.subcommand {
+            format!("{} (compact)", self.event)
+        } else {
+            self.event.to_owned()
+        }
+    }
+}
+
+/// The hooks `client` (`claude` or `codex`) gets.
+pub(super) fn for_client(client: &str) -> impl Iterator<Item = Hook> + '_ {
+    HOOKS
+        .into_iter()
+        .filter(move |hook| client != "codex" || hook.codex)
+}
+
+/// Where this tool's hooks go: the client that runs them, and for Codex the
+/// `additionalContextLimit` its handlers carry, when the installed Codex
+/// reads one ([`super::versions::CODEX_CONTEXT_LIMIT_SINCE`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Target {
+    pub(super) client: &'static str,
+    pub(super) context_limit: Option<usize>,
+}
+
+impl Target {
+    pub(super) const fn new(client: &'static str) -> Self {
+        Self {
+            client,
+            context_limit: None,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Change {
@@ -96,18 +235,22 @@ pub(super) fn config_dir(variable: &str, default: &str) -> Result<PathBuf> {
 }
 
 /// The matcher group this tool owns for `hook` and an installed binary.
-/// `client` (`claude` or `codex`) names the hook's runner, so the hook can
-/// label the conversation origin and its snapshots without guessing.
-pub(super) fn entry(hook: Hook, binary: &Path, client: &str) -> Value {
-    entry_for(hook, binary, client, cfg!(windows))
+/// `target.client` (`claude` or `codex`) names the hook's runner, so the
+/// hook can label the conversation origin and its snapshots without
+/// guessing.
+pub(super) fn entry(hook: Hook, binary: &Path, target: Target) -> Value {
+    entry_for(hook, binary, target, cfg!(windows))
 }
 
 /// [`entry`] as written on Windows or elsewhere. Claude Code on Windows
 /// runs a hook's command through Git Bash, or PowerShell without it, so
 /// there the binary is named in exec form (`command` and `args`, run
 /// without any shell), with forward slashes, which every shell and Claude
-/// Code itself read alike.
-fn entry_for(hook: Hook, binary: &Path, client: &str, windows: bool) -> Value {
+/// Code itself read alike. A Codex limit goes on the handler, where Codex
+/// reads it, and on its command, so the hook knows the room its client
+/// gives it.
+fn entry_for(hook: Hook, binary: &Path, target: Target, windows: bool) -> Value {
+    let client = target.client;
     let mut handler = if windows && client == "claude" {
         json!({
             "type": "command",
@@ -117,15 +260,22 @@ fn entry_for(hook: Hook, binary: &Path, client: &str, windows: bool) -> Value {
     } else {
         json!({
             "type": "command",
-            "command": command_for(hook, binary, client, windows),
+            "command": command_for(hook, binary, target, windows),
         })
     };
     handler["timeout"] = json!(hook.timeout_seconds);
     if let Some(message) = hook.status_message {
         handler["statusMessage"] = json!(message);
     }
+    if let Some(limit) = target.context_limit {
+        handler["additionalContextLimit"] = json!(limit);
+    }
     let mut group = json!({"hooks": [handler]});
-    if let Some(matcher) = hook.matcher {
+    let matcher = match client {
+        "codex" => hook.codex_matcher.or(hook.matcher),
+        _ => hook.matcher,
+    };
+    if let Some(matcher) = matcher {
         group["matcher"] = json!(matcher);
     }
     group
@@ -133,21 +283,28 @@ fn entry_for(hook: Hook, binary: &Path, client: &str, windows: bool) -> Value {
 
 /// The command line `hook`'s entry runs, for a client that runs it through
 /// a shell.
-pub(super) fn command(hook: Hook, binary: &Path, client: &str) -> String {
-    command_for(hook, binary, client, cfg!(windows))
+pub(super) fn command(hook: Hook, binary: &Path, target: Target) -> String {
+    command_for(hook, binary, target, cfg!(windows))
 }
 
 /// [`command`] as written on Windows or elsewhere: for the POSIX shell, or
 /// on Windows for cmd.exe, which Codex runs it through, with the path in
 /// double quotes (a Windows path never contains one).
-fn command_for(hook: Hook, binary: &Path, client: &str, windows: bool) -> String {
+fn command_for(hook: Hook, binary: &Path, target: Target, windows: bool) -> String {
     let binary = if windows {
         format!("\"{}\"", binary.display())
     } else {
         crate::shell::quote(binary)
     };
-    format!("{binary} {} --client {client}", hook.subcommand)
+    let mut command = format!("{binary} {} --client {}", hook.subcommand, target.client);
+    if let Some(limit) = target.context_limit {
+        command.push_str(&format!(" {CONTEXT_LIMIT_FLAG} {limit}"));
+    }
+    command
 }
+
+/// The argument that tells a hook the context limit its handler carries.
+pub(crate) const CONTEXT_LIMIT_FLAG: &str = "--context-limit";
 
 /// A handler written by this tool for `hook`, for any install location,
 /// client or form, including the earlier one without `--client`, so a
@@ -394,7 +551,7 @@ mod tests {
     const BINARY: &str = "/opt/user memory/bin/user-memory";
 
     fn wanted() -> Value {
-        entry(SESSION_START, Path::new(BINARY), "claude")
+        entry(SESSION_START, Path::new(BINARY), Target::new("claude"))
     }
 
     /// A realistic user settings file: other hooks, permissions, env and
@@ -429,35 +586,195 @@ mod tests {
     #[test]
     fn entries_quote_the_binary_and_cover_new_and_resumed_sessions() {
         assert_eq!(
-            entry_for(SESSION_START, Path::new(BINARY), "claude", false),
+            entry_for(
+                SESSION_START,
+                Path::new(BINARY),
+                Target::new("claude"),
+                false
+            ),
             json!({"matcher":"startup|resume|clear|compact","hooks":[{"type":"command","command":"'/opt/user memory/bin/user-memory' session-start --client claude","timeout":10,"statusMessage":"Loading user memory"}]})
         );
         assert_eq!(
-            entry_for(PROMPT_SUBMIT, Path::new(BINARY), "codex", false),
+            entry_for(
+                PROMPT_SUBMIT,
+                Path::new(BINARY),
+                Target::new("codex"),
+                false
+            ),
             json!({"hooks":[{"type":"command","command":"'/opt/user memory/bin/user-memory' prompt-submit --client codex","timeout":5}]})
         );
     }
 
-    /// The example in examples/ is the macOS and Linux form.
+    /// The example in examples/ is the macOS and Linux form, every hook as
+    /// setup writes it into an empty settings file.
     #[test]
     fn the_documented_example_matches_what_setup_writes() {
         let example: Value =
             serde_json::from_str(include_str!("../../examples/claude-hooks.json")).unwrap();
         let binary = Path::new("/ABS/PATH/TO/user-memory");
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("settings.json");
+        for hook in for_client("claude") {
+            let wanted = entry_for(hook, binary, Target::new("claude"), false);
+            apply(&path, hook, Some(&wanted)).unwrap();
+        }
+        let written: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(example, written);
+    }
+
+    /// Every event each client gets, with its matcher and command, and for
+    /// a Codex that reads one, the context limit on the handler and its
+    /// command alike.
+    #[test]
+    fn each_client_gets_the_whole_set_with_its_own_matchers_and_limit() {
+        let binary = Path::new(BINARY);
+        let shape = |target: Target| -> Vec<(String, Option<String>, String, Option<u64>)> {
+            for_client(target.client)
+                .map(|hook| {
+                    let group = entry_for(hook, binary, target, false);
+                    let handler = &group["hooks"][0];
+                    (
+                        hook.event.to_owned(),
+                        group["matcher"].as_str().map(str::to_owned),
+                        handler["command"].as_str().unwrap().to_owned(),
+                        handler["additionalContextLimit"].as_u64(),
+                    )
+                })
+                .collect()
+        };
+        let quoted = "'/opt/user memory/bin/user-memory'";
+        let row = |event: &str, matcher: Option<&str>, command: &str, limit: Option<u64>| {
+            (
+                event.to_owned(),
+                matcher.map(str::to_owned),
+                format!("{quoted} {command}"),
+                limit,
+            )
+        };
+        let claude = "Bash|PowerShell|Monitor|Agent|Task|SendMessage";
         assert_eq!(
-            example,
-            json!({"hooks":{
-                "SessionStart":[entry_for(SESSION_START, binary, "claude", false)],
-                "UserPromptSubmit":[entry_for(PROMPT_SUBMIT, binary, "claude", false)]
-            }})
+            shape(Target::new("claude")),
+            [
+                row(
+                    "SessionStart",
+                    Some("startup|resume|clear|compact"),
+                    "session-start --client claude",
+                    None
+                ),
+                row(
+                    "SessionStart",
+                    Some("compact"),
+                    "working-set --client claude",
+                    None
+                ),
+                row(
+                    "UserPromptSubmit",
+                    None,
+                    "prompt-submit --client claude",
+                    None
+                ),
+                row(
+                    "SubagentStart",
+                    None,
+                    "subagent-start --client claude",
+                    None
+                ),
+                row(
+                    "PreToolUse",
+                    Some(claude),
+                    "pre-tool-use --client claude",
+                    None
+                ),
+                row("PostToolUse", None, "post-tool-use --client claude", None),
+                row(
+                    "PostToolUseFailure",
+                    None,
+                    "post-tool-use --client claude",
+                    None
+                ),
+            ]
         );
+        let limited = Target {
+            client: "codex",
+            context_limit: Some(7_500),
+        };
+        let limit = " --context-limit 7500";
+        assert_eq!(
+            shape(limited),
+            [
+                row(
+                    "SessionStart",
+                    Some("startup|resume|clear|compact"),
+                    &format!("session-start --client codex{limit}"),
+                    Some(7_500)
+                ),
+                row(
+                    "SessionStart",
+                    Some("compact"),
+                    &format!("working-set --client codex{limit}"),
+                    Some(7_500)
+                ),
+                row(
+                    "UserPromptSubmit",
+                    None,
+                    &format!("prompt-submit --client codex{limit}"),
+                    Some(7_500)
+                ),
+                row(
+                    "SubagentStart",
+                    None,
+                    &format!("subagent-start --client codex{limit}"),
+                    Some(7_500)
+                ),
+                row(
+                    "PreToolUse",
+                    Some("*"),
+                    &format!("pre-tool-use --client codex{limit}"),
+                    Some(7_500)
+                ),
+                row(
+                    "PostToolUse",
+                    None,
+                    &format!("post-tool-use --client codex{limit}"),
+                    Some(7_500)
+                ),
+            ]
+        );
+        // A Codex that does not read the limit: today's shape.
+        assert!(
+            shape(Target::new("codex")).iter().all(
+                |(_, _, command, limit)| limit.is_none() && command.ends_with("--client codex")
+            )
+        );
+    }
+
+    /// The Codex review step names every event setup writes for Codex, and
+    /// no other.
+    #[test]
+    fn the_codex_review_step_names_every_event() {
+        let approve = super::super::codex_trust::APPROVE;
+        for hook in HOOKS {
+            assert_eq!(
+                approve.contains(hook.event),
+                hook.codex,
+                "{}: {approve}",
+                hook.event
+            );
+        }
+    }
+
+    /// Claude Code's pre-tool matcher names exactly the tools the hook acts
+    /// on in the binary.
+    #[test]
+    fn the_claude_pre_tool_matcher_is_the_binarys_list() {
+        assert_eq!(CLAUDE_PRE_TOOLS, crate::session::CLAUDE_TOOLS.join("|"));
     }
 
     #[test]
     fn each_hook_is_installed_verified_and_removed_on_its_own() {
         let tmp = tempdir().unwrap();
         let path = tmp.path().join("settings.json");
-        let prompt = entry(PROMPT_SUBMIT, Path::new(BINARY), "claude");
+        let prompt = entry(PROMPT_SUBMIT, Path::new(BINARY), Target::new("claude"));
         assert_eq!(
             apply(&path, SESSION_START, Some(&wanted())).unwrap(),
             Change::Added
@@ -693,7 +1010,7 @@ mod tests {
         );
         let config: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(config, json!({"hooks":{"SessionStart":[wanted()]}}));
-        let codex = entry(SESSION_START, Path::new(BINARY), "codex");
+        let codex = entry(SESSION_START, Path::new(BINARY), Target::new("codex"));
         assert_eq!(
             apply(&path, SESSION_START, Some(&codex)).unwrap(),
             Change::Updated
@@ -717,7 +1034,7 @@ mod tests {
         let binary =
             Path::new(r"C:\Users\dev\AppData\Local\Programs\user-memory\bin\user-memory.exe");
         assert_eq!(
-            entry_for(SESSION_START, binary, "claude", true),
+            entry_for(SESSION_START, binary, Target::new("claude"), true),
             json!({"matcher":"startup|resume|clear|compact","hooks":[{
                 "type":"command",
                 "command":"C:/Users/dev/AppData/Local/Programs/user-memory/bin/user-memory.exe",
@@ -726,7 +1043,7 @@ mod tests {
                 "statusMessage":"Loading user memory"}]})
         );
         assert_eq!(
-            entry_for(PROMPT_SUBMIT, binary, "codex", true),
+            entry_for(PROMPT_SUBMIT, binary, Target::new("codex"), true),
             json!({"hooks":[{
                 "type":"command",
                 "command":r#""C:\Users\dev\AppData\Local\Programs\user-memory\bin\user-memory.exe" prompt-submit --client codex"#,
@@ -734,7 +1051,12 @@ mod tests {
         );
         // Elsewhere both clients keep the shell form.
         assert_eq!(
-            entry_for(SESSION_START, Path::new(BINARY), "claude", false),
+            entry_for(
+                SESSION_START,
+                Path::new(BINARY),
+                Target::new("claude"),
+                false
+            ),
             wanted_on_unix()
         );
     }
@@ -750,8 +1072,8 @@ mod tests {
         let tmp = tempdir().unwrap();
         let path = tmp.path().join("settings.json");
         let binary = Path::new(r"C:\Program Files\user-memory.exe");
-        let exec = entry_for(SESSION_START, binary, "claude", true);
-        let shell = entry_for(SESSION_START, binary, "claude", false);
+        let exec = entry_for(SESSION_START, binary, Target::new("claude"), true);
+        let shell = entry_for(SESSION_START, binary, Target::new("claude"), false);
         fs::write(&path, json!({"hooks":{"SessionStart":[shell]}}).to_string()).unwrap();
         assert_eq!(
             apply(&path, SESSION_START, Some(&exec)).unwrap(),
@@ -760,7 +1082,7 @@ mod tests {
         let config: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(config, json!({"hooks":{"SessionStart":[exec.clone()]}}));
         assert!(verify(&path, SESSION_START, &exec).unwrap());
-        let shell = entry_for(SESSION_START, binary, "claude", false);
+        let shell = entry_for(SESSION_START, binary, Target::new("claude"), false);
         assert_eq!(
             apply(&path, SESSION_START, Some(&shell)).unwrap(),
             Change::Updated
@@ -783,7 +1105,11 @@ mod tests {
         let tmp = tempdir().unwrap();
         let path = tmp.path().join("hooks.json");
         assert!(!verify(&path, SESSION_START, &wanted()).unwrap());
-        let stale = entry(SESSION_START, Path::new("/elsewhere/user-memory"), "claude");
+        let stale = entry(
+            SESSION_START,
+            Path::new("/elsewhere/user-memory"),
+            Target::new("claude"),
+        );
         fs::write(&path, json!({"hooks":{"SessionStart":[stale]}}).to_string()).unwrap();
         assert!(!verify(&path, SESSION_START, &wanted()).unwrap());
         fs::write(
