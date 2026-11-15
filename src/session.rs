@@ -65,6 +65,11 @@ const ADDED_ROOM: usize = 500;
 /// the cut's: above it, whole groups collapse into counted lines, so the cut
 /// stays a last resort.
 const INDEX_MARGIN: usize = 500;
+/// The most room the project rules take before the index. Counted on
+/// synthetic rules: a rule in full is a median 187 characters (242 at the
+/// 90th percentile) and by its title 71, so this holds about 30 rules in full
+/// or 84 by title, and leaves the index the rest of the room.
+const PROJECT_RULE_CHARS: usize = 6_000;
 /// Said where [`capped`] cut session start's index.
 const INDEX_CUT: &str = "(index cut to fit; index lists every line)";
 /// Said where [`capped`] cut the prompt hook's notice.
@@ -960,6 +965,7 @@ async fn fitted(
     asked["fit_room"] = json!(room);
     asked["fit_whole_projects"] = json!(seen.core);
     asked["fit_unit"] = json!(unit);
+    asked["fit_rules_room"] = json!(PROJECT_RULE_CHARS.min(room));
     let reply = fetch(asked).await?;
     if memory::next_cursor(&reply).is_none() && unit.len(&reply) <= room {
         return Ok(reply);
@@ -1464,7 +1470,9 @@ mod tests {
 
     // Session start asks for its index in one request, and reads what the
     // walk of every page read: an older server, which knows no fit_room,
-    // is walked page by page and the result shortened here as before.
+    // is walked page by page and the result shortened here as before. The
+    // project rules part, which only the one request has, is left out here;
+    // its own tests are in tests/session_start.rs.
     #[tokio::test]
     async fn the_session_index_is_one_request_and_reads_as_the_page_walk_did() {
         let dir = tempfile::tempdir().unwrap();
@@ -1492,8 +1500,9 @@ mod tests {
                 notes: Vec::new(),
             };
             let calls = std::cell::Cell::new(0);
-            let mut store = async |input: Value| -> anyhow::Result<String> {
+            let mut store = async |mut input: Value| -> anyhow::Result<String> {
                 calls.set(calls.get() + 1);
+                input.as_object_mut().unwrap().remove("fit_rules_room");
                 memory::index(&db, &serde_json::from_value(input)?)
             };
             let room = CODEX_LIMIT - ADDED_ROOM - INDEX_MARGIN;

@@ -557,8 +557,8 @@ fn assert_listed_or_counted(hook: &str, total: usize) {
     let (listed, collapsed) = groups(hook);
     let found: usize = listed.iter().chain(&collapsed).map(|(_, n)| n).sum();
     assert_eq!(found, total, "every memory listed or counted:\n{hook}");
-    let rules_at = hook.find("\nRules\n").unwrap();
     let others_at = hook.find("\nOther memories\n").unwrap_or(hook.len());
+    let rules_at = hook.find("\nRules\n").unwrap_or(others_at);
     let (rules, others) = (&hook[rules_at..others_at], &hook[others_at..]);
     if others.lines().any(|l| l.starts_with("    ")) {
         assert!(
@@ -763,7 +763,8 @@ fn a_notice_too_long_for_codex_is_cut_to_its_limit() {
 }
 
 // A folder project of 300 memories and no other project: the hook fills its
-// cap line by line, every rule before any other memory, and counts the rest.
+// cap line by line, its 120 rules first, by title and then counted, then
+// the index of the rest, which counts what it does not list.
 #[test]
 fn a_large_folder_project_fills_the_cap_rules_first() {
     let tmp = tempdir().unwrap();
@@ -795,7 +796,7 @@ fn a_large_folder_project_fills_the_cap_rules_first() {
     let begun = Instant::now();
     let hook = started(home, &app, "s", "startup");
     let took = begun.elapsed();
-    let (listed, collapsed) = groups(&hook);
+    let (listed, collapsed) = groups(&hook[hook.find("USER MEMORY INDEX").unwrap()..]);
     eprintln!(
         "large folder project: hook {} characters of {HOOK_CHARS}, {} lines, {} of 300 memories listed, took {took:?}; listed per group {listed:?}; counted per group {collapsed:?}",
         hook.chars().count(),
@@ -804,15 +805,20 @@ fn a_large_folder_project_fills_the_cap_rules_first() {
     );
     assert!(hook.chars().count() <= HOOK_CHARS, "{hook}");
     assert!(hook.chars().count() * 10 > HOOK_CHARS * 9, "{hook}");
-    assert_eq!(hook.matches(SHORTENED).count(), 1, "{hook}");
-    assert_listed_or_counted(&hook, 300);
-    // Every rule category shares the room: each lists some of its rules.
-    for category in ["programming", "testing", "deploy", "docs", "workflow"] {
-        assert!(
-            listed.iter().any(|(name, n)| name == category && *n > 0),
-            "{category} lists no rule:\n{hook}"
-        );
-    }
+    let part = rules_part(&hook);
+    let titled = part.iter().filter(|l| l.starts_with("    ")).count();
+    assert!(titled > 0, "{hook}");
+    assert_eq!(
+        part.last().unwrap(),
+        &format!(
+            "  {} more rules of github.com/acme/app not shown; index lists them.",
+            120 - titled
+        ),
+        "{hook}"
+    );
+    let index = &hook[hook.find("USER MEMORY INDEX").unwrap()..];
+    assert_eq!(index.matches(SHORTENED).count(), 1, "{hook}");
+    assert_listed_or_counted(index, 180);
 }
 
 // The index opens with what it is, that it comes before any work, and that
@@ -1817,4 +1823,210 @@ fn the_tool_hooks_read_their_whole_payload_and_print_nothing_yet() {
             assert_eq!(text(&out), "", "{hook} {client}");
         }
     }
+}
+
+/// A store in `home` with a standing rule of project `key` for each of
+/// `rules` (title, content, where it applies, why), strongest first: each
+/// was changed a minute before the one before it.
+fn with_project_rules(home: &Path, key: &str, rules: &[(String, String, String, String)]) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_user-memory"));
+    command.arg("index");
+    assert!(
+        in_folder(command, home, home)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let conn = rusqlite::Connection::open(home.join("memory.sqlite3")).unwrap();
+    for (i, (title, content, context, reason)) in rules.iter().enumerate() {
+        let id = format!("{:08x}-0000-4000-8000-{:012x}", i + 1, i + 1);
+        let changed = format!("2026-11-01 {:02}:{:02}:00", 23 - i / 60, 59 - i % 60);
+        conn.execute(
+            "INSERT INTO memories (id,memory_type,category,title,content,context,reason,source,status,scope,project,updated_at) VALUES (?1,'preference','workflow',?2,?3,?4,?5,'explicit','confirmed','project',?6,?7)",
+            rusqlite::params![id, title, content, context, reason, key, changed],
+        )
+        .unwrap();
+    }
+}
+
+/// The lines of session start's project rules part: after the Projects
+/// line, up to the index header.
+fn rules_part(hook: &str) -> Vec<&str> {
+    hook.lines()
+        .skip_while(|line| !line.starts_with("Projects: "))
+        .skip(1)
+        .take_while(|line| !line.starts_with("USER MEMORY INDEX"))
+        .collect()
+}
+
+/// Opens each project's rules.
+const RULES_OF_APP: &str =
+    "Project rules of github.com/acme/app, strongest first; the user stated them, follow them:";
+/// Ends a project's rules in full when some follow by title.
+const BY_TITLE: &str = "  By title only; read the full rule before acting on one that applies:";
+/// The room the project rules take at most, as session start gives it.
+const PROJECT_RULE_CHARS: usize = 6_000;
+
+/// `count` rules of the app, `width` characters each in full.
+fn rules_of_width(count: usize, width: usize) -> Vec<(String, String, String, String)> {
+    (0..count)
+        .map(|i| {
+            let title = format!("Rule {i:03} of the app");
+            // "    " + 8-character id + " " + title + ": " + content
+            let content = "x".repeat(width - 4 - 8 - 1 - title.len() - 2);
+            (title, content, String::new(), String::new())
+        })
+        .collect()
+}
+
+// Session start shows the project's rules first, in full: id, title,
+// content, where it applies and why, under one heading. The index after
+// them leaves them out; the global rules and other memories stay in it.
+#[test]
+fn project_rules_come_first_in_full_and_leave_the_index() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path();
+    let app = repository(home, "app", "git@github.com:acme/app.git");
+    let rule = |n: usize| {
+        (
+            format!("Run the app's migrations twice {n}"),
+            format!("Run them twice, the second time to check {n} is a no-op"),
+            "When changing the schema".to_owned(),
+            "A migration once ran half".to_owned(),
+        )
+    };
+    with_project_rules(home, "github.com/acme/app", &[rule(1), rule(2), rule(3)]);
+    remember(home, &app, "Prefer Rust", &["--scope", "global"]);
+    let hook = started(home, &app, "s", "startup");
+    let part = rules_part(&hook);
+    assert_eq!(part[0], RULES_OF_APP, "{hook}");
+    for (line, n) in part[1..].iter().zip(1..) {
+        assert!(
+            line.ends_with(&format!(
+                " Run the app's migrations twice {n}: Run them twice, the second time to check {n} is a no-op (When changing the schema) Why: A migration once ran half"
+            )),
+            "{hook}"
+        );
+    }
+    assert_eq!(part.len(), 4, "{hook}");
+    let index = &hook[hook.find("USER MEMORY INDEX").unwrap()..];
+    assert!(!index.contains("migrations"), "{hook}");
+    assert!(index.contains(" Prefer Rust"), "{hook}");
+    assert!(index.contains("Scope: global 1, project 3"), "{hook}");
+}
+
+// A rule longer than the full limit is shown by its title even as the
+// strongest, so it cannot push the others to their titles.
+#[test]
+fn a_very_long_strongest_rule_is_shown_by_title() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path();
+    let app = repository(home, "app", "git@github.com:acme/app.git");
+    let mut rules = rules_of_width(1, 4_000);
+    rules[0].0 = "The long rule".to_owned();
+    rules.extend(rules_of_width(21, 200).into_iter().skip(1));
+    with_project_rules(home, "github.com/acme/app", &rules);
+    let hook = started(home, &app, "s", "startup");
+    let part = rules_part(&hook);
+    let by_title = part.iter().position(|l| *l == BY_TITLE).expect(&hook);
+    assert_eq!(by_title, 21, "{hook}");
+    assert!(part[22].ends_with(" The long rule"), "{hook}");
+    assert_eq!(part.len(), 23, "{hook}");
+}
+
+// The part holds 29 rules of about the median's length in full, not 30;
+// past that, the strongest stay in full and the rest go by title, a rule at
+// a time, leaving no more of the part unused than one rule in full takes.
+#[test]
+fn twenty_nine_rules_fit_in_full_and_thirty_do_not() {
+    const WIDTH: usize = 200;
+    for count in [29, 30, 31] {
+        let tmp = tempdir().unwrap();
+        let home = tmp.path();
+        let app = repository(home, "app", "git@github.com:acme/app.git");
+        with_project_rules(home, "github.com/acme/app", &rules_of_width(count, WIDTH));
+        let hook = started(home, &app, "s", "startup");
+        let part = rules_part(&hook);
+        let full = part.iter().filter(|l| l.chars().count() == WIDTH).count();
+        let titled = part.len() - 1 - full - usize::from(part.contains(&BY_TITLE));
+        assert_eq!(full + titled, count, "{count}:\n{hook}");
+        if count == 29 {
+            assert_eq!(full, 29, "{hook}");
+            continue;
+        }
+        assert!(titled > 0, "{count}:\n{hook}");
+        let used: usize = part.iter().map(|l| l.chars().count() + 1).sum();
+        assert!(used <= PROJECT_RULE_CHARS + 1, "{count}: {used}");
+        assert!(used + WIDTH > PROJECT_RULE_CHARS, "{count}: {used}\n{hook}");
+    }
+}
+
+// More rules than fit by title: as many as fit, strongest first, and a
+// line counting the rest; each rule is listed or counted once, and none is
+// in the index.
+#[test]
+fn rules_past_their_titles_are_counted() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path();
+    let app = repository(home, "app", "git@github.com:acme/app.git");
+    with_project_rules(home, "github.com/acme/app", &rules_of_width(300, 200));
+    let hook = started(home, &app, "s", "startup");
+    let part = rules_part(&hook);
+    assert!(hook.chars().count() <= HOOK_CHARS, "{hook}");
+    let titled: Vec<&&str> = part.iter().filter(|l| l.contains(" Rule ")).collect();
+    for (line, n) in titled.iter().zip(0..) {
+        assert!(
+            line.ends_with(&format!(" Rule {n:03} of the app")),
+            "{hook}"
+        );
+    }
+    let counted = 300 - titled.len();
+    assert!(counted > 0, "{hook}");
+    let used: usize = part.iter().map(|l| l.chars().count() + 1).sum();
+    assert!(used - 1 <= PROJECT_RULE_CHARS, "{used}\n{hook}");
+    assert_eq!(
+        part.last().unwrap(),
+        &format!("  {counted} more rules of github.com/acme/app not shown; index lists them."),
+        "{hook}"
+    );
+    let index = &hook[hook.find("USER MEMORY INDEX").unwrap()..];
+    assert!(!index.contains(" Rule "), "{hook}");
+}
+
+// Without fit_rules_room, as from a session hook before it or to a server
+// that ignores it, the index is as before: the project rules in its Rules.
+#[test]
+fn the_index_keeps_project_rules_unless_asked_for_them_apart() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path();
+    with_project_rules(home, "github.com/acme/app", &rules_of_width(2, 60));
+    let index = |extra: Value| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_user-memory"));
+        command.arg("serve");
+        let mut arguments =
+            json!({"projects":["github.com/acme/app"],"fit_room":9000,"fit_unit":"utf16_units"});
+        arguments
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let reply = serve::call(in_folder(command, home, home), "index", arguments);
+        reply
+            .as_str()
+            .map_or_else(|| reply.to_string(), str::to_owned)
+    };
+    let before = index(json!({}));
+    assert!(before.starts_with("USER MEMORY INDEX"), "{before}");
+    assert!(before.contains("Rule 001 of the app"), "{before}");
+    let apart = index(json!({"fit_rules_room": PROJECT_RULE_CHARS}));
+    assert!(apart.starts_with(RULES_OF_APP), "{apart}");
+    let index_part = &apart[apart.find("USER MEMORY INDEX").unwrap()..];
+    assert!(!index_part.contains("Rule 001"), "{apart}");
+    let counts = |text: &str| {
+        text.lines()
+            .find(|line| line.starts_with("Categories:"))
+            .unwrap()
+            .to_owned()
+    };
+    assert_eq!(counts(&before), counts(index_part));
 }

@@ -128,6 +128,7 @@ mod tests {
                 "category",
                 "cursor",
                 "fit_room",
+                "fit_rules_room",
                 "fit_unit",
                 "fit_whole_projects",
                 "instructions",

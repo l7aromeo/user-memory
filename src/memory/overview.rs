@@ -79,6 +79,11 @@ pub struct Index {
     #[serde(default)]
     #[schemars(skip)]
     pub fit_unit: FitUnit,
+    /// Used by user-memory's own session hook with fit_room; leave unset. The part of fit_room, in fit_unit, for the standing rules of the session's projects: they come first, under one heading per project, each in full while the rules after it still fit as pointers, then as pointers, then counted; the index after them leaves them out. An older server ignores it and sends the index as before.
+    #[arg(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    pub fit_rules_room: Option<usize>,
 }
 
 /// What a client counts its hook text in, so the session start's index fits
@@ -184,12 +189,36 @@ pub fn index(db: &Path, input: &Index) -> Result<String> {
     }
 }
 
+/// What the session hook shows within `room` in `input.fit_unit`, built
+/// once here so it asks for it in one call: with `input.fit_rules_room`,
+/// the project rules first ([`project_rules`]), then the index in the room
+/// they leave.
+fn fitted(
+    conn: &rusqlite::Connection,
+    input: &Index,
+    selection: &Selection,
+    filter: &Filter,
+    room: usize,
+) -> Result<String> {
+    let unit = input.fit_unit;
+    let Some(rules_room) = input.fit_rules_room else {
+        return fitted_index(conn, input, selection, filter, room);
+    };
+    let rules = project_rules(conn, selection, filter, rules_room.min(room), unit)?;
+    if rules.is_empty() {
+        return fitted_index(conn, input, selection, filter, room);
+    }
+    let left = room.saturating_sub(unit.len(&rules) + 1);
+    let index = fitted_index(conn, input, selection, filter, left)?;
+    Ok(format!("{rules}\n{index}"))
+}
+
 /// The whole index of `selection` (whose filter is `filter`) within `room`
-/// in `input.fit_unit`, built once here so the session hook asks for it in one call:
+/// in `input.fit_unit`:
 /// [`shorten`] when it fits with every project or the session sees only the
 /// folder's own (`input.fit_whole_projects`), else [`tiered`], with the global memories
 /// and the folder's projects listed whole and every other project in part.
-fn fitted(
+fn fitted_index(
     conn: &rusqlite::Connection,
     input: &Index,
     selection: &Selection,
@@ -210,6 +239,8 @@ fn fitted(
         let index = Index {
             selection,
             without_global_rules,
+            fit_room: input.fit_room,
+            fit_rules_room: input.fit_rules_room,
             ..Index::default()
         };
         render(conn, &index, &index.selection.filter()?, None)
@@ -275,6 +306,11 @@ fn render(
     let (mut rules, others): (Vec<Memory>, Vec<Memory>) = all.into_iter().partition(standing_rule);
     if input.without_global_rules {
         rules.retain(|m| m.scope != "global");
+    }
+    // The session hook's fitted copy shows the project rules before the
+    // index; a page of the index never leaves them out.
+    if input.fit_room.is_some() && input.fit_rules_room.is_some() {
+        rules.retain(|m| m.scope != "project");
     }
     // Every memory in index order, with its section and group, so a page can
     // start or end inside a group and still name it.
@@ -468,13 +504,221 @@ pub(super) fn line(m: &Memory) -> String {
     if m.scope == "project" {
         line.push_str(" [project]");
     }
+    line.push_str(&status_marks(m));
+    line
+}
+
+/// The markers after a memory's line for uncertainty and repeated
+/// confirmation.
+fn status_marks(m: &Memory) -> String {
+    let mut marks = String::new();
     if matches!(m.status.as_str(), "tentative" | "stale") {
-        line.push_str(&format!(" ({})", m.status));
+        marks.push_str(&format!(" ({})", m.status));
     }
     if m.confirmations >= 2 {
-        line.push_str(&format!(" ×{}", m.confirmations));
+        marks.push_str(&format!(" ×{}", m.confirmations));
     }
+    marks
+}
+
+/// Opens each project's rules in the session hook's copy, before the key.
+const PROJECT_RULES: &str = "Project rules of ";
+/// Ends that heading: the rules are the user's word, so they are followed.
+const PROJECT_RULES_NOTE: &str = ", strongest first; the user stated them, follow them:";
+/// Where a project's rules in full end and its rules by title begin, so a
+/// title still reads as a rule to read before acting.
+const BY_TITLE: &str = "  By title only; read the full rule before acting on one that applies:";
+/// The longest rule shown in full, in the session hook's unit. Counted on
+/// synthetic rules: a rule in full is a median 187 characters and 242 at
+/// the 90th percentile, so nearly every rule fits; a longer one, which could
+/// take two thirds of the part and push twenty others to their titles, is
+/// shown by its title, whatever its rank.
+pub const FULL_RULE_MAX: usize = 400;
+
+/// A rule on one line, in full: id, title, what it says when that differs
+/// from the title, where it applies (in parentheses) and why, and its
+/// markers.
+fn full_rule(m: &Memory) -> String {
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let (title, content) = (flat(&m.title), flat(&m.content));
+    let mut line = format!("    {} {title}", &m.id.to_string()[..SHORT_ID]);
+    if !content.is_empty() && content != title {
+        line.push_str(&format!(": {content}"));
+    }
+    let context = flat(&m.context);
+    if !context.is_empty() {
+        line.push_str(&format!(" ({context})"));
+    }
+    let reason = flat(&m.reason);
+    if !reason.is_empty() {
+        line.push_str(&format!(" Why: {reason}"));
+    }
+    line.push_str(&status_marks(m));
     line
+}
+
+/// A rule by its title, under its project's heading.
+fn titled_rule(m: &Memory) -> String {
+    format!(
+        "    {} {}{}",
+        &m.id.to_string()[..SHORT_ID],
+        m.title,
+        status_marks(m)
+    )
+}
+
+/// The line counting a project's rules the part leaves out.
+fn rules_counted(key: &str, count: usize, after_some: bool) -> String {
+    let (more, noun) = match (after_some, count) {
+        (true, 1) => (" more", "rule"),
+        (true, _) => (" more", "rules"),
+        (false, 1) => ("", "rule"),
+        (false, _) => ("", "rules"),
+    };
+    format!("  {count}{more} {noun} of {key} not shown; index lists them.")
+}
+
+/// How the part shows a rule.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Shown {
+    Full,
+    Titled,
+    Counted,
+}
+
+/// One project's rules in the part, strongest first, with each one's lines
+/// and how it is shown.
+struct ProjectRules<'a> {
+    key: &'a str,
+    rules: Vec<(String, String, Shown)>,
+}
+
+impl ProjectRules<'_> {
+    fn has(&self, shown: Shown) -> bool {
+        self.rules.iter().any(|(_, _, s)| *s == shown)
+    }
+
+    /// The part's lines for this project.
+    fn lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        let listed = self.has(Shown::Full) || self.has(Shown::Titled);
+        if listed {
+            lines.push(format!("{PROJECT_RULES}{}{PROJECT_RULES_NOTE}", self.key));
+        }
+        let of = |shown: Shown| self.rules.iter().filter(move |(_, _, s)| *s == shown);
+        lines.extend(of(Shown::Full).map(|(full, _, _)| full.clone()));
+        if self.has(Shown::Titled) {
+            lines.push(BY_TITLE.to_owned());
+            lines.extend(of(Shown::Titled).map(|(_, titled, _)| titled.clone()));
+        }
+        let counted = of(Shown::Counted).count();
+        if counted > 0 {
+            lines.push(rules_counted(self.key, counted, listed));
+        }
+        lines
+    }
+
+    /// The room this project's lines take in `unit`, without building them.
+    fn width(&self, unit: FitUnit) -> usize {
+        let line = |text: &str| unit.len(text) + 1;
+        let listed = self.has(Shown::Full) || self.has(Shown::Titled);
+        let mut room = 0;
+        if listed {
+            room += line(PROJECT_RULES) + line(self.key) + line(PROJECT_RULES_NOTE) - 2;
+        }
+        if self.has(Shown::Titled) {
+            room += line(BY_TITLE);
+        }
+        for (full, titled, shown) in &self.rules {
+            room += match shown {
+                Shown::Full => line(full),
+                Shown::Titled => line(titled),
+                Shown::Counted => 0,
+            };
+        }
+        let counted = self
+            .rules
+            .iter()
+            .filter(|(_, _, s)| *s == Shown::Counted)
+            .count();
+        if counted > 0 {
+            room += line(&rules_counted(self.key, counted, listed));
+        }
+        room
+    }
+}
+
+/// The standing rules of the session's projects within `room` in `unit`,
+/// the folder's projects first (the order of `selection.projects`), each
+/// project's strongest first. Each rule is shown by its title while the
+/// titles fit, the rest counted; then each, in order, in full while the
+/// whole still fits and it is no longer than [`FULL_RULE_MAX`]. So the
+/// strongest rules are whole and the part degrades a rule at a time. Empty
+/// when the projects have no rules.
+fn project_rules(
+    conn: &rusqlite::Connection,
+    selection: &Selection,
+    filter: &Filter,
+    room: usize,
+    unit: FitUnit,
+) -> Result<String> {
+    let mut rules: Vec<Memory> = candidates(conn, filter)?
+        .into_iter()
+        .filter(|m| standing_rule(m) && m.scope == "project")
+        .collect();
+    let rank = |m: &Memory| {
+        selection
+            .projects
+            .iter()
+            .position(|key| *key == m.project)
+            .unwrap_or(selection.projects.len())
+    };
+    rules.sort_by(|a, b| rank(a).cmp(&rank(b)).then_with(|| group_order(a, b)));
+    let mut projects: Vec<ProjectRules> = Vec::new();
+    for m in &rules {
+        let entry = (full_rule(m), titled_rule(m), Shown::Counted);
+        match projects.last_mut() {
+            Some(last) if last.key == m.project => last.rules.push(entry),
+            _ => projects.push(ProjectRules {
+                key: &m.project,
+                rules: vec![entry],
+            }),
+        }
+    }
+    let width = |projects: &[ProjectRules]| -> usize {
+        projects
+            .iter()
+            .map(|p| p.width(unit))
+            .sum::<usize>()
+            .saturating_sub(1)
+    };
+    let positions: Vec<(usize, usize)> = projects
+        .iter()
+        .enumerate()
+        .flat_map(|(p, project)| (0..project.rules.len()).map(move |r| (p, r)))
+        .collect();
+    for &(p, r) in &positions {
+        projects[p].rules[r].2 = Shown::Titled;
+        if width(&projects) > room {
+            projects[p].rules[r].2 = Shown::Counted;
+            break;
+        }
+    }
+    for &(p, r) in &positions {
+        let (full, _, shown) = &projects[p].rules[r];
+        if *shown != Shown::Titled || unit.len(full) > FULL_RULE_MAX {
+            continue;
+        }
+        projects[p].rules[r].2 = Shown::Full;
+        if width(&projects) > room {
+            projects[p].rules[r].2 = Shown::Titled;
+        }
+    }
+    Ok(projects
+        .iter()
+        .flat_map(ProjectRules::lines)
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 /// A group as the rendered index shows it: its header line, its memory lines
