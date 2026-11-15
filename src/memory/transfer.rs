@@ -1307,21 +1307,30 @@ fn import(
         .collect();
     let named = if history::kept(&tx)? && !(added_ids.is_empty() && replaced.is_empty()) {
         let named = import_name(&tx, name, document)?;
-        let earlier: Vec<(Uuid, Value)> = replaced
+        let brought = |e: &Entry| e.origins.iter().map(|o| o.origin.clone()).collect();
+        let mut marked: Vec<history::Marked> = rows
             .iter()
-            .filter_map(|id| store.get(id))
-            .map(|old| {
-                (
-                    old.id,
-                    json!({
+            .filter(|e| added_ids.contains(&e.id))
+            .map(|e| history::Marked {
+                id: e.id,
+                brought: brought(e),
+                replaced: None,
+            })
+            .collect();
+        for entry in rows.iter().filter(|e| replaced.contains(&e.id)) {
+            if let Some(old) = store.get(&entry.id) {
+                marked.push(history::Marked {
+                    id: entry.id,
+                    brought: brought(entry),
+                    replaced: Some(json!({
                         "origins": old.origins,
                         "created_at": old.created_at,
                         "last_confirmed_at": old.last_confirmed_at,
-                    }),
-                )
-            })
-            .collect();
-        history::mark_import(&tx, &named, mark, &added_ids, &earlier)?;
+                    })),
+                });
+            }
+        }
+        history::mark_import(&tx, &named, mark, &marked)?;
         Some(named)
     } else {
         None
@@ -1378,10 +1387,11 @@ fn import(
 }
 
 /// What is worth doing after the applied import `summary`, if anything:
-/// review when imported memories resemble stored ones, and, when memories
-/// were added, `reindex` (the command that runs it where the store lives)
-/// to embed them now. That is optional: search embeds missing memories as
-/// it goes. A preview gets none, since nothing was written.
+/// review when imported memories resemble stored ones; when memories were
+/// added, `reindex` (the command that runs it where the store lives) to
+/// embed them now, which is optional, since search embeds missing memories
+/// as it goes; and how to undo the import when it has a name. A preview
+/// gets none, since nothing was written.
 pub fn import_next(summary: &Value, reindex: &str) -> Option<String> {
     if summary["applied"] != true {
         return None;
@@ -1404,6 +1414,13 @@ pub fn import_next(summary: &Value, reindex: &str) -> Option<String> {
     if added > 0 {
         steps.push(format!(
             "optionally run {reindex} to embed the new memories now; search embeds them as it goes"
+        ));
+    }
+    // Quoted, so it runs as printed: a name holds no character a shell
+    // treats specially inside double quotes.
+    if let Some(named) = summary["import"].as_str() {
+        steps.push(format!(
+            "to undo it, forget with import \"{named}\" (`user-memory forget --import \"{named}\"`)"
         ));
     }
     (!steps.is_empty()).then(|| steps.join("; "))

@@ -325,7 +325,7 @@ fn surface(root: &TempDir) -> Surface {
             [FORGOTTEN],
         )
         .unwrap();
-    let (tools, results) = serve(
+    let (tools, mut results) = serve(
         home,
         &db,
         &[
@@ -360,6 +360,15 @@ fn surface(root: &TempDir) -> Surface {
             ("read", json!({"ids": [FORGOTTEN], "history": true})),
         ],
     );
+    // Undoes the import that brought the forgotten memories back, by the
+    // name its summary gave.
+    let named = results[8]["import"].as_str().unwrap().to_owned();
+    let (_, undone) = serve(
+        home,
+        &db,
+        &[("forget", json!({"import": named, "user_confirmed": true}))],
+    );
+    results.extend(undone);
     let mut values = BTreeSet::new();
     let mut tool_params = BTreeMap::new();
     for tool in &tools {

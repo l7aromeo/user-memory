@@ -2544,6 +2544,35 @@ fn history_from_a_server_before_history_says_which_side_to_upgrade() {
     }
 }
 
+/// An undo of an import asked of a server from before undo is refused with
+/// which side to upgrade: an older server would ignore `import`, refuse
+/// for want of a target, and the memory stays where the user expected it
+/// gone, so nothing is sent.
+#[test]
+fn undoing_an_import_on_a_server_before_undo_says_which_side_to_upgrade() {
+    let host = Host::start_as(root(), Some(BEFORE_HISTORY));
+    let home = tempdir().unwrap();
+    let url = format!("http://{}/mcp", host.address);
+    let out = client_run(
+        &host,
+        home.path(),
+        Some(HISTORY_SINCE),
+        &[
+            "forget",
+            "--import",
+            "shared.json@2026-01-01T00:00:00Z.0123abcd",
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{stderr}");
+    assert!(
+        stderr.contains(&format!(
+            "The memory server at {url} runs user-memory {BEFORE_HISTORY}, which cannot undo an import (import needs {HISTORY_SINCE} or newer). Upgrade the server on its machine."
+        )),
+        "{stderr}"
+    );
+}
+
 /// History from a server new enough is read as before: one of the release
 /// that adds it, and one of this build's own version, which in a tree not
 /// yet released is the release before it.

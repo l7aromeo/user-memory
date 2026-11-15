@@ -532,11 +532,13 @@ fn tools_apply_documented_defaults_and_require_confirmation_to_change_memory() {
     assert_eq!(remaining["memories"].as_array().unwrap().len(), 9);
     let mut forget =
         |arguments: Value| -> Value { serde_json::from_str(&tool("forget", arguments)).unwrap() };
-    let exactly_one = "Give exactly one of memory_id or a non-empty origin";
+    let exactly_one = "Give exactly one of memory_id, a non-empty origin or a non-empty import";
     for arguments in [
         json!({"user_confirmed":true}),
         json!({"memory_id":ids[1],"origin":"claude:session/x","user_confirmed":true}),
         json!({"origin":"   ","user_confirmed":true}),
+        json!({"origin":"claude:session/x","import":"x.json@2026-01-01T00:00:00Z.0123abcd","user_confirmed":true}),
+        json!({"import":"  ","user_confirmed":true}),
     ] {
         let refused = forget(arguments.clone());
         assert_eq!(refused["deleted"], false, "{arguments}");

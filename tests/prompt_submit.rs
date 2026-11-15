@@ -226,6 +226,47 @@ fn a_running_session_hears_what_changed_since_it_last_looked() {
     assert!(home.notice("s1").contains("Write release notes"));
 }
 
+// An undone import reaches running sessions as a forget and a correction
+// do: what it deleted as -, what it gave back as ~.
+#[test]
+fn a_running_session_hears_an_import_undone() {
+    let home = Home::new();
+    let replaced = home.record("Prefer Rust for tools");
+    home.hook("SessionStart", "s1", &[]);
+    let file = home.path().join("shared.json");
+    home.cli(&["export", file.to_str().unwrap()]);
+    let mut document: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    let memories = document["memories"].as_array_mut().unwrap();
+    let mut added = memories[0].clone();
+    let new = "00000000-0000-4000-8000-000000000001";
+    added["id"] = json!(new);
+    added["title"] = json!("Ask before pushing");
+    added["content"] = json!("Ask before pushing");
+    memories[0]["title"] = json!("Prefer Go for tools");
+    memories[0]["content"] = json!("Prefer Go for tools");
+    memories.push(added);
+    std::fs::write(&file, document.to_string()).unwrap();
+    let summary = home.cli(&[
+        "import",
+        file.to_str().unwrap(),
+        "--apply",
+        "--on-conflict",
+        "use-file",
+    ]);
+    let named = summary["import"].as_str().unwrap().to_owned();
+    assert!(home.notice("s1").contains("Ask before pushing"));
+    home.cli(&["forget", "--import", &named]);
+    let notice = home.notice("s1");
+    assert!(
+        notice.contains(&format!("- {} Ask before pushing", id8(new))),
+        "{notice}"
+    );
+    assert!(
+        notice.contains(&format!("~ {} Prefer Rust for tools", id8(&replaced))),
+        "{notice}"
+    );
+}
+
 #[test]
 fn a_session_without_a_snapshot_gets_one_and_no_notice() {
     let home = Home::new();
