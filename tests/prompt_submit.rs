@@ -666,8 +666,9 @@ fn a_snapshot_from_before_digests_lists_no_memory_as_changed() {
 }
 
 // Before each prompt the hook reads only the memories changed since the
-// session last looked, however many the store holds; a session whose
-// projects changed, or a store with a new id, is read whole.
+// session last looked, however many the store holds, and nothing when the
+// store's marker says nothing changed, as after a write that changes no
+// memory; a store with a new id is read whole.
 #[test]
 fn a_prompt_reads_only_what_changed_since_the_session_looked() {
     let home = Home::new();
@@ -683,10 +684,16 @@ fn a_prompt_reads_only_what_changed_since_the_session_looked() {
             .find_map(|l| l.strip_prefix("user-memory: read ").map(str::to_owned))
             .unwrap_or_default()
     };
-    assert_eq!(read(&home), "0 stamps (changed)");
+    let unchanged = "0 stamps (none: the marker is unchanged)";
+    assert_eq!(read(&home), unchanged);
     home.record("Ask before pushing");
     assert_eq!(read(&home), "1 stamps (changed)");
-    // A store that took a new id, as after a restore, is read whole.
+    assert_eq!(read(&home), unchanged);
+    let backup = home.command(&["backup", "now"], &[]).output().unwrap();
+    assert!(backup.status.success(), "{backup:?}");
+    assert_eq!(read(&home), unchanged, "a backup changes no memory");
+    // A restore removes the marker, and the restored store holds another
+    // count: read whole once, then what changed since.
     rusqlite::Connection::open(home.path().join("memory.sqlite3"))
         .unwrap()
         .execute(
@@ -694,8 +701,14 @@ fn a_prompt_reads_only_what_changed_since_the_session_looked() {
             [],
         )
         .unwrap();
+    std::fs::remove_file(home.path().join("memory.sqlite3.changed")).unwrap();
     assert_eq!(read(&home), "51 stamps (every)");
     assert_eq!(read(&home), "0 stamps (changed)");
+    // The next write renews the id and writes the marker: read whole again,
+    // then nothing.
+    home.record("Write release notes");
+    assert_eq!(read(&home), "52 stamps (every)");
+    assert_eq!(read(&home), unchanged);
 }
 
 // The hook's look at the session's links is a read: while another process

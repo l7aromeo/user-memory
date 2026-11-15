@@ -105,7 +105,11 @@ it (owner-only, a few bytes). A session hook reads that file to tell whether
 anything changed since it last looked, without opening the store. A writer
 that finds the file missing or naming other numbers than the store holds,
 as after a restore or a copy, gives the store a new id first, so every
-session reads it whole once. A forgotten memory's row in `memory_changes`
+session reads it whole once. Before each prompt, a session on this machine whose
+snapshot matches the file reads nothing from the store; one that does not
+reads only the memories changed since. A program other than user-memory
+that edits the store leaves the file as it was, so sessions see that edit
+after the next write by user-memory. A forgotten memory's row in `memory_changes`
 keeps its id and the time it went for 30 days, as long as an unused session
 file lasts, and is dropped as an automatic backup is made.
 
