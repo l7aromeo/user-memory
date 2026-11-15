@@ -379,13 +379,15 @@ pub(crate) struct Matched {
     pub(crate) score: f64,
     /// The same match scored free of the store's size, for measuring
     /// bars on: each term's worth by how many memories hold it alone, as
-    /// `1/holders` and as `1/sqrt(holders)`; anchors as `1/sqrt(holders)`
-    /// or `1/(1 + ln holders)` with stems as `1/holders`; and the score as
-    /// a share of what the action that fired could score at most.
+    /// `1/holders` and as `1/sqrt(holders)`; anchors as `1/sqrt(holders)`,
+    /// `1/(1 + ln holders)` or at full worth however many hold them, with
+    /// stems as `1/holders`; and the score as a share of what the action
+    /// that fired could score at most.
     pub(crate) holders: f64,
     pub(crate) root: f64,
     pub(crate) mixed: f64,
     pub(crate) mixed_log: f64,
+    pub(crate) flat: f64,
     pub(crate) share: f64,
     /// The fewest memories holding an anchor of the action that fired that
     /// this match holds; 0 for none.
@@ -825,10 +827,10 @@ impl DeliveryIndex {
             let worth = |field: Field| {
                 let base = if anchor { ANCHOR_WEIGHT } else { weight(field) } * want.weight;
                 let held = holders.max(1) as f64;
-                let (mixed, mixed_log) = if anchor {
-                    (base / held.sqrt(), base / (1.0 + held.ln()))
+                let (mixed, mixed_log, flat) = if anchor {
+                    (base / held.sqrt(), base / (1.0 + held.ln()), base)
                 } else {
-                    (base / held, base / held)
+                    (base / held, base / held, base / held)
                 };
                 Gain {
                     store: base * rarity(all, held) / rarest,
@@ -836,6 +838,7 @@ impl DeliveryIndex {
                     root: base / held.sqrt(),
                     mixed,
                     mixed_log,
+                    flat,
                 }
             };
             let mut want = *want;
@@ -909,6 +912,7 @@ impl DeliveryIndex {
                 root: total.root,
                 mixed: total.mixed,
                 mixed_log: total.mixed_log,
+                flat: total.flat,
                 share: if possible > 0.0 {
                     total.store / possible
                 } else {
@@ -935,6 +939,7 @@ struct Gain {
     root: f64,
     mixed: f64,
     mixed_log: f64,
+    flat: f64,
 }
 
 impl Gain {
@@ -945,6 +950,7 @@ impl Gain {
         self.root += other.root * share;
         self.mixed += other.mixed * share;
         self.mixed_log += other.mixed_log * share;
+        self.flat += other.flat * share;
     }
 }
 
