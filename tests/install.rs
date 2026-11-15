@@ -3319,10 +3319,12 @@ fn upgrade_installs_a_newer_release_keeping_the_saved_setup() {
     // --check says what it would do and needs neither.
     let out = detached(c.upgrade(&releases, "0.9.0", &["--check"]));
     assert!(out.status.success(), "{out:?}");
+    // A releases place other than the project's own is named first.
     assert_eq!(
         text(&out).0,
         format!(
-            "Would upgrade user-memory from 0.9.0 to {BUILD} on this machine; nothing was changed.\n"
+            "The release comes from {}, which USER_MEMORY_RELEASES sets instead of https://github.com/l7aromeo/user-memory/releases.\nWould upgrade user-memory from 0.9.0 to {BUILD} on this machine; nothing was changed.\n",
+            releases.base
         )
     );
     // Upgrades only move forward.
@@ -3398,6 +3400,37 @@ fn upgrade_installs_nothing_that_fails_its_checksum() {
     let out = detached(c.upgrade(&releases, "0.9.0", &["--yes"]));
     assert_eq!(out.status.code(), Some(1), "{out:?}");
     assert!(text(&out).1.contains(&format!("The download of user-memory {BUILD} doesn't match its published checksum; nothing was installed.")), "{out:?}");
+    assert_eq!(c.installed(), before);
+    assert_eq!(c.leftovers(), Vec::<String>::new());
+}
+
+/// A download that redirects from HTTPS, or from this machine, to plain
+/// http elsewhere is refused, and nothing is installed.
+#[test]
+fn upgrade_follows_no_redirect_to_plain_http() {
+    let releases = Releases::start();
+    let c = Client::bare();
+    let out = c.install(&releases, &[], &["--local", "native"]);
+    assert!(out.status.success(), "{}", text(&out).1);
+    let before = c.installed();
+    let tag = format!("v{BUILD}");
+    releases.publish(&tag, Path::new(env!("CARGO_BIN_EXE_user-memory")));
+    releases.set_latest(&tag);
+    // TEST-NET-1 (RFC 5737): never answers, and is never reached here.
+    let elsewhere = "http://192.0.2.1/user-memory";
+    releases.redirect(
+        &format!("download/{tag}"),
+        &format!("user-memory-{}", native_target()),
+        elsewhere,
+    );
+    let out = detached(c.upgrade(&releases, "0.9.0", &["--yes"]));
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(
+        text(&out).1.contains(&format!(
+            "a redirect to {elsewhere} is neither HTTPS nor on this machine"
+        )),
+        "{out:?}"
+    );
     assert_eq!(c.installed(), before);
     assert_eq!(c.leftovers(), Vec::<String>::new());
 }

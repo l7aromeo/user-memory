@@ -158,6 +158,10 @@ impl Releases {
             }
         }
     }
+    /// Answers a request for `name` under `layout` with a redirect to `to`.
+    pub fn redirect(&self, layout: &str, name: &str, to: &str) {
+        fs::write(self.asset(layout, &format!("{name}.redirect")), to).unwrap();
+    }
     /// Makes `<base>/latest` redirect to release `tag`, as GitHub's does.
     pub fn set_latest(&self, tag: &str) {
         fs::write(self.dir.path().join("latest.tag"), tag).unwrap();
@@ -189,8 +193,16 @@ fn serve(
         .filter(|rest| !rest.contains(".."))
         .map(|rest| root.join(rest));
     let dropped = flaky.lock().unwrap().remove(&path);
+    let redirect = file
+        .as_ref()
+        .and_then(|file| fs::read_to_string(format!("{}.redirect", file.display())).ok());
     let latest = fs::read_to_string(root.join("latest.tag")).ok();
     let response = match file.and_then(|file| fs::read(file).ok()) {
+        _ if redirect.is_some() => format!(
+            "HTTP/1.1 302 Found\r\nLocation: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            redirect.unwrap_or_default()
+        )
+        .into_bytes(),
         _ if path == "/l7aromeo/user-memory/releases/latest" && latest.is_some() => format!(
             "HTTP/1.1 302 Found\r\nLocation: https://github.com/l7aromeo/user-memory/releases/tag/{}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
             latest.unwrap_or_default()

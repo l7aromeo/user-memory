@@ -44,6 +44,9 @@ const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 /// How long reaching the releases page may take before the upgrade gives
 /// up, as the installer's own download waits.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// How many redirects a download follows, as reqwest does by default:
+/// GitHub sends a release asset to its download host with one.
+const MAX_REDIRECTS: usize = 10;
 
 /// The client build of this platform, as the release names its assets.
 const TARGET: Option<&str> = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
@@ -112,6 +115,12 @@ pub async fn upgrade(options: &Options) -> Result<()> {
     };
     if let Some(note) = &plan.note {
         println!("{note}");
+    }
+    if base != update::RELEASES {
+        println!(
+            "The release comes from {base}, which USER_MEMORY_RELEASES sets instead of {}.",
+            update::RELEASES
+        );
     }
     if options.check {
         println!(
@@ -321,6 +330,18 @@ enum Download {
 /// only when it matches, as the installer does.
 async fn download(assets: &str, name: &str, path: &Path) -> Result<(), Download> {
     let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= MAX_REDIRECTS {
+                attempt.error("too many redirects")
+            } else if update::allowed(attempt.url().as_str()) {
+                attempt.follow()
+            } else {
+                let to = attempt.url().to_string();
+                attempt.error(format!(
+                    "a redirect to {to} is neither HTTPS nor on this machine"
+                ))
+            }
+        }))
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(DOWNLOAD_TIMEOUT)
         .build()
