@@ -324,9 +324,11 @@ fn host_token(path: &Path) -> Result<String> {
     Ok(token)
 }
 
-/// What `/` answers: the service's name while the store opens, else 503,
-/// so the Docker healthcheck needs no token. A store that opened within
-/// [`HEALTH_FRESH`] is not opened again, so callers of this unauthenticated
+/// What `/` answers: the service's name while the store opens, read-only
+/// and at this binary's schema version, else 503, so the Docker
+/// healthcheck needs no token; it never creates or migrates a store. A
+/// store that opened within [`HEALTH_FRESH`] is not opened again, so
+/// callers of this unauthenticated
 /// path cannot make a healthy server open its store at will; a failure is
 /// checked again on the next request, so a repaired store answers at once.
 #[derive(Clone)]
@@ -364,9 +366,7 @@ impl Health {
             None => {
                 let db = self.db.clone();
                 let found = tokio::task::spawn_blocking(move || {
-                    crate::connect(&db)
-                        .map(drop)
-                        .map_err(|err| format!("{err:#}"))
+                    crate::memory::servable(&db).map_err(|err| format!("{err:#}"))
                 })
                 .await
                 .unwrap_or_else(|err| Err(err.to_string()));

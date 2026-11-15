@@ -288,6 +288,27 @@ fn wait_for_migration(conn: &Connection, mut found: i64, current: i64) -> Result
 #[cfg(debug_assertions)]
 const TEST_SCHEMA_VERSION: &str = "USER_MEMORY_TEST_SCHEMA_VERSION";
 
+/// Whether the store at `db` can be served, checked without writing to it:
+/// it exists, reads as a database, and has this binary's schema version.
+/// For the server's unauthenticated health check, which must never create,
+/// migrate or convert a store as [`connect`] does.
+pub fn servable(db: &Path) -> Result<()> {
+    let conn = Connection::open_with_flags(
+        db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("Cannot open {}", db.display()))?;
+    let found = version(&conn).with_context(|| format!("Cannot read {}", db.display()))?;
+    let current = schema_version();
+    if found != current {
+        bail!(
+            "{} has schema version {found}; this server serves version {current}",
+            db.display()
+        );
+    }
+    Ok(())
+}
+
 /// The schema version `connect` compares a store against: [`SCHEMA_VERSION`],
 /// or in a debug build the one [`TEST_SCHEMA_VERSION`] names.
 fn schema_version() -> i64 {
