@@ -1,0 +1,397 @@
+//! Client tokens at the memory server: each request is checked against the
+//! shared token file and the registry, live, through the real binary.
+
+#![allow(
+    clippy::unwrap_used,
+    reason = "integration tests may unwrap: a failed unwrap is a failed test"
+)]
+
+#[path = "support/sandbox.rs"]
+mod sandbox;
+use sandbox::Sandboxed;
+#[path = "support/time.rs"]
+mod time;
+use time::STUCK;
+
+use rusqlite::Connection;
+use serde_json::json;
+use std::{
+    fs,
+    io::{BufRead, BufReader, Read, Write},
+    net::TcpStream,
+    path::PathBuf,
+    process::{Child, Command, Output, Stdio},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+use tempfile::{TempDir, tempdir};
+
+/// The shared token file's token.
+const SHARED: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+struct Host {
+    root: TempDir,
+    child: Option<Child>,
+    address: String,
+}
+
+/// An HTTP answer: status, `WWW-Authenticate` and body.
+struct Answer {
+    status: u16,
+    challenge: String,
+    body: String,
+}
+
+impl Host {
+    fn start() -> Self {
+        Self::start_with(&[])
+    }
+
+    fn start_with(env: &[(&str, &str)]) -> Self {
+        let root = tempdir().unwrap();
+        fs::create_dir_all(root.path().join("data")).unwrap();
+        fs::write(root.path().join("access-token"), SHARED).unwrap();
+        let mut host = Self {
+            root,
+            child: None,
+            address: String::new(),
+        };
+        let mut command = host.command(&[]);
+        command.args([
+            "host",
+            "--listen",
+            "127.0.0.1:0",
+            "--db",
+            host.db().to_str().unwrap(),
+            "--token-file",
+            host.root.path().join("access-token").to_str().unwrap(),
+        ]);
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        let mut child = command
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        assert!(line.starts_with("Listening: http://"), "{line}");
+        host.address = line
+            .trim()
+            .strip_prefix("Listening: http://")
+            .unwrap()
+            .strip_suffix("/mcp")
+            .unwrap()
+            .to_owned();
+        host.child = Some(child);
+        host
+    }
+
+    fn db(&self) -> PathBuf {
+        self.root.path().join("data").join("memories.sqlite3")
+    }
+
+    fn registry(&self) -> PathBuf {
+        self.root.path().join("data").join("accounts.sqlite3")
+    }
+
+    fn command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_user-memory"));
+        command
+            .args(args)
+            .sandboxed(self.root.path())
+            .stdin(Stdio::null());
+        command
+    }
+
+    /// `host token ARGS` on this server's registry, from another process.
+    fn token(&self, args: &[&str]) -> Output {
+        let out = self
+            .command(
+                &[
+                    &["host", "token"],
+                    args,
+                    &["--db", self.db().to_str().unwrap()],
+                ]
+                .concat(),
+            )
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out
+    }
+
+    /// A new client token named `name` (with `extra` options), read from
+    /// the file `add` wrote.
+    fn add(&self, name: &str, extra: &[&str]) -> String {
+        let file = self.root.path().join(format!("{name}.token"));
+        let mut args = vec!["add", name, "--out", file.to_str().unwrap()];
+        args.extend(extra);
+        self.token(&args);
+        fs::read_to_string(file).unwrap()
+    }
+
+    fn send(&self, method: &str, path: &str, token: &str, body: &str) -> Answer {
+        let mut socket = TcpStream::connect(&self.address).unwrap();
+        socket.set_read_timeout(Some(STUCK)).unwrap();
+        write!(
+            socket,
+            "{method} {path} HTTP/1.1\r\nHost: {}\r\nAccept: application/json, text/event-stream\r\nContent-Type: application/json\r\nMCP-Protocol-Version: 2025-06-18\r\nAuthorization: Bearer {token}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+            self.address,
+            body.len()
+        )
+        .unwrap();
+        let mut response = Vec::new();
+        socket.read_to_end(&mut response).unwrap();
+        let text = String::from_utf8_lossy(&response).into_owned();
+        let (head, body) = text.split_once("\r\n\r\n").unwrap();
+        let status = head.split_whitespace().nth(1).unwrap().parse().unwrap();
+        let challenge = head
+            .lines()
+            .find_map(|line| {
+                let (key, value) = line.split_once(':')?;
+                key.eq_ignore_ascii_case("www-authenticate")
+                    .then(|| value.trim().to_owned())
+            })
+            .unwrap_or_default();
+        Answer {
+            status,
+            challenge,
+            body: body.to_owned(),
+        }
+    }
+
+    /// An MCP `initialize` with `token`.
+    fn initialize(&self, token: &str) -> Answer {
+        let message = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}});
+        self.send("POST", "/mcp", token, &message.to_string())
+    }
+
+    /// Stops the server and returns what it wrote to stderr.
+    fn stop(&mut self) -> String {
+        let mut child = self.child.take().unwrap();
+        let _ = child.kill();
+        let mut stderr = String::new();
+        child
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_string(&mut stderr)
+            .unwrap();
+        let _ = child.wait();
+        stderr
+    }
+
+    fn registry_conn(&self) -> Connection {
+        Connection::open(self.registry()).unwrap()
+    }
+}
+
+impl Drop for Host {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+fn now() -> i64 {
+    i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    )
+    .unwrap()
+}
+
+const DAY: i64 = 24 * 60 * 60;
+
+const REVOKED: &str = r#"Bearer error="invalid_token", error_description="revoked""#;
+const UNUSED: &str = r#"Bearer error="invalid_token", error_description="unused""#;
+const EXPIRED: &str = r#"Bearer error="invalid_token", error_description="expired""#;
+
+#[test]
+fn a_client_token_works_at_once_and_stops_at_once_when_revoked() {
+    let host = Host::start();
+    // The registry appears after the server started: no restart.
+    let laptop = host.add("laptop", &[]);
+    assert_eq!(host.initialize(&laptop).status, 200);
+    // The client uses it as any token file.
+    let file = host.root.path().join("laptop.token");
+    let out = host
+        .command(&["index"])
+        .env("USER_MEMORY_URL", format!("http://{}/mcp", host.address))
+        .env("USER_MEMORY_TOKEN_FILE", &file)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    host.token(&["revoke", "laptop"]);
+    let refused = host.initialize(&laptop);
+    assert_eq!(refused.status, 401);
+    assert_eq!(refused.challenge, REVOKED);
+    // The shared file and other tokens are untouched; a stranger gets the
+    // plain challenge, with no reason to learn from.
+    assert_eq!(host.initialize(SHARED).status, 200);
+    let stranger = host.initialize(&"x".repeat(56));
+    assert_eq!(stranger.status, 401);
+    assert_eq!(stranger.challenge, "Bearer");
+    // Once the registry says the shared file is retired, its token is
+    // refused as revoked, at once.
+    host.registry_conn()
+        .execute(
+            "INSERT INTO settings (key, value) VALUES ('shared_file_retired', '1')",
+            [],
+        )
+        .unwrap();
+    assert_eq!(host.initialize(SHARED).challenge, REVOKED);
+}
+
+#[test]
+fn delete_auth_token_revokes_the_caller_and_no_other() {
+    let host = Host::start();
+    let a = host.add("a", &[]);
+    let b = host.add("b", &["--read-only"]);
+    let answer = host.send("DELETE", "/auth/token", &b, "");
+    assert_eq!(answer.status, 200, "{}", answer.body);
+    assert_eq!(host.initialize(&b).challenge, REVOKED);
+    assert_eq!(host.initialize(&a).status, 200);
+    // The shared file is retired otherwise, and a stranger is refused.
+    let shared = host.send("DELETE", "/auth/token", SHARED, "");
+    assert_eq!(shared.status, 400);
+    assert!(
+        shared.body.contains("host token retire-shared"),
+        "{}",
+        shared.body
+    );
+    assert_eq!(
+        host.send("DELETE", "/auth/token", &"x".repeat(56), "")
+            .status,
+        401
+    );
+    let listed = String::from_utf8_lossy(&host.token(&["list"]).stdout).into_owned();
+    assert!(listed.contains("\na "), "{listed}");
+    assert!(!listed.contains("\nb "), "{listed}");
+}
+
+#[test]
+fn a_token_expires_after_90_days_unused_or_at_its_date() {
+    let host = Host::start();
+    let idle = host.add("idle", &[]);
+    let dated = host.add("dated", &["--expires", "5"]);
+    let fresh = host.add("fresh", &[]);
+    for token in [&idle, &dated, &fresh] {
+        assert_eq!(host.initialize(token).status, 200);
+    }
+    // Time passes, as the registry sees it.
+    let conn = host.registry_conn();
+    conn.execute(
+        "UPDATE client_tokens SET created_at = ?1, last_used_at = ?1 WHERE name = 'idle'",
+        [now() - 91 * DAY],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE client_tokens SET expires_at = ?1 WHERE name = 'dated'",
+        [now() - 1],
+    )
+    .unwrap();
+    for (token, challenge) in [(&idle, UNUSED), (&dated, EXPIRED)] {
+        let answer = host.initialize(token);
+        assert_eq!(answer.status, 401);
+        assert_eq!(answer.challenge, challenge);
+    }
+    assert_eq!(host.initialize(&fresh).status, 200);
+    // 89 days unused still works.
+    conn.execute(
+        "UPDATE client_tokens SET created_at = ?1, last_used_at = ?1 WHERE name = 'fresh'",
+        [now() - 89 * DAY],
+    )
+    .unwrap();
+    assert_eq!(host.initialize(&fresh).status, 200);
+}
+
+/// The registry is read again only when another process commits to it:
+/// the server's own last-use writes cause no reload, and are written at
+/// most once an hour per token.
+#[test]
+fn the_servers_own_last_use_write_causes_no_reload() {
+    let mut host = Host::start_with(&[("USER_MEMORY_TEST_TRACE", "1")]);
+    let laptop = host.add("laptop", &[]);
+    assert_eq!(host.initialize(&laptop).status, 200);
+    let last_used = || -> Option<i64> {
+        host.registry_conn()
+            .query_row(
+                "SELECT last_used_at FROM client_tokens WHERE name = 'laptop'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let first = last_used().expect("the first use is written");
+    std::thread::sleep(Duration::from_millis(1100));
+    for _ in 0..3 {
+        assert_eq!(host.initialize(&laptop).status, 200);
+    }
+    assert_eq!(last_used(), Some(first), "written at most once an hour");
+    host.token(&["revoke", "laptop"]);
+    assert_eq!(host.initialize(&laptop).status, 401);
+    let log = host.stop();
+    let loads = log.matches("registry loaded:").count();
+    assert_eq!(
+        loads, 2,
+        "loaded at its first use and after the revoke only:\n{log}"
+    );
+}
+
+#[test]
+fn a_damaged_or_newer_registry_refuses_every_request_until_moved_aside() {
+    let mut host = Host::start();
+    fs::write(
+        host.registry(),
+        "not a database, though long enough to be read as one by SQLite's header check",
+    )
+    .unwrap();
+    let message = format!(
+        "The server's token registry {} cannot be read (file is not a database). Move it aside and issue each client a new token with `user-memory host token add`.",
+        host.registry().display()
+    );
+    for _ in 0..2 {
+        // The shared file too: a retired one could otherwise come back.
+        let answer = host.initialize(SHARED);
+        assert_eq!(answer.status, 503);
+        assert_eq!(answer.body, message);
+    }
+    fs::rename(host.registry(), host.root.path().join("accounts.damaged")).unwrap();
+    assert_eq!(host.initialize(SHARED).status, 200);
+
+    // A registry made newer under the running server, by a newer
+    // user-memory beside it, is refused the same way, with no restart.
+    let laptop = host.add("laptop", &[]);
+    assert_eq!(host.initialize(&laptop).status, 200);
+    host.registry_conn()
+        .pragma_update(None, "user_version", 2)
+        .unwrap();
+    let answer = host.initialize(&laptop);
+    assert_eq!(answer.status, 503);
+    assert!(
+        answer
+            .body
+            .contains("has schema version 2, but this user-memory is older than it"),
+        "{}",
+        answer.body
+    );
+    let log = host.stop();
+    assert_eq!(log.matches(&message).count(), 1, "said once:\n{log}");
+}
