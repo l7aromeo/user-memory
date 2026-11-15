@@ -910,8 +910,17 @@ async fn main() -> Result<()> {
             }
             let titles = titles.as_deref().map(read_titles).transpose()?;
             let document = read_export(&path)?;
+            // The file's name alone names the import, never the path to it.
+            let name = if path.as_os_str() == "-" {
+                "stdin".to_owned()
+            } else {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            };
             let summary = if let Some(remote) = setup::configured_remote()? {
                 let request = memory::ImportRequest {
+                    name: Some(name),
                     apply,
                     on_conflict,
                     titles,
@@ -933,6 +942,7 @@ async fn main() -> Result<()> {
             } else {
                 memory::import_document(
                     &db,
+                    &name,
                     &document,
                     apply,
                     on_conflict,

@@ -191,6 +191,7 @@ on the command line) returns them, oldest first:
 | `client` | Who wrote it: the MCP client's name from its handshake, such as `claude-code`, on one line and at most 240 characters; `cli` for the command line; `host:<name>` through a shared server, including through `connect`, which passes the app's name on. Empty for a change made outside user-memory. |
 | `before` | The changed fields' previous values, by their export names. |
 | `imported` | For an event an import brought in: when that import ran, in the same form as `at`. Imported events are kept as the file had them; nothing reads them as this store's own. |
+| `import` | On the `import` event of a memory an import added or replaced: that import's name, as its summary gave it. |
 
 - Undo a wrong correction by `update` with the values in `before`.
 - An import that changes a memory, even only its last confirmation, is an
@@ -208,7 +209,9 @@ on the command line) returns them, oldest first:
 - Exports carry the exported memories' events in a `history` section. An
   import adds them marked as `imported`, skips an event the store already
   holds or one it could not have written, and reports how many under
-  `history`. A file without the section imports as before.
+  `history`. A file without the section imports as before. An export
+  leaves out each event's `import` name, which holds a file name only this
+  store has a use for.
 
 ## Passages
 
@@ -310,6 +313,15 @@ user-memory import backup.json --apply --category programming
 user-memory import - --apply < backup.json
 user-memory import old-backup.json --titles titles.json   # format version 1
 ```
+
+An applied import that adds or replaces memories has a name, which its
+summary gives as `import`: the file's name, the time and the start of the
+file's SHA-256, such as `shared.json@2026-11-15T10:42:07Z.3f9a1c2b`. The
+file name is the base name only, never a path, with each character other
+than letters, digits, spaces and `.-_+=,()[]~` as `_`, cut to 80
+characters; through a server, the client's file names it. Each memory the
+import added or replaced carries that name on its `import` event, with what
+it replaced; one it found identical does not.
 
 An applied import's summary ends with `next` when a step is worth taking:
 `review` when `similar_to_existing` is above zero, and an optional `reindex`

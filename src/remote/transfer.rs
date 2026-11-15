@@ -190,6 +190,7 @@ async fn import(State(db): State<PathBuf>, request: Request) -> Response {
     let imported = tokio::task::spawn_blocking(move || {
         memory::import_document(
             &db,
+            options.name.as_deref().unwrap_or_default(),
             &document,
             options.apply,
             options.on_conflict,
