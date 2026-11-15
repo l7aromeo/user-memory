@@ -596,6 +596,45 @@ runs after a warm-up: with that build, with this one, and with this one
 without the history's triggers. It ends with the history's size after a
 year of synthetic changes.
 
+## Delivery benchmark
+
+`just delivery-bench` measures delivery matching (`src/memory/delivery.rs`):
+what an agent's actions match among a store's passages, and what the bars
+push after an action, push after a failed one, or hold before a command. No
+hook calls the matcher yet, so the shipped binary doesn't include it. The
+benchmark reaches it through `user-memory-bench`, a second binary
+(`evals/delivery/entry.rs`) that releases never build, as they never build
+`user-memory-fake`.
+
+That binary compiles the matcher and the modules it uses from their own
+files, through a `#[path]` mirror of `src/memory`: `delivery.rs`,
+`words.rs`, `index/passages.rs`, `index/stems.rs` and `index/weights.rs`.
+Each says so at its top. A mirrored file that starts using a module outside
+the mirror breaks that binary's build, which `just check` builds with every
+target; move what it needs into a mirrored file instead.
+
+For each store size and seed, `evals/delivery/run.py` draws a synthetic
+world from `evals/delivery/world.py`: a project's commands, files and
+components, notes and lessons about them with look-alikes about something
+else, rules, long merged memories, filler from `evals/scale`'s vocabulary,
+and whole tasks of five kinds of work, each action with the memories it
+needs then. It writes the memories into a throwaway store, indexes them
+with `user-memory reindex`, builds the delivery index, runs every task
+through `user-memory-bench match` and reports precision and recall by way,
+signal, shape and kind of work, with timing, holds and failures
+(`evals/delivery/metrics.py`):
+
+    just delivery-bench                  # 50, 1,000 and 10,000 memories
+    just delivery-bench --sizes 50       # one size
+    just delivery-bench --sweep          # bars and window, on the tuning seeds
+    just delivery-bench --cost           # one lookup's time, 10,000 memories
+
+The bars and window are set on the tuning seeds (`--sweep`) and reported on
+others, so the report isn't graded on what set them. `--bars` reports at
+other bars, `--credit` with credit for a memory's other passages, and
+`--keep DIR` keeps the built stores. The measures' own tests run with
+`python3 -I evals/delivery/test_bench.py`.
+
 ## Repository rules
 
 - Keep implementation plans, designs and progress logs outside the repository

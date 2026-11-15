@@ -53,6 +53,11 @@ retrieval-bench *args:
     cargo build --locked
     python3 -I evals/retrieval/run.py {{ args }}
 
+# Delivery matching on synthetic whole tasks (issue #125): `just delivery-bench --sizes 50`, `--sweep`, `--cost`.
+delivery-bench *args:
+    cargo build --release --locked --bin user-memory --bin user-memory-bench
+    python3 -I evals/delivery/run.py {{ args }}
+
 # Search speed on 100,000 synthetic memories against the budgets of issue #11; fails past one: `just search-budget --memories 20000`.
 search-budget *args:
     cargo build --release --locked
