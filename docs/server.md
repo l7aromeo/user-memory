@@ -283,9 +283,11 @@ read, the server answers every request that needs a token with 503 and a
 sentence that names no file; its log says why and what to do
 ([troubleshooting](troubleshooting.md)).
 
-To change the shared token: delete the server's token file
-(`/data/access-token` in Docker), restart the server so it creates a new one,
-then run the installer again on every machine that uses it.
+While the shared token file is not retired, you can change its token:
+delete the server's token file (`/data/access-token` in Docker), restart the
+server so it creates a new one, then run the installer again on every
+machine that uses it. Once it is retired, its token is refused whatever it
+holds; give each machine its own token instead.
 
 ## Semantic search
 
