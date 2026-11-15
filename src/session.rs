@@ -226,9 +226,19 @@ pub async fn start(path: PathBuf, client: Option<HookClient>) -> String {
         }
         _ => None,
     };
-    let block = found
-        .as_ref()
-        .and_then(|(found, snapshot, reply)| new_rules_block(found, snapshot, reply, unit));
+    // Who removes a rule depends on the token, asked only when there is a
+    // rule to remove.
+    let read_only = match (&found, setup::configured_remote().ok().flatten()) {
+        (Some((found, ..)), Some(remote)) if !found.rules.is_empty() => {
+            tokio::time::timeout_at(deadline, remote.read_only())
+                .await
+                .unwrap_or(false)
+        }
+        _ => false,
+    };
+    let block = found.as_ref().and_then(|(found, snapshot, reply)| {
+        new_rules_block(found, snapshot, reply, unit, read_only)
+    });
     let told = found.and_then(|(found, ..)| found.told);
     let index = match index {
         Ok(Ok((lines, index))) => {
@@ -325,6 +335,8 @@ fn told_message(told: &seen::Told) -> String {
 const NEW_RULES: &str = "New rules since your last session:";
 /// Closes it: how a rule the user did not give is removed.
 const NEW_RULES_REMOVE: &str = "If one isn't the user's, remove it with forget on their yes, or forget with its origin to remove everything that conversation recorded.";
+/// Closes it for a machine whose token can't change memories.
+const NEW_RULES_REMOVE_READ_ONLY: &str = "This machine's token is read-only: if one isn't the user's, the server's operator can remove it.";
 /// The most room the list of new rules takes, in the client's unit, out of
 /// the index's: about a dozen rule lines, a fifth of the smaller client's
 /// limit. Rules past it are counted, and `review` lists them.
@@ -381,16 +393,23 @@ async fn new_rules(
 
 /// The list of the rules `found` names, global ones first, then by project
 /// and title, each with its id, title and where its latest change came
-/// from, within [`NEW_RULES_CHARS`] in `unit`; `None` when there are none.
+/// from, within [`NEW_RULES_CHARS`] in `unit`, closed by who can remove one
+/// for a `read_only` token or not; `None` when there are none.
 fn new_rules_block(
     found: &seen::Found,
     snapshot: &live::Snapshot,
     reply: &memory::StampsReply,
     unit: FitUnit,
+    read_only: bool,
 ) -> Option<String> {
     if found.rules.is_empty() {
         return None;
     }
+    let close = if read_only {
+        NEW_RULES_REMOVE_READ_ONLY
+    } else {
+        NEW_RULES_REMOVE
+    };
     let mut rules: Vec<(&str, &str, &str)> = found
         .rules
         .iter()
@@ -417,7 +436,7 @@ fn new_rules_block(
     };
     let more = |n: usize| format!("  ...and {n} more: review lists them.");
     let mut lines = vec![NEW_RULES.to_owned()];
-    let mut used = unit.len(NEW_RULES) + unit.len(NEW_RULES_REMOVE) + 2;
+    let mut used = unit.len(NEW_RULES) + unit.len(close) + 2;
     for (at, rule) in rules.iter().enumerate() {
         let next = line(*rule);
         let left = rules.len() - at - 1;
@@ -433,7 +452,7 @@ fn new_rules_block(
         used += unit.len(&next) + 1;
         lines.push(next);
     }
-    lines.push(NEW_RULES_REMOVE.to_owned());
+    lines.push(close.to_owned());
     Some(lines.join("\n"))
 }
 

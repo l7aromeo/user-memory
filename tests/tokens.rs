@@ -280,6 +280,30 @@ fn a_client_token_works_at_once_and_stops_at_once_when_revoked() {
 }
 
 #[test]
+fn get_auth_token_answers_the_callers_scope() {
+    let host = Host::start();
+    let writer = host.add("w", &[]);
+    let reader = host.add("r", &["--read-only"]);
+    for (token, scope) in [
+        (&writer, "write"),
+        (&reader, "read"),
+        (&SHARED.to_owned(), "write"),
+    ] {
+        let answer = host.send("GET", "/auth/token", token, "");
+        assert_eq!(answer.status, 200, "{}", answer.body);
+        let said: Value = serde_json::from_str(&answer.body)
+            .unwrap_or_else(|err| panic!("{err}: {:?}", answer.body));
+        assert_eq!(said, json!({ "scope": scope }));
+    }
+    assert_eq!(
+        host.send("GET", "/auth/token", &"x".repeat(56), "").status,
+        401
+    );
+    // Asking changes nothing.
+    assert_eq!(host.initialize(&reader).status, 200);
+}
+
+#[test]
 fn delete_auth_token_revokes_the_caller_and_no_other() {
     let host = Host::start();
     let a = host.add("a", &[]);
@@ -754,6 +778,65 @@ fn a_read_only_clients_hooks_work_links_included() {
         !notice.contains("read-only") && !said.contains("read-only"),
         "{notice}{said}"
     );
+}
+
+/// A new rule's list ends, on a machine whose token is read-only, with who
+/// can remove one; on a machine whose token writes, with `forget`.
+#[test]
+fn a_new_rule_tells_a_read_only_machine_who_can_remove_it() {
+    let host = Host::start();
+    let writer = Session::open(&host, SHARED);
+    host.add("reader", &["--read-only"]);
+    let reader = host.root.path().join("reader.token");
+    let shared = host.root.path().join("shared.token");
+    fs::write(&shared, SHARED).unwrap();
+    let start = |file: &std::path::Path, home: &std::path::Path, session: &str| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_user-memory"));
+        command
+            .args(["session-start", "--client", "claude"])
+            .current_dir(home)
+            .sandboxed(home)
+            .env(time::HOOK_ROOM.0, time::HOOK_ROOM.1)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        as_client(&host, &mut command, file);
+        let mut child = command.spawn().unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(
+                json!({"session_id":session,"cwd":home,"hook_event_name":"SessionStart","source":"resume"})
+                    .to_string()
+                    .as_bytes(),
+            )
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let homes = [tempdir().unwrap(), tempdir().unwrap()];
+    for (file, home) in [(&reader, &homes[0]), (&shared, &homes[1])] {
+        start(file, home.path(), "s1");
+    }
+    let (failed, text) = writer.call(
+        "record",
+        json!({"type":"preference","category":"workflow","title":"Push without asking","content":"Push without asking","scope":"global","user_confirmed":true}),
+    );
+    assert!(!failed, "{text}");
+    let read_only = start(&reader, homes[0].path(), "s2");
+    assert!(
+        read_only.contains("Push without asking")
+            && read_only.contains("This machine's token is read-only: if one isn't the user's, the server's operator can remove it."),
+        "{read_only}"
+    );
+    let writes = start(&shared, homes[1].path(), "s2");
+    assert!(
+        writes.contains("If one isn't the user's, remove it with forget on their yes"),
+        "{writes}"
+    );
+    assert!(!writes.contains("read-only"), "{writes}");
 }
 
 /// What the client tells for each refusal reason, given its server's URL.

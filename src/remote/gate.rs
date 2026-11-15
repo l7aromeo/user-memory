@@ -263,6 +263,17 @@ pub async fn authenticate(State(gate): State<Gate>, mut request: Request, next: 
     }
 }
 
+/// `GET /auth/token`: the calling token's scope, `{"scope":"read"}` or
+/// `{"scope":"write"}` (the shared token file writes), so a client can say
+/// who removes a rule without trying a write.
+pub async fn own_scope(axum::Extension(access): axum::Extension<Access>) -> Response {
+    let scope = match access.scope {
+        Scope::Write => "write",
+        Scope::Read => "read",
+    };
+    axum::Json(serde_json::json!({ "scope": scope })).into_response()
+}
+
 /// `DELETE /auth/token`: the calling client token revokes itself, as a
 /// machine does when it leaves this server.
 pub async fn revoke_own(
