@@ -1,6 +1,7 @@
 //! The Windows system calls behind private files ([`crate::private`]), the
-//! PATH change notice, the console check and the file id that tells `serve`
-//! its binary was replaced: the only `unsafe` code in user-memory.
+//! PATH change notice, the console check, the file id that tells `serve`
+//! its binary was replaced and the rename that waits out a passing hold:
+//! the only `unsafe` code in user-memory.
 //!
 //! A private file or folder has a protected access list (DACL) with one
 //! entry: full access for the user this process runs as. "Protected" drops
@@ -16,11 +17,20 @@
 #![allow(unsafe_code, reason = "the one module that calls Windows directly")]
 #![deny(unsafe_op_in_unsafe_fn)]
 
-use std::{ffi::c_void, io, path::Path, ptr, sync::mpsc, thread, time::Duration};
+use std::{
+    ffi::c_void,
+    io,
+    path::Path,
+    ptr,
+    sync::mpsc,
+    thread,
+    time::{Duration, Instant},
+};
 use windows::{
     Win32::{
         Foundation::{
-            CloseHandle, ERROR_SUCCESS, HANDLE, HLOCAL, LPARAM, LocalFree, WIN32_ERROR, WPARAM,
+            CloseHandle, ERROR_SHARING_VIOLATION, ERROR_SUCCESS, HANDLE, HLOCAL, LPARAM, LocalFree,
+            WIN32_ERROR, WPARAM,
         },
         Security::{
             ACCESS_ALLOWED_ACE, ACL, ACL_SIZE_INFORMATION, AclSizeInformation,
@@ -207,6 +217,36 @@ pub fn file_id(path: &Path) -> io::Result<(u64, u64)> {
     unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }?;
     let index = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
     Ok((u64::from(info.dwVolumeSerialNumber), index))
+}
+
+/// The first pause before a rename refused for a sharing violation is
+/// tried again: a program that opened the file for a moment is usually done
+/// within a few milliseconds.
+const RENAME_PAUSE: Duration = Duration::from_millis(10);
+
+/// The longest pause between two tries, as each pause doubles: short
+/// enough that a rename follows soon after the holder lets go.
+const RENAME_PAUSE_MAX: Duration = Duration::from_millis(250);
+
+/// Renames `from` to `to`, trying again for up to `wait` while another
+/// program has either file open without sharing delete (a sharing
+/// violation): a program may open a new or newly started executable for a
+/// moment. Any other error, access denied among them, is returned at once.
+pub fn rename(from: &Path, to: &Path, wait: Duration) -> io::Result<()> {
+    let deadline = Instant::now() + wait;
+    let mut pause = RENAME_PAUSE;
+    loop {
+        let err = match std::fs::rename(from, to) {
+            Err(err) if err.raw_os_error() == Some(ERROR_SHARING_VIOLATION.0 as i32) => err,
+            done => return done,
+        };
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(err);
+        }
+        thread::sleep(pause.min(left));
+        pause = (pause * 2).min(RENAME_PAUSE_MAX);
+    }
 }
 
 /// Whether this process's console has a window someone can type in, so a
