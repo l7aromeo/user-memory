@@ -3504,11 +3504,13 @@ fn a_session_started_while_its_server_was_down_gets_the_index_when_it_is_back() 
 /// `REMOTE_MARKER_POLL` in `src/remote/marker.rs`.
 const MARKER_POLL: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// A TCP relay to a host that counts the connections it takes, so a test
-/// sees from the server's side whether a client asked it anything.
+/// A TCP relay to a host that counts the connections it takes and keeps
+/// what clients send, so a test sees from the server's side whether a
+/// client asked it anything, and what.
 struct Counting {
     address: String,
     taken: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    sent: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
 }
 
 impl Counting {
@@ -3517,6 +3519,8 @@ impl Counting {
         let address = listener.local_addr().unwrap().to_string();
         let taken = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let count = taken.clone();
+        let sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = sent.clone();
         let host = host.to_owned();
         std::thread::spawn(move || {
             for client in listener.incoming() {
@@ -3525,21 +3529,43 @@ impl Counting {
                 let Ok(server) = TcpStream::connect(&host) else {
                     continue;
                 };
-                for (mut from, mut to) in [
-                    (client.try_clone().unwrap(), server.try_clone().unwrap()),
-                    (server, client),
+                for (mut from, mut to, keep) in [
+                    (
+                        client.try_clone().unwrap(),
+                        server.try_clone().unwrap(),
+                        Some(kept.clone()),
+                    ),
+                    (server, client, None),
                 ] {
                     std::thread::spawn(move || {
-                        let _ = std::io::copy(&mut from, &mut to);
+                        let mut buffer = [0; 8192];
+                        while let Ok(n) = from.read(&mut buffer)
+                            && n > 0
+                        {
+                            if let Some(keep) = &keep {
+                                keep.lock().unwrap().extend_from_slice(&buffer[..n]);
+                            }
+                            if to.write_all(&buffer[..n]).is_err() {
+                                break;
+                            }
+                        }
                         let _ = to.shutdown(std::net::Shutdown::Write);
                     });
                 }
             }
         });
-        Self { address, taken }
+        Self {
+            address,
+            taken,
+            sent,
+        }
     }
     fn taken(&self) -> usize {
         self.taken.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    /// What clients sent so far, as text.
+    fn sent(&self) -> String {
+        String::from_utf8_lossy(&self.sent.lock().unwrap()).into_owned()
     }
 }
 
@@ -3775,9 +3801,10 @@ fn connectors_on_one_machine_share_their_polls() {
 #[test]
 fn a_write_through_one_connector_reaches_another_sessions_next_prompt() {
     let host = Host::start(root());
+    let proxy = Counting::to(&host.address);
     let machine = Machine {
         home: tempdir().unwrap(),
-        url: format!("http://{}/mcp", host.address),
+        url: format!("http://{}/mcp", proxy.address),
         token: host.root.path().join("token"),
         // Polls far apart, so only the dropped marker can tell the write.
         env: vec![("USER_MEMORY_MARKER_POLL_MS", "20000".to_owned())],
@@ -3798,6 +3825,8 @@ fn a_write_through_one_connector_reaches_another_sessions_next_prompt() {
         json!({"jsonrpc":"2.0","method":"notifications/initialized"})
     )
     .unwrap();
+    let before = proxy.sent().len();
+    let wrote = std::time::SystemTime::now();
     writeln!(
         input,
         "{}",
@@ -3819,4 +3848,14 @@ fn a_write_through_one_connector_reaches_another_sessions_next_prompt() {
     );
     let (told, log) = machine.hook("prompt-submit");
     assert!(told.contains("Prefer small pull requests"), "{told}{log}");
+    // The poll the write woke asked from the position it held, for the
+    // changes since, not for every stamp.
+    let marker = machine.marker();
+    time::until("the poll after the write", || modified(&marker) > wrote);
+    let asked = proxy.sent()[before..].to_owned();
+    assert!(
+        asked.contains("\"arguments\":{\"stamps\":true,\"stamps_since\":\"1."),
+        "{asked}"
+    );
+    assert!(!asked.contains("\"stamps_since\":\"\""), "{asked}");
 }
