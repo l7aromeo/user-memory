@@ -104,6 +104,12 @@ source out.
   schema must match its committed snapshot, and a store built from every
   earlier snapshot must migrate to exactly the current schema while keeping
   all of its rows.
+- `tests/docs.rs` — the docs, the skill and the newest release note against
+  the binary: every user-memory command they show runs as written, and every
+  message they quote is one the code prints. A quote in double backticks may
+  wrap within its paragraph; one left open there fails. Older release notes
+  are history: each was checked when its release was built and stays as
+  written.
 - `tests/skill.rs` — every tool, parameter, value and result field the skill
   mentions exists in the binary; `tests/docs.rs` checks its commands, quoted
   messages and links with the docs'.
@@ -233,8 +239,8 @@ docker compose up -d
 ```
 
 Never add `-v`, which deletes the memories. From then on `up` warns that the
-volume ``already exists but was created for project "<folder>" (expected
-"user-memory")``. That is harmless: the volume keeps its memories and is
+volume "already exists but was created for project "<folder>" (expected
+"user-memory")". That is harmless: the volume keeps its memories and is
 reused as it is. The installer's server never sees this warning: every
 installer has written its project's name into its compose file and created
 the volume through that project.
