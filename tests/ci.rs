@@ -85,17 +85,6 @@ fn the_check_workflow_runs_every_check_on_both_platforms_without_secrets() {
         assert!(workflow.lines().any(|l| l == line), "{line}");
     }
     assert!(!workflow.contains("secrets."), "{workflow}");
-    // One toolchain for every build: the Dockerfile's.
-    let dockerfile = repo_file("Dockerfile");
-    let image = dockerfile
-        .lines()
-        .find_map(|l| l.strip_prefix("ARG RUST_IMAGE=rust:"))
-        .unwrap();
-    let version = image.split('-').next().unwrap();
-    assert!(
-        workflow.contains(&format!("toolchain: \"{version}\"")),
-        "the workflow's toolchain is not the Dockerfile's {version}"
-    );
 }
 
 /// The Dockerfile's Rust version, which every workflow builds with.
@@ -161,13 +150,58 @@ fn the_docker_workflow_runs_the_real_docker_installer_test() {
         ],
         "the workflow's filter {name} must match the real Docker tests"
     );
-    assert!(
-        steps
-            .iter()
-            .any(|s| s["with"]["toolchain"].as_str() == Some(&dockerfile_rust())),
-        "the workflow's toolchain is not the Dockerfile's {}",
-        dockerfile_rust()
+}
+
+/// The `channel` rust-toolchain.toml names: the Rust every cargo command in
+/// a checkout uses, whatever the machine's default.
+fn toolchain_file_rust() -> String {
+    repo_file("rust-toolchain.toml")
+        .lines()
+        .find_map(|l| l.strip_prefix("channel = \""))
+        .and_then(|rest| rest.strip_suffix('"'))
+        .expect("rust-toolchain.toml names a channel")
+        .to_owned()
+}
+
+/// The workflows that build or check with an explicit toolchain step. Each
+/// keeps its own `toolchain:` line, so a run never depends on how the action
+/// reads rust-toolchain.toml.
+const TOOLCHAIN_WORKFLOWS: [&str; 3] = ["check.yml", "docker.yml", "windows.yml"];
+
+/// One Rust everywhere: the Dockerfile's (the server image, and the release
+/// builds read it), rust-toolchain.toml's (every cargo command in a
+/// checkout) and each workflow's toolchain step. The file overrides what a
+/// workflow installs, so if the two disagreed a run would use the file's
+/// version while its log named the workflow's.
+#[test]
+fn the_toolchain_file_the_dockerfile_and_every_workflow_name_one_rust() {
+    let rust = dockerfile_rust();
+    assert_eq!(
+        toolchain_file_rust(),
+        rust,
+        "rust-toolchain.toml's channel is not the Dockerfile's {rust}"
     );
+    let mut pinned = Vec::new();
+    for (name, text) in workflows() {
+        let docs = YamlLoader::load_from_str(&text).unwrap();
+        for (_, job) in docs[0]["jobs"].as_hash().unwrap() {
+            for step in job["steps"].as_vec().into_iter().flatten() {
+                if let Some(toolchain) = step["with"]["toolchain"].as_str() {
+                    assert_eq!(
+                        toolchain, rust,
+                        "{name}: its toolchain is not the Dockerfile's {rust}"
+                    );
+                    pinned.push(name.clone());
+                }
+            }
+        }
+    }
+    for name in TOOLCHAIN_WORKFLOWS {
+        assert!(
+            pinned.iter().any(|p| p == name),
+            "{name} has no toolchain step"
+        );
+    }
 }
 
 /// The shellcheck the check workflow installs: its latest stable release

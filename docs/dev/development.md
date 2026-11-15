@@ -7,8 +7,17 @@ is made in [releasing](releasing.md).
 
 ## Build and check
 
-Requirements: Rust 1.99.1, the version the checks and the release builds use
-(the Dockerfile's `RUST_IMAGE`), and a C build toolchain (SQLite is bundled).
+Requirements: [rustup](https://rustup.rs/) and a C build toolchain (SQLite
+is bundled). The Rust version comes from `rust-toolchain.toml`: in a
+checkout, every cargo command uses it with rustfmt and clippy, whatever the
+machine's default, and rustup installs it on first use. It is the version the
+workflows and the release builds use, the Dockerfile's `RUST_IMAGE`, so
+`just check` here and in CI run the same lints. Moving to a new Rust release
+is one change in three places, the Dockerfile, `rust-toolchain.toml` and the
+workflows' `toolchain:` lines, which `cargo test --test ci` holds together.
+A build that runs neither rustfmt nor clippy (the server image, the release
+builds) names the version itself, through `RUSTUP_TOOLCHAIN` or its image,
+so rustup fetches nothing more.
 
 ```bash
 cargo install cargo-nextest --locked   # once

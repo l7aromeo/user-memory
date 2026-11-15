@@ -1,3 +1,6 @@
+# Only what the image builds from. rust-toolchain.toml stays out: the image
+# is the RUST_IMAGE's Rust, and the file would make rustup fetch the
+# rustfmt and clippy it names, which the build never runs.
 *
 !Cargo.toml
 !Cargo.lock

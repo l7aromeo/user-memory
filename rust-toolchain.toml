@@ -1,0 +1,8 @@
+# The Rust every cargo command in a checkout uses, whatever the machine's
+# default: the version of the Dockerfile's RUST_IMAGE, which the workflows
+# also name (tests/ci.rs holds the three together). rustfmt and clippy are
+# what `just check` runs beyond the compiler.
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

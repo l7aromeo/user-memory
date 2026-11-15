@@ -43,9 +43,11 @@ jobs:
       - name: Build the server for Docker
         run: zsh scripts/client-release --build-only --target x86_64-unknown-linux-gnu --out "$RUNNER_TEMP/build"
       # The toolchain the server image and the release builds use (Dockerfile).
+      # rust-toolchain.toml's components, so the tests below fetch nothing.
       - uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: "1.99.1"
+          components: rustfmt, clippy
       - uses: actions/cache@v6
         with:
           path: |

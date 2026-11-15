@@ -289,8 +289,12 @@ main() {
                 platform=${platform/aarch64/arm64}
                 local stage=$(mktemp -d "${TMPDIR:-/tmp}/user-memory-stage.XXXXXX")
                 # Same image and packages as the server's Dockerfile; the cargo
-                # registry is cached in a named volume between releases.
+                # registry is cached in a named volume between releases. The
+                # image's own Rust is named over rust-toolchain.toml, whose
+                # rustfmt and clippy the image lacks: rustup would fetch them
+                # first, and a build without network would stop there.
                 docker run --rm -i --platform $platform \
+                    -e RUSTUP_TOOLCHAIN=${${rust_image#rust:}%%-*} \
                     -v user-memory-release-cargo:/usr/local/cargo/registry \
                     -v $stage:/out \
                     $rust_image sh -ec '
