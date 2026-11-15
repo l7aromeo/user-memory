@@ -2,6 +2,7 @@
 
 1. Call `review`. Inside a project, pass `projects` with the projects the session start's `Projects:` line lists, the folder's own, the listed and the linked ones (or the output of `user-memory project-id`), so their memories are reviewed with the global ones; list more projects to review them too. Raise `max_groups` (up to 20) if the user wants more groups.
 2. Present each group by kind, with each member's id, type, scope and a short paraphrase of its content:
+   - `recent`: the rules added or changed in the last 30 days, then the memories agents recorded in that time. Session start sends the user here when a rule is new.
    - `duplicate`: the same memory recorded more than once in one scope.
    - `redundant`: a project memory that repeats a global one.
    - `shared`: the same rule as project memories in several projects, with no global memory covering them. Each project still needs its copy.
@@ -10,6 +11,7 @@
 
    A group that lists only some of its members gives the number left out as `left_out`: say so, and review again once its listed members are handled.
 3. Propose one action per group and let the user choose:
+   - Recent: ask whether each rule is the user's. Forget one they did not give, or everything its conversation recorded with `forget` and its `origin`; change nothing else unless they ask. Never pass its members to `review` with `keep`: they are not alike, and the group stays listed for 30 days whatever the user answers.
    - Duplicate: merge into one memory, or forget the extras.
    - Redundant: forget the project copy; the global memory already applies there.
    - Shared: leave the copies, unless the user wants the rule everywhere. Then, with their yes, record it once with scope global and `user_confirmed: true`, and only after that forget the project copies. Never forget a copy on its own: each project would lose the rule.

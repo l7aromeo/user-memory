@@ -130,7 +130,7 @@ enum Command {
     },
     /// Search user memories; optionally filter type, category and project.
     Search(memory::Search),
-    /// List groups of memories the user may want to merge, forget or re-derive.
+    /// List the rules and agents' memories new in the last 30 days, then groups of memories the user may want to merge, forget or re-derive.
     Review(memory::Review),
     /// Apply a correction or confirmation explicitly requested by the user.
     Update(memory::Update),
@@ -309,7 +309,7 @@ impl UserMemoryServer {
         .await
     }
     #[tool(
-        description = "Groups of duplicate, cross-scope, overlapping and stale memories to consolidate; keep marks one left as is. Only when the user asks; change nothing they have not approved."
+        description = "Rules and agents' memories new in the last 30 days, then groups of duplicate, cross-scope, overlapping and stale memories to consolidate; keep marks one left as is. Only when the user asks; change nothing they have not approved."
     )]
     async fn review(
         &self,

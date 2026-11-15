@@ -728,7 +728,7 @@ fn review_lists_duplicates_and_an_approved_merge_consolidates_them() {
         )
         .unwrap();
     let review = s.value(&["review"]);
-    let group = &review["groups"][0];
+    let group = &consolidation(&review)[0];
     assert_eq!(group["kind"], "duplicate", "{review}");
     let mut members: Vec<&str> = group["members"]
         .as_array()
@@ -755,7 +755,7 @@ fn review_lists_duplicates_and_an_approved_merge_consolidates_them() {
         "--merge",
     ]);
     assert_eq!(merged["stored"], true, "{merged}");
-    assert_eq!(s.value(&["review"])["groups"], json!([]));
+    assert_eq!(consolidation(&s.value(&["review"])), Vec::<Value>::new());
 }
 
 /// Every row of the memory tables, every column, in a fixed order.
@@ -815,7 +815,7 @@ fn marking_existing_memories_distinct_changes_no_memory_and_ends_their_group() {
         s.memory(pattern["id"].as_str().unwrap())["status"],
         "tentative"
     );
-    assert_eq!(s.value(&["review"])["groups"][0]["kind"], "duplicate");
+    assert_eq!(consolidation(&s.value(&["review"]))[0]["kind"], "duplicate");
     let before = rows(&s);
     let marked = s.value(&["update", &a, "--distinct-from", &b]);
     assert_eq!(marked, json!({"updated":false,"distinct_marked":1,"id":a}));
@@ -824,7 +824,7 @@ fn marking_existing_memories_distinct_changes_no_memory_and_ends_their_group() {
         s.memory(pattern["id"].as_str().unwrap())["status"],
         "tentative"
     );
-    assert_eq!(s.value(&["review"])["groups"], json!([]));
+    assert_eq!(consolidation(&s.value(&["review"])), Vec::<Value>::new());
     let again = s.value(&["update", &b, "--distinct-from", &a]);
     assert_eq!(again["distinct_marked"], 0, "the pair is unordered");
     let combined = s.value(&[
@@ -857,7 +857,7 @@ fn keeping_a_group_marks_every_pair_and_ends_it() {
             "UPDATE memories SET content='Prefer Rust' WHERE id IN ('{b}','{c}');"
         ))
         .unwrap();
-    let groups = s.value(&["review"])["groups"].clone();
+    let groups = consolidation(&s.value(&["review"]));
     let titles: BTreeSet<&str> = groups[0]["members"]
         .as_array()
         .unwrap()
@@ -867,7 +867,7 @@ fn keeping_a_group_marks_every_pair_and_ends_it() {
     assert_eq!(
         titles,
         BTreeSet::from(["Prefer Rust", "Use Go here", "Wrap lines at 100"]),
-        "{groups}"
+        "{groups:?}"
     );
     let refused = s.value(&["review", "--keep", &a]);
     assert_eq!(
@@ -877,8 +877,8 @@ fn keeping_a_group_marks_every_pair_and_ends_it() {
     let before = rows(&s);
     let kept = s.value(&["review", "--keep", &a[..8], "--keep", &b, "--keep", &c]);
     assert_eq!(
-        (&kept["kept"], &kept["groups"]),
-        (&json!(3), &json!([])),
+        (&kept["kept"], consolidation(&kept)),
+        (&json!(3), Vec::new()),
         "{kept}"
     );
     assert_eq!(rows(&s), before, "keeping a group rewrites no memory");
@@ -946,4 +946,16 @@ fn one_page(value: Value, page_size_given: bool) -> Value {
         "{value}"
     );
     value["memories"].clone()
+}
+
+/// A review's groups other than `recent`, which lists every memory these
+/// tests just recorded.
+fn consolidation(review: &Value) -> Vec<Value> {
+    review["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|group| group["kind"] != "recent")
+        .cloned()
+        .collect()
 }
