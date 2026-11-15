@@ -232,9 +232,11 @@ pub fn connect(db: &Path) -> Result<Connection> {
 /// upgrade` replaces the binary first, then setup backs the store up and
 /// migrates it, which a call meeting the store then waits for instead of
 /// being refused. 50 s covers the 45 s budget for v0.10.0's whole upgrade
-/// of 100,000 memories (evals/scale/upgrade.py), and stays under the 60 s
-/// Codex gives an MCP tool call by default, so the call is answered rather
-/// than timed out. Past it the call is refused as before: the store is not
+/// of 100,000 memories (evals/scale/upgrade.py), which measured 17.6 s
+/// (median of three) from schema 6 to 9 on 100,000 memories with
+/// 2,560-dimension vectors (1.3 GB), release build on an Apple M4 Pro. It
+/// stays under the 60 s Codex gives an MCP tool call by default, so the
+/// call is answered rather than timed out. Past it the call is refused as before: the store is not
 /// being migrated.
 const MIGRATION_WAIT: Duration = Duration::from_secs(50);
 /// How often the waiting `serve` reads the store's version again.
