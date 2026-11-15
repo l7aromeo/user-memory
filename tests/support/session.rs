@@ -20,8 +20,13 @@ pub struct Serve {
 
 impl Serve {
     /// Starts `serve`, a `user-memory serve` command with its folder and
-    /// environment set, and initializes the session.
-    pub fn spawn(mut serve: Command) -> Self {
+    /// environment set, and initializes the session as the client "test".
+    pub fn spawn(serve: Command) -> Self {
+        Self::spawn_as(serve, "test")
+    }
+
+    /// [`Serve::spawn`] as the client named `client` in `initialize`.
+    pub fn spawn_as(mut serve: Command, client: &str) -> Self {
         let mut child = serve
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -38,7 +43,7 @@ impl Serve {
         };
         serve.ask(
             "initialize",
-            json!({"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}),
+            json!({"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":client,"version":"1"}}),
         );
         serve.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
         serve

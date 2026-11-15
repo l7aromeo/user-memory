@@ -32,7 +32,7 @@ mod titles;
 mod transfer;
 mod write;
 
-pub use history::{CLI, acting_as, set_default_client};
+pub use history::{CLI, acting_as, client_name, set_default_client};
 pub(crate) use history::{end as end_writer, note as note_writer};
 pub use ids::MemoryRef;
 pub use index::{outdated as search_index_outdated, reindex};

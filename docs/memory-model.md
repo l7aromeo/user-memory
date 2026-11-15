@@ -188,7 +188,7 @@ on the command line) returns them, oldest first:
 | `at` | When it happened. |
 | `last_at`, `count` | For confirmations: a confirmation right after another adds to that event instead of a new one, so a rule restated every session keeps one. |
 | `origin` | The conversation, when the change named one. |
-| `client` | Who wrote it: the MCP client's name from its handshake, such as `claude-code`; `cli` for the command line; `host:<name>` through a shared server. Empty for a change made outside user-memory. |
+| `client` | Who wrote it: the MCP client's name from its handshake, such as `claude-code`, on one line and at most 240 characters; `cli` for the command line; `host:<name>` through a shared server, including through `connect`, which passes the app's name on. Empty for a change made outside user-memory. |
 | `before` | The changed fields' previous values, by their export names. |
 | `imported` | For an event an import brought in: when that import ran, in the same form as `at`. Imported events are kept as the file had them; nothing reads them as this store's own. |
 
