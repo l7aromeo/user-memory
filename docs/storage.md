@@ -138,7 +138,11 @@ give.
   every write, from user-memory or any other program, and queue a changed
   memory in `search_pending`. Every write by user-memory stems what it
   queued before it commits; a search first stems what another program left
-  queued.
+  queued. An update of `memories` with any conflict clause (`OR ABORT`,
+  `OR FAIL`, `OR ROLLBACK`, `OR IGNORE`, `OR REPLACE`) queues the memory
+  once and records its history like any other update. To change a memory,
+  update it; replacing its row (`INSERT OR REPLACE`, `REPLACE INTO`) skips
+  what its removal would do.
 - `search_state` records which stemming made the stored stems. A user-memory
   that stems differently, after an upgrade, does not read an index made by
   another: search reads and stems every memory itself, which is slower on a
