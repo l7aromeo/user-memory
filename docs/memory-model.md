@@ -257,13 +257,18 @@ passages are worked out again whenever the memory is indexed.
 - Restoring an older backup brings back memories forgotten since.
 - An export records the store that wrote it as `source`, beside `selection`,
   without changing the format version: `{"server": "sha256:<hex>", "kind":
-  "local"}`, where `server` is the SHA-256 of the store's identity (its
-  resolved file path), so the file never holds the path. Older versions
+  "local"}`, where `server` is the unsalted SHA-256 of the store's identity
+  (its resolved file path, which usually holds the user name). It is not a
+  way to keep the path out of the file: anyone can guess it, and it is the
+  same in every export the store writes. For a store behind a server it
+  becomes the server key's fingerprint (#58). Older versions
   ignore the field. The import summary echoes a readable `source` and, when
   it is not the importing store's own, adds `source_note`:
   ``This export came from a different memory store (source sha256:1a2b3c4d5e6f); importing adds its memories to this one.``
   It is a notice only and never blocks an import. A file without `source`, or
-  with an unreadable one, imports as before. A store moved to another path
+  with an unreadable one (a `kind` other than `local`, or an `id` over 64
+  characters or outside letters, digits, `-` and `_`), imports as before,
+  with nothing echoed. A store moved to another path
   counts as another store, and two servers with the same file path (for
   example both in Docker at `/data`) cannot be told apart.
 - A client connected to a remote server exports from and imports into that
