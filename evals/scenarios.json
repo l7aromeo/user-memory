@@ -442,7 +442,7 @@
    ],
    "checks": [
     {"called": {"step": 0, "tools": ["record"], "args": {"confirms": "{seed:imperative}"}}},
-    {"memory": {"where": {"content": "imperative"}, "status": "all", "count": "1"}},
+    {"memory": {"where": {"content": "^(?![\\s\\S]*past tense)[\\s\\S]*imperative"}, "status": "all", "count": "1"}},
     {"called": {"step": 1, "tools": ["record"], "args": {"supersedes": "{seed:imperative}"}}},
     {"seed": {"id": "imperative", "fields": {"status": "^superseded$"}}}
    ]
