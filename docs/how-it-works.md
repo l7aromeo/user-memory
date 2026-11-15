@@ -175,7 +175,7 @@ USER MEMORY INDEX: the user's memories. Current instructions take precedence; ne
 …
 Rules
   programming (1)
-    e0000002 Use Python in this repository [project]
+    e0000002 Use Python 3.13 in this repository [project]
 Other memories
   goal (1)
     e0000003 Ship the parser by November [project] (tentative)

@@ -79,10 +79,10 @@ Example explicit preference (`record` arguments):
 ```json
 {
   "type": "preference",
-  "category": "programming languages",
-  "title": "Prefer Rust over Python",
-  "content": "Generally prefer Rust over Python",
-  "reason": "Performance and strict safety",
+  "category": "communication",
+  "title": "Answer in short paragraphs",
+  "content": "Answer in short paragraphs",
+  "reason": "Easier to read",
   "scope": "global",
   "source": "explicit",
   "origin": "claude:session/7f3c…",
