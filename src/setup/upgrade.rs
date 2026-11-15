@@ -498,11 +498,18 @@ async fn docker_server(staged: &Path, dir: &Path, url: &str, assets: &str) -> Re
 
 /// A command running the release being installed. A debug build's test
 /// version names this process, not the binary it installs.
+#[cfg(debug_assertions)]
 fn installed_command(binary: &Path) -> Command {
     let mut command = Command::new(binary);
-    #[cfg(debug_assertions)]
     command.env_remove(versions::TEST_VERSION);
     command
+}
+
+/// A command running the release being installed. A release build reads no
+/// test version, so it has none to keep from the child.
+#[cfg(not(debug_assertions))]
+fn installed_command(binary: &Path) -> Command {
+    Command::new(binary)
 }
 
 /// The setup command that refreshes this install with its saved choices.
