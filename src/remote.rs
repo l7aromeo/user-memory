@@ -136,6 +136,19 @@ impl Connection {
             .await
             .context("Memory server connection timed out")?
             .context("Cannot connect to memory server")?;
+        // An input the server is too old for is refused, not sent: it would
+        // be ignored and the reply would look complete.
+        let handshake = service.peer_info().map(serde_json::to_value).transpose()?;
+        if let Some(server) = handshake
+            .as_ref()
+            .and_then(crate::setup::versions::server_version)
+            .and_then(serde_json::Value::as_str)
+            && let Some((refusal, _)) =
+                crate::setup::versions::refused_option(&self.url, server, name, &arguments)
+        {
+            let _ = service.cancel().await;
+            bail!("{refusal}");
+        }
         let request = rmcp::model::CallToolRequestParams::new(name)
             .with_arguments(arguments.as_object().cloned().unwrap_or_default());
         let result =
@@ -664,6 +677,9 @@ async fn forward<R: Transport<RoleClient>>(
     let mut initialize: Option<RxJsonRpcMessage<RoleServer>> = None;
     let mut initialized: Option<RxJsonRpcMessage<RoleServer>> = None;
     let mut initial_version: Option<serde_json::Value> = None;
+    // The version the server's latest handshake named, which decides what
+    // the bridge refuses ([`refusal`]).
+    let mut server_version: Option<String> = None;
     // What the first handshake said about versions, which session start
     // told the user; a re-handshake that says something new is told in the
     // next tool reply.
@@ -731,6 +747,14 @@ async fn forward<R: Transport<RoleClient>>(
                     // Nothing to say to a server not reached yet.
                     continue;
                 }
+                // A call the server seems too old for is checked against the
+                // server as it is now: a refused call never reaches it, so
+                // without a fresh handshake an upgraded server would go
+                // unseen. Only with nothing else in flight, which the new
+                // connection would lose.
+                if !disconnected && pending.len() == 1 && refusal(&value, server_version.as_deref(), endpoint).is_some() {
+                    disconnected = true;
+                }
                 if disconnected {
                     if method == "initialize" || method == "server/discover" {
                         match new_remote() {
@@ -771,6 +795,9 @@ async fn forward<R: Transport<RoleClient>>(
                                     stand_in = None;
                                 }
                                 let version = handshake.as_ref().and_then(crate::setup::versions::server_version).cloned();
+                                if let Some(named) = version.as_ref().and_then(serde_json::Value::as_str) {
+                                    server_version = Some(named.to_owned());
+                                }
                                 if initial_version.is_none() {
                                     initial_version.clone_from(&version);
                                 }
@@ -808,6 +835,13 @@ async fn forward<R: Transport<RoleClient>>(
                         }
                     }
                 }
+                if let Some(refused) = refusal(&value, server_version.as_deref(), endpoint)
+                    && let Some(id) = value.get("id")
+                {
+                    pending.retain(|(request_id, _)| request_id != id);
+                    fail_request(&mut local, &mut sends, id, method, &refused)?;
+                    continue;
+                }
                 writes.extend(write_call(&message));
                 let send = Transport::<RoleClient>::send(&mut remote, message);
                 start_in_order(&mut outgoing, async move { send.await.context("Memory server request failed") });
@@ -827,6 +861,9 @@ async fn forward<R: Transport<RoleClient>>(
                 reached = true;
                 held.clear();
                 let value = serde_json::to_value(&message)?;
+                if let Some(named) = value.get("result").and_then(crate::setup::versions::server_version).and_then(serde_json::Value::as_str) {
+                    server_version = Some(named.to_owned());
+                }
                 if initial_version.is_none() && let Some(version) = value.get("result").and_then(crate::setup::versions::server_version) {
                     initial_version = Some(version.clone());
                     version_line = value.get("result").and_then(|result| crate::setup::versions::server_line(crate::setup::versions::running(), endpoint, result));
@@ -1108,22 +1145,54 @@ fn fail_pending(
     message: &str,
 ) -> Result<()> {
     for (id, method) in pending.drain(..) {
-        // A tool call gets a tool error, which the agent reads. Any other
-        // request gets JSON-RPC's internal error: the relay failed it, not
-        // the server, which may never have seen it.
-        let response = if method == "tools/call" {
-            serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"isError":true,"content":[{"type":"text","text":message}]}})
-        } else {
-            serde_json::json!({"jsonrpc":"2.0","id":id,"error":{"code":rmcp::model::ErrorCode::INTERNAL_ERROR.0,"message":message}})
-        };
-        let response: TxJsonRpcMessage<RoleServer> = serde_json::from_value(response)?;
-        let send = Transport::<RoleServer>::send(local, response);
-        start_in_order(sends, async move {
-            send.await
-                .context("Cannot send memory server response to client")
-        });
+        fail_request(local, sends, &id, &method, message)?;
     }
     Ok(())
+}
+
+/// Answers the app's request `id` for `method` with `message`, as the relay
+/// and not the server.
+fn fail_request(
+    local: &mut impl Transport<RoleServer>,
+    sends: &mut tokio::task::JoinSet<Result<()>>,
+    id: &serde_json::Value,
+    method: &str,
+    message: &str,
+) -> Result<()> {
+    // A tool call gets a tool error, which the agent reads. Any other
+    // request gets JSON-RPC's internal error: the relay failed it, not the
+    // server, which may never have seen it.
+    let response = if method == "tools/call" {
+        serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"isError":true,"content":[{"type":"text","text":message}]}})
+    } else {
+        serde_json::json!({"jsonrpc":"2.0","id":id,"error":{"code":rmcp::model::ErrorCode::INTERNAL_ERROR.0,"message":message}})
+    };
+    let response: TxJsonRpcMessage<RoleServer> = serde_json::from_value(response)?;
+    let send = Transport::<RoleServer>::send(local, response);
+    start_in_order(sends, async move {
+        send.await
+            .context("Cannot send memory server response to client")
+    });
+    Ok(())
+}
+
+/// What the bridge answers, in place of the server at `endpoint` whose
+/// handshake named `server`, to the app's message `value` when it is a tool
+/// call with an input that server is too old for: the refusal and what the
+/// agent should do. `None` for anything else.
+fn refusal(value: &serde_json::Value, server: Option<&str>, endpoint: &str) -> Option<String> {
+    if value.get("method")? != "tools/call" {
+        return None;
+    }
+    let params = value.get("params")?;
+    let tool = params.get("name")?.as_str()?;
+    let arguments = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let (sentence, floor) =
+        crate::setup::versions::refused_option(endpoint, server?, tool, &arguments)?;
+    Some(format!("{sentence} {}", floor.for_agent))
 }
 
 #[cfg(test)]

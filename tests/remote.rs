@@ -64,7 +64,16 @@ impl Drop for ChildGuard {
 
 impl Host {
     fn start(root: TempDir) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_user-memory"))
+        Self::start_as(root, None)
+    }
+    /// Starts a host, as the debug build of `version` when given: a server
+    /// of another release.
+    fn start_as(root: TempDir, version: Option<&str>) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_user-memory"));
+        if let Some(version) = version {
+            command.env("USER_MEMORY_TEST_VERSION", version);
+        }
+        let mut child = command
             .args(["host", "--listen", "127.0.0.1:0", "--db"])
             .arg(root.path().join("shared.sqlite3"))
             .arg("--token-file")
@@ -2367,6 +2376,264 @@ fn the_servers_oldest_client_is_said_to_a_client_below_it() {
             told,
             "{this}: {stdout}"
         );
+    }
+}
+
+/// The release that adds history, as the clients in these tests report it.
+const HISTORY_SINCE: &str = "0.10.0";
+
+/// The release before history, as an older server reports it.
+const BEFORE_HISTORY: &str = "0.9.3";
+
+/// What a client of `url` says when asked for history from a server that
+/// runs `server`, a release before history.
+fn keeps_no_history(url: &str, server: &str) -> String {
+    format!(
+        "The memory server at {url} runs user-memory {server}, which keeps no history (history needs {HISTORY_SINCE} or newer). Upgrade the server on its machine."
+    )
+}
+
+/// What the bridge adds for the agent to a refused history read.
+const NOTHING_READ: &str = "Nothing was read. Tell the user this memory server is too old to show history. A read without history still returns the memory, but says nothing about whether it changed.";
+
+/// `user-memory args` from a client of `host`, as the debug build of
+/// `this` when given.
+fn client_run(host: &Host, home: &Path, this: Option<&str>, args: &[&str]) -> std::process::Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_user-memory"));
+    if let Some(this) = this {
+        command.env("USER_MEMORY_TEST_VERSION", this);
+    }
+    command
+        .args(args)
+        .sandboxed(home)
+        .env("USER_MEMORY_URL", format!("http://{}/mcp", host.address))
+        .env("USER_MEMORY_TOKEN_FILE", host.root.path().join("token"))
+        .env_remove("USER_MEMORY_DB")
+        .output()
+        .unwrap()
+}
+
+/// `client_run`'s reply, which must have succeeded.
+fn client_reply(host: &Host, home: &Path, this: Option<&str>, args: &[&str]) -> Value {
+    let out = client_run(host, home, this, args);
+    assert!(
+        out.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+/// A memory recorded through `host` and corrected once, so its history has
+/// two events; its id.
+fn corrected_memory(host: &Host, home: &Path, this: Option<&str>) -> String {
+    let stored = client_reply(
+        host,
+        home,
+        this,
+        &[
+            "record",
+            "--type",
+            "preference",
+            "--category",
+            "programming",
+            "--title",
+            "Prefer short functions",
+            "--content",
+            "Prefer short functions",
+            "--scope",
+            "global",
+        ],
+    );
+    let id = stored["id"].as_str().unwrap().to_owned();
+    let updated = client_reply(
+        host,
+        home,
+        this,
+        &["update", &id, "--content", "Prefer short, named functions"],
+    );
+    assert_eq!(updated["updated"], true, "{updated}");
+    id
+}
+
+/// History asked of a server from before history is refused with which side
+/// to upgrade, by `history` and by `read --history`, with nothing on
+/// stdout: an older server would answer with the memory and no history,
+/// which reads as a memory that never changed.
+#[test]
+fn history_from_a_server_before_history_says_which_side_to_upgrade() {
+    let host = Host::start_as(root(), Some(BEFORE_HISTORY));
+    let home = tempdir().unwrap();
+    let url = format!("http://{}/mcp", host.address);
+    let id = corrected_memory(&host, home.path(), Some(HISTORY_SINCE));
+    for args in [
+        vec!["history", id.as_str()],
+        vec!["read", id.as_str(), "--history"],
+    ] {
+        let out = client_run(&host, home.path(), Some(HISTORY_SINCE), &args);
+        let (stdout, stderr) = (
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+        assert!(!out.status.success(), "{args:?}: {stdout}");
+        assert!(stdout.is_empty(), "{args:?}: {stdout}");
+        assert!(
+            stderr.contains(&keeps_no_history(&url, BEFORE_HISTORY)),
+            "{args:?}: {stderr}"
+        );
+    }
+}
+
+/// History from a server new enough is read as before: one of the release
+/// that adds it, and one of this build's own version, which in a tree not
+/// yet released is the release before it.
+#[test]
+fn history_from_a_server_new_enough_or_of_this_build_is_read() {
+    for version in [Some(HISTORY_SINCE), None] {
+        let host = Host::start_as(root(), version);
+        let home = tempdir().unwrap();
+        let id = corrected_memory(&host, home.path(), version);
+        for args in [
+            vec!["history", id.as_str()],
+            vec!["read", id.as_str(), "--history"],
+        ] {
+            let read = client_reply(&host, home.path(), version, &args);
+            let events = read["memories"][0]["history"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{version:?} {args:?}: {read}"));
+            assert_eq!(events.len(), 2, "{version:?} {args:?}: {read}");
+        }
+    }
+}
+
+/// A server from before history still serves everything that needs no newer
+/// release, `update --drop-history` included: with no history kept, the
+/// correction leaves the store as the option asks.
+#[test]
+fn a_server_before_history_still_serves_what_needs_no_newer_release() {
+    let host = Host::start_as(root(), Some(BEFORE_HISTORY));
+    let home = tempdir().unwrap();
+    let this = Some(HISTORY_SINCE);
+    let id = corrected_memory(&host, home.path(), this);
+    let read = client_reply(&host, home.path(), this, &["read", &id]);
+    assert_eq!(read["memories"][0]["id"], id.as_str(), "{read}");
+    let found = client_reply(&host, home.path(), this, &["search", "functions"]);
+    assert_eq!(found["memories"][0]["id"], id.as_str(), "{found}");
+    let index = client_run(&host, home.path(), this, &["index"]);
+    let listed = String::from_utf8_lossy(&index.stdout);
+    assert!(
+        index.status.success() && listed.contains("Prefer short functions"),
+        "{listed}"
+    );
+    let dropped = client_reply(
+        &host,
+        home.path(),
+        this,
+        &[
+            "update",
+            &id,
+            "--content",
+            "Prefer small functions",
+            "--drop-history",
+        ],
+    );
+    assert_eq!(dropped["updated"], true, "{dropped}");
+}
+
+/// Through the bridge, a history read from a server before history is
+/// answered by the bridge as a tool error the agent relays, and never sent;
+/// a read without history and a correction with drop_history go through.
+/// Once the server is upgraded, the next history read is the server's: on
+/// Codex's opening and on Claude Code's, whose listen stream stays open.
+#[test]
+fn the_bridge_refuses_history_from_a_server_before_history_until_it_is_upgraded() {
+    for on_2026_protocol in [false, true] {
+        let mut host = Host::start_as(root(), Some(BEFORE_HISTORY));
+        let home = tempdir().unwrap();
+        let url = format!("http://{}/mcp", host.address);
+        let id = corrected_memory(&host, home.path(), Some(HISTORY_SINCE));
+        let token = host.root.path().join("token");
+        let mut app = App::start(
+            home.path(),
+            &url,
+            &token,
+            &[("USER_MEMORY_TEST_VERSION", HISTORY_SINCE)],
+        );
+        let wrap = |message: Value| {
+            if on_2026_protocol {
+                on_2026(message)
+            } else {
+                message
+            }
+        };
+        if on_2026_protocol {
+            let discover = app.ask(&wrap(
+                json!({"jsonrpc":"2.0","id":1,"method":"server/discover","params":{}}),
+            ));
+            assert!(discover.get("result").is_some(), "{discover}");
+            app.send(&wrap(
+                json!({"jsonrpc":"2.0","id":"tools-stream","method":"subscriptions/listen","params":{"notifications":{"toolsListChanged":true}}}),
+            ));
+            let tools = app.ask(&wrap(
+                json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}),
+            ));
+            assert!(tools.get("result").is_some(), "{tools}");
+        } else {
+            app.open();
+        }
+        let refused = app.ask(&wrap(call(
+            3,
+            "read",
+            json!({"ids": [id], "history": true}),
+        )));
+        assert_eq!(
+            refused["result"]["isError"], true,
+            "{on_2026_protocol}: {refused}"
+        );
+        assert_eq!(
+            texts(&refused),
+            [format!(
+                "{} {NOTHING_READ}",
+                keeps_no_history(&url, BEFORE_HISTORY)
+            )],
+            "{on_2026_protocol}"
+        );
+        let plain = app.ask(&wrap(call(
+            4,
+            "read",
+            json!({"ids": [id], "history": false}),
+        )));
+        assert_ne!(
+            plain["result"]["isError"], true,
+            "{on_2026_protocol}: {plain}"
+        );
+        assert!(texts(&plain)[0].contains(&id), "{plain}");
+        let dropped = app.ask(&wrap(call(
+            5,
+            "update",
+            json!({"memory_id": id, "content": "Prefer small functions", "drop_history": true, "user_confirmed": true}),
+        )));
+        assert_ne!(
+            dropped["result"]["isError"], true,
+            "{on_2026_protocol}: {dropped}"
+        );
+        host.child.kill().unwrap();
+        host.child.wait().unwrap();
+        host.restart_as(Some(HISTORY_SINCE));
+        let upgraded = app.ask(&wrap(call(
+            6,
+            "read",
+            json!({"ids": [id], "history": true}),
+        )));
+        assert_ne!(
+            upgraded["result"]["isError"], true,
+            "{on_2026_protocol}: {upgraded}"
+        );
+        assert!(
+            texts(&upgraded)[0].contains("\"history\""),
+            "{on_2026_protocol}: {upgraded}"
+        );
+        app.close();
     }
 }
 
