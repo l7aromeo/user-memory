@@ -416,9 +416,22 @@ impl UserMemoryServer {
     ) -> Reply {
         let db = self.db.clone();
         let client = self.caller(&peer);
+        let on_server = self.store_on_server();
         synced(
             blocking(Some("deleted"), move || {
-                memory::acting_as(&client, || output(memory::forget(&db, input), "deleted"))
+                let forgot = memory::acting_as(&client, || memory::forget(&db, input));
+                // Its copy is where the store is: say so on a server.
+                let forgot = forgot.map(|mut reply| {
+                    if on_server && reply.get("backup").is_some() {
+                        let next = reply["next"].as_str().map(str::to_owned);
+                        reply["next"] = json!(match next {
+                            Some(next) => format!("{next}\n{}", memory::COPY_ON_SERVER),
+                            None => memory::COPY_ON_SERVER.to_owned(),
+                        });
+                    }
+                    reply
+                });
+                output(forgot, "deleted")
             })
             .await,
         )

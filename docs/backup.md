@@ -31,6 +31,18 @@ history events older than a year are dropped
 ([history](memory-model.md#history)); the backups made before still hold
 them until they rotate out.
 
+A forget by origin that deletes memories first copies the store into the
+same folder, as `memories-forget-<UTC time>.sqlite3`, and its reply names
+the copy under `backup`. The copy is taken in the forget's own write turn,
+so it holds exactly what the forget deletes, and the forget fails whole if
+the copy can't be made. These copies are not the day's backup and don't
+count toward the 7: each is dropped 7 days after it was made, by the time in
+its name, when the next change or a running server's hourly check looks at
+the folder. `backup list` lists them after the automatic backups, and one
+restores the same way. On a store of 100,000 memories with vectors, 1.4 GB,
+the copy takes 2 to 3 seconds; other changes wait for it, sessions reading
+memory don't.
+
 ```bash
 user-memory backup list
 ```

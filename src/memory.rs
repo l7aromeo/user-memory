@@ -61,7 +61,7 @@ pub use transfer::{
     export_document, export_named, export_next, import_document, import_named, import_next,
     write_export,
 };
-pub use write::{Forget, Record, Update, forget, record, update};
+pub use write::{COPY_ON_SERVER, Forget, Record, Update, forget, record, update};
 
 #[derive(
     Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, ValueEnum, PartialEq, Eq,

@@ -5,6 +5,8 @@
 
 #[path = "support/sandbox.rs"]
 mod sandbox;
+#[path = "support/serve.rs"]
+mod serve;
 use sandbox::Sandboxed;
 use serde_json::{Value, json};
 use std::{fs, path::PathBuf, process::Command};
@@ -1950,7 +1952,12 @@ fn forgetting_needs_exactly_one_target_on_the_command_line() {
             .status
             .success()
     );
-    let out = s.value(&["forget", "--origin", " chat/1 "]);
+    let mut out = s.value(&["forget", "--origin", " chat/1 "]);
+    let backup = out.as_object_mut().unwrap().remove("backup").unwrap();
+    assert!(
+        backup.as_str().unwrap().starts_with("memory-forget-"),
+        "{backup}"
+    );
     assert_eq!(
         out,
         serde_json::json!({"deleted":true,"count":1,"ids":[id],"kept":[],"unlinked":0,"staled":[],"left_superseded":[]})
@@ -4618,4 +4625,100 @@ fn the_cli_takes_projects_as_the_tools_name_it() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+// A forget by origin that deletes memories copies the store just before,
+// beside the automatic backups, and names the copy; one that deletes
+// nothing makes none, and one whose copy cannot be made forgets nothing.
+#[test]
+fn a_forget_that_deletes_names_the_copy_made_just_before() {
+    let s = Store::new();
+    let stored = s.value(&[
+        "record",
+        "--type",
+        "preference",
+        "--category",
+        "style",
+        "--content",
+        "Prefer tabs for indentation",
+        "--origin",
+        "c:1",
+    ]);
+    let id = stored["id"].as_str().unwrap().to_owned();
+    let folder = s.db.with_file_name("backups");
+    let copies = || -> Vec<String> {
+        fs::read_dir(&folder)
+            .map(|dir| {
+                dir.map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                    .filter(|name| name.contains("-forget-"))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let none = s.value(&["forget", "--origin", "c:9"]);
+    assert_eq!(none["deleted"], false, "{none}");
+    assert!(none.get("backup").is_none(), "{none}");
+    assert!(copies().is_empty());
+
+    // The copy cannot be made: nothing is forgotten, and neither the
+    // command nor the tool names a path. Today's automatic backup moves
+    // aside meanwhile.
+    let aside = s.db.with_file_name("backups-aside");
+    let refused = |how: &str| {
+        let out = s.run(&["forget", "--origin", "c:1"]);
+        assert!(!out.status.success(), "{how}: {out:?}");
+        let mut serve = Command::new(env!("CARGO_BIN_EXE_user-memory"));
+        serve
+            .arg("serve")
+            .sandboxed(s.root.path())
+            .env("USER_MEMORY_DB", &s.db)
+            .env_remove("USER_MEMORY_URL");
+        let tool = serve::result(
+            serve,
+            "forget",
+            json!({"origin":"c:1","user_confirmed":true}),
+        );
+        assert_eq!(tool["isError"], true, "{how}: {tool}");
+        for said in [
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+            tool["content"][0]["text"].as_str().unwrap().to_owned(),
+        ] {
+            assert!(said.contains("Nothing was forgotten"), "{how}: {said}");
+            assert!(said.contains("then forget again"), "{how}: {said}");
+            assert!(
+                !said.contains(s.root.path().to_str().unwrap()),
+                "{how}: {said}"
+            );
+            assert!(!said.contains("memory.sqlite3"), "{how}: {said}");
+        }
+        assert_eq!(s.value(&["read", &id])["memories"][0]["id"], id.as_str());
+    };
+    fs::rename(&folder, &aside).unwrap();
+    fs::write(&folder, "").unwrap();
+    refused("the backups folder is a file");
+    fs::remove_file(&folder).unwrap();
+    // Mode bits are Unix's; Windows has no read-only folder to test with.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::create_dir(&folder).unwrap();
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o500)).unwrap();
+        refused("the backups folder is not writable");
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::remove_dir(&folder).unwrap();
+    }
+    fs::rename(&aside, &folder).unwrap();
+
+    let forgot = s.value(&["forget", "--origin", "c:1"]);
+    assert_eq!(forgot["deleted"], true, "{forgot}");
+    let name = forgot["backup"].as_str().unwrap();
+    assert!(name.starts_with("memory-forget-"), "{forgot}");
+    assert_eq!(copies(), [name]);
+    let copy = rusqlite::Connection::open(folder.join(name)).unwrap();
+    let content: String = copy
+        .query_row("SELECT content FROM memories WHERE id=?1", [&id], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(content, "Prefer tabs for indentation");
 }

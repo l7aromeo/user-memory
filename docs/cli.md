@@ -142,7 +142,10 @@ user-memory forget --origin claude:session/<id>
 The first deletes one memory, by its full id or the 8 characters the index shows. The second deletes every memory
 one conversation recorded, and the projects it linked, reported as
 `unlinked`. A memory that another conversation also stated is kept and
-listed as `kept`. Patterns built
+listed as `kept`. When it deletes memories, it first copies the store
+beside the [automatic backups](backup.md#automatic-backups) and names the
+copy as `backup`; on a large store that takes a few seconds, and if the
+copy can't be written, nothing is forgotten. Patterns built
 on a forgotten memory become stale, listed as `staled`. A memory the forgotten
 one had replaced is listed as `left_superseded`: it stays hidden until
 `user-memory update ID` makes it active again. When either list has entries,
@@ -155,8 +158,9 @@ from.
 
 Forgetting removes the memory's text from the store and from every backup
 made after. Copies made before keep it, and restoring one brings the memory
-back: the automatic backups, the `.bak` files beside the store and your
-exports. [Privacy](privacy.md#what-a-forgotten-memory-leaves) lists every
+back: the automatic backups, the copy a forget by origin makes just before
+it deletes memories, dropped a week later, the `.bak` files beside the store
+and your exports. [Privacy](privacy.md#what-a-forgotten-memory-leaves) lists every
 copy and how long each lasts. To remove every copy, such as after a secret
 was stored by mistake:
 
@@ -164,8 +168,9 @@ was stored by mistake:
    it. On a store upgraded from an earlier version, do this after setup or
    `user-memory migrate` has rewritten the store
    ([removed text](storage.md#removed-text)).
-2. Delete the older backups that `user-memory backup list` shows, the
-   `.bak` files beside the store, and every export made before the forget.
+2. Delete the older backups and the forget copies that `user-memory backup
+   list` shows, the `.bak` files beside the store, and every export made
+   before the forget.
    You can no longer go back to any of them.
 
 ## Projects
