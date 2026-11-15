@@ -26,7 +26,8 @@ use std::{
     io::Write,
     net::SocketAddr,
     path::{Path, PathBuf},
-    time::Duration,
+    sync::{Arc, Mutex, PoisonError},
+    time::{Duration, Instant},
 };
 
 mod gate;
@@ -323,6 +324,75 @@ fn host_token(path: &Path) -> Result<String> {
     Ok(token)
 }
 
+/// What `/` answers: the service's name while the store opens, else 503,
+/// so the Docker healthcheck needs no token. A store that opened within
+/// [`HEALTH_FRESH`] is not opened again, so callers of this unauthenticated
+/// path cannot make a healthy server open its store at will; a failure is
+/// checked again on the next request, so a repaired store answers at once.
+#[derive(Clone)]
+struct Health {
+    db: PathBuf,
+    last: Arc<Mutex<Option<Checked>>>,
+}
+
+/// When the store was last checked, and whether it opened.
+type Checked = (Instant, Result<(), String>);
+
+/// How long a store check answers `/`: far below the healthcheck's
+/// 30-second interval, and long enough that a flood opens the store a few
+/// times a minute at most.
+const HEALTH_FRESH: Duration = Duration::from_secs(5);
+
+impl Health {
+    fn new(db: PathBuf) -> Self {
+        Self {
+            db,
+            last: Arc::default(),
+        }
+    }
+
+    async fn answer(self) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        let cached = {
+            let last = self.last.lock().unwrap_or_else(PoisonError::into_inner);
+            last.as_ref()
+                .filter(|(at, found)| found.is_ok() && at.elapsed() < HEALTH_FRESH)
+                .map(|(_, found)| found.clone())
+        };
+        let found = match cached {
+            Some(found) => found,
+            None => {
+                let db = self.db.clone();
+                let found = tokio::task::spawn_blocking(move || {
+                    crate::connect(&db)
+                        .map(drop)
+                        .map_err(|err| format!("{err:#}"))
+                })
+                .await
+                .unwrap_or_else(|err| Err(err.to_string()));
+                let mut last = self.last.lock().unwrap_or_else(PoisonError::into_inner);
+                // The server's log gets each new failure once.
+                if let Err(err) = &found
+                    && last.as_ref().map(|(_, was)| was) != Some(&found)
+                {
+                    eprintln!("The memory store cannot be opened: {err}");
+                }
+                *last = Some((Instant::now(), found.clone()));
+                found
+            }
+        };
+        match found {
+            Ok(()) => "user-memory MCP server. Endpoint: /mcp\n".into_response(),
+            // The reason stays in the log: this path needs no token.
+            Err(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "The memory store cannot be opened; the server's log says why.\n",
+            )
+                .into_response(),
+        }
+    }
+}
+
 /// Resolves when the process is asked to stop: Ctrl-C (SIGINT, which the
 /// Docker server's compose file sends) everywhere, and SIGTERM on Unix.
 pub async fn stopped() {
@@ -380,6 +450,7 @@ pub async fn host(options: HostOptions) -> Result<()> {
             transfer::admit,
         ));
     let transfers = transfer::routes(db.clone(), allowed);
+    let health = Health::new(db.clone());
     let service: StreamableHttpService<crate::UserMemoryServer, LocalSessionManager> =
         StreamableHttpService::new(
             move || {
@@ -393,17 +464,14 @@ pub async fn host(options: HostOptions) -> Result<()> {
         );
     // /mcp, the export and import endpoints and a token's own revocation
     // need a token (src/remote/gate.rs). `/` names the service for health
-    // checks and reverse-proxy smoke tests and reads nothing; other paths
-    // are 404.
+    // checks and reverse-proxy smoke tests, reads no memory and needs no
+    // token; other paths are 404.
     let router = Router::new()
         .nest_service("/mcp", service)
         .merge(transfers)
         .merge(own_token)
         .layer(middleware::from_fn_with_state(gate, gate::authenticate))
-        .route(
-            "/",
-            get(|| async { "user-memory MCP server. Endpoint: /mcp\n" }),
-        )
+        .route("/", get(move || health.clone().answer()))
         .fallback(|| async { StatusCode::NOT_FOUND });
     println!("Listening: http://{address}/mcp");
     eprintln!("Access-token file: {}", token_file.display());

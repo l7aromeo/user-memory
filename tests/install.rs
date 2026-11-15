@@ -956,7 +956,7 @@ fn the_questions_set_up_a_docker_server_and_a_rerun_upgrades_it() {
         "stop_signal: SIGINT",
         "restart: unless-stopped",
         "    name: user-memory-data",
-        "      test: \"USER_MEMORY_URL=http://127.0.0.1:8765/mcp USER_MEMORY_TOKEN_FILE=/data/access-token user-memory index >/dev/null\"",
+        "      test: [CMD, user-memory, server, health]",
     ] {
         assert!(compose.contains(line), "{line}\n{compose}");
     }

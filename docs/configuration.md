@@ -35,8 +35,9 @@ settings and the embedding setting. For the installer's options, see
 | `--token-file PATH` | Access-token file; a private random token is created if absent |
 | `--allowed-host NAME` | Hostname accepted through a reverse proxy (repeatable) |
 
-Only `/mcp` needs the token; `GET /` answers one line without reading the
-store, for health checks.
+Every path but `/` needs a token. `GET /` needs none: for health checks, it
+answers one line while the store opens and 503 while it cannot be opened,
+with the reason in the server's log.
 
 ## Environment
 
