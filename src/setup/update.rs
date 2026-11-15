@@ -7,7 +7,7 @@ use std::{env, time::Duration};
 
 /// The public releases, where the installer downloads from;
 /// `USER_MEMORY_RELEASES` points the check elsewhere, as for the installer.
-const RELEASES: &str = "https://github.com/l7aromeo/user-memory/releases";
+pub(super) const RELEASES: &str = "https://github.com/l7aromeo/user-memory/releases";
 /// Enough for one round trip to GitHub; an offline doctor barely waits.
 const TIMEOUT: Duration = Duration::from_secs(3);
 /// Set to 1, it turns the check off, as `setup --no-update-check` does.

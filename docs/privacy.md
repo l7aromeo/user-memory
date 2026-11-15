@@ -116,9 +116,9 @@ The client connects to two places you choose:
 Two more requests go to GitHub, and carry nothing about you or your
 memories:
 
-- The installers download the release from
+- The installers and `user-memory upgrade` download the release from
   `github.com/l7aromeo/user-memory/releases` (`USER_MEMORY_RELEASES` names a
-  mirror instead).
+  mirror instead, which `upgrade` names before it asks).
 - `user-memory doctor` asks the same releases page once which release is
   the newest, to tell you when yours is out of date. The session hooks
   never make that request. `user-memory setup --no-update-check`, or

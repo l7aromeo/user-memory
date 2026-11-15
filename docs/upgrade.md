@@ -37,7 +37,10 @@ script, it needs `--yes`, which you give once you've decided.
 and its `.sha256` from the releases page, as the installer does, and
 installs nothing that doesn't match. The checksum comes from the same
 release as the binary, so it guards against a broken download, not a
-forged release.
+forged release. When `USER_MEMORY_RELEASES` names a mirror, it says so
+before it asks:
+``The release comes from …, which USER_MEMORY_RELEASES sets instead of https://github.com/l7aromeo/user-memory/releases.``
+It follows no redirect to plain `http://` away from this machine.
 
 Upgrades only move forward: an older `--version` is refused with
 ``user-memory upgrade only moves forward (this is …). To go back, restore the backup the upgrade made: see the user-memory skill's upgrade playbook.``
