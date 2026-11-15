@@ -497,6 +497,19 @@ const RECONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// shorter wait would stand in for reachable servers that are far away.
 const FIRST_ANSWER: Duration = Duration::from_secs(3);
 
+/// How long the first real handshake may take, counted from the session's
+/// first request: the 30 seconds both apps give a server to start (Codex's
+/// `DEFAULT_STARTUP_TIMEOUT`, Claude Code's `MCP_TIMEOUT`). A slow server
+/// keeps what it had before the bridge answered handshakes itself; a later
+/// reconnect has [`RECONNECT_TIMEOUT`].
+const APP_START_LIMIT: Duration = Duration::from_secs(30);
+
+/// How long the bridge waits for the stand-in's answers to the requests it
+/// still holds when the server takes over. It answers from memory, in the
+/// same process, within microseconds; the bound only keeps a stand-in that
+/// stopped from holding the session.
+const STAND_IN_WAIT: Duration = Duration::from_secs(1);
+
 /// The messages the [`StandIn`] answers: the handshake, the tool list and
 /// `ping`, which is all an app asks before its first call.
 fn stands_in_for(method: &str) -> bool {
@@ -665,6 +678,7 @@ async fn forward<R: Transport<RoleClient>>(
     // first request waits for the server until `first_answer`.
     let mut reached = false;
     let mut held: Vec<RxJsonRpcMessage<RoleServer>> = Vec::new();
+    let mut opened: Option<tokio::time::Instant> = None;
     let mut first_answer: Option<tokio::time::Instant> = None;
     // The app's `tools/list` requests for a later page: their replies are
     // not the whole list.
@@ -696,7 +710,9 @@ async fn forward<R: Transport<RoleClient>>(
                 if let Some(id) = value.get("id") && value.get("method").is_some() {
                     pending.push((id.clone(), method.to_owned()));
                     if !reached && first_answer.is_none() {
-                        first_answer = Some(tokio::time::Instant::now() + FIRST_ANSWER);
+                        let now = tokio::time::Instant::now();
+                        opened = Some(now);
+                        first_answer = Some(now + FIRST_ANSWER);
                     }
                 }
                 if !reached && stands_in_for(method) {
@@ -726,13 +742,24 @@ async fn forward<R: Transport<RoleClient>>(
                             }
                         }
                     } else {
+                        if let Some(stand_in) = &mut stand_in {
+                            // What it still holds is answered before the
+                            // server can take over.
+                            finish_standing(stand_in, &mut standing, &mut local, &mut sends, &mut given_tools).await?;
+                        }
                         // The server may have changed while it was away: its
                         // own tool list tells, when the app was given one.
                         let asked = given_tools.as_ref().map(|_| tools_params.clone().unwrap_or_else(|| serde_json::json!({})));
                         let recovered = async {
                             reconnect(new_remote()?, initialize.clone(), initialized.clone(), asked.as_ref()).await
                         };
-                        match tokio::time::timeout(RECONNECT_TIMEOUT, recovered).await {
+                        // The first real handshake has the time the app
+                        // would have given it.
+                        let limit = match opened {
+                            Some(opened) if !reached => RECONNECT_TIMEOUT.max((opened + APP_START_LIMIT).saturating_duration_since(tokio::time::Instant::now())),
+                            _ => RECONNECT_TIMEOUT,
+                        };
+                        match tokio::time::timeout(limit, recovered).await {
                             Ok(Ok(Reconnected { remote: next, handshake, tools })) => {
                                 remote = next;
                                 disconnected = false;
@@ -853,17 +880,7 @@ async fn forward<R: Transport<RoleClient>>(
                     stand_in = None;
                     continue;
                 };
-                let value = serde_json::to_value(&message)?;
-                if let Some(id) = value.get("id")
-                    && let Some(at) = standing.iter().position(|(request_id, _)| request_id == id)
-                {
-                    let (_, method) = standing.swap_remove(at);
-                    if method == "tools/list" && let Some(tools) = value.pointer("/result/tools") {
-                        given_tools = Some(tools.clone());
-                    }
-                }
-                let send = Transport::<RoleServer>::send(&mut local, message);
-                start_in_order(&mut sends, async move { send.await.context("Cannot send memory server response to client") });
+                pass_stand_in_reply(message, &mut standing, &mut local, &mut sends, &mut given_tools)?;
             }
             result = to_stand_in.join_next(), if !to_stand_in.is_empty() => {
                 if let Some(Ok(Err(err)) | Err(err)) = result.map(|r| r.map_err(anyhow::Error::from)) {
@@ -959,6 +976,64 @@ fn start_standing(
         });
     }
     stand_in
+}
+
+/// Passes a reply of the stand-in's to the app, keeping the tool list it
+/// gave as the one the app has.
+fn pass_stand_in_reply(
+    message: RxJsonRpcMessage<RoleClient>,
+    standing: &mut Vec<(serde_json::Value, String)>,
+    local: &mut impl Transport<RoleServer>,
+    sends: &mut tokio::task::JoinSet<Result<()>>,
+    given_tools: &mut Option<serde_json::Value>,
+) -> Result<()> {
+    let value = serde_json::to_value(&message)?;
+    if let Some(id) = value.get("id")
+        && let Some(at) = standing.iter().position(|(request_id, _)| request_id == id)
+    {
+        let (_, method) = standing.swap_remove(at);
+        if method == "tools/list"
+            && let Some(tools) = value.pointer("/result/tools")
+        {
+            *given_tools = Some(tools.clone());
+        }
+    }
+    let send = Transport::<RoleServer>::send(local, message);
+    start_in_order(sends, async move {
+        send.await
+            .context("Cannot send memory server response to client")
+    });
+    Ok(())
+}
+
+/// Lets the stand-in answer every request it still holds, before the
+/// server takes the session over; one it can't answer within
+/// [`STAND_IN_WAIT`] gets the relay's error.
+async fn finish_standing(
+    stand_in: &mut StandIn,
+    standing: &mut Vec<(serde_json::Value, String)>,
+    local: &mut impl Transport<RoleServer>,
+    sends: &mut tokio::task::JoinSet<Result<()>>,
+    given_tools: &mut Option<serde_json::Value>,
+) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + STAND_IN_WAIT;
+    while !standing.is_empty() {
+        let next = tokio::time::timeout_at(
+            deadline,
+            Transport::<RoleClient>::receive(&mut stand_in.transport),
+        )
+        .await;
+        let Ok(Some(message)) = next else {
+            break;
+        };
+        pass_stand_in_reply(message, standing, local, sends, given_tools)?;
+    }
+    fail_pending(
+        local,
+        sends,
+        standing,
+        "The memory relay stopped answering this request",
+    )
 }
 
 /// The method of the private notice that gives the front the version line a

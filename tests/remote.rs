@@ -1980,6 +1980,8 @@ struct Said {
     held: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// The protocol version it agrees, in place of the one asked for.
     protocol: Option<String>,
+    /// How long each handshake takes it, as over a slow link.
+    handshake_time: Option<std::time::Duration>,
 }
 
 type Shared = std::sync::Arc<std::sync::Mutex<Said>>;
@@ -2050,12 +2052,18 @@ fn answer_fake(mut stream: std::net::TcpStream, said: &Shared) {
         return;
     }
     let message: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-    let held = said.lock().unwrap().held.clone();
-    if message["method"] == "initialize"
-        && let Some(held) = held
-    {
-        while !held.load(std::sync::atomic::Ordering::SeqCst) {
-            std::thread::sleep(std::time::Duration::from_millis(10));
+    let (held, handshake_time) = {
+        let said = said.lock().unwrap();
+        (said.held.clone(), said.handshake_time)
+    };
+    if message["method"] == "initialize" {
+        if let Some(held) = held {
+            while !held.load(std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+        if let Some(time) = handshake_time {
+            std::thread::sleep(time);
         }
     }
     let mut said = said.lock().unwrap();
@@ -3064,6 +3072,64 @@ fn connect_never_prints_what_the_bridge_tells_the_front() {
             .starts_with("notifications/user-memory/")),
         "{printed:?}"
     );
+}
+
+/// Requests the stand-in still holds when a call hands the session to the
+/// server are answered, however the app's concurrent requests fall.
+#[test]
+fn what_the_stand_in_holds_is_answered_when_the_server_takes_over() {
+    let home = tempdir().unwrap();
+    let token = home.path().join("token");
+    fs::write(&token, TOKEN).unwrap();
+    let state = said(env!("CARGO_PKG_VERSION"), None);
+    let (url, start) = endpoint_down(&state);
+    let mut app = App::start(home.path(), &url, &token, &[]);
+    app.open();
+    start();
+    // Many tool lists and then the call that reaches the server, in one
+    // write: some lists are still with the stand-in when the call comes.
+    let lists: Vec<Value> = (100..120)
+        .map(|id| json!({"jsonrpc":"2.0","id":id,"method":"tools/list","params":{}}))
+        .collect();
+    let batch: String = lists
+        .iter()
+        .chain([&call(3, "index", json!({}))])
+        .map(|message| format!("{message}\n"))
+        .collect();
+    let input = app.input.as_mut().unwrap();
+    input.write_all(batch.as_bytes()).unwrap();
+    input.flush().unwrap();
+    let mut answered = std::collections::HashSet::new();
+    while answered.len() < lists.len() + 1 {
+        let line = app
+            .output
+            .recv_timeout(STUCK)
+            .unwrap_or_else(|_| panic!("unanswered: {:?} of 100..120 and 3", answered));
+        let value: Value = serde_json::from_str(&line).unwrap();
+        if value.get("method").is_none() {
+            answered.insert(value["id"].as_i64().unwrap());
+        }
+    }
+    app.close();
+}
+
+/// A server that takes longer for each handshake than a reconnect waits,
+/// but less than the app would have waited at session start, still serves
+/// the session's first call.
+#[test]
+fn a_server_slow_to_shake_hands_serves_the_first_call() {
+    let home = tempdir().unwrap();
+    let token = home.path().join("token");
+    fs::write(&token, TOKEN).unwrap();
+    let state = said(env!("CARGO_PKG_VERSION"), None);
+    // Past the 10 seconds a reconnect waits; within the apps' 30.
+    state.lock().unwrap().handshake_time = Some(std::time::Duration::from_secs(12));
+    let url = versioned_endpoint(&state);
+    let mut app = App::start(home.path(), &url, &token, &[]);
+    let (handshake, _) = app.open();
+    assert!(handshake.get("result").is_some(), "{handshake}");
+    assert_eq!(texts(&app.ask(&call(3, "index", json!({})))), ["served"]);
+    app.close();
 }
 
 /// A reply to a later page of the tool list is not the list the app has:
