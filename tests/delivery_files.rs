@@ -1,6 +1,7 @@
 //! The delivery index's files on this machine (#175), through the real
-//! binary: session start builds its scope's base, the tool hooks keep its
-//! overlay current, and no file keeps the words a removal took out.
+//! binary: session start builds its scope's base, the prompt hook builds one
+//! its scope lacks, the tool hooks keep its overlay current, and no file
+//! keeps the words a removal took out.
 
 #![allow(
     clippy::unwrap_used,
@@ -9,6 +10,8 @@
 
 #[path = "support/sandbox.rs"]
 mod sandbox;
+#[path = "support/serve.rs"]
+mod serve;
 use sandbox::Sandboxed;
 #[path = "support/time.rs"]
 mod time;
@@ -66,8 +69,13 @@ impl Home {
     /// Records a global memory whose content holds `anchor` as a code
     /// span, which the index keeps as written; returns its id.
     fn record(&self, title: &str, anchor: &str) -> String {
+        self.record_in(None, title, anchor)
+    }
+
+    /// As [`Home::record`], for `project` when given.
+    fn record_in(&self, project: Option<&str>, title: &str, anchor: &str) -> String {
         let content = format!("Run `{anchor}` before the {title} step.");
-        let out = self.cli(&[
+        let mut args = vec![
             "record",
             "--type",
             "procedure",
@@ -77,9 +85,12 @@ impl Home {
             title,
             "--content",
             &content,
-            "--scope",
-            "global",
-        ]);
+        ];
+        match project {
+            Some(project) => args.extend(["--scope", "project", "--project", project]),
+            None => args.extend(["--scope", "global"]),
+        }
+        let out = self.cli(&args);
         assert_eq!(out["stored"], true, "{out}");
         out["id"].as_str().unwrap().to_owned()
     }
@@ -127,6 +138,16 @@ impl Home {
         let out = time::finish(self.spawn(hook, session, env), hook);
         assert!(out.status.success(), "{out:?}");
         out
+    }
+
+    /// Links (or with `unlink`, unlinks) `project` in `session`.
+    fn link(&self, session: &str, project: &str, unlink: bool) {
+        let linked = serve::call(
+            self.command(&["serve"], &[]),
+            "link",
+            json!({"origin": format!("claude:session/{session}"), "projects": [project], "unlink": unlink}),
+        );
+        assert!(linked.is_object(), "{linked}");
     }
 
     fn state(&self) -> PathBuf {
@@ -448,4 +469,92 @@ fn a_tool_hook_deletes_a_base_holding_words_an_unaware_writer_removed() {
             "{remove}: the base is deleted"
         );
     }
+}
+
+#[test]
+fn the_prompt_builds_a_base_its_scope_lacks_and_still_prints_its_notice() {
+    let home = Home::new();
+    home.record("deploy", "quokka-deploy");
+    home.hook("SessionStart", "s1", &[]);
+    // As after a project move or `migrate`: the store's files are gone.
+    for file in every_file(&home.delivery()) {
+        fs::remove_file(file).unwrap();
+    }
+    let lint = home.record("lint", "wombat-lint");
+    let out = home.hook("UserPromptSubmit", "s1", &[]);
+    let notice = String::from_utf8(out.stdout).unwrap();
+    assert!(notice.contains(&lint[..8]), "the new memory told: {notice}");
+    for anchor in ["quokka-deploy", "wombat-lint"] {
+        assert!(holds(&home.base(), &hex(anchor)), "{anchor} in the base");
+    }
+    assert!(home.overlay().exists(), "an empty overlay naming the base");
+}
+
+#[test]
+fn a_linked_scope_gets_its_base_at_the_next_prompt_and_an_unlinked_one_loses_its_memories() {
+    const COMPILER: &str = "github.com/acme/compiler";
+    let home = Home::new();
+    home.record_in(Some(COMPILER), "fuzz", "quokka-fuzz");
+    home.hook("SessionStart", "s1", &[]);
+    assert!(
+        !holds(&home.base(), &hex("quokka-fuzz")),
+        "not this scope's"
+    );
+    home.link("s1", COMPILER, false);
+    home.hook("UserPromptSubmit", "s1", &[]);
+    let bases = home.files(".index");
+    assert_eq!(bases.len(), 2, "the linked scope's base beside the first");
+    assert_eq!(
+        bases
+            .iter()
+            .filter(|base| holds(base, &hex("quokka-fuzz")))
+            .count(),
+        1,
+        "the linked scope's base holds the project's memory"
+    );
+    home.link("s1", COMPILER, true);
+    home.hook("UserPromptSubmit", "s1", &[]);
+    home.record_in(Some(COMPILER), "bench", "wombat-bench");
+    home.record("lint", "numbat-lint");
+    home.hook("PostToolUse", "s1", &[]);
+    let delivery = every_file(&home.delivery());
+    assert!(
+        delivery.iter().any(|file| holds(file, &hex("numbat-lint"))),
+        "the hook kept the session's scope current: {delivery:?}"
+    );
+    assert!(
+        !delivery
+            .iter()
+            .any(|file| holds(file, &hex("wombat-bench"))),
+        "nothing of the unlinked project: {delivery:?}"
+    );
+}
+
+#[test]
+fn a_base_whose_changes_the_store_pruned_is_built_again_at_the_next_prompt() {
+    let home = Home::new();
+    home.record("deploy", "quokka-deploy");
+    home.hook("SessionStart", "s1", &[]);
+    home.record("lint", "wombat-lint");
+    let conn = rusqlite::Connection::open(home.db()).unwrap();
+    conn.execute(
+        "UPDATE store_changes SET pruned_through=last_change WHERE id=1",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    home.hook("UserPromptSubmit", "s1", &[]);
+    assert!(holds(&home.base(), &hex("wombat-lint")), "built again");
+}
+
+#[test]
+fn a_prompt_after_an_unaware_removal_builds_the_base_without_its_words() {
+    let home = Home::new();
+    let id = home.record("deploy", "quokka-deploy");
+    home.record("lint", "wombat-lint");
+    home.hook("SessionStart", "s1", &[]);
+    home.cli(&["forget", &id]);
+    home.hook("UserPromptSubmit", "s1", &[]);
+    assert_eq!(holding(&home, "quokka-deploy"), Vec::<PathBuf>::new());
+    assert!(holds(&home.base(), &hex("wombat-lint")), "built again");
 }

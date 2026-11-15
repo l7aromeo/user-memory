@@ -756,10 +756,12 @@ pub async fn prompt_submit(client: HookClient) -> String {
     let deadline = tokio::time::Instant::now() + hook_time(PROMPT_LIMIT);
     let landing = std::sync::Arc::new(live::Landing::default());
     let mut missed = None;
+    let mut projects = None;
     let notice =
         match tokio::time::timeout_at(deadline, changes(client, landing.clone(), deadline)).await {
             Ok(Some(found)) => match tokio::time::timeout_at(deadline, found.saved).await {
                 Ok(_) => {
+                    projects = found.projects;
                     missed = found.missed;
                     found.notice
                 }
@@ -787,6 +789,18 @@ pub async fn prompt_submit(client: HookClient) -> String {
     if let (Some(_), Some(missed)) = (&notice, &missed) {
         let _ = std::fs::remove_file(missed);
     }
+    // The scope's delivery index, with what is left of the prompt's limit.
+    if let Some(projects) = projects
+        && matches!(setup::configured_remote(), Ok(None))
+    {
+        let db = db_path();
+        let until = std::time::Instant::now()
+            + deadline.saturating_duration_since(tokio::time::Instant::now());
+        let kept = tokio::task::spawn_blocking(move || {
+            memory::delivery_files::at_prompt(&db, &projects, until)
+        });
+        let _ = tokio::time::timeout_at(deadline, kept).await;
+    }
     let (limit, unit) = hook_limit(Some(client), None);
     notice
         .map(|text| capped(text, limit, unit, NOTICE_CUT))
@@ -810,6 +824,8 @@ struct Found {
     notice: Option<String>,
     saved: tokio::task::JoinHandle<std::io::Result<()>>,
     missed: Option<PathBuf>,
+    /// The session's project keys now.
+    projects: Option<Vec<String>>,
 }
 
 /// What changed since the session in the hook payload last looked, and the
@@ -882,11 +898,16 @@ async fn changes(
             }
         }
     };
+    let projects = now
+        .projects
+        .as_ref()
+        .map(|projects| projects.iter().map(|p| p.key.clone()).collect());
     let saved = tokio::task::spawn_blocking(move || live::save(&path, &now, &landing));
     Some(Found {
         notice,
         saved,
         missed,
+        projects,
     })
 }
 

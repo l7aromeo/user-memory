@@ -346,7 +346,8 @@ impl Files {
     }
 }
 
-/// What session start did with its scope's delivery index.
+/// What session start or the prompt hook did with its scope's delivery
+/// index.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Started {
     /// The base was there for the store's position, with no overlay to fold.
@@ -361,14 +362,63 @@ pub(crate) enum Started {
 
 /// Session start's part (#175), for the local store at `db` and the
 /// session's `projects`: under the store's lock, waited for until
-/// `deadline`, clears what [`Files::tidy`] clears, then builds the scope's
-/// base again when it is missing, unusable, or has an overlay that holds a
-/// change, and puts an empty overlay made for the new base beside it. The build reads the store; it
-/// is never renamed into place past `deadline`.
+/// `deadline`, clears what [`Files::tidy`] clears with the files a day old,
+/// then builds the scope's base again when it is missing, unusable, or has
+/// an overlay that holds a change.
 pub(crate) fn at_session_start(
     db: &Path,
     projects: &[String],
     deadline: Instant,
+) -> io::Result<Started> {
+    build_base(
+        db,
+        projects,
+        deadline,
+        Some(SystemTime::now()),
+        Keep::Folded,
+    )
+}
+
+/// The prompt hook's part (#175), for the local store at `db` and the
+/// session's `projects`: refreshes the scope's overlay, waiting for the lock
+/// until `deadline`, and builds the scope's base when there is none it can
+/// use: a new scope after `link` or `unlink`, files deleted by a project
+/// move, `migrate` or a removal, a store put back by hand, or a position the
+/// store no longer counts the changes since.
+pub(crate) fn at_prompt(db: &Path, projects: &[String], deadline: Instant) -> io::Result<Started> {
+    match refresh(db, projects, deadline, true)? {
+        Refreshed::NoBase | Refreshed::Behind | Refreshed::Cleared => {
+            build_base(db, projects, deadline, None, Keep::Current)
+        }
+        Refreshed::Busy | Refreshed::Late => Ok(Started::Left),
+        Refreshed::Unchanged | Refreshed::Done => Ok(Started::Current),
+    }
+}
+
+/// When a scope's usable base and its overlay are kept as they are.
+#[derive(Clone, Copy)]
+enum Keep {
+    /// At session start: while the overlay holds no change, so each session
+    /// starts on a base with every change folded in.
+    Folded,
+    /// At the prompt: while the overlay holds the store's latest change. A
+    /// base whose overlay the store can no longer bring up to date is built
+    /// again; one another hook built meanwhile is kept.
+    Current,
+}
+
+/// Under the store's lock, waited for until `deadline`: clears what
+/// [`Files::tidy`] clears (with the files older than [`DELIVERY_AGE`]
+/// before `aged`, when given), then builds the scope's base unless there is
+/// a usable one to `keep`, and puts an empty overlay made for it beside it.
+/// The build reads the store; it is never renamed into place past
+/// `deadline`.
+fn build_base(
+    db: &Path,
+    projects: &[String],
+    deadline: Instant,
+    aged: Option<SystemTime>,
+    keep: Keep,
 ) -> io::Result<Started> {
     let Some(files) = Files::of(&paths::store_identity(None, db)) else {
         return Ok(Started::Left);
@@ -377,14 +427,18 @@ pub(crate) fn at_session_start(
     let Some(lock) = files.lock_until(deadline)? else {
         return Ok(Started::Left);
     };
-    files.tidy(&lock, Some(SystemTime::now()));
+    files.tidy(&lock, aged);
     let Some(now) = super::changes::position(db) else {
         return Ok(Started::Left);
     };
-    let current = files.open(&scope, &now).is_some_and(|view| {
-        view.overlay
+    let current = files.open(&scope, &now).is_some_and(|view| match keep {
+        Keep::Folded => view
+            .overlay
             .as_ref()
-            .is_none_or(|overlay| overlay.len() == 0 && overlay.header.skip.is_empty())
+            .is_none_or(|overlay| overlay.len() == 0 && overlay.header.skip.is_empty()),
+        Keep::Current => view.overlay.as_ref().is_some_and(|overlay| {
+            Position::kept(overlay.header.position.clone()).same_change(&now)
+        }),
     });
     if current {
         return Ok(Started::Current);
