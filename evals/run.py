@@ -1584,11 +1584,28 @@ def start_servers(scenario, sandbox):
         sandbox.remote = servers[name]
         sandbox.db = servers[name].db
         sandbox.env["USER_MEMORY_DB"] = str(sandbox.db)
-        sandbox.token_file.write_text(servers[name].token.read_text())
-        sandbox.token_file.chmod(0o600)
+        own = scenario.get("client_token")
+        if own is None:
+            sandbox.token_file.write_text(servers[name].token.read_text())
+            sandbox.token_file.chmod(0o600)
+        else:
+            client_token(sandbox, servers[name], own)
         for server in servers.values():
             server.start()
     return servers
+
+
+def client_token(sandbox, server, own):
+    """Gives the client its own token from `server`, as its operator would
+    with `host token add`, instead of the shared one: `own` takes
+    `read_only`. The token goes straight to the client's token file."""
+    binary = sandbox.binary if sandbox.binary.exists() else sandbox.source
+    args = [str(binary), "host", "token", "add", "client", "--out", str(sandbox.token_file),
+            "--db", str(server.db)]
+    if own.get("read_only"):
+        args.append("--read-only")
+    subprocess.run(args, env=sandbox.client_env(), stdin=subprocess.DEVNULL,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
 
 def server_step(step, servers, sandbox):

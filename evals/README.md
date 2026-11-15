@@ -258,7 +258,9 @@ with, so only the server's side can refuse it mid-session). `versions`
 makes the debug build report another release, as `USER_MEMORY_TEST_VERSION`
 does: `client` for the trial's client and what its agent app starts, a
 server's name for that server, such as a client of a newer release than its
-server.
+server. `client_token` gives the client its own token from that server, as
+its operator would with `user-memory host token add`, instead of a copy of
+the shared one: `{"read_only": true}` makes it read-only.
 
 A step's `while_working` is a second user message, sent once the agent's
 first tool call in the turn shows, as a user types while the agent works:
