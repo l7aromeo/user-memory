@@ -1037,5 +1037,68 @@ class OutageAtSessionStart(unittest.TestCase):
         self.assertEqual(len(self.failed([note, saved], [{**memory, "scope": "project"}])), 1)
 
 
+class HistoryFromAnOlderServer(unittest.TestCase):
+    """#141's scenario: a client a release newer than its server, which keeps
+    no history, and an agent asked whether a rule ever changed."""
+
+    NAME = "history_from_a_server_too_old_for_it_is_not_read_as_no_change"
+
+    def setUp(self):
+        scenarios = json.loads((HERE / "scenarios.json").read_text())["scenarios"]
+        self.scenario = next(s for s in scenarios if s["name"] == self.NAME)
+
+    def started(self, scenario):
+        """The client's environment and each server's, as `scenario` starts
+        them, with no process run."""
+        started = []
+        with tempfile.TemporaryDirectory() as folder:
+            folder = Path(folder)
+            sandbox = types.SimpleNamespace(dir=folder, env={"PATH": "/usr/bin"}, remote=None, db=None,
+                                            token_file=folder / "token", binary=folder / "absent",
+                                            source=folder / "user-memory")
+            sandbox.client_env = lambda: sandbox.env
+            popen, connect = run.subprocess.Popen, run.socket.create_connection
+            run.subprocess.Popen = lambda args, env, **kw: started.append(env) or object()
+            run.socket.create_connection = lambda *a, **kw: types.SimpleNamespace(close=lambda: None)
+            try:
+                run.start_servers(scenario, sandbox)
+            finally:
+                run.subprocess.Popen, run.socket.create_connection = popen, connect
+        return sandbox.env, started
+
+    def test_the_client_reports_the_newer_release_and_the_server_the_older(self):
+        client, servers = self.started(self.scenario)
+        self.assertEqual(client[run.TEST_VERSION], "0.10.0")
+        self.assertEqual([env[run.TEST_VERSION] for env in servers], ["0.9.3"])
+        # A server the scenario gives no version reports its own, not the client's.
+        client, servers = self.started({**self.scenario, "versions": {"client": "0.10.0"}})
+        self.assertEqual(client[run.TEST_VERSION], "0.10.0")
+        self.assertEqual([run.TEST_VERSION in env for env in servers], [False])
+
+    def failed(self, records):
+        """The scenario's checks that `records` fail."""
+        return [check for check in self.scenario["checks"]
+                if not run.grade(check, None, records, [])[0]]
+
+    def test_relaying_the_refusal_passes_and_each_way_to_claim_no_change_fails(self):
+        read = ("read", {"ids": ["notes"], "history": True})
+        relayed = {"answer": "I can't show its history: your memory server runs user-memory 0.9.3, which is "
+                             "too old to keep history. Upgrade the server to see earlier wording.",
+                   "tool_calls": [read]}
+        self.assertEqual(self.failed([relayed]), [])
+        # A later read without history, for the rule's text, is no failure.
+        reread = {**relayed, "tool_calls": [read, ("read", {"ids": ["notes"]})]}
+        self.assertEqual(self.failed([reread]), [])
+        for claim in ["It has never been changed.",
+                      "No, it hasn't been changed: it still says the same.",
+                      "There is no earlier version; the rule is unchanged."]:
+            with self.subTest(claim=claim):
+                said = {"answer": f"{claim} Your server is older, though.", "tool_calls": [read]}
+                self.assertEqual([next(iter(c)) for c in self.failed([said])], ["answer_not"])
+        # Not saying why there is no history fails too.
+        silent = {"answer": "The rule says release notes list breaking changes first.", "tool_calls": [read]}
+        self.assertEqual([next(iter(c)) for c in self.failed([silent])], ["answer"])
+
+
 if __name__ == "__main__":
     unittest.main()
