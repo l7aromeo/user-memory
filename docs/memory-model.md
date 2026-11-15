@@ -17,7 +17,7 @@ plain words, see [how it works](how-it-works.md).
 |---|---|
 | `type` | Extensible label: preference, constraint, value, decision, fact, goal, behavior, pattern, or another type; a rule is a preference, constraint or value |
 | `category` | Topic independent of type: programming, communication, workflow, learning, etc. |
-| `title` | One line of at most 120 characters stating the memory so an agent can act on it, such as "Push, publish or tag only with the user's go-ahead"; the index lists it |
+| `title` | One line of at most 120 characters stating the memory so an agent can act on it, such as "Ask before every git push"; the index lists it |
 | `content` | Concise statement, choice, observation, or tentative pattern |
 | `context`, `reason` | When it applies and its stated/evidence-based rationale; absent reasons stay blank |
 | `scope`, `project` | Global across projects, or limited to one project key (see [project identity](projects.md#project-identity)) |
@@ -362,7 +362,7 @@ list names 20 and counts the rest under `unlisted` (`{"add": 4,
 
 An applied import that adds or replaces memories has a name, which its
 summary gives as `import`: the file's name, the time and the start of the
-file's SHA-256, such as `shared.json@2026-11-15T10:42:07Z.3f9a1c2b`. The
+file's SHA-256, such as `shared.json@2026-11-15T10:42:07Z.e0e0e0e0`. The
 file name is the base name only, never a path, with each character other
 than letters, digits, spaces and `.-_+=,()[]~` as `_`, cut to 80
 characters; through a server, the client's file names it. Each memory the

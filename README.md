@@ -59,20 +59,20 @@ In Claude Code, in a repository whose remote is `github.com/you/app`, you say
 that holds in every project; you say yes, and it records the rule:
 
 ```json
-{"stored":true,"id":"c8adb3bb-d79e-44ab-a586-6c19057d4a97","status":"confirmed"}
+{"stored":true,"id":"e0000001-0000-4000-8000-000000000001","status":"confirmed"}
 ```
 
 Later, in Codex, you say it again. The server recognises the rule instead
 of storing a copy:
 
 ```json
-{"stored":false,"reason":"similar memories exist","similar":[{"id":"c8adb3bb-d79e-44ab-a586-6c19057d4a97","content":"Ask before every git push, even on a feature branch.","type":"preference","category":"workflow","scope":"global","project":"","status":"confirmed","source":"explicit","match":"keyword 1.00"}],"resolve":"confirms: an explicit memory said again; supersedes: the user changed their mind; distinct_from: genuinely different; to make a listed observation the user's own, update it with user_confirmed."}
+{"stored":false,"reason":"similar memories exist","similar":[{"id":"e0000001-0000-4000-8000-000000000001","content":"Ask before every git push, even on a feature branch.","type":"preference","category":"workflow","scope":"global","project":"","status":"confirmed","source":"explicit","match":"keyword 1.00"}],"resolve":"confirms: an explicit memory said again; supersedes: the user changed their mind; distinct_from: genuinely different; to make a listed observation the user's own, update it with user_confirmed."}
 ```
 
 and the agent confirms the existing one:
 
 ```json
-{"stored":true,"id":"c8adb3bb-d79e-44ab-a586-6c19057d4a97","confirmed":true,"confirmations":2}
+{"stored":true,"id":"e0000001-0000-4000-8000-000000000001","confirmed":true,"confirmations":2}
 ```
 
 Every session on any machine using that server now starts with the rule in
@@ -85,13 +85,13 @@ USER MEMORY INDEX: the user's memories. Current instructions take precedence; ne
 …
 Rules
   programming (1)
-    0aa57ee3 Use Python 3.13 in this repository [project]
+    e0000002 Use Python 3.13 in this repository [project]
   workflow (1)
-    c8adb3bb Ask before every git push ×2
+    e0000001 Ask before every git push ×2
 ```
 
 Agents are told to read a rule in full before acting on it, so before it
-pushes, the agent reads `c8adb3bb` and asks you first.
+pushes, the agent reads `e0000001` and asks you first.
 
 ## Install
 

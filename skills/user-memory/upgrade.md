@@ -37,12 +37,12 @@ docker compose run --rm memory migrate --check && docker compose stop memory && 
 Schema version 3 gives every memory a title: one line of at most 120 characters that states the memory so an agent can act on it. Nothing writes titles for the user, so the upgrade refuses, changing nothing, until it has one for each memory, and lists the untitled ones with their content.
 
 1. Get the list: the refusal from the installer, `./setup` or `user-memory migrate` (Docker: `docker compose run --rm memory migrate --check`, which changes nothing).
-2. Propose a title for each memory: the rule or fact itself, such as "Push, publish or tag only with the user's explicit go-ahead", not a topic such as "Release policy". Keep the user's wording where it is already short.
+2. Propose a title for each memory: the rule or fact itself, such as "Ask before every git push", not a topic such as "Release policy". Keep the user's wording where it is already short.
 3. Show every proposed title to the user next to its memory, and change what they ask for. Write nothing until they approve the whole list.
 4. Write the approved map to a file, one JSON object from each memory id to its title, for example `titles.json`:
 
    ```json
-   {"68da18b4-…": "Push, publish or tag only with the user's explicit go-ahead"}
+   {"e0000001-…": "Ask before every git push"}
    ```
 
 5. Run the upgrade with it: the installer again with `--titles titles.json` (`… | sh -s -- --titles titles.json`), or `./setup --titles titles.json`, or `user-memory migrate --titles titles.json`. Docker server from a checkout: `docker compose run --rm -T memory migrate --titles - < titles.json`. Each title is stored as written, with its whitespace tidied.

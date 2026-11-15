@@ -17,7 +17,7 @@ Forget only on the user's explicit request, and say what will be lost before doi
 
 ## What one import brought
 
-An applied import that added or replaced memories gives its name in its summary, as `import`, such as `shared.json@2026-11-15T10:42:07Z.3f9a1c2b`.
+An applied import that added or replaced memories gives its name in its summary, as `import`, such as `shared.json@2026-11-15T10:42:07Z.e0e0e0e0`.
 
 1. Get the name from the import's summary or the user; never guess it. When there were later imports too, undo the latest first.
 2. Call `forget` with `import` set to that name and `user_confirmed: true`.

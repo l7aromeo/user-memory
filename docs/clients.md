@@ -70,8 +70,8 @@ docs, never edited unasked), then one line per rule by category:
 
 ```
 workflow
-- 68da18b4 Push, publish or tag only with the user's explicit go-ahead ×3
-- 1b827239 Worktrees go in ~/Projects/worktrees/<project>/<name>
+- e0000001 Ask before every git push ×3
+- e0000005 Run the tests before every commit
 ```
 
 - Only explicit, confirmed, active global preferences, constraints and
@@ -162,10 +162,10 @@ Categories: workflow 3, communication 1, programming 1, work 1 · Types: prefere
 The user's global rules are in your instruction files (USER MEMORY); project rules and other memories follow.
 Rules
   programming (1)
-    7c4e1f20 Use Python in this repository [project]
+    e0000002 Use Python in this repository [project]
 Other memories
   goal (1)
-    a1b2c3d4 Ship the parser by November [project] (tentative)
+    e0000003 Ship the parser by November [project] (tentative)
 ```
 
 Without instruction files (`setup --no-instructions`), the global rules are
@@ -240,7 +240,7 @@ existing category for a new memory (`workflow`, not a new `process`). With
 
   ```
   New rules since your last session:
-    3f9c2a1b Push only with the user's go-ahead (from claude:session/<id>, claude)
+    e0000005 Run the tests before every commit (from claude:session/<id>, claude)
   If one isn't the user's, remove it with forget on their yes, or forget with its origin to remove everything that conversation recorded.
   ```
 
@@ -289,9 +289,9 @@ only when something changed, adds a short notice to the session's context:
 
 ```
 Memory changed since this session last looked (+ new, ~ changed, - forgotten or replaced). Read + and ~ before applying them; stop following - ones, even where your instruction files, loaded at session start, still list them.
-+ 5e2a91c0 Ask before pushing
-~ 7c4e1f20 Use Python 3.13 in this repository
-- 0b9d3a11 Answer in short paragraphs
++ e0000006 Indent with tabs
+~ e0000002 Use Python 3.13 in this repository
+- e0000004 Answer in short paragraphs
 ```
 
 It covers the projects of session start and of every folder the session
