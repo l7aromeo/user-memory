@@ -25,9 +25,9 @@ Every command has `--help`.
 | `user-memory index --project .` | The same, plus the current folder's project. |
 | `user-memory index --topic 'publish a release'` | Memories about that topic first in their groups. |
 | `user-memory index --instructions` | The rules text the instruction files hold. |
-| `user-memory read 68da18b4 1b827239` | Whole memories, by up to 20 ids (full, or the 8 characters the index shows). `--status all` includes stale and superseded ones. |
+| `user-memory read e0000001 e0000005` | Whole memories, by up to 20 ids (full, or the 8 characters the index shows). `--status all` includes stale and superseded ones. |
 | `user-memory read --category workflow` | Every memory in one category. |
-| `user-memory history 68da18b4` | A memory's history, oldest first: each change with its operation, time, client and the values it replaced. For a forgotten memory, its tombstones. `read --history` adds the same to each memory it reads. |
+| `user-memory history e0000001` | A memory's history, oldest first: each change with its operation, time, client and the values it replaced. For a forgotten memory, its tombstones. `read --history` adds the same to each memory it reads. |
 | `user-memory search 'language choice'` | Memories that match a topic, best first. |
 | `user-memory review` | First the rules added or changed and the memories agents recorded in the last 30 days, then groups of duplicates, project copies of global memories, one rule stated in several projects, overlaps and stale patterns. Changes nothing; `--keep ID` (repeatable) leaves the memories you name as they are, so review stops grouping them. `--project P` adds projects; `--max-groups N` limits the groups listed. |
 
@@ -96,11 +96,11 @@ only the fields that change; the rest stay, including the evidence, often
 your own words, which `--evidence` replaces:
 
 ```bash
-user-memory update 68da18b4-5d40-4746-930f-22a7c859e8f7 --title 'Ask before every push'
+user-memory update e0000001-0000-4000-8000-000000000001 --title 'Ask before every push'
 ```
 
 ```bash
-user-memory update 68da18b4-5d40-4746-930f-22a7c859e8f7 --content 'Prefer Python for prototypes' --reason 'Faster iteration'
+user-memory update e0000001-0000-4000-8000-000000000001 --content 'Prefer Python for prototypes' --reason 'Faster iteration'
 ```
 
 `--evidence` replaces the kept evidence, `--origin ORIGIN` adds the
@@ -108,7 +108,7 @@ conversation the correction came from, and `--replace-origins` with it keeps
 only that one:
 
 ```bash
-user-memory update 68da18b4-5d40-4746-930f-22a7c859e8f7 --content 'Prefer Python for prototypes' --origin claude:session/<id> --replace-origins
+user-memory update e0000001-0000-4000-8000-000000000001 --content 'Prefer Python for prototypes' --origin claude:session/<id> --replace-origins
 ```
 
 Every change is kept in the memory's history for a year, with the values
@@ -120,19 +120,19 @@ the memory's earlier events keep only their operation and time, and this
 change keeps no replaced values.
 
 ```bash
-user-memory update 68da18b4-5d40-4746-930f-22a7c859e8f7 --content 'The deploy key is in the vault' --drop-history
+user-memory update e0000001-0000-4000-8000-000000000001 --content 'The deploy key is in the vault' --drop-history
 ```
 
 To tell review that two memories are different, so it stops grouping them:
 
 ```bash
-user-memory update 68da18b4-5d40-4746-930f-22a7c859e8f7 --distinct-from 1b827239-0000-4000-8000-000000000000
+user-memory update e0000001-0000-4000-8000-000000000001 --distinct-from e0000005-0000-4000-8000-000000000005
 ```
 
 ## Forget
 
 ```bash
-user-memory forget 68da18b4-5d40-4746-930f-22a7c859e8f7
+user-memory forget e0000001-0000-4000-8000-000000000001
 ```
 
 ```bash
@@ -140,7 +140,7 @@ user-memory forget --origin claude:session/<id>
 ```
 
 ```bash
-user-memory forget --import "shared.json@2026-11-15T10:42:07Z.3f9a1c2b"
+user-memory forget --import "shared.json@2026-11-15T10:42:07Z.e0e0e0e0"
 ```
 
 The first deletes one memory, by its full id or the 8 characters the index shows. The second deletes every memory

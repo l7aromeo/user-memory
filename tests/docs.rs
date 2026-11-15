@@ -1672,7 +1672,7 @@ fn fragments(line: &str) -> Vec<Fragment> {
 }
 
 /// A line of a quoted block that shows a memory or a group of them, not a
-/// message: `  7c4e1f20 Title`, `+ 5e2a91c0 Title`, `- 0b9d3a11 Title`,
+/// message: `  e0000002 Title`, `+ e0000006 Title`, `- e0000004 Title`,
 /// `  programming (1)`.
 fn data_line(line: &str) -> bool {
     let line = line.trim_start();
@@ -2489,4 +2489,241 @@ fn a_page_missing_from_the_index_is_caught() {
     let pages = ["docs/README.md", "docs/a.md", "docs/b.md", "docs/dev/c.md"].map(String::from);
     let index = "[A](a.md#part), [C](dev/c.md) and [up](../README.md)\n```\n[B](b.md)\n```\n";
     assert_eq!(unindexed(index, &pages), ["docs/b.md"]);
+}
+
+/// The folders whose text the example-id check reads: every text the
+/// repository holds but the build output. The root's own files are read
+/// too.
+const ID_FOLDERS: [&str; 8] = [
+    "docs",
+    "skills",
+    "release-notes",
+    "src",
+    "tests",
+    "evals",
+    "examples",
+    ".github",
+];
+
+/// The kinds of file those folders hold text in.
+const ID_EXTENSIONS: [&str; 11] = [
+    "md", "rs", "sql", "json", "py", "toml", "yml", "yaml", "sh", "ps1", "addition",
+];
+
+/// Ids that tests need in a particular shape, each plainly made up, beside
+/// the families `example_id` accepts. docs/dev/development.md lists them
+/// with the same reasons.
+const SHAPED_IDS: [&str; 10] = [
+    // A version 1 UUID (RFC 9562's DNS namespace), which an import refuses.
+    "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+    // Version 4 with the Microsoft variant, which an import refuses too.
+    "6ba7b810-9dad-41d1-c0b4-00c04fd430c8",
+    // Not version 4.
+    "00000000-0000-1000-8000-000000000003",
+    // Version 4 with the wrong variant.
+    "00000000-0000-4000-c000-000000000004",
+    // Two ids sharing their short form.
+    "abcdef12-0000-4000-8000-000000000001",
+    "abcdef12-0000-4000-8000-000000000002",
+    // Another memory, named only in a field that refers to one.
+    "11111111-1111-4111-8111-111111111111",
+    // An index entry left for a memory that is gone.
+    "1a2b3c4d-0000-4000-8000-00000000dead",
+    // Ids that sort after every other.
+    "ffffffff-ffff-4fff-bfff-ffffffffffff",
+    "ffffffff-0000-4000-8000-ffffffffffff",
+];
+
+/// Whether `digits` is `len` decimal digits.
+fn decimal(digits: &str, len: usize) -> bool {
+    digits.len() == len && digits.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Whether `id` is one an example may use: an `e` example id
+/// (`e0000001-0000-4000-8000-000000000001`, the number in the first group
+/// and again at the end), a schema seed's (`1a2b3c4d-1111-4aaa-8aaa-…01`),
+/// a test's fixed id (`00000000-0000-4000-8000-0000000000NN`), or one of
+/// `SHAPED_IDS`.
+fn example_id(id: &str) -> bool {
+    let id = id.to_ascii_lowercase();
+    let example = id
+        .strip_prefix('e')
+        .and_then(|rest| rest.split_once("-0000-4000-8000-00000"))
+        .is_some_and(|(number, end)| decimal(number, 7) && number == end);
+    let seed = id
+        .strip_prefix("1a2b3c4d-")
+        .and_then(|rest| rest.split_once("-4aaa-8aaa-0000000000"))
+        .is_some_and(|(group, end)| decimal(group, 4) && decimal(end, 2));
+    let fixed = id
+        .strip_prefix("00000000-0000-4000-8000-0000000000")
+        .is_some_and(|end| end.len() == 2 && end.bytes().all(|b| b.is_ascii_hexdigit()));
+    example || seed || fixed || SHAPED_IDS.contains(&id.as_str())
+}
+
+/// Whether the byte at `at` in `text` starts or ends nothing longer: a
+/// letter, digit or `-` joins it to its neighbour.
+fn apart(text: &[u8], at: Option<usize>) -> bool {
+    at.and_then(|at| text.get(at))
+        .is_none_or(|b| !b.is_ascii_alphanumeric() && *b != b'-')
+}
+
+/// The UUID-shaped strings in `text` that are not example ids, each with
+/// its line.
+fn stray_uuids(text: &str) -> Vec<(usize, String)> {
+    /// Where a UUID has its hyphens.
+    const HYPHENS: [usize; 4] = [8, 13, 18, 23];
+    /// A UUID's length.
+    const UUID: usize = 36;
+    let bytes = text.as_bytes();
+    let mut found = Vec::new();
+    for start in 0..bytes.len().saturating_sub(UUID - 1) {
+        let candidate = &bytes[start..start + UUID];
+        let shaped = candidate.iter().enumerate().all(|(i, b)| {
+            if HYPHENS.contains(&i) {
+                *b == b'-'
+            } else {
+                b.is_ascii_hexdigit()
+            }
+        });
+        if shaped
+            && apart(bytes, start.checked_sub(1))
+            && apart(bytes, Some(start + UUID))
+            && let Ok(id) = std::str::from_utf8(candidate)
+            && !example_id(id)
+        {
+            let line = text[..start].matches('\n').count() + 1;
+            found.push((line, id.to_owned()));
+        }
+    }
+    found
+}
+
+/// The short ids in a doc that are not example ids: 8 lowercase hex
+/// characters with a letter among them, standing alone or cut from a full
+/// id with `-…`. All digits is a date or a number, and a hash joined to a
+/// name by a dot (`….e0e0e0e0`) is no id; a commit id is quoted at another
+/// length.
+fn stray_short_ids(text: &str) -> Vec<(usize, String)> {
+    /// A short id's length.
+    const SHORT: usize = 8;
+    let bytes = text.as_bytes();
+    let mut found = Vec::new();
+    for start in 0..bytes.len().saturating_sub(SHORT - 1) {
+        let candidate = &bytes[start..start + SHORT];
+        let hex = candidate
+            .iter()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b));
+        let joined = start
+            .checked_sub(1)
+            .is_some_and(|before| bytes[before] == b'.');
+        // A full id cut short, as in `{"e0000001-…": …}`.
+        let cut = bytes[start + SHORT..].starts_with("-…".as_bytes());
+        if hex
+            && !candidate.iter().all(u8::is_ascii_digit)
+            && !joined
+            && apart(bytes, start.checked_sub(1))
+            && (cut || apart(bytes, Some(start + SHORT)))
+            && let Ok(id) = std::str::from_utf8(candidate)
+            && !(id.starts_with('e') && decimal(&id[1..], SHORT - 1))
+        {
+            let line = text[..start].matches('\n').count() + 1;
+            found.push((line, id.to_owned()));
+        }
+    }
+    found
+}
+
+/// Every text file under `folder`, by its path from the repository root.
+fn texts(folder: &Path, root: &Path, into: &mut Vec<(String, String)>) {
+    for entry in fs::read_dir(folder).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            if path.file_name().is_some_and(|name| name != "__pycache__") {
+                texts(&path, root, into);
+            }
+        } else if path
+            .extension()
+            .is_some_and(|ext| ID_EXTENSIONS.iter().any(|known| ext == *known))
+        {
+            let name = path
+                .strip_prefix(root)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            into.push((name, fs::read_to_string(&path).unwrap()));
+        }
+    }
+}
+
+// Examples use one set of plainly made-up ids, the same few everywhere
+// (docs/dev/development.md#example-ids-and-titles), so a reader or a tool
+// never takes an example for a stored memory.
+#[test]
+fn every_uuid_is_an_example() {
+    let root = repo_file("");
+    let mut files = Vec::new();
+    for entry in fs::read_dir(&root).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_file()
+            && path
+                .extension()
+                .is_some_and(|ext| ID_EXTENSIONS.iter().any(|known| ext == *known))
+        {
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            files.push((name, fs::read_to_string(&path).unwrap()));
+        }
+    }
+    for folder in ID_FOLDERS {
+        texts(&root.join(folder), &root, &mut files);
+    }
+    assert!(files.iter().any(|(name, _)| name == "src/main.rs"));
+    let mut strays: Vec<String> = files
+        .iter()
+        .flat_map(|(name, text)| {
+            stray_uuids(text)
+                .into_iter()
+                .map(move |(line, id)| format!("{name}:{line}: {id}"))
+        })
+        .collect();
+    for (name, doc) in docs() {
+        strays.extend(
+            stray_short_ids(&doc)
+                .into_iter()
+                .map(|(line, id)| format!("{name}:{line}: {id}")),
+        );
+    }
+    assert!(
+        strays.is_empty(),
+        "ids outside the example set (docs/dev/development.md#example-ids-and-titles):\n{}",
+        strays.join("\n")
+    );
+}
+
+#[test]
+fn an_id_outside_the_example_set_is_caught() {
+    // Built here, so this file holds no stray id for the check above.
+    let stray = ["c0ffee11", "2222", "4333", "8444", "555566667777"].join("-");
+    let doc = "Run `user-memory read e0000001-0000-4000-8000-000000000001`.\n\
+        {\"id\":\"STRAY\"}\n\
+        ```output\n    e0000002 Use Python 3.13 in this repository [project]\n    c0ffee11 Answer briefly\n```\n\
+        Undo `shared.json@2026-11-15T10:42:07Z.e0e0e0e0`; commit 3f9a1c2 or 3f9a1c2b4d; on 20261015.\n\
+        {\"c0ffee22-…\": \"Answer briefly\"}, {\"e0000003-…\": \"Ship the parser by November\"}\n"
+        .replace("STRAY", &stray);
+    assert_eq!(stray_uuids(&doc), [(2, stray.clone())]);
+    assert_eq!(
+        stray_short_ids(&doc),
+        [(5, "c0ffee11".to_owned()), (8, "c0ffee22".to_owned())]
+    );
+    let test = "const ID: &str = \"STRAY\";\n\
+        let seed = \"1a2b3c4d-3333-4aaa-8aaa-000000000003\";\n\
+        let fixed = \"00000000-0000-4000-8000-00000000000a\";\n\
+        let longer = \"00000000-0000-4000-8000-000000000001-\";\n\
+        let shaped = \"6ba7b810-9dad-11d1-80b4-00c04fd430c8\";\n"
+        .replace("STRAY", &stray);
+    assert_eq!(stray_uuids(&test), [(1, stray)]);
+    // An `e` id whose numbers differ is no example id.
+    assert!(!example_id(
+        &["e0000001", "0000-4000-8000-000000000002"].join("-")
+    ));
+    assert!(example_id("E0000007-0000-4000-8000-000000000007"));
 }

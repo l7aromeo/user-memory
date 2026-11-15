@@ -53,7 +53,7 @@ the conversation it came from. Each memory has:
 
 | Part | Example |
 |---|---|
-| Title | `Push, publish or tag only with my explicit go-ahead` |
+| Title | `Ask before every git push` |
 | Content | The rule in full, with its conditions and exceptions. |
 | Reason | Why you want it, when you said why. A reason you did not give stays blank. |
 | Type | `preference`, `constraint`, `value`, `decision`, `goal`, `fact`, `behavior`, `pattern` or another label. |
@@ -102,13 +102,13 @@ A global memory you record yourself on the command line counts as your yes.
 ## Titles
 
 Every memory has a title of at most 120 characters. The title states the
-memory itself ("Push, publish or tag only with my explicit go-ahead"), not a
+memory itself ("Ask before every git push"), not a
 topic ("Release policy"). Agents decide from the title whether to read the
 whole memory, so a good title matters. To reword one, ask your agent, or run
 `update` with the memory's id, the 8 characters the index shows:
 
 ```bash
-user-memory update 68da18b4 --title 'Push, publish or tag only with my explicit go-ahead'
+user-memory update e0000001 --title 'Ask before every git push'
 ```
 
 Changing only the title keeps everything else about the memory.
@@ -144,8 +144,8 @@ setup also writes your global rules there, one line each:
 
 ```
 workflow
-- 68da18b4 Push, publish or tag only with my explicit go-ahead ×3
-- 1b827239 Worktrees go in ~/Projects/worktrees/<project>/<name>
+- e0000001 Ask before every git push ×3
+- e0000005 Run the tests before every commit
 ```
 
 Only your explicit, confirmed, global rules go there. Observations, patterns,
@@ -175,10 +175,10 @@ USER MEMORY INDEX: the user's memories. Current instructions take precedence; ne
 …
 Rules
   programming (1)
-    7c4e1f20 Use Python in this repository [project]
+    e0000002 Use Python in this repository [project]
 Other memories
   goal (1)
-    a1b2c3d4 Ship the parser by November [project] (tentative)
+    e0000003 Ship the parser by November [project] (tentative)
 ```
 
 - **Conversation origin** names this conversation. Every memory recorded in it
@@ -225,9 +225,9 @@ notice:
 
 ```output
 Memory changed since this session last looked (+ new, ~ changed, - forgotten or replaced). Read + and ~ before applying them; stop following - ones, even where your instruction files, loaded at session start, still list them.
-+ 5e2a91c0 Ask before pushing
-~ 7c4e1f20 Use Python 3.13 in this repository
-- 0b9d3a11 Answer in short paragraphs
++ e0000006 Indent with tabs
+~ e0000002 Use Python 3.13 in this repository
+- e0000004 Answer in short paragraphs
 ```
 
 `+` is a new memory, `~` a changed one, and `-` one that was forgotten or
@@ -288,7 +288,7 @@ user-memory index --project .
 ```
 
 ```bash
-user-memory read 68da18b4
+user-memory read e0000001
 ```
 
 ```bash

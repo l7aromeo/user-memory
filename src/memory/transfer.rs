@@ -875,7 +875,7 @@ fn one_line(title: &str) -> String {
 
 /// The name of the import being written in `conn`: the cleaned name of
 /// `file`, the time and the hash of `document`, as
-/// `shared.json@2026-11-15T10:42:07Z.3f9a1c2b`, with `.2`, `.3` and so on
+/// `shared.json@2026-11-15T10:42:07Z.e0e0e0e0`, with `.2`, `.3` and so on
 /// after a name an earlier import here already took in the same second.
 fn import_name(conn: &Connection, file: &str, document: &str) -> Result<String> {
     let time: String = conn.query_row("SELECT strftime('%Y-%m-%dT%H:%M:%SZ','now')", [], |r| {

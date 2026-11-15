@@ -272,7 +272,7 @@ takes each title from a JSON object mapping every memory id to the title the
 user approved:
 
 ```json
-{"68da18b4-5d40-4746-930f-22a7c859e8f7": "Push, publish or tag only with the user's explicit go-ahead"}
+{"e0000001-0000-4000-8000-000000000001": "Ask before every git push"}
 ```
 
 Without the map, with an id missing or unknown, or with a title that is

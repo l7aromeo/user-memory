@@ -47,6 +47,9 @@ skip without them locally.
 - **Docs.** A change updates the docs and code comments it affects, in the
   same change. `cargo test --test docs` checks that the commands, quoted
   messages and links in the docs and the user-memory skill match the code.
+- **Examples.** Docs, tests and fixtures use the made-up ids and titles in
+  [example ids and titles](docs/dev/development.md#example-ids-and-titles);
+  `cargo test --test docs` fails on any other UUID.
 - **Release notes.** Only the release pull request adds or changes
   `release-notes/` and `CHANGELOG.md`. Any other pull request that users
   notice gives its line for the notes under the template's *Upgrade note*,

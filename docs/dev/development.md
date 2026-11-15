@@ -429,6 +429,54 @@ If you ran `embedding set` with the dev build, also delete
 `target/debug/.user-memory.json`, so the next run starts with no saved
 setting.
 
+## Example ids and titles
+
+Examples are plainly made up and the same few everywhere: the docs, the
+skill, help texts, tests, fixtures and evals use these memories.
+
+| Id | Short | Title |
+|---|---|---|
+| `e0000001-0000-4000-8000-000000000001` | `e0000001` | Ask before every git push |
+| `e0000002-0000-4000-8000-000000000002` | `e0000002` | Use Python 3.13 in this repository |
+| `e0000003-0000-4000-8000-000000000003` | `e0000003` | Ship the parser by November |
+| `e0000004-0000-4000-8000-000000000004` | `e0000004` | Answer in short paragraphs |
+| `e0000005-0000-4000-8000-000000000005` | `e0000005` | Run the tests before every commit |
+| `e0000006-0000-4000-8000-000000000006` | `e0000006` | Indent with tabs |
+
+A further example continues the count: `e0000007-0000-4000-8000-000000000007`.
+The content is the title unless the passage needs more. Tests may use other
+titles too, as long as they describe nobody in particular.
+
+Two other families stay where they are:
+
+- `1a2b3c4d-1111-4aaa-8aaa-000000000001` and on: the schema snapshots'
+  seeds in `tests/fixtures/schema/` and the tests that read them.
+- `00000000-0000-4000-8000-000000000001` and on, up to `…0000ff`: ids a
+  test needs and never shows.
+
+A test that needs an id of a particular shape uses one of these, each with
+the reason beside it in `SHAPED_IDS` in `tests/docs.rs`:
+
+| Id | Why |
+|---|---|
+| `6ba7b810-9dad-11d1-80b4-00c04fd430c8` | Version 1 (RFC 9562's DNS namespace), which an import refuses |
+| `6ba7b810-9dad-41d1-c0b4-00c04fd430c8` | Version 4 with the Microsoft variant, refused too |
+| `00000000-0000-1000-8000-000000000003` | Not version 4 |
+| `00000000-0000-4000-c000-000000000004` | Version 4 with the wrong variant |
+| `abcdef12-0000-4000-8000-000000000001`, `…002` | Two ids sharing their short form |
+| `11111111-1111-4111-8111-111111111111` | Another memory, named only in a field that refers to one |
+| `1a2b3c4d-0000-4000-8000-00000000dead` | An index entry left for a memory that is gone |
+| `ffffffff-ffff-4fff-bfff-ffffffffffff`, `ffffffff-0000-4000-8000-ffffffffffff` | Ids that sort after every other |
+
+`every_uuid_is_an_example` in `tests/docs.rs` fails on any other UUID in
+the repository's text, and on any other short id in the docs and the skill:
+8 hex characters with a letter among them, standing alone or cut short as
+`e0000001-…`. A hash or commit id that is not a memory id is written so it
+cannot be taken for one: a commit id at 7 characters or at least 9, and a
+hash joined to its name by a dot, as an import's name ends in `.e0e0e0e0`.
+Store ids are 32 hex characters without hyphens, and session ids are
+written `<id>`, so neither looks like a memory id.
+
 ## Changing the stored schema
 
 Every change to the stored schema (tables, triggers, search-index SQL) bumps

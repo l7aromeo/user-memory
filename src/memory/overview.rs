@@ -890,7 +890,7 @@ mod tests {
     #[test]
     fn a_line_shows_the_short_id_title_and_markers() {
         let m = Memory {
-            id: uuid::Uuid::parse_str("68da18b4-1111-4aaa-8aaa-000000000001").unwrap(),
+            id: uuid::Uuid::parse_str("e0000003-0000-4000-8000-000000000003").unwrap(),
             title: "Ship the parser by November".into(),
             scope: "project".into(),
             status: "tentative".into(),
@@ -899,7 +899,7 @@ mod tests {
         };
         assert_eq!(
             line(&m),
-            "    68da18b4 Ship the parser by November [project] (tentative) ×3"
+            "    e0000003 Ship the parser by November [project] (tentative) ×3"
         );
         let plain = Memory {
             title: "Prefer Rust".into(),
@@ -908,7 +908,7 @@ mod tests {
             confirmations: 1,
             ..m
         };
-        assert_eq!(line(&plain), "    68da18b4 Prefer Rust");
+        assert_eq!(line(&plain), "    e0000003 Prefer Rust");
     }
 
     /// An index of `count` memory lines for `name`, as the hook fetches one.

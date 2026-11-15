@@ -49,7 +49,7 @@ pub struct Record {
     /// Topic/category independent from type, such as programming or communication; reuse a category the index's Categories line lists when one fits.
     #[arg(long)]
     pub category: String,
-    /// One line of at most 120 characters stating the memory so an agent can act on it from the index alone, such as the rule itself: "Push, publish or tag only with the user's go-ahead", not "Release policy".
+    /// One line of at most 120 characters stating the memory so an agent can act on it from the index alone, such as the rule itself: "Ask before every git push", not "Release policy".
     #[arg(long, allow_hyphen_values = true)]
     pub title: String,
     /// The memory in full, readable without the conversation: the user's preference, choice, fact or observed behavior with its conditions and exceptions; at most 4,000 characters.
