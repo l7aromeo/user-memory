@@ -210,10 +210,10 @@ fn a_running_session_hears_what_changed_since_it_last_looked() {
     assert_eq!(
         notice,
         [
-            "Memory changed since this session last looked (+ new, ~ changed, - no longer active; read before applying):".to_owned(),
+            "Memory changed since this session last looked (+ new, ~ changed, - forgotten or replaced). Read + and ~ before applying them; stop following - ones, even where your instruction files, loaded at session start, still list them.".to_owned(),
             format!("+ {} Ask before pushing", id8(&added)),
             format!("~ {} Answer in one short paragraph", id8(&renamed)),
-            format!("- {}", id8(&forgotten)),
+            format!("- {} Use tabs for indentation", id8(&forgotten)),
         ]
         .join("\n")
     );
@@ -630,7 +630,7 @@ fn only_a_change_an_agent_acts_on_is_told() {
     assert_eq!(
         home.notice("s"),
         [
-            "Memory changed since this session last looked (+ new, ~ changed, - no longer active; read before applying):".to_owned(),
+            "Memory changed since this session last looked (+ new, ~ changed, - forgotten or replaced). Read + and ~ before applying them; stop following - ones, even where your instruction files, loaded at session start, still list them.".to_owned(),
             format!("~ {} Keep pull requests small", id8(&id)),
         ]
         .join("\n")
@@ -727,5 +727,70 @@ fn a_prompt_during_another_write_still_hears_what_changed() {
     assert!(
         notice.contains(&format!("+ {} Ask before pushing", id8(&added))),
         "{notice:?}"
+    );
+}
+
+// What this conversation changed itself, by its origin on the memory's
+// latest change, is not told back to it; the same change from another
+// conversation is.
+#[test]
+fn a_session_is_not_told_of_its_own_changes() {
+    let home = Home::new();
+    home.record("Prefer Rust for tools");
+    home.hook("SessionStart", "s", &[]);
+    let by = |origin: &str, title: &str| {
+        home.cli(&[
+            "record",
+            "--type",
+            "preference",
+            "--category",
+            "git",
+            "--title",
+            title,
+            "--content",
+            title,
+            "--scope",
+            "global",
+            "--origin",
+            origin,
+        ])["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let own = by("claude:session/s", "Prefers rebase merges");
+    // Another conversation confirms it before the next prompt: still this
+    // session's own change, since a confirmation changes nothing.
+    home.cli(&[
+        "record",
+        "--type",
+        "preference",
+        "--category",
+        "git",
+        "--title",
+        "Prefers rebase merges",
+        "--content",
+        "Prefers rebase merges",
+        "--scope",
+        "global",
+        "--confirms",
+        &own,
+        "--origin",
+        "claude:session/other",
+    ]);
+    assert_eq!(home.notice("s"), "", "its own record");
+    home.cli(&[
+        "update",
+        &own,
+        "--content",
+        "Prefers rebase merges for feature branches",
+        "--origin",
+        "claude:session/s",
+    ]);
+    assert_eq!(home.notice("s"), "", "its own update");
+    let theirs = by("claude:session/other", "Signs every commit");
+    assert_eq!(
+        home.notice("s").lines().nth(1),
+        Some(format!("+ {} Signs every commit", id8(&theirs)).as_str())
     );
 }

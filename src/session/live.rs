@@ -30,7 +30,7 @@ const SESSION_ID_CHARS: usize = 128;
 /// project no longer loads there.
 const LEFT_WITH_PROJECT: &str = "project no longer loaded";
 /// Opens the notice; the agent reads a changed memory before applying it.
-const HEADER: &str = "Memory changed since this session last looked (+ new, ~ changed, - no longer active; read before applying):";
+const HEADER: &str = "Memory changed since this session last looked (+ new, ~ changed, - forgotten or replaced). Read + and ~ before applying them; stop following - ones, even where your instruction files, loaded at session start, still list them.";
 
 /// Where a project the session sees comes from, as the header labels it:
 /// the folder's own key, the key of its `.user-memory-key` that waits for a
@@ -331,14 +331,22 @@ fn projects_changed(old: Option<&[Project]>, new: Option<&[Project]>) -> Option<
 ///
 /// A memory in `left` is still active but left with its project, so it is
 /// marked `<` with its title rather than `-`.
-pub(super) fn notice(old: &Snapshot, new: &Snapshot, left: &BTreeSet<String>) -> Option<String> {
+///
+/// A memory in `own` was changed last by this conversation, which knows it
+/// already, and is left out.
+pub(super) fn notice(
+    old: &Snapshot,
+    new: &Snapshot,
+    left: &BTreeSet<String>,
+    own: &BTreeSet<String>,
+) -> Option<String> {
     let projects = projects_changed(old.projects.as_deref(), new.projects.as_deref());
     // A snapshot saved before digests holds each memory's last update in
     // their place: compared with a digest, every memory would read as
     // changed, so the first notice after an upgrade compares status and
     // title alone.
     let digests = old.changes.is_some() == new.changes.is_some();
-    let memories = memory_notice(&old.stamps, &new.stamps, left, digests);
+    let memories = memory_notice(&old.stamps, &new.stamps, left, own, digests);
     match (projects, memories) {
         (None, None) => None,
         (projects, memories) => Some(
@@ -356,33 +364,36 @@ fn memory_notice(
     old: &Stamps,
     new: &Stamps,
     left: &BTreeSet<String>,
+    own: &BTreeSet<String>,
     digests: bool,
 ) -> Option<String> {
     let short = |id: &str| id.chars().take(8).collect::<String>();
     let line =
         |sign: char, id: &str, stamp: &Stamp| format!("{sign} {} {}", short(id), stamp.title);
+    let theirs = |id: &&String| !own.contains(*id);
     let added = new
         .iter()
-        .filter(|(id, _)| !old.contains_key(*id))
+        .filter(|(id, _)| theirs(id) && !old.contains_key(*id))
         .map(|(id, stamp)| line('+', id, stamp));
     let changed = new
         .iter()
         .filter(|(id, stamp)| {
-            old.get(*id).is_some_and(|was| {
-                (digests && was.digest != stamp.digest)
-                    || was.status != stamp.status
-                    || was.title != stamp.title
-            })
+            theirs(id)
+                && old.get(*id).is_some_and(|was| {
+                    (digests && was.digest != stamp.digest)
+                        || was.status != stamp.status
+                        || was.title != stamp.title
+                })
         })
         .map(|(id, stamp)| line('~', id, stamp));
     let removed = old
         .iter()
-        .filter(|(id, _)| !new.contains_key(*id))
+        .filter(|(id, _)| theirs(id) && !new.contains_key(*id))
         .map(|(id, stamp)| {
             if left.contains(id) {
                 format!("< {} {} ({LEFT_WITH_PROJECT})", short(id), stamp.title)
             } else {
-                format!("- {}", short(id))
+                format!("- {} {}", short(id), stamp.title)
             }
         });
     let changes: Vec<String> = added.chain(changed).chain(removed).collect();
@@ -437,7 +448,10 @@ mod tests {
                 stamp("2026-10-01 10:00:00", "confirmed", "Old title"),
             ),
         ]);
-        assert_eq!(memory_notice(&old, &old, &BTreeSet::new(), true), None);
+        assert_eq!(
+            memory_notice(&old, &old, &BTreeSet::new(), &BTreeSet::new(), true),
+            None
+        );
         let new = stamps(&[
             ("11111111-aaaa", kept),
             (
@@ -454,13 +468,13 @@ mod tests {
             ),
         ]);
         assert_eq!(
-            memory_notice(&old, &new, &BTreeSet::new(), true).unwrap(),
+            memory_notice(&old, &new, &BTreeSet::new(), &BTreeSet::new(), true).unwrap(),
             [
                 HEADER,
                 "+ 55555555 Ask before pushing",
                 "~ 22222222 Likes tea",
                 "~ 44444444 New title",
-                "- 33333333",
+                "- 33333333 Answer briefly",
             ]
             .join("\n")
         );
@@ -476,7 +490,14 @@ mod tests {
                 )
             })
             .collect();
-        let text = memory_notice(&Stamps::new(), &new, &BTreeSet::new(), true).unwrap();
+        let text = memory_notice(
+            &Stamps::new(),
+            &new,
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            true,
+        )
+        .unwrap();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 1 + NOTICE_LINES + 1);
         assert_eq!(
@@ -486,9 +507,15 @@ mod tests {
         assert_eq!(lines[NOTICE_LINES + 1], "and 3 more: call index");
         let exact: Stamps = new.into_iter().take(NOTICE_LINES).collect();
         assert!(
-            !memory_notice(&Stamps::new(), &exact, &BTreeSet::new(), true)
-                .unwrap()
-                .contains("more")
+            !memory_notice(
+                &Stamps::new(),
+                &exact,
+                &BTreeSet::new(),
+                &BTreeSet::new(),
+                true
+            )
+            .unwrap()
+            .contains("more")
         );
     }
 
@@ -698,7 +725,7 @@ mod tests {
             changes: None,
         };
         assert_eq!(
-            notice(&old, &new, &BTreeSet::new()).unwrap(),
+            notice(&old, &new, &BTreeSet::new(), &BTreeSet::new()).unwrap(),
             [
                 "Projects changed: + github.com/x/web (listed in .user-memory); - github.com/x/old (no longer listed); - github.com/x/tool (unlinked); - local:app (moved)",
                 HEADER,
@@ -713,7 +740,7 @@ mod tests {
             changes: None,
         };
         assert!(
-            notice(&old, &same_memories, &BTreeSet::new())
+            notice(&old, &same_memories, &BTreeSet::new(), &BTreeSet::new())
                 .unwrap()
                 .starts_with("Projects changed: ")
         );
@@ -722,8 +749,11 @@ mod tests {
             stamps: kept,
             changes: None,
         };
-        assert_eq!(notice(&unknown, &same_memories, &BTreeSet::new()), None);
-        assert_eq!(notice(&old, &old, &BTreeSet::new()), None);
+        assert_eq!(
+            notice(&unknown, &same_memories, &BTreeSet::new(), &BTreeSet::new()),
+            None
+        );
+        assert_eq!(notice(&old, &old, &BTreeSet::new(), &BTreeSet::new()), None);
     }
 
     fn seen_from(key: &str, source: &str, folders: &[&str]) -> Project {

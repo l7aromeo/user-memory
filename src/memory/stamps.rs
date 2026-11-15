@@ -18,8 +18,15 @@ pub const STAMPS: &str = "user-memory stamps v1";
 /// Opens a stamps reply for a client that asks with [`Since`]: the store's
 /// id and latest change, then `full` when it lists every memory in scope or
 /// `delta` when it lists only those changed since, with `-` and the id of
-/// each changed memory no longer in scope.
+/// each changed memory no longer in scope. Each memory's line holds the
+/// conversation origin of its latest change, so a session is not told of
+/// its own.
 pub const STAMPS_SINCE: &str = "user-memory stamps v2";
+
+/// The conversation origin of the latest change to the memory `{id}` names,
+/// empty when none was given: a confirmation, a distinct pair or a removed
+/// conversation changes nothing a session is told of.
+const LATEST_ORIGIN: &str = "coalesce((SELECT origin FROM memory_events WHERE memory_id={id} AND op NOT IN ('confirm','distinct','origin_removed') ORDER BY seq DESC LIMIT 1),'')";
 
 /// Where a session's snapshot stands in the store's count of its changes:
 /// the store's id and the latest change it has seen. The default, an empty
@@ -73,8 +80,9 @@ pub(super) fn stamps_since(conn: &Connection, filter: &Filter, since: &Since) ->
     let delta = since.store_id == store_id && (pruned..=last).contains(&since.change);
     let (condition, mut values) = condition(filter)?;
     let mut sql = format!(
-        "SELECT id,status,title,{} FROM memories WHERE {condition}",
-        super::changes::digested()
+        "SELECT id,status,title,{},{} FROM memories WHERE {condition}",
+        super::changes::digested(),
+        LATEST_ORIGIN.replace("{id}", "memories.id"),
     );
     if delta {
         sql.push_str(" AND id IN (SELECT memory_id FROM memory_changes WHERE change>?)");
@@ -91,16 +99,25 @@ pub(super) fn stamps_since(conn: &Connection, filter: &Filter, since: &Since) ->
         let status: String = row.get(1)?;
         let title: String = row.get(2)?;
         let counted: String = row.get(3)?;
-        lines.push(format!("{id}\t{}\t{status}\t{title}", digest(&counted)));
+        let origin: String = row.get(4)?;
+        lines.push(format!(
+            "{id}\t{}\t{status}\t{origin}\t{title}",
+            digest(&counted)
+        ));
         listed.insert(id);
     }
     if delta {
-        let mut changed = read
-            .prepare("SELECT memory_id FROM memory_changes WHERE change>?1 ORDER BY memory_id")?;
-        for id in changed.query_map([since.change], |r| r.get::<_, String>(0))? {
-            let id = id?;
+        let mut changed = read.prepare(&format!(
+            "SELECT memory_id,{} FROM memory_changes WHERE change>?1 ORDER BY memory_id",
+            LATEST_ORIGIN.replace("{id}", "memory_changes.memory_id")
+        ))?;
+        let rows = changed.query_map([since.change], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (id, origin) = row?;
             if !listed.contains(&id) {
-                lines.push(format!("-\t{id}"));
+                lines.push(format!("-\t{id}\t{origin}"));
             }
         }
     }
@@ -118,6 +135,9 @@ pub struct StampsReply {
     pub stamps: Stamps,
     /// Memories changed since what was asked and no longer in scope.
     pub gone: Vec<String>,
+    /// The conversation origin of the latest change to each memory listed
+    /// or gone, where one was given.
+    pub origins: BTreeMap<String, String>,
 }
 
 /// The reply to a stamps request with [`Since`], or a [`STAMPS`] reply from
@@ -146,12 +166,30 @@ pub fn parse_stamps_reply(text: &str) -> Option<StampsReply> {
         ..StampsReply::default()
     };
     for line in body.lines() {
-        match line.strip_prefix("-\t") {
-            Some(id) => reply.gone.push(id.to_owned()),
-            None => {
-                let (id, stamp) = parse_line(line)?;
-                reply.stamps.insert(id, stamp);
+        let (id, origin) = match line.strip_prefix("-\t") {
+            Some(gone) => {
+                let (id, origin) = gone.split_once('\t')?;
+                reply.gone.push(id.to_owned());
+                (id.to_owned(), origin)
             }
+            None => {
+                let mut fields = line.splitn(5, '\t');
+                let id = fields.next()?.to_owned();
+                let digest = fields.next()?.to_owned();
+                let status = fields.next()?.to_owned();
+                let origin = fields.next()?;
+                let title = fields.next()?.to_owned();
+                let stamp = Stamp {
+                    digest,
+                    status,
+                    title,
+                };
+                reply.stamps.insert(id.clone(), stamp);
+                (id, origin)
+            }
+        };
+        if !origin.is_empty() {
+            reply.origins.insert(id, origin.to_owned());
         }
     }
     Some(reply)

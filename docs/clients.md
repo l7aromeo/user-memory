@@ -248,10 +248,10 @@ what the session sees now with its saved snapshot, saves the new one, and,
 only when something changed, adds a short notice to the session's context:
 
 ```
-Memory changed since this session last looked (+ new, ~ changed, - no longer active; read before applying):
+Memory changed since this session last looked (+ new, ~ changed, - forgotten or replaced). Read + and ~ before applying them; stop following - ones, even where your instruction files, loaded at session start, still list them.
 + 5e2a91c0 Ask before pushing
 ~ 7c4e1f20 Use Python 3.13 in this repository
-- 0b9d3a11
+- 0b9d3a11 Answer in short paragraphs
 ```
 
 It covers the projects of session start and of every folder the session
@@ -266,7 +266,10 @@ and the memories of a project gained follow as `+` lines, those of a project
 lost as `<` lines with their title and `(project no longer loaded)`: they
 are still active, only no longer loaded here. `+` is a new memory, `~` one
 changed in what an agent acts on (a confirmation is not a change), and `-` one no longer active
-(forgotten, superseded or stale). Ten changes are listed;
+(forgotten, superseded or stale), with the title the session last saw: its
+instruction files, read at session start, may still list it, and the notice
+wins. A change this conversation made itself, its origin on the memory's
+latest change, is left out: the agent already knows it. Ten changes are listed;
 more are counted, with a pointer to `index`. The projects line names 20
 projects at most and counts the rest, and the notice keeps to the same
 limits as session start. Global rules are never repeated
