@@ -716,13 +716,25 @@ impl DeliveryIndex {
         self.memories
     }
 
-    /// The id of memory `m`.
-    pub(crate) fn id(&self, m: usize) -> &str {
+    /// The id of memory `m`; a memory past the count is a damaged file.
+    pub(crate) fn id(&self, m: usize) -> Result<&str, Error> {
+        if m >= self.memories {
+            return Err(Error::Format);
+        }
         let at = self.ids_at + m * ID_BYTES;
-        std::str::from_utf8(&self.bytes[at..at + ID_BYTES]).unwrap_or("")
+        self.bytes
+            .get(at..at + ID_BYTES)
+            .and_then(|id| std::str::from_utf8(id).ok())
+            .ok_or(Error::Format)
     }
 
+    /// Row `r`, checked where it is read rather than in a pass over every
+    /// row at load, which a hook's time can't afford: a row past the count,
+    /// or naming a memory past it, is a damaged file.
     fn row(&self, r: usize) -> Result<Row, Error> {
+        if r >= self.rows {
+            return Err(Error::Format);
+        }
         let at = self.rows_at + r * ROW_BYTES;
         let slot = self
             .bytes
@@ -730,8 +742,12 @@ impl DeliveryIndex {
             .and_then(|b| b.try_into().ok())
             .map(u16::from_le_bytes)
             .ok_or(Error::Format)?;
+        let memory = u32_at(&self.bytes, at)?;
+        if memory as usize >= self.memories {
+            return Err(Error::Format);
+        }
         Ok(Row {
-            memory: u32_at(&self.bytes, at)?,
+            memory,
             slot,
             start: u32_at(&self.bytes, at + 6)?,
             length: u32_at(&self.bytes, at + 10)?,
@@ -767,6 +783,15 @@ impl DeliveryIndex {
                 std::cmp::Ordering::Less => low = mid + 1,
                 std::cmp::Ordering::Greater => high = mid,
                 std::cmp::Ordering::Equal => {
+                    // The postings must fit the file before room is made
+                    // for them: a damaged count would ask for gigabytes.
+                    let end = first
+                        .checked_add(count)
+                        .and_then(|n| n.checked_mul(POSTING_BYTES))
+                        .and_then(|n| n.checked_add(self.postings_at));
+                    if end.is_none_or(|end| end > self.bytes.len()) {
+                        return Err(Error::Format);
+                    }
                     let mut list = Vec::with_capacity(count);
                     for p in first..first + count {
                         let at = self.postings_at + p * POSTING_BYTES;
@@ -1343,7 +1368,7 @@ mod tests {
         id_end: usize,
     ) -> Option<&'a Matched> {
         let id = format!("00000000-0000-4000-8000-{id_end:012}");
-        found.iter().find(|m| index.id(m.memory) == id)
+        found.iter().find(|m| index.id(m.memory).unwrap() == id)
     }
 
     #[test]
@@ -1388,6 +1413,36 @@ mod tests {
         let mut foreign = index.bytes.clone();
         foreign[0] = b'X';
         assert!(matches!(DeliveryIndex::read(foreign), Err(Error::Format)));
+    }
+
+    #[test]
+    fn a_row_naming_a_memory_past_the_count_is_refused_where_read() {
+        let index = store("deploy", &[]);
+        let mut bytes = index.bytes.clone();
+        // Every row names memory 40 of 40: past the last.
+        for r in 0..index.rows {
+            let at = index.rows_at + r * ROW_BYTES;
+            bytes[at..at + 4].copy_from_slice(&40u32.to_le_bytes());
+        }
+        let damaged = DeliveryIndex::read(bytes).unwrap();
+        let mut window = Window::default();
+        window.push(&action(Kind::Prompt, "deploy step"));
+        assert!(matches!(damaged.rank(&window), Err(Error::Format)));
+        assert!(matches!(damaged.id(40), Err(Error::Format)));
+    }
+
+    #[test]
+    fn postings_running_past_the_file_are_refused_before_room_is_made() {
+        let index = store("deploy", &[]);
+        assert!(index.entries > 1);
+        let key = index.entry(0).unwrap().0.to_vec();
+        let mut bytes = index.bytes.clone();
+        // The first entry's count, which load does not check, runs far
+        // past the end.
+        let at = index.entries_at + 16;
+        bytes[at..at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        let damaged = DeliveryIndex::read(bytes).unwrap();
+        assert!(matches!(damaged.postings(&key), Err(Error::Format)));
     }
 
     #[test]
