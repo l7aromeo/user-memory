@@ -311,13 +311,33 @@ def binaries(release):
 
 
 def bars_of_matcher():
-    """The matcher's own bars, read from its source so the report states them."""
+    """The matcher's own bars, read from its source so the report states
+    them: a command's passages on share, every other action's on mixed, and
+    every push needing an anchor of the action that fired."""
     source = (ROOT / "src/memory/delivery.rs").read_text()
-    bars = {}
-    for name, key in (("PUSH_BAR", "push"), ("FAILURE_BAR", "failure"), ("HOLD_BAR", "hold")):
+
+    def const(name):
         line = next(l for l in source.splitlines() if l.startswith(f"pub(crate) const {name}: f64 = "))
-        bars[key] = float(line.split("=")[1].strip(" ;"))
-    return bars
+        return float(line.split("=")[1].strip(" ;"))
+
+    hold = const("HOLD_BAR")
+    return {"scale": "kind", "anchor": True, "failure anchor": True,
+            "command": {"scale": "share", "push": const("COMMAND_PUSH_BAR"),
+                        "failure": const("COMMAND_FAILURE_BAR"), "hold": hold},
+            # Other actions never hold; the bar is a command's, for the report.
+            "other": {"scale": "mixed", "push": const("PUSH_BAR"), "failure": const("FAILURE_BAR"),
+                      "hold": hold}}
+
+
+def describe(bars):
+    """The bars as the report's title states them."""
+    if bars.get("scale") == "kind":
+        c, o = bars["command"], bars["other"]
+        return (f"commands on share: push {c['push']}, failure {c['failure']}, hold {c['hold']}; "
+                f"other actions on mixed: push {o['push']}, failure {o['failure']}; "
+                "a push needs an anchor, after a failure too")
+    return (f"bars on {bars.get('scale', 'score')}: push {bars['push']}, failure {bars['failure']}, "
+            f"hold {bars['hold']}" + ("; a push needs an anchor" if bars.get("anchor") else ""))
 
 
 def sweep(found, sizes, seeds, tuning, keep):
@@ -394,8 +414,6 @@ def main():
     parser.add_argument("--cost", action="store_true", help="time one lookup on the largest size")
     parser.add_argument("--check-cost", action="store_true", help="fail when the lookup's median is over its limit")
     parser.add_argument("--credit", type=float, help="credit for terms only other passages hold")
-    parser.add_argument("--subcommand", choices=["every", "first", "noted", "after-flag"],
-                        help="which word argument of a command names its subcommand")
     parser.add_argument("--bars", action="append",
                         help="PUSH,FAILURE,HOLD[,anchor][,scale=NAME] to report at instead of the matcher's; "
                              "NAME is what the bars test (score, holders, root, share, mixed, mixed_log, flat); repeatable")
@@ -409,7 +427,7 @@ def main():
     args = parser.parse_args()
     found = binaries(not args.debug)
     sizes = [int(s) for s in args.sizes.split(",")]
-    tuning = {"credit": args.credit, "subcommand": args.subcommand}
+    tuning = {"credit": args.credit}
     if args.cost or args.check_cost:
         worst = cost(found, REPORT_SEEDS[0], max(sizes), args.keep)
         if args.check_cost and worst > LOOKUP_LIMIT_MS:
@@ -451,10 +469,7 @@ def main():
                 total.update(c)
                 for kind, value in k.items():
                     by_kind.setdefault(kind, Counter()).update(value)
-            report(f"{size} memories ({built}); bars on {bars.get('scale', 'score')}: push {bars['push']}, "
-                   f"failure {bars['failure']}, hold {bars['hold']}"
-                   + ("; a push needs an anchor" if bars.get("anchor") else ""),
-                   total, by_kind)
+            report(f"{size} memories ({built}); {describe(bars)}", total, by_kind)
         if args.presence:
             report_presence(size, runs)
         if args.prompt_curve:
@@ -475,6 +490,9 @@ def main():
             for bar in map(float, args.failure_curve.split(",")):
                 for anchor in (False, True):
                     bars = {**variants[0], "failure": bar, "failure anchor": anchor}
+                    if bars.get("scale") == "kind":
+                        # Failed actions are commands: the bar is on their share.
+                        bars["command"] = {**bars["command"], "failure": bar}
                     total = Counter()
                     for drawn, matched, _, _ in runs:
                         total.update(counts(drawn, matched, bars)[0])
