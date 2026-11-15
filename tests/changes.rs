@@ -631,3 +631,50 @@ fn session_start_sets_right_a_marker_that_missed_a_change() {
     assert_eq!(now, last);
     assert_eq!(store.marker(), Some(format!("{renewed} {now}\n")));
 }
+
+// Another program's statement with its own conflict clause replaces the
+// clause of the statements its triggers run: the row a change leaves still
+// names the latest change and whether the memory is live.
+#[test]
+fn a_statement_with_its_own_conflict_clause_still_counts_its_change() {
+    let s = Store::new();
+    let a = s.record("Prefer Rust for tools", &[]);
+    let b = s.record("Ask before pushing", &[]);
+    let conn = Connection::open(&s.db).unwrap();
+    let row = |id: &str| -> (i64, Option<String>) {
+        conn.query_row(
+            "SELECT change,removed_at FROM memory_changes WHERE memory_id=?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+    };
+    let last = || s.state().1;
+    conn.execute_batch(&format!(
+        "CREATE TEMP TABLE kept AS SELECT * FROM memories WHERE id='{a}';
+         DELETE FROM memories WHERE id='{a}';"
+    ))
+    .unwrap();
+    assert!(row(&a).1.is_some(), "forgotten");
+    for (what, id, sql) in [
+        (
+            "INSERT OR IGNORE over a forgotten memory",
+            &a,
+            "INSERT OR IGNORE INTO memories SELECT * FROM kept".to_owned(),
+        ),
+        (
+            "UPDATE OR IGNORE",
+            &b,
+            format!("UPDATE OR IGNORE memories SET title='Ask before every push' WHERE id='{b}'"),
+        ),
+        (
+            "INSERT OR REPLACE over a live memory",
+            &a,
+            "INSERT OR REPLACE INTO memories SELECT * FROM kept".to_owned(),
+        ),
+    ] {
+        conn.execute_batch(&sql)
+            .unwrap_or_else(|err| panic!("{what}: {err}"));
+        assert_eq!(row(id), (last(), None), "{what}");
+    }
+}
