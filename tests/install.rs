@@ -3235,9 +3235,15 @@ impl Client {
     /// `<bin>/user-memory upgrade ARGS`, run as a build reporting `from`
     /// against `releases`, in this machine's clean environment.
     fn upgrade(&self, releases: &Releases, from: &str, args: &[&str]) -> Command {
+        let mut command = self.installed_command(releases, &["upgrade"]);
+        command.args(args).env("USER_MEMORY_TEST_VERSION", from);
+        command
+    }
+    /// `<bin>/user-memory ARGS` in this machine's clean environment, with
+    /// `releases` as its releases page.
+    fn installed_command(&self, releases: &Releases, args: &[&str]) -> Command {
         let mut command = Command::new(self.path("bin/user-memory"));
         command
-            .arg("upgrade")
             .args(args)
             .env_clear()
             .env("HOME", self.home.path())
@@ -3260,7 +3266,6 @@ impl Client {
                     self.path("cli").display()
                 ),
             )
-            .env("USER_MEMORY_TEST_VERSION", from)
             .stdin(Stdio::null());
         command
     }
@@ -3404,6 +3409,89 @@ fn upgrade_installs_nothing_that_fails_its_checksum() {
     assert_eq!(c.leftovers(), Vec::<String>::new());
 }
 
+/// An upgrade runs setup with the choices saved beside the binary: what the
+/// user turned off stays off, and the store and semantic search settings
+/// stay as they were.
+#[test]
+fn upgrade_keeps_each_choice_the_setup_saved() {
+    let releases = Releases::start();
+    let endpoint = FakeOllama::start(&[], None);
+    let c = Client::bare();
+    let key = c.path("embedding key");
+    fs::write(&key, "sk-test-0123456789abcdef\n").unwrap();
+    let url = format!("{}/v1/embeddings", endpoint.address);
+    let out = c.install(
+        &releases,
+        &[],
+        &[
+            "--local",
+            "native",
+            "--embed-url",
+            &url,
+            "--embed-model",
+            "text-embedding-3-small",
+            "--embed-key-file",
+            key.to_str().unwrap(),
+        ],
+    );
+    assert!(out.status.success(), "{}", text(&out).1);
+    // The user turns the rest off and moves the store, with setup.
+    let store = c.path("elsewhere/memories.sqlite3");
+    let bin = c.path("bin");
+    let out = detached(c.installed_command(
+        &releases,
+        &[
+            "setup",
+            "--client",
+            "codex",
+            "--install-dir",
+            bin.to_str().unwrap(),
+            "--no-hooks",
+            "--no-skill",
+            "--no-instructions",
+            "--no-update-check",
+            "--db",
+            store.to_str().unwrap(),
+        ],
+    ));
+    assert!(out.status.success(), "{}", text(&out).1);
+    let receipt = c.receipt();
+    for choice in ["hooks", "skill", "instructions", "update_check"] {
+        assert_eq!(receipt[choice], false, "{choice}: {receipt}");
+    }
+    assert_eq!(receipt["db"], store.to_str().unwrap());
+    assert_eq!(receipt["embedding"]["USER_MEMORY_EMBED_URL"], url);
+    let hooks = || fs::read_to_string(c.path(".codex/hooks.json")).unwrap_or_default();
+    let instructions = || fs::read_to_string(c.path(".codex/AGENTS.md")).unwrap_or_default();
+    let skill = c.path(".agents/skills/user-memory");
+    let off = |when: &str| {
+        assert!(
+            !hooks().contains("user-memory"),
+            "{when}: hooks {}",
+            hooks()
+        );
+        assert!(!skill.exists(), "{when}: skill");
+        assert!(
+            !instructions().contains("user-memory"),
+            "{when}: instructions {}",
+            instructions()
+        );
+    };
+    off("before");
+
+    let tag = format!("v{BUILD}");
+    releases.publish(&tag, Path::new(env!("CARGO_BIN_EXE_user-memory")));
+    releases.set_latest(&tag);
+    let out = detached(c.upgrade(&releases, "0.9.0", &["--yes"]));
+    assert!(out.status.success(), "{out:?}");
+    let mut kept = c.receipt();
+    assert_eq!(kept["version"], BUILD);
+    kept["version"] = receipt["version"].clone();
+    assert_eq!(kept, receipt);
+    off("after");
+    assert!(store.exists(), "the store moved");
+}
+
 /// A download that redirects from HTTPS, or from this machine, to plain
 /// http elsewhere is refused, and nothing is installed.
 #[test]
@@ -3449,6 +3537,7 @@ fn upgrade_on_a_client_takes_its_servers_version() {
         &["--url", &s.base()],
     );
     assert!(out.status.success(), "{}", text(&out).1);
+    let receipt = c.receipt();
     let url = format!("{}/mcp", s.base());
     releases.publish(
         &format!("v{BUILD}"),
@@ -3481,7 +3570,12 @@ fn upgrade_on_a_client_takes_its_servers_version() {
         "{stdout}"
     );
     assert_ne!(c.installed().0, before.0);
+    // The server and its token file are kept, with every other choice.
     assert_eq!(c.receipt()["remote"]["url"], url);
+    assert!(receipt["remote"]["token_file"].is_string(), "{receipt}");
+    let mut kept = c.receipt();
+    kept["version"] = receipt["version"].clone();
+    assert_eq!(kept, receipt);
 }
 
 #[test]
