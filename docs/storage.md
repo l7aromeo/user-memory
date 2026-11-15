@@ -109,7 +109,8 @@ session reads it whole once. Before each prompt, a session on this machine whose
 snapshot matches the file reads nothing from the store; one that does not
 reads only the memories changed since. A program other than user-memory
 that edits the store leaves the file as it was, so sessions see that edit
-after the next write by user-memory. A forgotten memory's row in `memory_changes`
+after the next write by user-memory or the next session start, which sets
+the file right when it no longer matches the store. A forgotten memory's row in `memory_changes`
 keeps its id and the time it went for 30 days, as long as an unused session
 file lasts, and is dropped as an automatic backup is made.
 

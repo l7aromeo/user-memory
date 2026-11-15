@@ -221,6 +221,23 @@ pub fn marked(db: &Path) -> Option<super::Since> {
     })
 }
 
+/// At session start, for the store at `db` on this machine: when its
+/// marker does not say what the store says, as after a crash between a
+/// commit and its marker, an edit by hand or another program, takes the
+/// write turn, which gives the store a new id and rewrites the marker, so
+/// every session on this machine reads the store whole at its next prompt
+/// rather than trust a marker that missed a change. A match costs one read.
+pub fn reconcile(db: &Path) -> anyhow::Result<()> {
+    let conn = super::schema::connect(db)?;
+    let Some(state) = state(&conn)? else {
+        return Ok(());
+    };
+    if read_marker(db).as_ref() != Some(&state) {
+        super::schema::write(&conn)?.commit()?;
+    }
+    Ok(())
+}
+
 /// Replaces the marker beside the store at `db` with `state`, through a
 /// temporary file and a rename, so a reader never sees half of it.
 fn write_marker(db: &Path, state: &State) -> io::Result<()> {

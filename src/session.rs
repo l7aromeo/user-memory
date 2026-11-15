@@ -154,6 +154,16 @@ pub async fn start(path: PathBuf, client: Option<HookClient>) -> String {
     let origin = client
         .zip(payload.as_deref())
         .and_then(|(c, p)| origin(c, p));
+    // A store on this machine whose marker missed a change gets a new id
+    // first, so the sessions running on it read it whole.
+    if setup::configured_remote().ok().flatten().is_none() {
+        let db = db_path();
+        let _ = tokio::time::timeout_at(
+            deadline,
+            tokio::task::spawn_blocking(move || memory::reconcile(&db)),
+        )
+        .await;
+    }
     let checkout = path.clone();
     let snapshot = async {
         if let (Some(client), Some(payload)) = (client, &payload) {
