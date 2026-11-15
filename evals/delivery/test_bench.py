@@ -120,6 +120,20 @@ class Evaluate(unittest.TestCase):
         self.assertEqual((c["failure needs"], c["failure found at its action"]), (1, 1))
         self.assertEqual((c["merged delivered"], c["merged whole"]), (1, 0))
 
+    def test_a_long_passage_not_needed_then_outranking_a_short_need_is_counted(self):
+        c = self.counts
+        # rule at action 0 and lesson at action 2, each above book's passage.
+        self.assertEqual((c["short needed"], c["long over short"]), (2, 0))
+        matched = [self.matched[0], self.matched[1],
+                   [candidate("book", 4.0, slot=1, start=0, length=100),
+                    candidate("lesson", 3.5, length=40, command=True)]]
+        c = metrics.evaluate(self.task, matched, self.memories, BARS)
+        self.assertEqual((c["short needed"], c["long over short"]), (2, 1))
+        # The needed point of the long memory outranking it is no inversion.
+        matched[2][0] = candidate("book", 4.0, slot=2, start=103, length=97)
+        c = metrics.evaluate(self.task, matched, self.memories, BARS)
+        self.assertEqual(c["long over short"], 0)
+
     def test_a_command_no_memory_names_counts_its_holds(self):
         task = {"actions": [{"kind": "prompt"}, {"kind": "command"}], "needs": []}
         matched = [[], [candidate("noise", 3.5, command=True)]]
@@ -127,6 +141,76 @@ class Evaluate(unittest.TestCase):
         self.assertEqual((c["unnamed commands"], c["unnamed held"]), (1, 1))
         c = metrics.evaluate(task, [[], [candidate("noise", 2.5, command=True)]], self.memories, BARS)
         self.assertEqual((c["unnamed commands"], c["unnamed held"]), (1, 0))
+
+
+class Classes(unittest.TestCase):
+    """Why a delivery is wrong, why a need is missed, when a lesson shows."""
+
+    git_tag = {"kind": "command", "about": ["command", "git", "tag"]}
+    memories = {
+        "note": {"shape": "note", "points": [{"start": 0, "end": 30, "about": ["command", "git", "tag"],
+                                              "anchored": True}]},
+        "decision": {"shape": "decision", "points": [{"start": 0, "end": 30,
+                                                      "about": ["component", "parser"]}]},
+        "start": {"shape": "start rule", "points": [{"start": 0, "end": 30, "about": ["work", "release"]}]},
+        "lesson": {"shape": "lesson", "points": [{"start": 0, "end": 30, "about": ["command", "git", "tag"],
+                                                  "anchored": True}]},
+    }
+
+    def test_a_wrong_delivery_is_about_this_action_or_about_something_else(self):
+        about = metrics.about_action
+        self.assertTrue(about(candidate("note", 3), self.memories["note"], self.git_tag, "change"))
+        self.assertFalse(about(candidate("decision", 3), self.memories["decision"], self.git_tag, "change"))
+        # A file and a design decision on one component are one subject.
+        edit = {"kind": "file", "about": ["file", "parser"]}
+        self.assertTrue(about(candidate("decision", 3), self.memories["decision"], edit, "change"))
+        # A rule for a kind of work is about every action of a task of it.
+        self.assertTrue(about(candidate("start", 3), self.memories["start"], self.git_tag, "release"))
+        self.assertFalse(about(candidate("start", 3), self.memories["start"], self.git_tag, "review"))
+        # A passage beside the point is about nothing the point is.
+        self.assertFalse(about(candidate("note", 3, start=30), self.memories["note"], self.git_tag, "change"))
+
+    def test_a_missed_need_says_why_from_its_own_action(self):
+        why = metrics.why_missed
+        need = {"action": 0, "memory": "note", "point": 0}
+        point = self.memories["note"]["points"][0]
+        self.assertEqual(why(need, point, [[]], BARS, [self.git_tag]), metrics.NOT_MATCHED)
+        self.assertEqual(why(need, point, [[candidate("note", 1, length=30)]], BARS, [self.git_tag]),
+                         metrics.SPELLED)
+        self.assertEqual(why(need, point, [[candidate("note", 1, length=30, anchored=True)]], BARS,
+                             [self.git_tag]), metrics.BELOW)
+        unanchored = self.memories["decision"]["points"][0]
+        self.assertEqual(why({**need, "memory": "decision"}, unanchored, [[]], BARS, [self.git_tag]),
+                         metrics.NO_ANCHOR)
+
+    def test_a_lesson_is_placed_against_its_commands_runs(self):
+        moment = metrics.lesson_moment
+        lesson = self.memories["lesson"]
+        prompt = {"kind": "prompt", "about": ["component", "parser"]}
+        failing = [prompt, {**self.git_tag, "failed": True}, self.git_tag]
+        self.assertEqual(moment(lesson, 0, failing, "push"), metrics.BEFORE_FAILURE)
+        self.assertEqual(moment(lesson, 1, failing, "push"), metrics.AT_FAILURE)
+        self.assertEqual(moment(lesson, 2, failing, "push"), metrics.AFTER_FAILURE)
+        # A hold at the failing command shows it before the command runs.
+        self.assertEqual(moment(lesson, 1, failing, "hold"), metrics.BEFORE_FAILURE)
+        passing = [prompt, self.git_tag]
+        self.assertEqual(moment(lesson, 0, passing, "push"), metrics.BEFORE_SUCCESS)
+        self.assertEqual(moment(lesson, 1, passing, "hold"), metrics.BEFORE_SUCCESS)
+        self.assertEqual(moment(lesson, 1, passing, "push"), metrics.AFTER_SUCCESS)
+        self.assertEqual(moment(lesson, 0, [prompt], "push"), metrics.NOT_RUN)
+
+    def test_rules_that_name_no_action_stay_out_of_the_totals(self):
+        task = {"kind": "release",
+                "actions": [{"kind": "prompt", "literal": True}, self.git_tag],
+                "needs": [{"action": 0, "memory": "start", "point": 0, "subject": "start rule"},
+                          {"action": 1, "memory": "note", "point": 0, "subject": "command"}]}
+        matched = [[candidate("start", 3, length=30)], [candidate("decision", 3, length=30, anchored=True)]]
+        c = metrics.evaluate(task, matched, self.memories, BARS)
+        self.assertEqual((c["delivered|all"], c["right|all"], c["wrong elsewhere|all"]), (1, 0, 1))
+        self.assertEqual((c["delivered|shape:start rule"], c["right|shape:start rule"]), (1, 1))
+        self.assertEqual((c["needed|all"], c["needed|subject:start rule"]), (1, 1))
+        self.assertEqual(c[f"missed {metrics.NOT_MATCHED}|all"], 1)
+        self.assertEqual((c["prompts"], c["prompts literal"], c["delivered|prompt literal"]), (1, 1, 0))
 
 
 class Generator(unittest.TestCase):
