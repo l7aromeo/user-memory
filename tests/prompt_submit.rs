@@ -697,3 +697,22 @@ fn a_prompt_reads_only_what_changed_since_the_session_looked() {
     assert_eq!(read(&home), "51 stamps (every)");
     assert_eq!(read(&home), "0 stamps (changed)");
 }
+
+// The hook's look at the session's links is a read: while another process
+// holds the store's write lock, a prompt still hears what changed rather
+// than wait behind it until its limit.
+#[test]
+fn a_prompt_during_another_write_still_hears_what_changed() {
+    let home = Home::new();
+    home.record("Prefer Rust for tools");
+    home.hook("SessionStart", "s", &[]);
+    let added = home.record("Ask before pushing");
+    let writer = rusqlite::Connection::open(home.path().join("memory.sqlite3")).unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let notice = home.notice("s");
+    writer.execute_batch("ROLLBACK").unwrap();
+    assert!(
+        notice.contains(&format!("+ {} Ask before pushing", id8(&added))),
+        "{notice:?}"
+    );
+}

@@ -94,6 +94,14 @@ pub fn link(db: &Path, input: &Link) -> Result<Value> {
         .map(|k| project_key(k))
         .collect();
     let conn = connect(db)?;
+    // Listing alone, as the session hooks do before every prompt, is a read:
+    // it never waits behind a writer or takes the write turn from one.
+    if keys.is_empty() {
+        let projects = linked(&conn, &origin)?;
+        let mut reply = json!({"linked":true,"projects":projects});
+        reply[if input.unlink { "removed" } else { "added" }] = json!([]);
+        return Ok(reply);
+    }
     let tx = write(&conn)?;
     let (mut changed, mut notes) = (Vec::new(), Vec::new());
     for key in keys {
