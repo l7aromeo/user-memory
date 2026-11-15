@@ -224,7 +224,12 @@ Each scenario may `seed` memories through the CLI, in order (seed `id`s are
 referenced by checks, and a seed's `args` may name an earlier seed as
 `{seed:NAME}`, its full id, so `"--supersedes", "{seed:old}"` replaces it;
 `"rule": true` marks a seed the rehearsal expects in the instruction file,
-and `"rule": false` one it expects absent from it),
+`"rule": false` one it expects absent from it, and `"aged": true` dates it
+back before every other memory, so it ranks below them where the newest come
+first). `bulk` stores many alike memories in one import: `count` of them with
+the given `type`, `category`, `scope` and `project`, `{n}` in the `title` and
+`content` replaced by each one's number (one `record` each would be refused
+as similar),
 then runs its `sessions` (one turn each) or `steps` (turns
 naming their `session`, kept open until its last turn) in a working directory
 (`cwd`: `plain`, `folder:<path>` without git, or `project:<path>`, a checkout
@@ -239,7 +244,9 @@ memory on, so its own memory files compete with user-memory. Writes stay
 unapproved, so the check sees the attempt. `commands` lets the agent run only
 the listed user-memory commands (`"user-memory project-id"`: Claude may run
 it by name or by the trial's installed path; Codex gets its workspace-write
-shell).
+shell). `subagents` gives Claude its subagent tool, `Agent`; a subagent may
+do what the session's other rules allow. Codex's sub-agent tools are on by
+default.
 
 A step may instead `compact` its session (Claude: `/compact`; Codex:
 `thread/compact/start`), or `resume` it: the session's process ends and a new
@@ -308,14 +315,15 @@ scenario's checks forbid, such as following an instruction written inside a
 memory. Each has `steps`, one record per turn from the first, with only the
 fields it needs (`commands`, `tool_calls` as `[name, args]` pairs,
 `approvals`, `answer`); `remove`, trial paths deleted while it is graded
-and put back afterwards, even when a check raises; `commits`, each a
-`cwd` and a `message`, made as empty commits in that checkout while it is
-graded, the branch put back afterwards, for the `commits` checks; and
-`memories`, what the session would have stored (fields as `search` gives
-them, `confirmed` unless a `status` says otherwise), graded beside the
-store's, for the `memory` checks. `obeyed` is a transcript
-of a session that did right; by default, one that did nothing. `{seed:NAME}`
-works in both as in checks.
+and put back afterwards, even when a check raises; `write`, trial paths
+given the text a session would have left, put back the same way;
+`commits`, each a `cwd` and a `message`, made as empty commits in that
+checkout while it is graded, the branch put back afterwards, for the
+`commits` checks; and `memories`, what the session would have stored
+(fields as `search` gives them, `confirmed` unless a `status` says
+otherwise), graded beside the store's, for the `memory` checks. `obeyed`
+is a transcript of a session that did right; by default, one that did
+nothing. `{seed:NAME}` works in both as in checks.
 
 `--rehearse` grades the scenario's decisive checks on the fresh trial
 against `obeyed`, where each must pass, and against each planted

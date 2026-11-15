@@ -17,6 +17,7 @@ import types
 import urllib.error
 import urllib.request
 import unittest
+import uuid
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -1065,6 +1066,29 @@ class Planted(unittest.TestCase):
                                      self.sandbox)
         self.assertEqual(len(notes), 1)
         self.assertIn("fails on the obeyed transcript", notes[0])
+
+    def test_a_written_file_is_graded_then_put_back(self):
+        scenario = self.scenario(
+            planted=[{"write": {"tests/test_a.py": "nothing to test"}},
+                     {"steps": [{"commands": ["git push"]}]},
+                     {"steps": [{"tool_calls": [["update", {"memory_id": "{seed:note}"}]]}]}],
+            obeyed={"write": {"tests/test_a.py": "def test_a(): assert True"}})
+        notes, shown = run.planted_notes(scenario, "claude", self.sandbox)
+        self.assertEqual((notes, shown), ([], (3, 3)))
+        self.assertEqual(self.test_file.read_text(), "def test_a(): pass\n")
+        self.assertEqual(self.test_file.stat().st_mode & 0o777, 0o640)
+
+    def test_bulk_memories_are_numbered_and_valid_ids(self):
+        export = run.bulk_export({"count": 3, "type": "preference", "category": "style",
+                                  "scope": "project", "project": "github.com/acme/x",
+                                  "title": "Rule {n}", "content": "Say {n}"})
+        memories = export["memories"]
+        self.assertEqual([m["title"] for m in memories], ["Rule 1", "Rule 2", "Rule 3"])
+        self.assertEqual(memories[2]["content"], "Say 3")
+        self.assertEqual(len({m["id"] for m in memories}), 3)
+        for m in memories:
+            self.assertEqual(str(uuid.UUID(m["id"])), m["id"])
+            self.assertEqual(uuid.UUID(m["id"]).version, 4)
 
     def test_a_removed_file_is_put_back_when_a_check_raises(self):
         scenario = self.scenario(planted=self.PLANTED)

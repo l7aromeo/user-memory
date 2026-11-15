@@ -665,6 +665,11 @@ class ClaudeSession:
             tools, allowed = CLAUDE_SHELL_TOOLS, allowed + allow
         elif options.get("claude_file_tools"):
             tools = CLAUDE_FILE_TOOLS
+        if options.get("subagents"):
+            # The subagent tool; what a subagent may do is what the session's
+            # other rules allow.
+            tools = ",".join([t for t in tools.split(",") if t] + ["Agent"])
+            allowed = allowed + ["Agent"]
         asks = options.get("asks")
         if asks:
             # The question tool, answered by the harness as the user would:
@@ -1674,6 +1679,43 @@ def seed_args(seed, ids):
     return [re.sub(r"\{seed:([^}]+)\}", earlier, arg) for arg in seed["args"]]
 
 
+# When an aged seed was last changed: before any other seed and any bulk
+# memory, so it ranks below them where the newest come first.
+AGED = "2020-01-01 00:00:00"
+# When a scenario's bulk memories were made: after an aged seed.
+BULK_STAMP = "2026-01-01 00:00:00"
+
+
+def age(sandbox, memory_id):
+    """Dates a seeded memory back to [`AGED`]."""
+    conn = sqlite3.connect(sandbox.db)
+    with conn:
+        conn.execute("UPDATE memories SET created_at=?1, updated_at=?1 WHERE id=?2",
+                     (AGED, memory_id))
+    conn.close()
+
+
+def bulk_export(spec):
+    """An export of `spec["count"]` memories made from `spec`'s fields, with
+    `{n}` in the title and content replaced by each one's number, so many
+    alike memories are stored in one import instead of one `record` each,
+    which would refuse them as similar."""
+    memories = []
+    for n in range(1, spec["count"] + 1):
+        memories.append({
+            "id": f"{0xb0000000 + n:08x}-0000-4000-8000-{n:012x}",
+            "type": spec["type"], "category": spec["category"],
+            "title": spec["title"].replace("{n}", str(n)),
+            "content": spec["content"].replace("{n}", str(n)),
+            "context": "", "reason": "", "scope": spec["scope"], "project": spec.get("project", ""),
+            "source": "explicit", "status": "confirmed", "evidence": "", "evidence_ids": [],
+            "origins": [], "superseded_by": None, "created_at": BULK_STAMP, "updated_at": BULK_STAMP,
+            "last_confirmed_at": None,
+        })
+    return {"format": "user-memory-export", "format_version": 2, "exported_at": "2026-01-01T00:00:00Z",
+            "memories": memories, "distinct_pairs": [], "history": []}
+
+
 def prepare(scenario, client, base, source, projects):
     """A trial's sandbox with its seeds stored, user-memory set up and the
     scenario's folders in place."""
@@ -1685,6 +1727,13 @@ def prepare(scenario, client, base, source, projects):
             if not saved.get("stored"):
                 raise RuntimeError(f"seed {seed} refused: {saved}")
             sandbox.ids[seed["id"]] = saved["id"]
+            if seed.get("aged"):
+                age(sandbox, saved["id"])
+        if "bulk" in scenario:
+            bulk = sandbox.dir / "bulk.json"
+            bulk.write_text(json.dumps(bulk_export(scenario["bulk"])))
+            sandbox.cli("import", str(bulk), "--apply")
+            bulk.unlink()
         sandbox.setup_output = sandbox.setup(scenario.get("hooks", True))
         for spec in scenario.get("folders", []):
             sandbox.workdir(spec, projects)
@@ -1712,7 +1761,7 @@ def watched(scenario, sandbox):
 def trial(scenario, client, base, source, projects, guard):
     sandbox = prepare(scenario, client, base, source, projects)
     options = {k: scenario[k] for k in ("shell", "claude_file_tools", "codex_escalations",
-                                        "commands")
+                                        "commands", "subagents")
                if k in scenario}
     options["resumes"] = any(step.get("resume") for step in steps(scenario))
     options["compacts"] = any(step.get("compact") for step in steps(scenario))
@@ -2016,9 +2065,10 @@ def blank_record(index):
 def planted_grades(scenario, transcript, checks, sandbox, memories):
     """(passed, detail) for each of `checks` on `transcript`: a turn record
     per step, filled from the transcript's `steps`, after its `remove` files
-    are deleted from the trial and its `commits` made in it; its `memories`
-    count as stored. Files and branches are put back afterwards, even when
-    a check raises. Nothing here reaches a model or the budget."""
+    are deleted from the trial, its `write` files given their text and its
+    `commits` made in it; its `memories` count as stored. Files and branches
+    are put back afterwards, even when a check raises. Nothing here reaches
+    a model or the budget."""
     turns = len(steps(scenario))
     given = transcript.get("steps", [])
     if len(given) > turns:
@@ -2030,6 +2080,10 @@ def planted_grades(scenario, transcript, checks, sandbox, memories):
             path = sandbox.dir / name
             removed[path] = (path.read_bytes(), path.stat().st_mode & 0o777)
             path.unlink()
+        for name, text in transcript.get("write", {}).items():
+            path = sandbox.dir / name
+            removed[path] = (path.read_bytes(), path.stat().st_mode & 0o777)
+            path.write_text(text)
         undo = planted_commits(sandbox, transcript.get("commits", []))
         records = [blank_record(i) for i in range(turns)]
         for record, step in zip(records, given):
