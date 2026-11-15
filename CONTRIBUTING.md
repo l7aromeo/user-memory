@@ -14,8 +14,10 @@ Security issues are the exception: report those privately, as below.
 
 ## Set up
 
-You need Rust 1.99.1 (the Dockerfile's `RUST_IMAGE`, which the checks and
-the release builds use), a C build toolchain (SQLite is bundled),
+You need [rustup](https://rustup.rs/), which installs the Rust that
+`rust-toolchain.toml` names on first use (the Dockerfile's `RUST_IMAGE`,
+which the checks and the release builds use), a C build toolchain (SQLite
+is bundled),
 [just](https://github.com/casey/just) and
 [cargo-nextest](https://nexte.st/):
 
