@@ -1594,9 +1594,12 @@ fn the_longest_no_project_line_matches_in_time() {
 /// how many patterns the code holds. The longest line is matched again with
 /// the code's patterns all repeated, with new patterns of holes and
 /// punctuation, the kind that matches inside any word, and with as many
-/// again that share no text with it. Only the last add work: one step, each
-/// pass, for each place one could start, its first text or a hole, to rule
-/// it out.
+/// again that share no text with it. Only the last may add work: one step,
+/// each pass, for each place one could start, its first text or a hole, to
+/// rule it out. That bounds the search for a window at the quote's start,
+/// which covers this line. A quote that needs windows after it as well pays
+/// a few steps for each pattern that starts with a hole, at each place a
+/// window ends; this test does not bound that.
 #[test]
 fn matching_work_does_not_grow_with_the_code_s_patterns() {
     let longest = longest_no_project_line();
@@ -1654,8 +1657,8 @@ fn matching_work_does_not_grow_with_the_code_s_patterns() {
         (matcher.steps, matcher.pass)
     };
     let (alone, _) = steps(&Corpus::new(patterns.clone()));
-    // The unrelated ones first, so they are tried before any match ends
-    // the search.
+    // The unrelated ones first. The corpus orders the starts itself, so
+    // this matters only to a start order that follows the code's.
     let (crowded, passes) = steps(&Corpus::new(
         unrelated
             .into_iter()
