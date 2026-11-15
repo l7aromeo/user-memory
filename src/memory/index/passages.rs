@@ -25,6 +25,21 @@ pub(in crate::memory) const PASSAGE_MIN_CHARS: usize = 80;
 /// index gives it.
 pub(in crate::memory) const MAX_PASSAGES: usize = 250;
 
+/// Rows the keyword index numbers for each memory: the memory's rows are
+/// `key * SLOTS` up to the next memory's. Slot 0 holds what counts for the
+/// whole memory, slots from 1 the content's passages, and [`CONTEXT_SLOT`]
+/// the context's. The keyword index's triggers write this number out.
+pub(in crate::memory) const SLOTS: i64 = 256;
+
+/// The slot of a memory's context, a passage of its own: it says when the
+/// memory applies.
+pub(in crate::memory) const CONTEXT_SLOT: i64 = SLOTS - 1;
+
+const _: () = assert!(
+    MAX_PASSAGES as i64 + 1 < CONTEXT_SLOT,
+    "every content passage has a slot before the context's"
+);
+
 /// Longest file extension a path-shaped word may end in, such as `.toml`
 /// or `.swift`; a longer dotted ending is a sentence's, not a file's.
 const EXTENSION_CHARS: usize = 5;
