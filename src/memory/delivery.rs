@@ -194,7 +194,7 @@ fn assignment(word: &str) -> bool {
 /// a pair no memory names has no holders and weighs nothing. With `pairs`,
 /// each two adjacent words are an anchor too, so a wrapper no table names
 /// (`npx`, a proxy) still yields the command it runs.
-fn command_terms(line: &str, stems: &mut Stems, terms: &mut Terms, pairs: bool) {
+fn command_terms(line: &str, stems: &mut Stems, terms: &mut Terms, pairs: bool, first_word: bool) {
     for words in segments(line) {
         let mut rest = words
             .iter()
@@ -212,7 +212,17 @@ fn command_terms(line: &str, stems: &mut Stems, terms: &mut Terms, pairs: bool) 
         if let Some(sub) = sub {
             terms.words(stems, sub);
         }
-        for arg in args.iter().filter(|arg| word_argument(arg)) {
+        // With `first_word`, only the first word argument that is no path.
+        let words_after = args.iter().filter(|arg| word_argument(arg));
+        let named: Vec<&&str> = if first_word {
+            words_after
+                .filter(|arg| !arg.contains('/'))
+                .take(1)
+                .collect()
+        } else {
+            words_after.collect()
+        };
+        for arg in named {
             terms.anchors.insert(format!("{name} {arg}").to_lowercase());
         }
         if pairs {
@@ -271,10 +281,15 @@ fn file_terms(path: &str, stems: &mut Stems, terms: &mut Terms) {
 }
 
 /// The terms `action` adds to the window; `pairs` as in [`command_terms`].
-pub(in crate::memory) fn terms(action: &Action, stems: &mut Stems, pairs: bool) -> Terms {
+pub(in crate::memory) fn terms(
+    action: &Action,
+    stems: &mut Stems,
+    pairs: bool,
+    first_word: bool,
+) -> Terms {
     let mut terms = Terms::default();
     match action.kind {
-        Kind::Command => command_terms(&action.text, stems, &mut terms, pairs),
+        Kind::Command => command_terms(&action.text, stems, &mut terms, pairs, first_word),
         Kind::File => file_terms(&action.text, stems, &mut terms),
         Kind::Prompt | Kind::Task | Kind::Plan | Kind::Message | Kind::Search => {
             terms.words(stems, &action.text);
@@ -293,6 +308,8 @@ pub(crate) struct Tuning {
     pub(crate) credit: f64,
     /// Adjacent words of a command are anchors too (see `command_terms`).
     pub(crate) pairs: bool,
+    /// Only a command's first word argument names its subcommand.
+    pub(crate) first_word: bool,
 }
 
 impl Default for Tuning {
@@ -302,6 +319,7 @@ impl Default for Tuning {
             half_life: WINDOW_HALF_LIFE,
             credit: OTHER_PASSAGE_CREDIT,
             pairs: false,
+            first_word: false,
         }
     }
 }
@@ -333,7 +351,12 @@ impl Window {
     /// Adds `action`, the one that fires the next match; the oldest past
     /// [`WINDOW_ACTIONS`] falls out.
     pub(crate) fn push(&mut self, action: &Action) {
-        let terms = terms(action, &mut self.stems, self.tuning.pairs);
+        let terms = terms(
+            action,
+            &mut self.stems,
+            self.tuning.pairs,
+            self.tuning.first_word,
+        );
         self.actions.push_back((action.kind, terms, action.failed));
         while self.actions.len() > self.tuning.window_actions {
             self.actions.pop_front();
@@ -1089,7 +1112,7 @@ mod tests {
     }
 
     fn of_with(kind: Kind, text: &str, pairs: bool) -> Terms {
-        terms(&action(kind, text), &mut Stems::new(), pairs)
+        terms(&action(kind, text), &mut Stems::new(), pairs, false)
     }
 
     fn stems(text: &str) -> BTreeSet<String> {
@@ -1169,6 +1192,23 @@ mod tests {
             !paired.anchors.iter().any(|a| a.contains("--yes")),
             "{paired:?}"
         );
+        // With only the first word argument as the subcommand, an argument
+        // that is another subcommand's word names nothing.
+        let first = super::terms(
+            &action(
+                Kind::Command,
+                "cargo run --bin test && git -C . commit -m fix",
+            ),
+            &mut Stems::new(),
+            false,
+            true,
+        );
+        for anchor in ["cargo run", "git commit"] {
+            assert!(first.anchors.contains(anchor), "{anchor}: {first:?}");
+        }
+        for anchor in ["cargo test", "git fix", "cargo bin"] {
+            assert!(!first.anchors.contains(anchor), "{anchor}: {first:?}");
+        }
     }
 
     #[test]

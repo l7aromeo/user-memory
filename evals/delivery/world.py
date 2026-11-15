@@ -145,6 +145,9 @@ WRAPPED = {("cargo", "test"): "just test", ("cargo", "build"): "make build",
 FLAG_FIRST = {"git": "-C .", "cargo": "--locked", "gh": "--repo example/ledger", "docker": "--debug",
               "kubectl": "-n prod", "terraform": "-chdir=infra", "npm": "--prefix .",
               "just": "--justfile justfile", "make": "-C ."}
+# Of those, the flags whose value is a word, which a rule taking the first
+# word argument as the subcommand reads as the subcommand.
+WORD_VALUED = {"kubectl", "just"}
 ROOT_FOLDER = "/work/ledger"
 # Wrappers no table names, in front of the command they run, as a share
 # of the spelled commands that can take one (`npx` before a package's
@@ -581,7 +584,8 @@ class World:
             if rng.random() < SPELLED_SHARE:
                 ways = ([("alias", ALIASES[(program, sub)])] if (program, sub) in ALIASES else []) + (
                     [("wrapper", WRAPPED[(program, sub)])] if (program, sub) in WRAPPED else []) + (
-                    [("flag first", f"{program} {FLAG_FIRST[program]} {sub}")] if program in FLAG_FIRST else []) + (
+                    [("flag with a word value" if program in WORD_VALUED else "flag first",
+                      f"{program} {FLAG_FIRST[program]} {sub}")] if program in FLAG_FIRST else []) + (
                     [("prefix", f"{rng.choice(PREFIXES)} {program} {sub}")] if sub else [])
                 if ways:
                     spelled, said = rng.choice(ways)

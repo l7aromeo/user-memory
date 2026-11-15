@@ -190,6 +190,7 @@ def evaluate(task, matched, memories, bars, earlier=None):
         held_now_here = False
         held_count = 0
         pushed_here = 0
+        now_here = 0
         for c in candidates:
             ways = decisions(c, bars, kind)
             if not ways:
@@ -234,6 +235,7 @@ def evaluate(task, matched, memories, bars, earlier=None):
             moment = run_moment(memory, c, i, actions, way)
             how = "now" if now else "late" if ok else wrong
             held_now_here |= way == "hold" and now
+            now_here += now
             for group in groups:
                 counts[f"delivered|{group}"] += 1
                 counts[f"right|{group}"] += ok
@@ -275,6 +277,7 @@ def evaluate(task, matched, memories, bars, earlier=None):
             # how much of that it needed now.
             counts["busy runs"] += 1
             counts["busy delivered"] += held_count + pushed_here
+            counts["busy delivered now"] += now_here
             counts["busy needed"] += sum(n["action"] == i for n in task["needs"])
         if kind == "command":
             counts["denials"] += held_here
