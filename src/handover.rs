@@ -608,6 +608,7 @@ pub async fn serve(inner: Inner) -> Result<()> {
     let own = session.identity.or_else(|| identity(&session.binary).ok());
     let mut front = Front {
         identity: own,
+        own,
         session,
         refused: None,
         wanted: None,
@@ -674,6 +675,9 @@ struct Front {
     session: Session,
     /// The identity of the build whose code serves the session now.
     identity: Option<Identity>,
+    /// The identity of this process's own build, which serves again when
+    /// the server is restarted here.
+    own: Option<Identity>,
     /// A replacement already refused, so it is checked and reported once.
     refused: Option<Identity>,
     /// A checked replacement waiting for the requests in flight.
@@ -1069,6 +1073,9 @@ impl Front {
     /// The server ended while the app is still connected: answers what it
     /// left in flight and starts it again with the session.
     async fn restart(&mut self) -> Result<()> {
+        // Its input goes with it, so the writer feeding it ends and the
+        // wait for the server returns.
+        self.backend.input = None;
         // A server of this binary that failed fails `serve`, as it did
         // before the front: its cause, such as a broken setup, stays.
         if let Some(err) = self.finish().await {
@@ -1091,7 +1098,7 @@ impl Front {
             self.write_app(&reply.to_string()).await?;
         }
         self.backend = start_here(&self.inner);
-        self.identity = identity(&self.session.binary).ok();
+        self.identity = self.own;
         self.replay().await
     }
 
