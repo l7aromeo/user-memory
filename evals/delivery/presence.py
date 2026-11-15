@@ -39,26 +39,32 @@ import world
 CHARS = 9500
 # #120: the index's share of `CHARS`, as `INDEX_CHARS` in src/session.rs.
 INDEX_CHARS = 9000
-# #123: how many of a project's last sessions use is counted over. Of the
-# 5, 10 and 20 tried, 20 lists the most needs in later sessions at 1,000
-# and 10,000 memories (0.90 and 0.86 of all needs with reads counted, 0.85
-# and 0.80 at 10); worlds of 40 sessions try nothing longer.
-USE_WINDOW = 20
+# #123: how many of a project's last sessions use is counted over. With
+# reads counted at 10,000 memories, windows of 20, 40 and 80 list 0.93,
+# 0.95 and 0.95 of later sessions' needs; 40 covers one round of these
+# worlds' tasks, which recur unchanged. How fast real work drifts, which
+# would make a long window stale, is not in the model.
+USE_WINDOW = 40
 # #123: the share of those sessions a memory must be used in to be printed
-# as most-used knowledge. 0.25, 0.5 and 0.75 list design decisions alike;
-# a lower share prints more and leaves less room for rules (rules needed
-# at 1,000 memories: 0.82, 0.91 and 1.00 at window 20, use by delivery).
-# No memory in these worlds is needed by most tasks, so the part itself
-# is not measured here.
+# as most-used knowledge. The worlds' essentials are needed by 0.7 of
+# tasks: at window 40 and 10,000 memories, 0.25 and 0.5 print all of them
+# and 0.75 prints 0.54. 0.25 also prints memories used less often, which
+# leaves less room for the index (0.91 of needs listed against 0.95).
 ESSENTIAL_SHARE = 0.5
-# #123: at most this many most-used memories are printed. Not varied:
-# the worlds hold too few memories used that often to fill it.
+# #123: at most this many most-used memories are printed. At 10,000
+# memories 2, 5 and 15 print 0.44, 0.92 and 1.00 of the essentials and
+# list 0.96, 0.96 and 0.95 of needs: printing fewer leaves the index more
+# room. 15 prints every essential for 0.01 of needs listed.
 ESSENTIALS_MAX = 15
 # #123: a most-used memory this short is printed whole; a longer one as its
-# line and one passage. Not varied, for the same reason.
+# line and one passage. Not separable in this model: 150, 300 and 600 give
+# the same figures to two places.
 ESSENTIAL_WHOLE_CHARS = 300
-# #120: the most-used part's floor and ceiling of the room. Not varied,
-# for the same reason.
+# #120: the most-used part's floor and ceiling of the room. The ceiling
+# at 1,500, 3,000 and 4,500 prints 0.92, 1.00 and 1.00 of the essentials
+# and lists 0.96, 0.95 and 0.95 of needs, at 10,000 memories; 3,000 is the
+# least that prints them all. The floor is not varied yet; it is set to
+# the smallest ceiling tried.
 ESSENTIALS_FLOOR = 1500
 ESSENTIALS_CHARS = 3000
 # A passage printed for a long most-used memory, as delivery cuts them
@@ -66,14 +72,14 @@ ESSENTIALS_CHARS = 3000
 PASSAGE_CHARS = 400
 
 # The values each constant is tried at.
-USE_WINDOWS = [5, 10, 20, 40]
+USE_WINDOWS = [5, 10, 20, 40, 80]
 ESSENTIAL_SHARES = [0.25, 0.5, 0.75]
 # The most-used part's limits, each tried alone with the others at their
 # constants, with reads counted, at `USE_WINDOW` and `ESSENTIAL_SHARE`.
 LIMITS = {"most": [2, 5, 15], "whole": [150, 300, 600], "room": [1500, 3000, 4500]}
 
 # Times the tasks run, each round in a new order: 40 to 48 tasks a round,
-# so three rounds let a window of 40 sessions fill.
+# so three rounds let a window of 80 sessions fill.
 ROUNDS = 3
 
 # A listed memory's line: its 8-character id after the indent.
