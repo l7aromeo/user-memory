@@ -150,6 +150,9 @@ pub fn position(url: &str) -> Option<Position> {
 /// marker no longer says where the server at `url` stands, so it goes, and
 /// the claim with it. Until the next tick's poll writes it again, the hooks
 /// of every session on this machine ask the server, and hear the write.
+/// Another connector's poll that was asked before the write and answers
+/// after this can put the older position back; the write then reaches the
+/// other sessions with the next poll, as a write from elsewhere does.
 pub fn moved(url: &str) {
     if let Some(files) = Files::of(url) {
         let _ = fs::remove_file(&files.marker);
