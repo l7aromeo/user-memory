@@ -1,10 +1,7 @@
 //! The words keyword search matches: each word of a memory stemmed, as the
 //! keyword index stores them.
 
-use crate::memory::{
-    Memory,
-    words::{CATEGORY_ALIASES, STOP, tokenize},
-};
+use crate::memory::words::{CATEGORY_ALIASES, STOP, tokenize};
 use rust_stemmers::{Algorithm, Stemmer};
 use std::collections::{BTreeSet, HashMap};
 
@@ -77,20 +74,6 @@ pub(in crate::memory) struct Text<'a> {
     pub(in crate::memory) context: &'a str,
     pub(in crate::memory) reason: &'a str,
     pub(in crate::memory) evidence: &'a str,
-}
-
-impl<'a> From<&'a Memory> for Text<'a> {
-    fn from(m: &'a Memory) -> Self {
-        Self {
-            memory_type: &m.memory_type,
-            category: &m.category,
-            title: &m.title,
-            content: &m.content,
-            context: &m.context,
-            reason: &m.reason,
-            evidence: &m.evidence,
-        }
-    }
 }
 
 /// How the keyword index stores `stem`: the lowercase hex of its UTF-8
