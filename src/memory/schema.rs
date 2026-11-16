@@ -542,6 +542,9 @@ pub(super) struct Write<'c> {
     file: Option<FileTurn>,
     turn: Option<Turn>,
     conn: &'c Connection,
+    /// The store's latest change when this write began, for a file-backed
+    /// store that counts its changes.
+    since: Option<i64>,
 }
 
 pub(super) fn write(conn: &Connection) -> Result<Write<'_>> {
@@ -550,6 +553,11 @@ pub(super) fn write(conn: &Connection) -> Result<Write<'_>> {
 
 /// [`write`] at `gate`, waiting at most `wait` for each turn.
 fn write_at<'c>(gate: &'static Gate, conn: &'c Connection, wait: Duration) -> Result<Write<'c>> {
+    #[cfg(debug_assertions)]
+    assert!(
+        !super::delivery_files::holds_lock(),
+        "a store write turn is never taken under a delivery lock"
+    );
     let turn = gate.enter(wait)?;
     // A write inside another on this thread already has the file's turn.
     let file = match (&turn, conn.path().filter(|path| !path.is_empty())) {
@@ -563,12 +571,17 @@ fn write_at<'c>(gate: &'static Gate, conn: &'c Connection, wait: Duration) -> Re
     {
         super::changes::begin(&tx, Path::new(db))?;
     }
+    let since = match file {
+        Some(_) => super::changes::state(&tx)?.map(|state| state.last_change),
+        None => None,
+    };
     Ok(Write {
         tx,
         named,
         file,
         turn,
         conn,
+        since,
     })
 }
 
@@ -686,31 +699,91 @@ impl Write<'_> {
     /// stderr, and the backup runs either way. A write inside another on
     /// this thread leaves the backup to the outer one, which holds the turn.
     pub(super) fn commit(self) -> Result<()> {
-        self.finish(false)
+        self.finish(false, None)
     }
 
     /// [`commit`](Self::commit) for a write that removed or replaced
-    /// memory text: after the commit the log is cleared, so neither the
-    /// store's files nor a backup made after hold the old text. The pages
-    /// themselves lose it as it is deleted (`secure_delete`, and the keyword
-    /// index's `secure-delete`).
-    pub(super) fn commit_removing(self) -> Result<()> {
-        self.finish(true)
+    /// memory text, which it does as `removing`: after the commit the log
+    /// is cleared, so neither the store's files nor a backup made after hold
+    /// the old text. The pages themselves lose it as it is deleted
+    /// (`secure_delete`, and the keyword index's `secure-delete`). This
+    /// machine's delivery index loses it too: under its lock, taken before
+    /// the commit, the files holding a memory whose text went are built
+    /// again ([`delivery_files::before_removal`]).
+    ///
+    /// [`delivery_files::before_removal`]: super::delivery_files::before_removal
+    pub(super) fn commit_removing(self, removing: super::delivery_files::Removing) -> Result<()> {
+        self.finish(true, Some(removing))
     }
 
-    fn finish(self, removed: bool) -> Result<()> {
+    /// [`commit_removing`](Self::commit_removing) for a write that removed
+    /// no memory's text, only its history.
+    pub(super) fn commit_removing_history(self) -> Result<()> {
+        self.finish(true, None)
+    }
+
+    /// The memories whose text this write removes or replaces: those it
+    /// deleted, and those whose words wait to be indexed again.
+    fn touched(&self) -> Result<std::collections::HashSet<String>> {
+        let mut touched = std::collections::HashSet::new();
+        let mut pending = self
+            .tx
+            .prepare("SELECT k.id FROM search_pending p JOIN search_keys k ON k.key=p.key")?;
+        for id in pending.query_map([], |r| r.get::<_, String>(0))? {
+            touched.insert(id?);
+        }
+        if let Some(since) = self.since {
+            let mut removed = self.tx.prepare(
+                "SELECT memory_id FROM memory_changes WHERE change>?1 AND removed_at IS NOT NULL",
+            )?;
+            for id in removed.query_map([since], |r| r.get::<_, String>(0))? {
+                touched.insert(id?);
+            }
+        }
+        Ok(touched)
+    }
+
+    fn finish(
+        self,
+        removed: bool,
+        removing: Option<super::delivery_files::Removing>,
+    ) -> Result<()> {
+        let local = conn_file(self.conn).filter(|_| self.file.is_some());
+        let removal = match (removing, &local) {
+            (Some(removing), Some(db)) => {
+                super::delivery_files::before_removal(db, &self.touched()?, removing)?
+            }
+            _ => None,
+        };
         let Self {
             tx,
             named,
             file,
             turn,
             conn,
+            since: _,
         } = self;
-        if named {
-            super::history::end(&tx)?;
+        let committed = (|| -> Result<()> {
+            if named {
+                super::history::end(&tx)?;
+            }
+            super::index::settle(&tx)?;
+            #[cfg(debug_assertions)]
+            if removal.is_some() && std::env::var_os(FAIL_REMOVAL).is_some() {
+                anyhow::bail!("the commit failed for a test");
+            }
+            Ok(tx.commit()?)
+        })();
+        if let Err(err) = committed {
+            if let Some(removal) = removal {
+                removal.abandon();
+            }
+            return Err(err);
         }
-        super::index::settle(&tx)?;
-        tx.commit()?;
+        #[cfg(debug_assertions)]
+        if removal.is_some() {
+            super::hold_for_tests(super::delivery_files::HOLD_REMOVAL);
+        }
         // Before the turns pass on, so no other writer's marker comes
         // between this commit and its own.
         if file.is_some()
@@ -721,6 +794,9 @@ impl Write<'_> {
         drop(file);
         let outermost = turn.is_some();
         drop(turn);
+        if let (Some(removal), Some(db)) = (removal, &local) {
+            let _left = removal.rebuild(db);
+        }
         if let Some(db) = conn.path().filter(|path| !path.is_empty()) {
             let mut log = std::ffi::OsString::from(db);
             log.push("-wal");
@@ -741,6 +817,19 @@ impl Write<'_> {
     pub(super) fn rollback(self) -> rusqlite::Result<()> {
         self.tx.rollback()
     }
+}
+
+/// Names, in debug builds only, a switch that fails a removing write's
+/// commit after its delivery files were voided, for the test of what it
+/// leaves.
+#[cfg(debug_assertions)]
+const FAIL_REMOVAL: &str = "USER_MEMORY_TEST_FAIL_REMOVAL";
+
+/// The file of the store behind `conn`; none for one in memory.
+fn conn_file(conn: &Connection) -> Option<std::path::PathBuf> {
+    conn.path()
+        .filter(|path| !path.is_empty())
+        .map(std::path::PathBuf::from)
 }
 
 /// In debug builds only: while the file `USER_MEMORY_PAUSE_OPEN` names

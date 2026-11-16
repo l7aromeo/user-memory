@@ -552,7 +552,7 @@ pub(super) fn prune(db: &Path) -> Result<usize> {
     // Forgotten memories' rows of the change counter go on the same day.
     let removed = super::changes::prune(&tx)?;
     if dropped + removed > 0 {
-        tx.commit_removing()?;
+        tx.commit_removing_history()?;
     } else {
         tx.rollback()?;
     }

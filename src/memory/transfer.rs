@@ -1383,7 +1383,7 @@ fn import(
     let replaced = on_conflict == OnConflict::UseFile
         && plans.iter().any(|plan| matches!(plan, Plan::Conflict));
     if replaced {
-        tx.commit_removing()?;
+        tx.commit_removing(super::delivery_files::Removing::Import)?;
     } else {
         tx.commit()?;
     }

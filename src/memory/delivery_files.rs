@@ -14,6 +14,12 @@
 //! base ([`Files::open`]). Writers rename a base before its overlay, so a
 //! reader never pairs a base with an overlay made for another.
 //!
+//! A store write that removes or replaces memory text takes the lock before
+//! its commit, under the store's write turn, voids the files holding that
+//! text and builds them again after ([`before_removal`]). Everything else
+//! that holds the lock only reads the store, so nothing under the lock ever
+//! waits for the write turn.
+//!
 //! Every file here is private ([`private`]) and read whole, never mapped,
 //! so a reader holds a file only while it reads it.
 
@@ -23,6 +29,7 @@ use super::{
 };
 use crate::{paths, private};
 use std::{
+    collections::HashSet,
     fs::{self, File, OpenOptions, TryLockError},
     io::{self, Seek, Write},
     path::{Path, PathBuf},
@@ -77,6 +84,54 @@ fn overlay_memories() -> usize {
     OVERLAY_MEMORIES
 }
 
+/// How long a write that removes memory text waits for its store's
+/// delivery lock before it refuses. Every live holder lets go within its own
+/// limit: a tool hook within its 100 ms, the prompt hook within its limit,
+/// session start within 5 s, another removal once it built its bases again
+/// (under half a second). Twice the longest, so only a stopped or hung
+/// holder makes a removal give up.
+pub(crate) const DELIVERY_LOCK_WAIT: Duration = Duration::from_secs(10);
+
+/// [`DELIVERY_LOCK_WAIT`], which debug builds take in seconds from
+/// `USER_MEMORY_TEST_DELIVERY_LOCK_WAIT`, so a test of a refusal is short.
+fn delivery_lock_wait() -> Duration {
+    #[cfg(debug_assertions)]
+    if let Some(secs) = std::env::var("USER_MEMORY_TEST_DELIVERY_LOCK_WAIT")
+        .ok()
+        .and_then(|secs| secs.parse().ok())
+    {
+        return Duration::from_secs(secs);
+    }
+    DELIVERY_LOCK_WAIT
+}
+
+/// Names, in debug builds only, a switch that makes a removing write leave
+/// the delivery files as they are, as a binary that knows nothing of them
+/// does, for the tests of the hooks' removal check.
+#[cfg(debug_assertions)]
+const NO_DELIVERY: &str = "USER_MEMORY_TEST_NO_DELIVERY";
+
+/// Names, in debug builds only, the file that holds a removing write after
+/// its commit and before it publishes the store's marker, so a test can
+/// kill it there.
+#[cfg(debug_assertions)]
+pub(crate) const HOLD_REMOVAL: &str = "USER_MEMORY_HOLD_REMOVAL";
+
+#[cfg(debug_assertions)]
+thread_local! {
+    /// How many delivery locks this thread holds, so debug builds can check
+    /// that no store write turn is taken under one.
+    static LOCKS_HELD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Whether this thread holds a delivery lock. The store's write turn always
+/// comes first: a write waiting for the turn under the lock could wait for
+/// a removal that waits for the lock.
+#[cfg(debug_assertions)]
+pub(crate) fn holds_lock() -> bool {
+    LOCKS_HELD.get() > 0
+}
+
 /// The extensions of the files.
 const BASE: &str = "index";
 const OVERLAY: &str = "overlay";
@@ -108,6 +163,13 @@ pub(crate) struct Files {
 /// its holder exits or is killed too.
 pub(crate) struct Lock {
     _file: File,
+}
+
+#[cfg(debug_assertions)]
+impl Drop for Lock {
+    fn drop(&mut self) {
+        LOCKS_HELD.set(LOCKS_HELD.get() - 1);
+    }
 }
 
 impl Files {
@@ -192,10 +254,11 @@ impl Files {
             .set_len(0)
             .and_then(|()| file.rewind())
             .and_then(|()| write!(file, "{}", std::process::id()));
+        #[cfg(debug_assertions)]
+        LOCKS_HELD.set(LOCKS_HELD.get() + 1);
         Lock { _file: file }
     }
 
-    #[cfg(test)]
     /// The process id the lock's holder wrote; none when the file holds
     /// none, or cannot be read while held, as on Windows.
     pub(crate) fn holder(&self) -> Option<u32> {
@@ -443,19 +506,12 @@ fn build_base(
     if current {
         return Ok(Started::Current);
     }
-    let Ok(built) = super::delivery::build(db, &scope, |id, change| {
-        Position::at(id, change, 0).as_str().to_owned()
-    }) else {
+    let Some((built, empty)) = base_and_overlay(db, &scope) else {
         return Ok(Started::Left);
     };
     if Instant::now() > deadline {
         return Ok(Started::Left);
     }
-    let header = DeliveryIndex::read(built.clone())
-        .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?
-        .header;
-    let empty = super::delivery::empty_overlay(&header)
-        .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
     files.write(&lock, &files.base(&scope), &built)?;
     files.write(&lock, &files.overlay(&scope), &empty)?;
     Ok(Started::Built)
@@ -522,8 +578,6 @@ pub(crate) fn refresh(
     let Some(lock) = lock else {
         return Ok(Refreshed::Busy);
     };
-    #[cfg(debug_assertions)]
-    super::hold_for_tests(HOLD_REFRESH);
     files.tidy(&lock, None);
     let Some(now) = super::changes::position(db) else {
         return Ok(Refreshed::NoBase);
@@ -554,6 +608,8 @@ pub(crate) fn refresh(
             }
             Err(super::delivery::Error::Format) => return Ok(Refreshed::NoBase),
         };
+    #[cfg(debug_assertions)]
+    super::hold_for_tests(HOLD_REFRESH);
     if overlay.stale {
         files.clear(&lock, &scope)?;
         return Ok(Refreshed::Cleared);
@@ -566,8 +622,8 @@ pub(crate) fn refresh(
 }
 
 /// Names, in debug builds only, the file that holds a hook's refresh after
-/// it took the lock and before it reads the old files again, so a test can
-/// run a removal against a hook holding the lock.
+/// it took the lock and built its overlay from the store, before it renames
+/// it, so a test can run a removal against a hook holding the lock.
 #[cfg(debug_assertions)]
 pub(crate) const HOLD_REFRESH: &str = "USER_MEMORY_HOLD_REFRESH";
 
@@ -592,6 +648,16 @@ fn remove(path: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use crate::memory::delivery::{self, Part};
+
+    #[test]
+    #[should_panic(expected = "a store write turn is never taken under a delivery lock")]
+    fn a_store_write_under_a_delivery_lock_is_a_broken_invariant() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = Files::in_dir(dir.path().join(FOLDER), "a store");
+        let _lock = files.try_lock().unwrap().unwrap();
+        let conn = rusqlite::Connection::open(dir.path().join("memories.sqlite3")).unwrap();
+        let _ = crate::memory::schema::write(&conn);
+    }
 
     /// A store at `dir` holding a stated memory of the ledger project and a
     /// global one.
@@ -674,7 +740,10 @@ mod tests {
             "content": "Moor the zeppelin to the north mast.", "scope": "global",
             "user_confirmed": true,
         });
+        // The store is written with no delivery lock held.
+        drop(lock);
         crate::memory::record(&db, serde_json::from_value(input).unwrap()).unwrap();
+        let lock = files.try_lock().unwrap().unwrap();
         files
             .write(&lock, &files.base(&ledger()), &base(&db))
             .unwrap();
@@ -712,6 +781,7 @@ mod tests {
         files
             .write(&lock, &files.base(&ledger()), &base(&db))
             .unwrap();
+        drop(lock);
         let at = now(&db);
         assert!(files.open(&ledger(), &at).is_some());
         // The store as a backup made before its last change held it.
@@ -742,4 +812,194 @@ mod tests {
         drop(held);
         assert!(files.try_lock().unwrap().is_some());
     }
+}
+
+/// What a write that removes memory text does, as its refusal names it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Removing {
+    Forget,
+    Update,
+    Import,
+}
+
+impl Removing {
+    /// The reply when `holder` (a process id, when the lock file names one)
+    /// kept the lock for all of `wait`.
+    fn refusal(self, holder: Option<u32>, wait: Duration) -> String {
+        let (done, verb) = match self {
+            Self::Forget => ("forgotten", "forget"),
+            Self::Update => ("updated", "update"),
+            Self::Import => ("imported", "import"),
+        };
+        let who = holder.map_or_else(
+            || "another user-memory process".to_owned(),
+            |pid| format!("user-memory process {pid}"),
+        );
+        format!(
+            "Nothing was {done}: {who} has held this machine's delivery index for {} s. Wait a moment and {verb} again; if it still holds it, stop that process first.",
+            wait.as_secs()
+        )
+    }
+}
+
+/// A removing write's hold on its store's delivery files, from before its
+/// commit until it built them again: the lock, and the scopes it voided.
+pub(crate) struct Removal {
+    files: Files,
+    lock: Lock,
+    /// The scopes whose base or overlay holds a memory the write removed or
+    /// rewrote, voided until they are built again.
+    scopes: Vec<Vec<String>>,
+    /// Files of no scope it could read, voided until they are deleted.
+    damaged: Vec<PathBuf>,
+    /// What the void mark named before this write.
+    kept: Vec<String>,
+}
+
+/// Before the commit of a write to the local store at `db` that removes or
+/// replaces the text of the memories `touched` (#175): when there are any,
+/// takes the store's delivery lock, waiting [`DELIVERY_LOCK_WAIT`], or
+/// fails with the reply for `removing` that names the holder, so the write
+/// rolls back. Holding it, names in the void mark every file that holds one
+/// of them, which readers then take as absent, so neither a hook that took
+/// the lock first nor a write killed after its commit leaves their words in
+/// use. [`Removal::rebuild`] after the commit builds those files again;
+/// [`Removal::abandon`] when the commit fails puts the mark back.
+pub(crate) fn before_removal(
+    db: &Path,
+    touched: &HashSet<String>,
+    removing: Removing,
+) -> anyhow::Result<Option<Removal>> {
+    if touched.is_empty() {
+        return Ok(None);
+    }
+    #[cfg(debug_assertions)]
+    if std::env::var_os(NO_DELIVERY).is_some() {
+        return Ok(None);
+    }
+    let Some(files) = Files::of(&paths::store_identity(None, db)) else {
+        return Ok(None);
+    };
+    let wait = delivery_lock_wait();
+    let Some(lock) = files.lock_until(Instant::now() + wait)? else {
+        anyhow::bail!(removing.refusal(files.holder(), wait));
+    };
+    files.tidy(&lock, None);
+    let kept = files.voided();
+    let mut scopes: Vec<Vec<String>> = Vec::new();
+    let mut damaged = Vec::new();
+    for (_, path) in files.own() {
+        if !path.extension().is_some_and(|e| e == BASE || e == OVERLAY) {
+            continue;
+        }
+        match DeliveryIndex::load(&path) {
+            Ok(index) => {
+                let holds =
+                    (0..index.len()).any(|m| index.id(m).is_ok_and(|id| touched.contains(id)));
+                if holds && !scopes.contains(&index.header.projects) {
+                    scopes.push(index.header.projects);
+                }
+            }
+            Err(_) => damaged.push(path),
+        }
+    }
+    let removal = Removal {
+        files,
+        lock,
+        scopes,
+        damaged,
+        kept,
+    };
+    let mut names = removal.kept.clone();
+    names.extend(removal.voided().iter().map(|path| name_of(path)));
+    if names.len() > removal.kept.len() {
+        removal.files.void(&removal.lock, &names)?;
+    }
+    Ok(Some(removal))
+}
+
+/// The file name of `path`, as the void mark keeps it.
+fn name_of(path: &Path) -> String {
+    path.file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned()
+}
+
+impl Removal {
+    /// The files this removal voided.
+    fn voided(&self) -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = self
+            .scopes
+            .iter()
+            .flat_map(|scope| [self.files.base(scope), self.files.overlay(scope)])
+            .collect();
+        paths.extend(self.damaged.iter().cloned());
+        paths
+    }
+
+    /// After the commit, still holding the lock: builds each voided scope's
+    /// base from the store at `db` again, each on its own thread, with an
+    /// empty overlay made for it; deletes a voided file it could not build
+    /// again; then names in the void mark only what is still on disk and
+    /// voided, which it returns, and lets the lock go.
+    pub(crate) fn rebuild(self, db: &Path) -> Vec<PathBuf> {
+        let built: Vec<Option<(Vec<u8>, Vec<u8>)>> = std::thread::scope(|threads| {
+            let builds: Vec<_> = self
+                .scopes
+                .iter()
+                .map(|scope| threads.spawn(move || base_and_overlay(db, scope)))
+                .collect();
+            builds
+                .into_iter()
+                .map(|build| build.join().ok().flatten())
+                .collect()
+        });
+        let mut done = HashSet::new();
+        for (scope, built) in self.scopes.iter().zip(built) {
+            let (base, overlay) = (self.files.base(scope), self.files.overlay(scope));
+            if let Some((base_bytes, overlay_bytes)) = built
+                && self.files.write(&self.lock, &base, &base_bytes).is_ok()
+                && self
+                    .files
+                    .write(&self.lock, &overlay, &overlay_bytes)
+                    .is_ok()
+            {
+                done.extend([name_of(&base), name_of(&overlay)]);
+            }
+        }
+        let mut left = Vec::new();
+        for path in self.voided() {
+            if done.contains(&name_of(&path)) {
+                continue;
+            }
+            match self.files.remove(&self.lock, &path) {
+                Err(err) if err.kind() != io::ErrorKind::NotFound => left.push(path),
+                _ => {}
+            }
+        }
+        let mut names = self.kept.clone();
+        names.extend(left.iter().map(|path| name_of(path)));
+        let _ = self.files.void(&self.lock, &names);
+        left
+    }
+
+    /// When the write failed after its files were voided: the void mark
+    /// names again only what it named before, then the lock goes, so the
+    /// files are used as they were.
+    pub(crate) fn abandon(self) {
+        let _ = self.files.void(&self.lock, &self.kept);
+    }
+}
+
+/// A new base of `scope` from the store at `db`, and an empty overlay made
+/// for it; none when the store's keyword index is not current.
+fn base_and_overlay(db: &Path, scope: &[String]) -> Option<(Vec<u8>, Vec<u8>)> {
+    let base = super::delivery::build(db, scope, |id, change| {
+        Position::at(id, change, 0).as_str().to_owned()
+    })
+    .ok()?;
+    let header = DeliveryIndex::read(base.clone()).ok()?.header;
+    let overlay = super::delivery::empty_overlay(&header).ok()?;
+    Some((base, overlay))
 }
