@@ -161,7 +161,13 @@ conversations and times (`restored`), and keeps each memory changed since
 on a forgotten memory become stale, listed as `staled`. A memory the forgotten
 one had replaced is listed as `left_superseded`: it stays hidden until
 `user-memory update ID` makes it active again. When either list has entries,
-`next` says what to do about each, one line each. The memory's history
+`next` says what to do about each, one line each. A forget, an update or
+an import that takes the file's side also builds this machine's delivery
+index again without the removed words before it replies; a file another
+program held open, so it could be neither replaced nor deleted, is listed
+in `delivery_left` with a line of `next`, and `user-memory doctor`
+deletes it. If another user-memory process holds the delivery index for
+10 s, the command changes nothing and names that process. The memory's history
 keeps only tombstones, each change's operation and time, which
 `user-memory history` shows. Forgetting cannot be undone, except from a
 backup. Nothing is ever deleted automatically, so write a

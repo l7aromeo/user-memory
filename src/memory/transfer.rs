@@ -1382,11 +1382,12 @@ fn import(
     // in the store's files, as for a correction.
     let replaced = on_conflict == OnConflict::UseFile
         && plans.iter().any(|plan| matches!(plan, Plan::Conflict));
-    if replaced {
-        tx.commit_removing(super::delivery_files::Removing::Import)?;
+    let left = if replaced {
+        tx.commit_removing(super::delivery_files::Removing::Import)?
     } else {
         tx.commit()?;
-    }
+        super::delivery_files::Left::default()
+    };
     summary.insert("applied".into(), json!(true));
     if let Some(named) = named {
         summary.insert("import".into(), json!(named));
@@ -1397,6 +1398,7 @@ fn import(
     if let Some(next) = import_next(&summary, "`user-memory reindex`") {
         summary["next"] = json!(next);
     }
+    left.note(&mut summary);
     Ok(summary)
 }
 

@@ -729,8 +729,10 @@ pub fn update(db: &Path, input: Update) -> Result<Value> {
         if input.drop_history {
             history::drop_history(&tx, memory_id, earlier)?;
         }
-        tx.commit_removing(Removing::Update)?;
-        return Ok(json!({"updated":true,"id":memory_id,"status":old.status}));
+        let left = tx.commit_removing(Removing::Update)?;
+        let mut result = json!({"updated":true,"id":memory_id,"status":old.status});
+        left.note(&mut result);
+        return Ok(result);
     }
     // Wording (title, context, reason or evidence note) is not the user
     // stating the memory: alone it leaves an observation or inference the
@@ -822,11 +824,12 @@ pub fn update(db: &Path, input: Update) -> Result<Value> {
     if input.drop_history {
         history::drop_history(&tx, memory_id, earlier)?;
     }
-    tx.commit_removing(Removing::Update)?;
+    let left = tx.commit_removing(Removing::Update)?;
     let mut result = json!({"updated":true,"id":memory_id,"status":status});
     if revived {
         result["revived"] = json!(true);
     }
+    left.note(&mut result);
     Ok(result)
 }
 
@@ -982,7 +985,7 @@ pub fn forget(db: &Path, input: Forget) -> Result<Value> {
     if !next.is_empty() {
         result["next"] = json!(next.join("\n"));
     }
-    tx.commit_removing(Removing::Forget)?;
+    tx.commit_removing(Removing::Forget)?.note(&mut result);
     Ok(result)
 }
 

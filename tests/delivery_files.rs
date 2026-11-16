@@ -950,3 +950,130 @@ fn a_migration_deletes_the_store_s_files() {
     assert!(out.status.success(), "{out:?}");
     assert_eq!(store_files(&home), Vec::<PathBuf>::new());
 }
+
+/// The reply's line when a removal left files another program holds open.
+const LEFT_MARKED: &str = "The files in delivery_left still hold the removed words because another program has them open. Readers skip them; user-memory deletes them at its next write, and `user-memory doctor` deletes them at once.";
+
+/// Makes renames and deletes of the file named `name` fail, as another
+/// program holding it open does on Windows.
+fn held(name: &str) -> (&'static str, &str) {
+    ("USER_MEMORY_TEST_HELD_FILE", name)
+}
+
+/// The delivery files holding `word`'s hex form or its text.
+fn delivered(home: &Home, word: &str) -> Vec<PathBuf> {
+    every_file(&home.delivery())
+        .into_iter()
+        .filter(|path| holds(path, &hex(word)) || holds(path, word))
+        .collect()
+}
+
+/// After a removal of `gone` that left `base`: the reply names it, the void
+/// mark names it, and the next tool hook deletes it and every word with it.
+fn left_until_the_next_writer(home: &Home, reply: &Value, base: &Path, gone: &str) {
+    assert_eq!(reply["delivery_left"], json!([base]), "{reply}");
+    assert!(
+        reply["next"].as_str().unwrap().ends_with(LEFT_MARKED),
+        "{reply}"
+    );
+    let void = home.files(".void");
+    assert_eq!(void.len(), 1);
+    let name = base.file_name().unwrap().to_str().unwrap();
+    assert!(fs::read_to_string(&void[0]).unwrap().contains(name));
+    home.hook("PostToolUse", "s1", &[]);
+    assert_eq!(delivered(home, gone), Vec::<PathBuf>::new());
+    assert!(home.files(".void").is_empty(), "the mark goes with it");
+}
+
+#[test]
+fn a_file_another_program_holds_is_named_in_the_reply_and_deleted_by_the_next_writer() {
+    for what in ["forget", "update", "update --title", "import"] {
+        let home = Home::new();
+        let title = if what == "update --title" {
+            "quokka-title"
+        } else {
+            "deploy"
+        };
+        let id = home.record(title, "quokka-deploy");
+        home.record("lint", "wombat-lint");
+        let file = home.path().join("export.json");
+        home.cli(&["export", file.to_str().unwrap()]);
+        if what == "import" {
+            home.cli(&["update", &id, "--content", "Run `numbat-deploy` first."]);
+        }
+        home.hook("SessionStart", "s1", &[]);
+        let base = home.base();
+        let name = base.file_name().unwrap().to_str().unwrap().to_owned();
+        let (args, gone): (Vec<&str>, &str) = match what {
+            "forget" => (vec!["forget", &id], "quokka-deploy"),
+            "update" => (
+                vec!["update", &id, "--content", "Run `numbat-deploy` first."],
+                "quokka-deploy",
+            ),
+            "update --title" => (vec!["update", &id, "--title", "numbat-title"], "quokka"),
+            _ => (
+                vec![
+                    "import",
+                    file.to_str().unwrap(),
+                    "--apply",
+                    "--on-conflict",
+                    "use-file",
+                ],
+                "numbat-deploy",
+            ),
+        };
+        assert!(holds(&base, &hex(gone)), "{what}");
+        let reply = home.cli_with(&args, &[held(&name)]);
+        assert!(holds(&base, &hex(gone)), "{what}: still on disk");
+        left_until_the_next_writer(&home, &reply, &base, gone);
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn a_base_open_without_shared_delete_is_named_in_the_reply_and_deleted_once_closed() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let (home, id) = started();
+    let base = home.base();
+    // As a scanner or backup tool opens it: no sharing at all.
+    let open = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(&base)
+        .unwrap();
+    let reply = home.cli(&["forget", &id]);
+    drop(open);
+    left_until_the_next_writer(&home, &reply, &base, "quokka-deploy");
+}
+
+/// Doctor's output in `home`, with `env`.
+fn doctor(home: &Home, env: &[(&str, &str)]) -> String {
+    let out = home.command(&["doctor"], env).output().unwrap();
+    String::from_utf8(out.stdout).unwrap()
+}
+
+#[test]
+fn doctor_deletes_the_files_a_removal_left_and_names_one_still_held() {
+    let (home, id) = started();
+    let base = home.base();
+    let name = base.file_name().unwrap().to_str().unwrap().to_owned();
+    home.cli_with(&["forget", &id], &[held(&name)]);
+    let still = doctor(&home, &[held(&name)]);
+    assert!(
+        still.contains(&format!(
+            "Delivery index: {} still holds removed words because another program has it open; close that program, then run `user-memory doctor` again",
+            base.display()
+        )),
+        "{still}"
+    );
+    assert!(!still.contains("Delivery index: deleted"), "{still}");
+    let done = doctor(&home, &[]);
+    assert!(
+        done.contains("Delivery index: deleted 1 file that held removed words.\n"),
+        "{done}"
+    );
+    assert_eq!(holding(&home, "quokka-deploy"), Vec::<PathBuf>::new());
+    assert!(home.files(".void").is_empty());
+    let again = doctor(&home, &[]);
+    assert!(!again.contains("Delivery index"), "silent: {again}");
+}

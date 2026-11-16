@@ -1776,6 +1776,7 @@ pub async fn doctor(options: &Options) -> Result<Health> {
         check_search_index(&paths.db, &mut actions, &mut failures);
         check_backups(&paths.db, &mut actions, &mut failures);
         check_privacy(&paths.db, &mut actions, &mut failures);
+        check_delivery(&paths.db, &mut actions);
     }
     let check_hooks = options.hooks_enabled(saved.as_ref());
     let check_skill = options.skill_enabled(saved.as_ref());
@@ -2021,6 +2022,7 @@ fn store_doctor(paths: &Paths) -> Result<Health> {
     }
     check_search_index(&paths.db, &mut actions, &mut failures);
     check_backups(&paths.db, &mut actions, &mut failures);
+    check_delivery(&paths.db, &mut actions);
     conclude(&actions, &failures)
 }
 
@@ -2078,6 +2080,33 @@ fn check_privacy(db: &Path, actions: &mut Vec<String>, failures: &mut Vec<String
         println!("Store privacy: OK");
     }
     actions.extend(wider.into_iter().map(privacy_step));
+}
+
+/// Deletes this machine's delivery files of the store at `db` that may still
+/// hold removed words (#175): those a removal could not delete while
+/// another program held them, and those a killed writer left. Says so when
+/// it deleted any; a file still held is an action, one line each. Silent
+/// when there is nothing to do, or when the lock stays taken: the next
+/// writer deletes them then.
+fn check_delivery(db: &Path, actions: &mut Vec<String>) {
+    let Some(cleaned) = crate::memory::delivery_files::clean(db) else {
+        return;
+    };
+    if cleaned.deleted > 0 {
+        println!(
+            "Delivery index: deleted {} that held removed words.",
+            match cleaned.deleted {
+                1 => "1 file".to_owned(),
+                n => format!("{n} files"),
+            }
+        );
+    }
+    actions.extend(cleaned.held.iter().map(|path| {
+        format!(
+            "Delivery index: {} still holds removed words because another program has it open; close that program, then run `user-memory doctor` again",
+            path.display()
+        )
+    }));
 }
 
 /// The step that makes `path` readable only by this user again.
