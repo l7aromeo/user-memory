@@ -341,8 +341,10 @@ on Windows), each private to you:
   tool hooks keep current; `<store key>.lock`, which every writer of the store's files
   holds; and at times `<store key>.void`, naming files to take as absent. A
   forget, an update or an import that removes or replaces a memory's text
-  builds the files that held it again, under the lock, before it replies. A
-  file not written for a day goes at that store's next session start.
+  builds the files that held it again, under the lock, before it replies.
+  `migrate` and `project move` delete the store's files, and the next
+  prompt builds them again. A file not written for a day goes at that
+  store's next session start.
   Deleting the folder loses nothing: the next session start builds it
   again.
 - `servers/`: for each memory server this machine is a client of, the

@@ -891,3 +891,62 @@ fn a_forget_whose_commit_fails_leaves_the_files_in_use() {
         "{still}"
     );
 }
+
+/// The store's delivery files other than its lock.
+fn store_files(home: &Home) -> Vec<PathBuf> {
+    every_file(&home.delivery())
+        .into_iter()
+        .filter(|path| path.extension().is_none_or(|e| e != "lock"))
+        .collect()
+}
+
+#[test]
+fn a_project_move_deletes_the_store_s_files_and_the_next_prompt_builds_them() {
+    const OLD: &str = "github.com/acme/old";
+    let home = Home::new();
+    home.record_in(Some(OLD), "fuzz", "quokka-fuzz");
+    home.hook("SessionStart", "s1", &[]);
+    home.link("s1", OLD, false);
+    home.hook("UserPromptSubmit", "s1", &[]);
+    assert!(
+        home.files(".index")
+            .iter()
+            .any(|base| holds(base, &hex("quokka-fuzz")))
+    );
+    let moved = home
+        .command(&["project", "move", OLD, "github.com/acme/new"], &[])
+        .output()
+        .unwrap();
+    assert!(moved.status.success(), "{moved:?}");
+    assert_eq!(store_files(&home), Vec::<PathBuf>::new());
+    home.hook("UserPromptSubmit", "s1", &[]);
+    assert!(
+        home.files(".index")
+            .iter()
+            .any(|base| holds(base, &hex("quokka-fuzz"))),
+        "the moved link's scope built again"
+    );
+}
+
+#[test]
+fn a_migration_deletes_the_store_s_files() {
+    let home = Home::new();
+    home.record("deploy", "quokka-deploy");
+    home.hook("SessionStart", "s1", &[]);
+    assert!(!store_files(&home).is_empty());
+    // The same path now holds a store from before the change counter.
+    for ending in ["", "-wal", "-shm"] {
+        let _ = fs::remove_file(format!("{}{ending}", home.db().display()));
+    }
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/schema");
+    let conn = rusqlite::Connection::open(home.db()).unwrap();
+    conn.execute_batch(&fs::read_to_string(fixtures.join("v9.sql")).unwrap())
+        .unwrap();
+    conn.pragma_update(None, "user_version", 9).unwrap();
+    conn.execute_batch(&fs::read_to_string(fixtures.join("v9.seed.sql")).unwrap())
+        .unwrap();
+    drop(conn);
+    let out = home.command(&["migrate"], &[]).output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(store_files(&home), Vec::<PathBuf>::new());
+}

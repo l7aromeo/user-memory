@@ -814,6 +814,28 @@ mod tests {
     }
 }
 
+/// After a committed write that changed what every scope of the local store
+/// at `db` holds, a migration or a project move (#175): deletes the store's
+/// bases and overlays, its void mark and its files being written, under its
+/// lock, waited for up to [`DELIVERY_LOCK_WAIT`], so the next prompt or
+/// session start builds each scope again from the store. A holder that
+/// keeps the lock longer keeps the files: a migration gave the store a new
+/// id, so no reader uses them, and after a move the overlays say which
+/// memories changed.
+pub(crate) fn drop_store(db: &Path) {
+    let Some(files) = Files::of(&paths::store_identity(None, db)) else {
+        return;
+    };
+    let Ok(Some(lock)) = files.lock_until(Instant::now() + delivery_lock_wait()) else {
+        return;
+    };
+    for (_, path) in files.own() {
+        if path != files.lock_path() {
+            let _ = files.remove(&lock, &path);
+        }
+    }
+}
+
 /// What a write that removes memory text does, as its refusal names it.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Removing {
