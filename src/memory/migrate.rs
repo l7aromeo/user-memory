@@ -741,6 +741,8 @@ fn run(
             if let Some(turn) = &turn {
                 turn.publish(&conn);
             }
+            // Built for the store before, so of no use to it now.
+            super::delivery_files::drop_store(db);
         }
         Err(err) => {
             drop(tx);

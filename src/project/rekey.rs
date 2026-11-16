@@ -130,6 +130,8 @@ pub fn move_project(db: &Path, old: &str, new: &str) -> Result<Moved> {
             crate::memory::end_writer(&tx)?;
             tx.commit()?;
             turn.publish(&conn);
+            // Every scope naming either key now holds other memories.
+            crate::memory::delivery_files::drop_store(db);
             // This transaction is not the store's write turn, whose commit
             // makes the day's backup, so the move makes it here.
             crate::memory::backups::back_up_if_due(db);
