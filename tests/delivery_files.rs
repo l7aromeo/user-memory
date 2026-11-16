@@ -61,7 +61,11 @@ impl Home {
     }
 
     fn cli(&self, args: &[&str]) -> Value {
-        let out = self.command(args, &[]).output().unwrap();
+        self.cli_with(args, &[])
+    }
+
+    fn cli_with(&self, args: &[&str], env: &[(&str, &str)]) -> Value {
+        let out = self.command(args, env).output().unwrap();
         assert!(out.status.success(), "{out:?}");
         serde_json::from_slice(&out.stdout).unwrap()
     }
@@ -69,11 +73,22 @@ impl Home {
     /// Records a global memory whose content holds `anchor` as a code
     /// span, which the index keeps as written; returns its id.
     fn record(&self, title: &str, anchor: &str) -> String {
-        self.record_in(None, title, anchor)
+        self.record_with(&[], None, title, anchor)
     }
 
     /// As [`Home::record`], for `project` when given.
     fn record_in(&self, project: Option<&str>, title: &str, anchor: &str) -> String {
+        self.record_with(&[], project, title, anchor)
+    }
+
+    /// As [`Home::record_in`], with `extra` arguments.
+    fn record_with(
+        &self,
+        extra: &[&str],
+        project: Option<&str>,
+        title: &str,
+        anchor: &str,
+    ) -> String {
         let content = format!("Run `{anchor}` before the {title} step.");
         let mut args = vec![
             "record",
@@ -90,6 +105,7 @@ impl Home {
             Some(project) => args.extend(["--scope", "project", "--project", project]),
             None => args.extend(["--scope", "global"]),
         }
+        args.extend(extra);
         let out = self.cli(&args);
         assert_eq!(out["stored"], true, "{out}");
         out["id"].as_str().unwrap().to_owned()
@@ -442,10 +458,12 @@ fn an_overlay_whose_store_pruned_its_changes_writes_nothing() {
     assert_eq!(fs::read(home.overlay()).unwrap(), before);
 }
 
+/// Makes a removing write leave the delivery files as they are, as a binary
+/// that knows nothing of them does.
+const UNAWARE: (&str, &str) = ("USER_MEMORY_TEST_NO_DELIVERY", "1");
+
 #[test]
 fn a_tool_hook_deletes_a_base_holding_words_an_unaware_writer_removed() {
-    // This binary's forget and update leave the delivery files as they are,
-    // as one that knows nothing of them does.
     for remove in ["forget", "update"] {
         let home = Home::new();
         let id = home.record("deploy", "quokka-deploy");
@@ -453,9 +471,12 @@ fn a_tool_hook_deletes_a_base_holding_words_an_unaware_writer_removed() {
         home.hook("SessionStart", "s1", &[]);
         assert!(holds(&home.base(), &hex("quokka-deploy")));
         let out = if remove == "forget" {
-            home.cli(&["forget", &id])
+            home.cli_with(&["forget", &id], &[UNAWARE])
         } else {
-            home.cli(&["update", &id, "--content", "Run the plain deploy step."])
+            home.cli_with(
+                &["update", &id, "--content", "Run the plain deploy step."],
+                &[UNAWARE],
+            )
         };
         assert!(out.is_object(), "{out}");
         home.hook("PostToolUse", "s1", &[]);
@@ -553,8 +574,320 @@ fn a_prompt_after_an_unaware_removal_builds_the_base_without_its_words() {
     let id = home.record("deploy", "quokka-deploy");
     home.record("lint", "wombat-lint");
     home.hook("SessionStart", "s1", &[]);
-    home.cli(&["forget", &id]);
+    home.cli_with(&["forget", &id], &[UNAWARE]);
     home.hook("UserPromptSubmit", "s1", &[]);
     assert_eq!(holding(&home, "quokka-deploy"), Vec::<PathBuf>::new());
     assert!(holds(&home.base(), &hex("wombat-lint")), "built again");
+}
+
+/// A home whose session started on a base holding `quokka-deploy` (the
+/// memory returned) and `wombat-lint`.
+fn started() -> (Home, String) {
+    let home = Home::new();
+    let id = home.record("deploy", "quokka-deploy");
+    home.record("lint", "wombat-lint");
+    home.hook("SessionStart", "s1", &[]);
+    assert!(holds(&home.base(), &hex("quokka-deploy")));
+    (home, id)
+}
+
+/// After a removal of `gone`: no delivery file holds its words (a session's
+/// snapshot keeps the titles it saw until its next prompt), and the scope's
+/// base was built again with `kept` and an empty overlay made for it.
+fn removed(home: &Home, gone: &str, kept: &str, what: &str) {
+    let holding: Vec<PathBuf> = every_file(&home.delivery())
+        .into_iter()
+        .filter(|path| holds(path, &hex(gone)) || holds(path, gone))
+        .collect();
+    assert_eq!(holding, Vec::<PathBuf>::new(), "{what}");
+    assert!(holds(&home.base(), &hex(kept)), "{what}: built again");
+    assert!(home.overlay().exists(), "{what}: with its overlay");
+    assert!(home.files(".void").is_empty(), "{what}: no void mark left");
+}
+
+#[test]
+fn forget_builds_the_files_again_without_the_forgotten_words() {
+    let (home, id) = started();
+    let out = home.cli(&["forget", &id]);
+    assert!(out.is_object(), "{out}");
+    removed(&home, "quokka-deploy", "wombat-lint", "forget ID");
+
+    let home = Home::new();
+    home.record_with(&["--origin", "chat/one"], None, "deploy", "quokka-deploy");
+    home.record("lint", "wombat-lint");
+    home.hook("SessionStart", "s1", &[]);
+    home.cli(&["forget", "--origin", "chat/one"]);
+    removed(&home, "quokka-deploy", "wombat-lint", "forget --origin");
+}
+
+#[test]
+fn forgetting_an_import_builds_the_files_again_without_its_words() {
+    let other = Home::new();
+    other.record("deploy", "quokka-deploy");
+    let file = other.path().join("export.json");
+    other.cli(&["export", file.to_str().unwrap()]);
+    let home = Home::new();
+    home.record("lint", "wombat-lint");
+    let summary = home.cli(&["import", file.to_str().unwrap(), "--apply"]);
+    let import = summary["import"].as_str().unwrap().to_owned();
+    home.hook("SessionStart", "s1", &[]);
+    assert!(holds(&home.base(), &hex("quokka-deploy")));
+    home.cli(&["forget", "--import", &import]);
+    removed(&home, "quokka-deploy", "wombat-lint", "forget --import");
+}
+
+#[test]
+fn update_builds_the_files_again_without_the_old_words() {
+    for (what, args) in [
+        ("content", vec!["--content", "Run `numbat-deploy` first."]),
+        (
+            "content, dropping the history",
+            vec!["--content", "Run `numbat-deploy` first.", "--drop-history"],
+        ),
+        ("title", vec!["--title", "numbat-deploy"]),
+    ] {
+        let home = Home::new();
+        let recorded = home.cli(&[
+            "record",
+            "--type",
+            "procedure",
+            "--category",
+            "build",
+            "--title",
+            "quokka-deploy",
+            "--content",
+            "Run `wombat-lint` first.",
+            "--scope",
+            "global",
+        ]);
+        let id = recorded["id"].as_str().unwrap().to_owned();
+        home.hook("SessionStart", "s1", &[]);
+        assert!(holds(&home.base(), &hex("quokka")), "{what}");
+        let mut update = vec!["update", id.as_str()];
+        update.extend(&args);
+        home.cli(&update);
+        let gone = if what == "title" {
+            "quokka"
+        } else {
+            "wombat-lint"
+        };
+        removed(&home, gone, "numbat", what);
+    }
+}
+
+#[test]
+fn an_import_taking_the_file_s_side_builds_the_files_again_without_the_store_s_words() {
+    let home = Home::new();
+    let id = home.record("deploy", "wombat-lint");
+    let file = home.path().join("export.json");
+    home.cli(&["export", file.to_str().unwrap()]);
+    home.cli(&["update", &id, "--content", "Run `quokka-deploy` first."]);
+    home.hook("SessionStart", "s1", &[]);
+    assert!(holds(&home.base(), &hex("quokka-deploy")));
+    let summary = home.cli(&[
+        "import",
+        file.to_str().unwrap(),
+        "--apply",
+        "--on-conflict",
+        "use-file",
+    ]);
+    assert_eq!(summary["applied"], true, "{summary}");
+    removed(&home, "quokka-deploy", "wombat-lint", "import use-file");
+}
+
+#[test]
+fn a_write_removing_no_held_word_leaves_the_files_as_they_are() {
+    let (home, _) = started();
+    let other = home.record_in(Some("github.com/acme/compiler"), "fuzz", "numbat-fuzz");
+    let base = home.base();
+    let written = modified(&base);
+    std::thread::sleep(Duration::from_millis(20));
+    // A memory no file holds, forgotten; one held, its scope changed only.
+    home.cli(&["forget", &other]);
+    let held = home.record_in(Some("github.com/acme/compiler"), "bench", "numbat-bench");
+    home.hook("PostToolUse", "s1", &[]);
+    let overlay = modified(&home.overlay());
+    home.cli(&["update", &held, "--scope", "global"]);
+    assert_eq!(modified(&base), written, "the base is kept");
+    assert_eq!(modified(&home.overlay()), overlay, "the overlay is kept");
+}
+
+#[test]
+fn the_daily_prune_leaves_the_files_as_they_are() {
+    let (home, id) = started();
+    home.cli(&["forget", &id]);
+    let base = home.base();
+    let written = modified(&base);
+    let conn = rusqlite::Connection::open(home.db()).unwrap();
+    conn.execute(
+        "UPDATE memory_changes SET removed_at=datetime('now','-40 days') WHERE removed_at IS NOT NULL",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    // No backup yet: the next write makes one, and prunes.
+    fs::remove_dir_all(home.path().join("backups")).unwrap();
+    std::thread::sleep(Duration::from_millis(20));
+    home.record("test", "numbat-test");
+    let pruned: i64 = rusqlite::Connection::open(home.db())
+        .unwrap()
+        .query_row(
+            "SELECT pruned_through FROM store_changes WHERE id=1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(pruned > 0, "the prune ran");
+    assert_eq!(modified(&base), written);
+}
+
+#[test]
+fn forget_through_the_server_builds_the_files_again() {
+    let (home, id) = started();
+    let out = serve::call(
+        home.command(&["serve"], &[]),
+        "forget",
+        json!({"memory_id": id, "user_confirmed": true}),
+    );
+    assert_eq!(out["deleted"], true, "{out}");
+    removed(
+        &home,
+        "quokka-deploy",
+        "wombat-lint",
+        "forget through serve",
+    );
+}
+
+#[test]
+fn a_forget_waits_for_a_hook_holding_the_lock_and_leaves_none_of_its_words() {
+    let home = Home::new();
+    home.record("lint", "wombat-lint");
+    home.hook("SessionStart", "s1", &[]);
+    let id = home.record("deploy", "quokka-deploy");
+    // The hook built its overlay, holding the new memory, and waits to
+    // rename it.
+    let hold = home.path().join("hold");
+    fs::write(&hold, "").unwrap();
+    let hook = home.spawn(
+        "PostToolUse",
+        "s1",
+        &[("USER_MEMORY_HOLD_REFRESH", hold.to_str().unwrap())],
+    );
+    time::until("the hook holds the lock", || {
+        home.path().join("hold.reached").exists()
+    });
+    let forget = home
+        .command(&["forget", &id], &[])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    fs::remove_file(&hold).unwrap();
+    time::finish(hook, "the hook");
+    let out = time::finish(forget, "the forget");
+    assert!(out.status.success(), "{out:?}");
+    removed(
+        &home,
+        "quokka-deploy",
+        "wombat-lint",
+        "forget after the hook",
+    );
+}
+
+#[test]
+fn a_forget_refuses_while_a_hook_holds_the_lock_and_changes_nothing() {
+    let (home, id) = started();
+    home.record("test", "numbat-test");
+    let hold = home.path().join("hold");
+    fs::write(&hold, "").unwrap();
+    let hook = home.spawn(
+        "PostToolUse",
+        "s1",
+        &[("USER_MEMORY_HOLD_REFRESH", hold.to_str().unwrap())],
+    );
+    time::until("the hook holds the lock", || {
+        home.path().join("hold.reached").exists()
+    });
+    let refused = home
+        .command(
+            &["forget", &id],
+            &[("USER_MEMORY_TEST_DELIVERY_LOCK_WAIT", "1")],
+        )
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    fs::remove_file(&hold).unwrap();
+    let pid = hook.id();
+    time::finish(hook, "the hook");
+    assert!(!refused.status.success(), "{refused:?}");
+    #[cfg(not(windows))]
+    let who = format!("user-memory process {pid}");
+    // Windows lets no other process read a locked file.
+    #[cfg(windows)]
+    let who = {
+        let _ = pid;
+        "another user-memory process".to_owned()
+    };
+    assert!(
+        stderr.contains(&format!(
+            "Nothing was forgotten: {who} has held this machine's delivery index for 1 s. Wait a moment and forget again; if it still holds it, stop that process first."
+        )),
+        "{stderr}"
+    );
+    let still = home.cli(&["read", &id]);
+    assert_eq!(
+        still["memories"].as_array().map(Vec::len),
+        Some(1),
+        "{still}"
+    );
+    assert!(home.files(".void").is_empty(), "nothing voided");
+}
+
+#[test]
+fn a_forget_killed_after_its_commit_leaves_its_words_to_the_next_tool_hook() {
+    let (home, id) = started();
+    let hold = home.path().join("hold");
+    fs::write(&hold, "").unwrap();
+    let mut forget = home
+        .command(
+            &["forget", &id],
+            &[("USER_MEMORY_HOLD_REMOVAL", hold.to_str().unwrap())],
+        )
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    time::until("the forget committed", || {
+        home.path().join("hold.reached").exists()
+    });
+    forget.kill().unwrap();
+    forget.wait().unwrap();
+    home.hook("PostToolUse", "s1", &[]);
+    assert_eq!(holding(&home, "quokka-deploy"), Vec::<PathBuf>::new());
+    home.hook("UserPromptSubmit", "s1", &[]);
+    assert!(holds(&home.base(), &hex("wombat-lint")), "built again");
+}
+
+#[test]
+fn a_forget_whose_commit_fails_leaves_the_files_in_use() {
+    let (home, id) = started();
+    let base = home.base();
+    let written = modified(&base);
+    let out = home
+        .command(&["forget", &id], &[("USER_MEMORY_TEST_FAIL_REMOVAL", "1")])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{out:?}");
+    assert!(
+        home.files(".void").is_empty(),
+        "the void mark is taken back"
+    );
+    assert_eq!(modified(&base), written, "the base is kept");
+    let still = home.cli(&["read", &id]);
+    assert_eq!(
+        still["memories"].as_array().map(Vec::len),
+        Some(1),
+        "{still}"
+    );
 }

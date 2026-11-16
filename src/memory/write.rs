@@ -1,7 +1,9 @@
 //! Recording, corrections and deletion with provenance checks.
 
 use super::{
-    Memory, Scope, Source, TITLE_LIMIT, clean, history,
+    Memory, Scope, Source, TITLE_LIMIT, clean,
+    delivery_files::Removing,
+    history,
     ids::{MemoryRef, full_id, resolve_all, uuids},
     project_key,
     schema::{connect, get, write},
@@ -727,7 +729,7 @@ pub fn update(db: &Path, input: Update) -> Result<Value> {
         if input.drop_history {
             history::drop_history(&tx, memory_id, earlier)?;
         }
-        tx.commit_removing()?;
+        tx.commit_removing(Removing::Update)?;
         return Ok(json!({"updated":true,"id":memory_id,"status":old.status}));
     }
     // Wording (title, context, reason or evidence note) is not the user
@@ -820,7 +822,7 @@ pub fn update(db: &Path, input: Update) -> Result<Value> {
     if input.drop_history {
         history::drop_history(&tx, memory_id, earlier)?;
     }
-    tx.commit_removing()?;
+    tx.commit_removing(Removing::Update)?;
     let mut result = json!({"updated":true,"id":memory_id,"status":status});
     if revived {
         result["revived"] = json!(true);
@@ -980,7 +982,7 @@ pub fn forget(db: &Path, input: Forget) -> Result<Value> {
     if !next.is_empty() {
         result["next"] = json!(next.join("\n"));
     }
-    tx.commit_removing()?;
+    tx.commit_removing(Removing::Forget)?;
     Ok(result)
 }
 

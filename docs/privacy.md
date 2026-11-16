@@ -70,10 +70,12 @@ them like the store.
 ### What a forgotten memory leaves
 
 `forget` removes a memory's text from the store, its log and every backup
-made after ([removed text](storage.md#removed-text)), and reduces its
-history to tombstones, each change's operation and time. A correction keeps
-the text it replaced in the memory's
-[history](memory-model.md#history) for a year, then drops it as an
+made after ([removed text](storage.md#removed-text)), and from this
+machine's delivery index before it replies, and reduces its history to
+tombstones, each change's operation and time. If another user-memory
+process holds the delivery index for 10 s, the forget changes nothing and
+names that process. A correction keeps the text it replaced in the
+memory's [history](memory-model.md#history) for a year, then drops it as an
 automatic backup is made; `update --drop-history` drops it at once, with
 the rest of that memory's history. Copies made before keep it, and
 restoring one of them brings the memory back:
