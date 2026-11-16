@@ -567,7 +567,9 @@ pub(crate) fn refresh(
         .is_some_and(|(marked, overlay)| {
             Position::kept(overlay.header.position.clone()).same_change(marked)
         });
-    if unchanged && files.voided().is_empty() {
+    // A base deleted beside its overlay, by hand or by another program,
+    // is built again by the prompt hook, so it is looked for too.
+    if unchanged && files.voided().is_empty() && files.base(&scope).exists() {
         return Ok(Refreshed::Unchanged);
     }
     let lock = if wait {
