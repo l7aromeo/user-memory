@@ -512,6 +512,17 @@ fn the_prompt_builds_a_base_its_scope_lacks_and_still_prints_its_notice() {
 }
 
 #[test]
+fn the_prompt_builds_a_base_deleted_beside_its_overlay() {
+    let home = Home::new();
+    home.record("deploy", "quokka-deploy");
+    home.hook("SessionStart", "s1", &[]);
+    // The overlay holds the store's latest change; only the base is gone.
+    fs::remove_file(home.base()).unwrap();
+    home.hook("UserPromptSubmit", "s1", &[]);
+    assert!(holds(&home.base(), &hex("quokka-deploy")), "built again");
+}
+
+#[test]
 fn a_linked_scope_gets_its_base_at_the_next_prompt_and_an_unlinked_one_loses_its_memories() {
     const COMPILER: &str = "github.com/acme/compiler";
     let home = Home::new();
