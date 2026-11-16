@@ -74,7 +74,10 @@ made after ([removed text](storage.md#removed-text)), and from this
 machine's delivery index before it replies, and reduces its history to
 tombstones, each change's operation and time. If another user-memory
 process holds the delivery index for 10 s, the forget changes nothing and
-names that process. A correction keeps the text it replaced in the
+names that process. A delivery file another program, such as a virus scanner
+or a backup tool, holds open can be neither replaced nor deleted: the
+reply lists it in `delivery_left`, readers skip it, and the next write or
+`user-memory doctor` deletes it. A correction keeps the text it replaced in the
 memory's [history](memory-model.md#history) for a year, then drops it as an
 automatic backup is made; `update --drop-history` drops it at once, with
 the rest of that memory's history. Copies made before keep it, and

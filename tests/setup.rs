@@ -1263,6 +1263,47 @@ fn doctor_exits_zero_when_nothing_needs_doing() {
     );
 }
 
+// Doctor deletes the store's delivery files a removal named in the void
+// mark, as another program held them open then.
+#[test]
+fn doctor_deletes_the_delivery_files_a_removal_left() {
+    let s = Sandbox::new();
+    s.client("codex", false);
+    s.codex_trust("trusted");
+    assert_success(&s.run(&["setup", "--client", "codex"]));
+    // The store's key, as the files name it: 64 bits of the SHA-256 of
+    // its resolved path.
+    let identity = format!(
+        "store {}",
+        dunce::canonicalize(s.path("private memory.sqlite3"))
+            .unwrap()
+            .display()
+    );
+    let key: String = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, identity.as_bytes())
+        .as_ref()
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let delivery = sandbox::folder(&s.path("home"), "state").join("delivery");
+    fs::create_dir_all(&delivery).unwrap();
+    let left = delivery.join(format!("{key}-0123456789abcdef.index"));
+    fs::write(&left, "71756f6b6b61").unwrap();
+    fs::write(
+        delivery.join(format!("{key}.void")),
+        left.file_name().unwrap().to_str().unwrap(),
+    )
+    .unwrap();
+    let out = s.run(&["doctor", "--client", "codex"]);
+    assert!(
+        stdout(&out).contains("Delivery index: deleted 1 file that held removed words.\n"),
+        "{}",
+        stdout(&out)
+    );
+    assert!(!left.exists());
+    assert!(!delivery.join(format!("{key}.void")).exists());
+}
+
 /// Only Windows needs a particular Claude Code: elsewhere an old one is
 /// neither asked nor named.
 #[test]

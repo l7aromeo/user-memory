@@ -627,9 +627,28 @@ pub(crate) fn refresh(
 #[cfg(debug_assertions)]
 pub(crate) const HOLD_REFRESH: &str = "USER_MEMORY_HOLD_REFRESH";
 
+/// Names, in debug builds only, a file name that renames and deletes in the
+/// delivery folder then fail on, as on Windows while another program holds
+/// the file open without sharing delete, so every platform tests it.
+#[cfg(debug_assertions)]
+const HELD_FILE: &str = "USER_MEMORY_TEST_HELD_FILE";
+
+/// In debug builds, the error [`HELD_FILE`] makes for `path`.
+fn held_for_tests(path: &Path) -> io::Result<()> {
+    #[cfg(debug_assertions)]
+    if let Some(held) = std::env::var_os(HELD_FILE)
+        && path.file_name() == Some(held.as_os_str())
+    {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
+    let _ = path;
+    Ok(())
+}
+
 /// Renames `from` over `to`, on Windows trying again for up to
 /// [`DELIVERY_REPLACE_WAIT`] while another program holds either file.
 fn replace(from: &Path, to: &Path) -> io::Result<()> {
+    held_for_tests(to)?;
     #[cfg(windows)]
     return crate::platform::windows::rename(from, to, DELIVERY_REPLACE_WAIT);
     #[cfg(not(windows))]
@@ -638,6 +657,7 @@ fn replace(from: &Path, to: &Path) -> io::Result<()> {
 
 /// Deletes `path`, on Windows trying again as [`replace`] does.
 fn remove(path: &Path) -> io::Result<()> {
+    held_for_tests(path)?;
     #[cfg(windows)]
     return crate::platform::windows::remove_file(path, DELIVERY_REPLACE_WAIT);
     #[cfg(not(windows))]
@@ -648,6 +668,26 @@ fn remove(path: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use crate::memory::delivery::{self, Part};
+
+    #[test]
+    fn files_left_add_their_paths_and_a_line_to_the_reply() {
+        let mut reply = serde_json::json!({"deleted": true, "next": "Undo with import."});
+        Left::default().note(&mut reply);
+        assert_eq!(
+            reply,
+            serde_json::json!({"deleted": true, "next": "Undo with import."})
+        );
+        let left = |marked| Left {
+            paths: vec![PathBuf::from("a.index")],
+            marked,
+        };
+        left(true).note(&mut reply);
+        assert_eq!(reply["delivery_left"], serde_json::json!(["a.index"]));
+        assert_eq!(reply["next"], format!("Undo with import.\n{LEFT_MARKED}"));
+        let mut reply = serde_json::json!({"updated": true});
+        left(false).note(&mut reply);
+        assert_eq!(reply["next"], LEFT_UNMARKED);
+    }
 
     #[test]
     #[should_panic(expected = "a store write turn is never taken under a delivery lock")]
@@ -965,7 +1005,7 @@ impl Removal {
     /// empty overlay made for it; deletes a voided file it could not build
     /// again; then names in the void mark only what is still on disk and
     /// voided, which it returns, and lets the lock go.
-    pub(crate) fn rebuild(self, db: &Path) -> Vec<PathBuf> {
+    pub(crate) fn rebuild(self, db: &Path) -> Left {
         let built: Vec<Option<(Vec<u8>, Vec<u8>)>> = std::thread::scope(|threads| {
             let builds: Vec<_> = self
                 .scopes
@@ -1002,8 +1042,11 @@ impl Removal {
         }
         let mut names = self.kept.clone();
         names.extend(left.iter().map(|path| name_of(path)));
-        let _ = self.files.void(&self.lock, &names);
-        left
+        let marked = self.files.void(&self.lock, &names).is_ok();
+        Left {
+            paths: left,
+            marked,
+        }
     }
 
     /// When the write failed after its files were voided: the void mark
@@ -1012,6 +1055,96 @@ impl Removal {
     pub(crate) fn abandon(self) {
         let _ = self.files.void(&self.lock, &self.kept);
     }
+}
+
+/// The delivery files a removing write could neither build again nor
+/// delete, as another program had them open: they still hold the removed
+/// text.
+#[derive(Debug, Default)]
+pub(crate) struct Left {
+    pub(crate) paths: Vec<PathBuf>,
+    /// Whether the void mark names them, so readers skip them.
+    pub(crate) marked: bool,
+}
+
+/// The reply's `next` line when files still hold removed text and the void
+/// mark names them.
+const LEFT_MARKED: &str = "The files in delivery_left still hold the removed words because another program has them open. Readers skip them; user-memory deletes them at its next write, and `user-memory doctor` deletes them at once.";
+
+/// The reply's `next` line when files still hold removed text and even the
+/// void mark could not be written.
+const LEFT_UNMARKED: &str = "The files in delivery_left still hold the removed words because another program has them open, and the mark that makes readers skip them could not be written. Close that program, then run `user-memory doctor` to delete them.";
+
+impl Left {
+    /// Adds to a removing command's `reply`, when files are left, their
+    /// paths as `delivery_left` and a line of `next` saying what happens to
+    /// them.
+    pub(crate) fn note(&self, reply: &mut serde_json::Value) {
+        if self.paths.is_empty() {
+            return;
+        }
+        reply["delivery_left"] = serde_json::json!(self.paths);
+        let line = if self.marked {
+            LEFT_MARKED
+        } else {
+            LEFT_UNMARKED
+        };
+        let next = match reply["next"].as_str() {
+            Some(next) if !next.is_empty() => format!("{next}\n{line}"),
+            _ => line.to_owned(),
+        };
+        reply["next"] = serde_json::json!(next);
+    }
+}
+
+/// What doctor's clean-up of a store's delivery files did.
+#[derive(Debug, Default)]
+pub(crate) struct Cleaned {
+    /// How many voided or half-written files it deleted.
+    pub(crate) deleted: usize,
+    /// The voided files another program still holds open.
+    pub(crate) held: Vec<PathBuf>,
+}
+
+/// Doctor's part (#175), for the local store at `db`: under the store's
+/// lock, waited for up to [`DELIVERY_LOCK_WAIT`], deletes what
+/// [`Files::tidy`] deletes: the files the void mark names, which may hold
+/// removed text, and those a killed writer left half written. None when
+/// the lock could not be had.
+pub(crate) fn clean(db: &Path) -> Option<Cleaned> {
+    let files = Files::of(&paths::store_identity(None, db))?;
+    if !files.dir.exists() {
+        return Some(Cleaned::default());
+    }
+    let lock = files
+        .lock_until(Instant::now() + delivery_lock_wait())
+        .ok()
+        .flatten()?;
+    let partial = format!(".{PARTIAL}");
+    let before: Vec<PathBuf> = files
+        .voided()
+        .iter()
+        .map(|name| files.dir.join(name))
+        .chain(
+            files
+                .own()
+                .into_iter()
+                .filter(|(name, _)| name.ends_with(&partial))
+                .map(|(_, path)| path),
+        )
+        .filter(|path| path.exists())
+        .collect();
+    files.tidy(&lock, None);
+    let held: Vec<PathBuf> = files
+        .voided()
+        .iter()
+        .map(|name| files.dir.join(name))
+        .filter(|path| path.exists())
+        .collect();
+    Some(Cleaned {
+        deleted: before.iter().filter(|path| !path.exists()).count(),
+        held,
+    })
 }
 
 /// A new base of `scope` from the store at `db`, and an empty overlay made

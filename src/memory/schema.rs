@@ -699,7 +699,7 @@ impl Write<'_> {
     /// stderr, and the backup runs either way. A write inside another on
     /// this thread leaves the backup to the outer one, which holds the turn.
     pub(super) fn commit(self) -> Result<()> {
-        self.finish(false, None)
+        self.finish(false, None).map(drop)
     }
 
     /// [`commit`](Self::commit) for a write that removed or replaced
@@ -712,14 +712,20 @@ impl Write<'_> {
     /// again ([`delivery_files::before_removal`]).
     ///
     /// [`delivery_files::before_removal`]: super::delivery_files::before_removal
-    pub(super) fn commit_removing(self, removing: super::delivery_files::Removing) -> Result<()> {
+    ///
+    /// Returns the delivery files that still hold removed text, for the
+    /// reply ([`Left::note`](super::delivery_files::Left::note)).
+    pub(super) fn commit_removing(
+        self,
+        removing: super::delivery_files::Removing,
+    ) -> Result<super::delivery_files::Left> {
         self.finish(true, Some(removing))
     }
 
     /// [`commit_removing`](Self::commit_removing) for a write that removed
     /// no memory's text, only its history.
     pub(super) fn commit_removing_history(self) -> Result<()> {
-        self.finish(true, None)
+        self.finish(true, None).map(drop)
     }
 
     /// The memories whose text this write removes or replaces: those it
@@ -747,7 +753,7 @@ impl Write<'_> {
         self,
         removed: bool,
         removing: Option<super::delivery_files::Removing>,
-    ) -> Result<()> {
+    ) -> Result<super::delivery_files::Left> {
         let local = conn_file(self.conn).filter(|_| self.file.is_some());
         let removal = match (removing, &local) {
             (Some(removing), Some(db)) => {
@@ -794,9 +800,10 @@ impl Write<'_> {
         drop(file);
         let outermost = turn.is_some();
         drop(turn);
-        if let (Some(removal), Some(db)) = (removal, &local) {
-            let _left = removal.rebuild(db);
-        }
+        let left = match (removal, &local) {
+            (Some(removal), Some(db)) => removal.rebuild(db),
+            _ => super::delivery_files::Left::default(),
+        };
         if let Some(db) = conn.path().filter(|path| !path.is_empty()) {
             let mut log = std::ffi::OsString::from(db);
             log.push("-wal");
@@ -812,7 +819,7 @@ impl Write<'_> {
                 super::backups::back_up_if_due(Path::new(db));
             }
         }
-        Ok(())
+        Ok(left)
     }
     pub(super) fn rollback(self) -> rusqlite::Result<()> {
         self.tx.rollback()
