@@ -723,7 +723,9 @@ building its scope's base against session start finding it (budget: the
 difference is at most 75 % of the build's own time on the same machine,
 since the build runs beside session start's own index and one that finishes
 first adds little of itself); a tool hook that finds a
-change, process start included (budget: `TOOL_HOOK_LIMIT`); what a forget
+change, process start included, once pushing nothing and once pushing the
+memory its command names (budget: `TOOL_HOOK_LIMIT`); the prompt hook
+pushing the memory its words name (budget: `PROMPT_LIMIT`); what a forget
 adds when three scopes' files hold the memory (budget: 400 ms);
 whether the prompt hook builds a missing base within `PROMPT_LIMIT`; and,
 with the store served by `host` on loopback to a client in a throwaway
