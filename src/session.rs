@@ -7,6 +7,8 @@
 //! session continues normally.
 
 mod live;
+#[cfg(test)]
+mod recall;
 mod seen;
 mod subagent;
 mod tools;

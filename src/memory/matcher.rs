@@ -144,9 +144,9 @@ pub(crate) struct Action {
 /// The terms one action adds to the window: stems as the keyword index
 /// holds them, and anchors matched as written.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(in crate::memory) struct Terms {
-    pub(in crate::memory) stems: BTreeSet<String>,
-    pub(in crate::memory) anchors: BTreeSet<String>,
+pub(crate) struct Terms {
+    pub(crate) stems: BTreeSet<String>,
+    pub(crate) anchors: BTreeSet<String>,
 }
 
 impl Terms {
