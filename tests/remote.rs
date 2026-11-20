@@ -173,6 +173,29 @@ impl Host {
     fn restart(&mut self) {
         self.restart_as(None);
     }
+    /// Restarts the host on its address with `env` added.
+    fn restart_with(&mut self, env: &[(&str, &str)]) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_user-memory"))
+            .args(["host", "--listen", &self.address, "--db"])
+            .arg(self.root.path().join("shared.sqlite3"))
+            .arg("--token-file")
+            .arg(self.root.path().join("token"))
+            .sandboxed(self.root.path())
+            .envs(env.iter().copied())
+            .env_remove("USER_MEMORY_DB")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        assert!(line.starts_with("Listening: http://"), "{line}");
+        self.child = child;
+    }
     /// Restarts the host on its address, as the debug build of `version`
     /// when given: a server upgraded while down.
     fn restart_as(&mut self, version: Option<&str>) {
@@ -3589,6 +3612,11 @@ impl Counting {
     /// A relay that holds each connection's reply back by `delay` before
     /// passing it on, as a slow server or network does.
     fn slowed(host: &str, delay: std::time::Duration) -> Self {
+        Self::slowed_for(host, delay, b"")
+    }
+    /// [`Counting::slowed`], for the connections whose request starts with
+    /// `request` only.
+    fn slowed_for(host: &str, delay: std::time::Duration, request: &'static [u8]) -> Self {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap().to_string();
         let taken = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -3603,21 +3631,34 @@ impl Counting {
                 let Ok(server) = TcpStream::connect(&host) else {
                     continue;
                 };
-                for (mut from, mut to, keep, mut wait) in [
+                let slow = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                for (mut from, mut to, keep, mut wait, asks) in [
                     (
                         client.try_clone().unwrap(),
                         server.try_clone().unwrap(),
                         Some(kept.clone()),
                         std::time::Duration::ZERO,
+                        true,
                     ),
-                    (server, client, None, delay),
+                    (server, client, None, delay, false),
                 ] {
+                    let slow = slow.clone();
                     std::thread::spawn(move || {
                         let mut buffer = [0; 8192];
+                        let mut first = true;
                         while let Ok(n) = from.read(&mut buffer)
                             && n > 0
                         {
-                            std::thread::sleep(std::mem::take(&mut wait));
+                            if asks && std::mem::take(&mut first) {
+                                slow.store(
+                                    buffer[..n].starts_with(request),
+                                    std::sync::atomic::Ordering::SeqCst,
+                                );
+                            }
+                            let wait = std::mem::take(&mut wait);
+                            if slow.load(std::sync::atomic::Ordering::SeqCst) {
+                                std::thread::sleep(wait);
+                            }
                             if let Some(keep) = &keep {
                                 keep.lock().unwrap().extend_from_slice(&buffer[..n]);
                             }
@@ -4048,4 +4089,502 @@ fn a_server_sends_its_tools_hints_over_http() {
         )]),
         ["index", "record", "search"]
     );
+}
+
+/// The hex form a delivery file keeps `term` in.
+fn hex(term: &str) -> String {
+    term.bytes().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The delivery files under `home` (bases, overlays and files being
+/// written), however deep its state folder is.
+fn delivery_files(home: &Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let mut dirs = vec![home.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if dir.ends_with("delivery")
+                && path
+                    .extension()
+                    .is_some_and(|e| e == "index" || e == "overlay" || e == "partial")
+            {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+
+/// The delivery files under `home` holding `term`, in hex or as written.
+fn holding(home: &Path, term: &str) -> Vec<std::path::PathBuf> {
+    let (hex, raw) = (hex(term), term.as_bytes().to_vec());
+    delivery_files(home)
+        .into_iter()
+        .filter(|path| {
+            let bytes = fs::read(path).unwrap_or_default();
+            [hex.as_bytes(), &raw]
+                .iter()
+                .any(|needle| bytes.windows(needle.len()).any(|w| w == *needle))
+        })
+        .collect()
+}
+
+/// Records on `host` a global procedure that runs `tool`, from `origin`;
+/// its id.
+fn record_tool(host: &Host, id: u64, tool: &str, origin: &str) -> String {
+    host.rpc(initialize(id));
+    let reply = host.rpc(call(
+        id + 1,
+        "record",
+        json!({"type":"procedure","category":"build","context":"Releasing","title":format!("Run {tool}"),"content":format!("Run `{tool}` before the step."),"reason":"Because","scope":"global","user_confirmed":true,"origin":origin}),
+    ));
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    serde_json::from_str::<Value>(text).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// What a hook said on stderr besides a debug build's traces of its work.
+fn errors(said: &str) -> Vec<&str> {
+    said.lines()
+        .filter(|line| {
+            !["user-memory: looked ", "user-memory: read "]
+                .iter()
+                .any(|trace| line.starts_with(trace))
+        })
+        .collect()
+}
+
+/// How many times the machine behind `proxy` asked for a delivery file.
+fn delivery_asks(proxy: &Counting) -> usize {
+    let sent = proxy.sent.lock().unwrap();
+    sent.windows(b"POST /delivery".len())
+        .filter(|w| *w == b"POST /delivery")
+        .count()
+}
+
+/// What the host wrote to stderr, once stopped.
+fn stopped_stderr(host: &mut Host) -> String {
+    let mut errors = host.child.stderr.take().unwrap();
+    let _ = host.child.kill();
+    let _ = host.child.wait();
+    let mut said = String::new();
+    errors.read_to_string(&mut said).unwrap();
+    said
+}
+
+// A client of a server gets the server's delivery index (#180): session
+// start downloads its scope's base, the connector takes each change into
+// it within a poll, and a forget or a correction on the server takes the
+// words out of the client's files at the connector's next poll, the base
+// rewritten without them rather than downloaded.
+#[test]
+fn a_forget_on_the_server_leaves_a_client_s_delivery_files_within_a_poll() {
+    let poll = std::time::Duration::from_millis(300);
+    let within = poll * 2 + std::time::Duration::from_secs(1);
+    let host = Host::start(root());
+    record_tool(&host, 1, "quokka-deploy", "chat/deploy");
+    let corrected = record_tool(&host, 3, "emu-check", "chat/check");
+    let proxy = Counting::to(&host.address);
+    let machine = Machine {
+        home: tempdir().unwrap(),
+        url: format!("http://{}/mcp", proxy.address),
+        token: host.root.path().join("token"),
+        env: vec![("USER_MEMORY_MARKER_POLL_MS", poll.as_millis().to_string())],
+    };
+    let _connector = machine.connector();
+    let (_, said) = machine.hook("session-start");
+    let home = machine.home.path();
+    assert_eq!(holding(home, "quokka-deploy").len(), 1, "{said}");
+    let downloads = delivery_asks(&proxy);
+    record_tool(&host, 5, "wombat-lint", "chat/lint");
+    let recorded = std::time::Instant::now();
+    time::until("the change reached the client", || {
+        !holding(home, "wombat-lint").is_empty()
+    });
+    assert!(recorded.elapsed() <= within, "{:?}", recorded.elapsed());
+    host.rpc(call(
+        7,
+        "forget",
+        json!({"origin":"chat/deploy","user_confirmed":true}),
+    ));
+    let forgot = std::time::Instant::now();
+    time::until("the forget left the client's files", || {
+        holding(home, "quokka-deploy").is_empty()
+    });
+    assert!(forgot.elapsed() <= within, "{:?}", forgot.elapsed());
+    host.rpc(call(
+        8,
+        "update",
+        json!({"memory_id":corrected,"content":"Run `koala-check` before the step.","user_confirmed":true}),
+    ));
+    time::until("the correction left the client's files", || {
+        holding(home, "emu-check").is_empty() && !holding(home, "koala-check").is_empty()
+    });
+    assert!(
+        !holding(home, "wombat-lint").is_empty(),
+        "folded, not dropped"
+    );
+    assert!(
+        delivery_files(home)
+            .iter()
+            .all(|path| path.extension().unwrap() != "partial"),
+        "no file left half written"
+    );
+    // The connector asked for changes; nothing downloaded a base again.
+    let asked = String::from_utf8_lossy(&proxy.sent.lock().unwrap()).into_owned();
+    let since = asked.matches("\"since\"").count();
+    assert_eq!(delivery_asks(&proxy) - downloads, since, "{asked}");
+}
+
+// Session start with a base folds the overlay on this machine and asks the
+// server nothing for it.
+#[test]
+fn session_start_folds_a_server_s_overlay_without_a_download() {
+    let poll = std::time::Duration::from_millis(300);
+    let host = Host::start(root());
+    record_tool(&host, 1, "quokka-deploy", "chat/deploy");
+    let proxy = Counting::to(&host.address);
+    let machine = Machine {
+        home: tempdir().unwrap(),
+        url: format!("http://{}/mcp", proxy.address),
+        token: host.root.path().join("token"),
+        env: vec![("USER_MEMORY_MARKER_POLL_MS", poll.as_millis().to_string())],
+    };
+    let connector = machine.connector();
+    machine.hook("session-start");
+    let home = machine.home.path();
+    record_tool(&host, 3, "wombat-lint", "chat/lint");
+    time::until("the change reached the overlay", || {
+        holding(home, "wombat-lint")
+            .iter()
+            .any(|path| path.extension().unwrap() == "overlay")
+    });
+    drop(connector);
+    let asks = delivery_asks(&proxy);
+    machine.hook("session-start");
+    assert_eq!(
+        delivery_asks(&proxy),
+        asks,
+        "session start asked the server"
+    );
+    let held = holding(home, "wombat-lint");
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert_eq!(
+        held[0].extension().unwrap(),
+        "index",
+        "folded into the base"
+    );
+}
+
+// A base that does not arrive within session start's limit leaves no file
+// and prints nothing, and no prompt of the session asks for it again.
+#[test]
+fn a_base_that_misses_session_start_s_limit_is_not_asked_for_at_every_prompt() {
+    let host = Host::start(root());
+    record_tool(&host, 1, "quokka-deploy", "chat/deploy");
+    // A delivery file slower than session start's 5 seconds.
+    let proxy = Counting::slowed_for(
+        &host.address,
+        std::time::Duration::from_secs(6),
+        b"POST /delivery",
+    );
+    let machine = Machine {
+        home: tempdir().unwrap(),
+        url: format!("http://{}/mcp", proxy.address),
+        token: host.root.path().join("token"),
+        env: vec![(time::HOOK_LIMITS.0, time::HOOK_LIMITS.1.to_owned())],
+    };
+    let (_, said) = machine.hook("session-start");
+    assert_eq!(errors(&said), Vec::<&str>::new());
+    let home = machine.home.path();
+    assert_eq!(delivery_files(home), Vec::<std::path::PathBuf>::new());
+    let asks = delivery_asks(&proxy);
+    assert_eq!(asks, 1);
+    let (_, said) = machine.hook("prompt-submit");
+    assert_eq!(errors(&said), Vec::<&str>::new());
+    assert_eq!(delivery_asks(&proxy), asks, "a prompt asked again");
+    // The next session start asks again.
+    machine.hook("session-start");
+    assert_eq!(delivery_asks(&proxy), asks + 1);
+}
+
+// A download cut short is never renamed into place: the old files stay.
+#[test]
+fn a_delivery_file_cut_short_leaves_the_client_s_files_as_they_were() {
+    let poll = std::time::Duration::from_millis(300);
+    let mut host = Host::start_with(
+        root(),
+        None,
+        &[
+            ("USER_MEMORY_TEST_DELIVERY_CUT", "1"),
+            // Every change makes the connector take a whole base.
+            ("USER_MEMORY_TEST_OVERLAY_MEMORIES", "0"),
+        ],
+    );
+    record_tool(&host, 1, "quokka-deploy", "chat/deploy");
+    let machine = Machine {
+        home: tempdir().unwrap(),
+        url: format!("http://{}/mcp", host.address),
+        token: host.root.path().join("token"),
+        env: vec![("USER_MEMORY_MARKER_POLL_MS", poll.as_millis().to_string())],
+    };
+    let _connector = machine.connector();
+    machine.hook("session-start");
+    let home = machine.home.path();
+    let before: Vec<(std::path::PathBuf, Vec<u8>)> = delivery_files(home)
+        .into_iter()
+        .map(|path| {
+            let bytes = fs::read(&path).unwrap();
+            (path, bytes)
+        })
+        .collect();
+    assert_eq!(before.len(), 2, "a base and its overlay");
+    let marker = machine.marker();
+    let marked = fs::read(&marker).unwrap();
+    record_tool(&host, 3, "wombat-lint", "chat/lint");
+    time::until("the connector polled the change", || {
+        fs::read(&marker).unwrap() != marked
+    });
+    let after: Vec<(std::path::PathBuf, Vec<u8>)> = delivery_files(home)
+        .into_iter()
+        .map(|path| {
+            let bytes = fs::read(&path).unwrap();
+            (path, bytes)
+        })
+        .collect();
+    assert_eq!(after, before);
+    // The server sends whole files again: the connector, behind, asks at
+    // its next poll though the server's position stayed where it was.
+    host.restart_with(&[]);
+    time::until("the client caught up", || {
+        !holding(home, "wombat-lint").is_empty()
+    });
+}
+
+// The prompt hook downloads a base its session's scope lacks.
+#[test]
+fn the_prompt_hook_downloads_a_server_s_base_the_scope_lacks() {
+    let host = Host::start(root());
+    record_tool(&host, 1, "quokka-deploy", "chat/deploy");
+    let machine = Machine {
+        home: tempdir().unwrap(),
+        url: format!("http://{}/mcp", host.address),
+        token: host.root.path().join("token"),
+        env: Vec::new(),
+    };
+    machine.hook("session-start");
+    let home = machine.home.path();
+    for path in delivery_files(home) {
+        fs::remove_file(path).unwrap();
+    }
+    let (_, said) = machine.hook("prompt-submit");
+    assert_eq!(errors(&said), Vec::<&str>::new());
+    assert_eq!(holding(home, "quokka-deploy").len(), 1);
+}
+
+// A server released before the route answers 404: the client keeps no
+// delivery files and says nothing.
+#[test]
+fn a_server_without_the_delivery_route_leaves_the_client_without_files_or_errors() {
+    let host = Host::start_with(root(), None, &[("USER_MEMORY_TEST_NO_DELIVERY_ROUTE", "1")]);
+    record_tool(&host, 1, "quokka-deploy", "chat/deploy");
+    let machine = Machine {
+        home: tempdir().unwrap(),
+        url: format!("http://{}/mcp", host.address),
+        token: host.root.path().join("token"),
+        env: Vec::new(),
+    };
+    let _connector = machine.connector();
+    let (started, said) = machine.hook("session-start");
+    assert!(started.contains("quokka-deploy"), "{started}");
+    assert_eq!(errors(&said), Vec::<&str>::new());
+    let (_, said) = machine.hook("prompt-submit");
+    assert_eq!(errors(&said), Vec::<&str>::new());
+    assert_eq!(
+        delivery_files(machine.home.path()),
+        Vec::<std::path::PathBuf>::new()
+    );
+}
+
+// Many clients asking for one scope's base at one position cost the
+// server one build.
+#[test]
+fn many_clients_asking_for_one_base_cost_the_server_one_build() {
+    let mut host = Host::start(root());
+    record_tool(&host, 1, "quokka-deploy", "chat/deploy");
+    let machines: Vec<Machine> = (0..4)
+        .map(|_| Machine {
+            home: tempdir().unwrap(),
+            url: format!("http://{}/mcp", host.address),
+            token: host.root.path().join("token"),
+            env: Vec::new(),
+        })
+        .collect();
+    std::thread::scope(|scope| {
+        for machine in &machines {
+            scope.spawn(|| machine.hook("session-start"));
+        }
+    });
+    for machine in &machines {
+        assert_eq!(holding(machine.home.path(), "quokka-deploy").len(), 1);
+    }
+    let said = stopped_stderr(&mut host);
+    assert_eq!(
+        said.matches("built a delivery base for clients").count(),
+        1,
+        "{said}"
+    );
+}
+
+// Doctor on a server's client deletes the delivery files no connector kept
+// current for a day, as session start does, and leaves current ones. Unix
+// only, as the remote setup test above: setup finds the fake Codex as
+// `cli/codex` on a `:`-separated PATH, where Windows looks clients up
+// through PATHEXT on a `;`-separated one.
+#[cfg(unix)]
+#[test]
+fn doctor_deletes_a_server_s_delivery_files_no_connector_kept_current() {
+    let host = Host::start(root());
+    record_tool(&host, 1, "quokka-deploy", "chat/deploy");
+    let client = tempdir().unwrap();
+    let bin = client.path().join("bin");
+    let cli_dir = client.path().join("cli");
+    fs::create_dir(&cli_dir).unwrap();
+    let url = format!("http://{}/mcp", host.address);
+    let token_file = host.root.path().join("token");
+    let config = json!({"enabled":true,"transport":{"type":"stdio","command":bin.join("user-memory"),"args":["serve"],"env":{"USER_MEMORY_URL":url,"USER_MEMORY_TOKEN_FILE":token_file}}});
+    fs::write(client.path().join("fixture.json"), config.to_string()).unwrap();
+    fake::fake(&cli_dir, "codex");
+    let run = |binary: &std::path::Path, args: &[&str]| {
+        let out = Command::new(binary)
+            .args(args)
+            .current_dir(client.path())
+            .sandboxed(client.path())
+            .env("CLAUDE_CONFIG_DIR", client.path())
+            .env("CODEX_HOME", client.path().join(".codex"))
+            .env("USER_MEMORY_APP_DIRS", "")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env_remove("GIT_CONFIG_GLOBAL")
+            .env_remove("XDG_CONFIG_HOME")
+            .env("PATH", format!("{}:/usr/bin:/bin", cli_dir.display()))
+            .env_remove("USER_MEMORY_DB")
+            .env_remove("USER_MEMORY_URL")
+            .env_remove("USER_MEMORY_TOKEN_FILE")
+            .env("USER_MEMORY_NO_UPDATE_CHECK", "1")
+            .env(time::HOOK_ROOM.0, time::HOOK_ROOM.1)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let token = token_file.to_string_lossy().into_owned();
+    let installed = bin.to_string_lossy().into_owned();
+    run(
+        std::path::Path::new(env!("CARGO_BIN_EXE_user-memory")),
+        &[
+            "setup",
+            "--client",
+            "codex",
+            "--url",
+            &url,
+            "--token-file",
+            &token,
+            "--install-dir",
+            &installed,
+        ],
+    );
+    let installed = bin.join("user-memory");
+    run(&installed, &["session-start"]);
+    let home = client.path();
+    assert_eq!(delivery_files(home).len(), 2, "a base and its overlay");
+    let said = run(&installed, &["doctor"]);
+    assert!(!said.contains("Delivery index"), "{said}");
+    assert_eq!(delivery_files(home).len(), 2, "current files stay");
+    let day_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(25 * 60 * 60);
+    for path in delivery_files(home) {
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(day_ago)
+            .unwrap();
+    }
+    let said = run(&installed, &["doctor"]);
+    assert!(
+        said.contains(
+            "Delivery index: deleted 2 files that may hold words the memory server removed."
+        ),
+        "{said}"
+    );
+    assert_eq!(delivery_files(home), Vec::<std::path::PathBuf>::new());
+}
+
+// A server that no longer answers the delivery route, as one put back to
+// an older release: the connector deletes the files no one keeps current.
+#[test]
+fn a_server_that_stops_serving_the_delivery_index_leaves_the_client_no_files() {
+    let poll = std::time::Duration::from_millis(300);
+    let mut host = Host::start(root());
+    record_tool(&host, 1, "quokka-deploy", "chat/deploy");
+    let machine = Machine {
+        home: tempdir().unwrap(),
+        url: format!("http://{}/mcp", host.address),
+        token: host.root.path().join("token"),
+        env: vec![("USER_MEMORY_MARKER_POLL_MS", poll.as_millis().to_string())],
+    };
+    let _connector = machine.connector();
+    machine.hook("session-start");
+    let home = machine.home.path();
+    assert_eq!(delivery_files(home).len(), 2);
+    host.restart_with(&[("USER_MEMORY_TEST_NO_DELIVERY_ROUTE", "1")]);
+    record_tool(&host, 3, "wombat-lint", "chat/lint");
+    time::until("the client deleted its files", || {
+        delivery_files(home).is_empty()
+    });
+}
+
+// A client whose connector never ran keeps no removed word past a day:
+// session start deletes files not written for a day and downloads the
+// base again, without what the server forgot meanwhile.
+#[test]
+fn session_start_replaces_a_server_s_files_no_connector_kept_current() {
+    let host = Host::start(root());
+    record_tool(&host, 1, "quokka-deploy", "chat/deploy");
+    record_tool(&host, 3, "wombat-lint", "chat/lint");
+    let machine = Machine {
+        home: tempdir().unwrap(),
+        url: format!("http://{}/mcp", host.address),
+        token: host.root.path().join("token"),
+        env: Vec::new(),
+    };
+    machine.hook("session-start");
+    let home = machine.home.path();
+    assert_eq!(holding(home, "quokka-deploy").len(), 1);
+    host.rpc(call(
+        5,
+        "forget",
+        json!({"origin":"chat/deploy","user_confirmed":true}),
+    ));
+    machine.hook("session-start");
+    assert_eq!(holding(home, "quokka-deploy").len(), 1, "within a day");
+    let day_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(25 * 60 * 60);
+    for path in delivery_files(home) {
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(day_ago)
+            .unwrap();
+    }
+    machine.hook("session-start");
+    assert_eq!(
+        holding(home, "quokka-deploy"),
+        Vec::<std::path::PathBuf>::new()
+    );
+    assert_eq!(holding(home, "wombat-lint").len(), 1, "downloaded again");
 }

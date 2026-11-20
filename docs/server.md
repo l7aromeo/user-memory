@@ -152,7 +152,7 @@ other than the host connect only through the proxy.
        proxy_send_timeout 300s;
    }
 
-   location ~ ^/(export|import)$ {              # export and import from clients
+   location ~ ^/(export|import|delivery)$ {     # export, import, delivery index
        client_max_body_size 129m;               # a 64 MiB file and titles map
        proxy_pass http://127.0.0.1:8765;
        proxy_set_header Host $host;

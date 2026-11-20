@@ -1806,11 +1806,14 @@ pub async fn doctor(options: &Options) -> Result<Health> {
             Err(err) => failures.push(format!("Embedding: {err:#}")),
         }
     }
-    if paths.remote.is_none() {
-        check_search_index(&paths.db, &mut actions, &mut failures);
-        check_backups(&paths.db, &mut actions, &mut failures);
-        check_privacy(&paths.db, &mut actions, &mut failures);
-        check_delivery(&paths.db, &mut actions, &mut failures);
+    match &paths.remote {
+        None => {
+            check_search_index(&paths.db, &mut actions, &mut failures);
+            check_backups(&paths.db, &mut actions, &mut failures);
+            check_privacy(&paths.db, &mut actions, &mut failures);
+            check_delivery(&paths.db, &mut actions, &mut failures);
+        }
+        Some(remote) => check_served_delivery(&remote.url, &mut actions, &mut failures),
     }
     let check_hooks = options.hooks_enabled(saved.as_ref());
     let check_skill = options.skill_enabled(saved.as_ref());
@@ -2133,12 +2136,45 @@ fn check_delivery(db: &Path, actions: &mut Vec<String>, failures: &mut Vec<Strin
     if cleaned.deleted > 0 {
         println!(
             "Delivery index: deleted {} that held removed words.",
-            match cleaned.deleted {
-                1 => "1 file".to_owned(),
-                n => format!("{n} files"),
-            }
+            files(cleaned.deleted)
         );
     }
+    held_delivery_files(&cleaned, actions);
+}
+
+/// "1 file" or "`n` files".
+fn files(n: usize) -> String {
+    match n {
+        1 => "1 file".to_owned(),
+        n => format!("{n} files"),
+    }
+}
+
+/// On a memory server's client, the delivery files of the server at `url`
+/// (#180): deletes those [`check_delivery`] deletes and those no connector
+/// kept current for a day.
+fn check_served_delivery(url: &str, actions: &mut Vec<String>, failures: &mut Vec<String>) {
+    let cleaned = match crate::memory::delivery_files::clean_served(url) {
+        Ok(cleaned) => cleaned,
+        Err(err) => {
+            failures.push(format!("Delivery index: {err}"));
+            return;
+        }
+    };
+    if cleaned.deleted > 0 {
+        println!(
+            "Delivery index: deleted {} that may hold words the memory server removed.",
+            files(cleaned.deleted)
+        );
+    }
+    held_delivery_files(&cleaned, actions);
+}
+
+/// The action for each delivery file another program keeps open.
+fn held_delivery_files(
+    cleaned: &crate::memory::delivery_files::Cleaned,
+    actions: &mut Vec<String>,
+) {
     actions.extend(cleaned.held.iter().map(|path| {
         format!(
             "Delivery index: {} still holds removed words because another program has it open; close that program, then run `user-memory doctor` again",

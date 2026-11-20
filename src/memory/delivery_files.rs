@@ -387,6 +387,16 @@ impl Files {
     /// base, so one renamed between the two reads is left out (see
     /// [`View::new`]).
     pub(crate) fn open(&self, scope: &[String], now: &Position) -> Option<View> {
+        let view = self.view(scope)?;
+        Position::kept(view.base.header.position.clone())
+            .within(now)
+            .then_some(view)
+    }
+
+    /// The base of `scope` and the overlay made for it, as a reader takes
+    /// them, whatever the base's position: [`Files::open`] without its check
+    /// against the store.
+    fn view(&self, scope: &[String]) -> Option<View> {
         let voided = self.voided();
         let readable = |path: &Path| {
             let name = path.file_name().map(|name| name.to_string_lossy());
@@ -401,8 +411,7 @@ impl Files {
             return None;
         }
         let base = DeliveryIndex::load(&base).ok()?;
-        let held = Position::kept(base.header.position.clone()).within(now);
-        if !held || base.header.projects != scope {
+        if base.header.projects != scope {
             return None;
         }
         View::new(base, overlay)
@@ -860,6 +869,294 @@ mod tests {
         assert!(files.open(&scope(&[]), &at).is_none());
     }
 
+    /// The overlay a server sends a client whose base is `base`, as the
+    /// store at `db` stands now.
+    fn delta(db: &Path, base: &DeliveryIndex) -> Option<Vec<u8>> {
+        let made_for = Position::kept(base.header.position.clone());
+        delivery::delta(
+            db,
+            &base.header.projects,
+            made_for.as_str(),
+            |id, change| {
+                made_for
+                    .within(&Position::at(id, change, 0))
+                    .then(|| made_for.change())
+                    .flatten()
+            },
+            overlay_memories(),
+            |id, change| Position::at(id, change, 0).as_str().to_owned(),
+        )
+        .unwrap()
+    }
+
+    fn change(db: &Path, input: serde_json::Value, forget: bool) {
+        let out = if forget {
+            crate::memory::forget(db, serde_json::from_value(input).unwrap())
+        } else {
+            crate::memory::update(db, serde_json::from_value(input).unwrap())
+        };
+        let out = out.unwrap();
+        assert!(out["updated"] == true || out["deleted"] == true, "{out}");
+    }
+
+    #[test]
+    fn a_folded_base_holds_what_the_store_would_build_and_no_removed_word() {
+        let (_dir, db, _files) = setup();
+        let old = DeliveryIndex::read(base(&db)).unwrap();
+        let ids: Vec<String> = (0..old.len())
+            .map(|m| old.id(m).unwrap().to_owned())
+            .collect();
+        // Added only: the overlay takes nothing out of the base.
+        let input = serde_json::json!({
+            "type": "fact", "category": "build", "title": "Mooring",
+            "content": "Moor the zeppelin to the north mast.", "scope": "global",
+            "user_confirmed": true,
+        });
+        crate::memory::record(&db, serde_json::from_value(input).unwrap()).unwrap();
+        let added = DeliveryIndex::read(delta(&db, &old).unwrap()).unwrap();
+        assert_eq!(added.len(), 1);
+        assert!(!delivery::removes(&old, &added).unwrap(), "an addition");
+        // A memory forgotten, then another reworded.
+        change(
+            &db,
+            serde_json::json!({"memory_id": ids[1], "user_confirmed": true}),
+            true,
+        );
+        let forgotten = DeliveryIndex::read(delta(&db, &old).unwrap()).unwrap();
+        assert!(delivery::removes(&old, &forgotten).unwrap(), "a forget");
+        change(
+            &db,
+            serde_json::json!({"memory_id": ids[0], "content": "The hangar's quartz door sticks.", "user_confirmed": true}),
+            false,
+        );
+        let overlay = DeliveryIndex::read(delta(&db, &old).unwrap()).unwrap();
+        let folded = delivery::fold(&old, &overlay).unwrap();
+        let folded = DeliveryIndex::read(folded).unwrap();
+        let fresh = DeliveryIndex::read(base(&db)).unwrap();
+        assert_eq!(folded.header, fresh.header);
+        assert_eq!(folded.contents().unwrap(), fresh.contents().unwrap());
+        let bytes = &folded.bytes;
+        for gone in ["glacier", "straight quotes", "Prefer"] {
+            let hex: String = gone.bytes().map(|b| format!("{b:02x}")).collect();
+            assert!(
+                !bytes.windows(hex.len()).any(|w| w == hex.as_bytes()),
+                "{gone} in hex"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reword_takes_words_out_and_a_new_status_does_not() {
+        let (_dir, db, _files) = setup();
+        let old = DeliveryIndex::read(base(&db)).unwrap();
+        let id = old.id(0).unwrap().to_owned();
+        // A new status moves the counter and leaves the indexed words.
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute("UPDATE memories SET status='tentative' WHERE id=?1", [&id])
+            .unwrap();
+        // As a write through the store does, so the next one keeps its id.
+        crate::memory::changes::publish(&conn, &db);
+        drop(conn);
+        let overlay = DeliveryIndex::read(delta(&db, &old).unwrap()).unwrap();
+        assert_eq!(overlay.header.skip, vec![id.clone()]);
+        let same = delivery::removes(&old, &overlay).unwrap();
+        change(
+            &db,
+            serde_json::json!({"memory_id": id, "title": "Hangar gate", "user_confirmed": true}),
+            false,
+        );
+        let overlay = DeliveryIndex::read(delta(&db, &old).unwrap()).unwrap();
+        assert!(delivery::removes(&old, &overlay).unwrap(), "a new title");
+        assert!(!same, "the indexed words unchanged");
+    }
+
+    #[test]
+    fn a_server_sends_a_whole_base_for_another_store_a_later_or_pruned_base_or_too_many_changes() {
+        let (dir, db, _files) = setup();
+        let old = DeliveryIndex::read(base(&db)).unwrap();
+        assert!(delta(&db, &old).is_some(), "the same store, nothing since");
+        let other = store(&dir.path().join("other"));
+        assert!(delta(&other, &old).is_none(), "another store");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let state = crate::memory::changes::state(&conn).unwrap().unwrap();
+        let mut later = old.header.clone();
+        later.position = Position::at(&state.store_id, state.last_change + 1, 0)
+            .as_str()
+            .to_owned();
+        let later = DeliveryIndex::read(DeliveryIndex::write_with(&later, &[]).unwrap()).unwrap();
+        assert!(delta(&db, &later).is_none(), "past the store's change");
+        conn.execute(
+            "UPDATE store_changes SET pruned_through=last_change+1 WHERE id=1",
+            [],
+        )
+        .unwrap();
+        assert!(delta(&db, &old).is_none(), "pruned");
+        conn.execute("UPDATE store_changes SET pruned_through=0 WHERE id=1", [])
+            .unwrap();
+        drop(conn);
+        for n in 0..3 {
+            let input = serde_json::json!({
+                "type": "fact", "category": "build", "title": format!("Mast {n}"),
+                "content": format!("Mast {n} faces {}.", ["north", "south", "east"][n]),
+                "scope": "global", "user_confirmed": true,
+            });
+            crate::memory::record(&db, serde_json::from_value(input).unwrap()).unwrap();
+        }
+        let made_for = Position::kept(old.header.position.clone());
+        let over = delivery::delta(
+            &db,
+            &old.header.projects,
+            made_for.as_str(),
+            |_, _| made_for.change(),
+            2,
+            |id, change| Position::at(id, change, 0).as_str().to_owned(),
+        )
+        .unwrap();
+        assert!(over.is_none(), "three changes past a bound of two");
+    }
+
+    const SERVER: &str = "https://memory.example.test:8765/mcp";
+
+    /// A store, this machine's files of it as the server's at `SERVER`: a
+    /// base of the ledger's scope at the store's position and its empty
+    /// overlay; and the folder of the connector's marker files.
+    fn served_setup() -> (tempfile::TempDir, PathBuf, Files, PathBuf) {
+        let (dir, db, _) = setup();
+        let files = Files::in_dir(
+            dir.path().join(FOLDER),
+            &paths::store_identity(Some(SERVER), Path::new("")),
+        );
+        let lock = files.try_lock().unwrap().unwrap();
+        let built = base(&db);
+        files.write(&lock, &files.base(&ledger()), &built).unwrap();
+        files
+            .write(&lock, &files.overlay(&ledger()), &overlay_for(&built))
+            .unwrap();
+        let servers = dir.path().join("servers");
+        (dir, db, files, servers)
+    }
+
+    fn served(files: &Files, servers: &Path) -> bool {
+        let marker = crate::remote::marker::testing::served(servers, SERVER);
+        files.open_served(marker.as_ref(), &ledger()).is_some()
+    }
+
+    /// Run as a process of its own by the test below: holds a connector's
+    /// lock on the file `USER_MEMORY_TEST_CONNECTED` names until killed.
+    #[test]
+    fn hold_a_connector_s_lock() {
+        let Some(path) = std::env::var_os("USER_MEMORY_TEST_CONNECTED") else {
+            return;
+        };
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .unwrap();
+        file.lock_shared().unwrap();
+        println!("held");
+        std::io::stdout().flush().unwrap();
+        std::thread::sleep(Duration::from_secs(60));
+    }
+
+    #[test]
+    fn a_base_from_the_server_ends_a_missed_mark_and_an_overlay_for_another_base_is_left() {
+        let (_dir, db, files, _servers) = served_setup();
+        let lock = files.try_lock().unwrap().unwrap();
+        files.write(&lock, &files.missed(&ledger()), b"").unwrap();
+        drop(lock);
+        let old = files.readable_base(&ledger()).unwrap();
+        let input = serde_json::json!({
+            "type": "fact", "category": "build", "title": "Mooring",
+            "content": "Moor the zeppelin to the north mast.", "scope": "global",
+            "user_confirmed": true,
+        });
+        crate::memory::record(&db, serde_json::from_value(input).unwrap()).unwrap();
+        let overlay = delta(&db, &old).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        assert_eq!(
+            files.take(&ledger(), overlay.clone(), deadline).unwrap(),
+            Taken::Written
+        );
+        assert!(files.missed(&ledger()).exists(), "no base yet");
+        assert_eq!(
+            files.take(&ledger(), base(&db), deadline).unwrap(),
+            Taken::Written
+        );
+        assert!(!files.missed(&ledger()).exists(), "a base is here");
+        assert_eq!(
+            files.take(&ledger(), overlay, deadline).unwrap(),
+            Taken::Left,
+            "made for the base before"
+        );
+    }
+
+    #[test]
+    fn a_server_s_files_are_read_only_while_a_connector_runs() {
+        let (_dir, db, files, servers) = served_setup();
+        crate::remote::marker::testing::mark(&servers, SERVER, &now(&db), Duration::ZERO);
+        assert!(!served(&files, &servers), "no connector");
+        let mut connector = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "memory::delivery_files::tests::hold_a_connector_s_lock",
+                "--exact",
+                "--nocapture",
+            ])
+            .env(
+                "USER_MEMORY_TEST_CONNECTED",
+                crate::remote::marker::testing::connected_path(&servers, SERVER),
+            )
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let out = std::io::BufReader::new(connector.stdout.take().unwrap());
+        let held = std::io::BufRead::lines(out).any(|line| line.is_ok_and(|line| line == "held"));
+        assert!(held);
+        assert!(served(&files, &servers), "a connector runs");
+        connector.kill().unwrap();
+        connector.wait().unwrap();
+        assert!(!served(&files, &servers), "the connector was killed");
+    }
+
+    #[test]
+    fn a_server_s_files_are_unread_once_its_connector_stops_hearing_from_it() {
+        let (_dir, db, files, servers) = served_setup();
+        let _connector = crate::remote::marker::testing::connect(&servers, SERVER);
+        let age = crate::remote::marker::testing::served_age();
+        let margin = Duration::from_secs(5);
+        crate::remote::marker::testing::mark(&servers, SERVER, &now(&db), age - margin);
+        assert!(served(&files, &servers), "a quiet connector's marker");
+        crate::remote::marker::testing::mark(&servers, SERVER, &now(&db), age + margin);
+        assert!(!served(&files, &servers), "no answer from the server");
+    }
+
+    #[test]
+    fn a_server_s_files_behind_its_marker_are_unread() {
+        let (_dir, db, files, servers) = served_setup();
+        let _connector = crate::remote::marker::testing::connect(&servers, SERVER);
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let state = crate::memory::changes::state(&conn).unwrap().unwrap();
+        let later = Position::at(&state.store_id, state.last_change + 1, 0);
+        crate::remote::marker::testing::mark(&servers, SERVER, &later, Duration::ZERO);
+        assert!(!served(&files, &servers), "a change the files don't hold");
+        // The connector took that change in: an overlay at the marker.
+        let base = files.readable_base(&ledger()).unwrap();
+        let mut header = base.header.clone();
+        header.part = Part::Overlay;
+        header.position = later.as_str().to_owned();
+        let lock = files.try_lock().unwrap().unwrap();
+        files
+            .write(
+                &lock,
+                &files.overlay(&ledger()),
+                &DeliveryIndex::write_with(&header, &[]).unwrap(),
+            )
+            .unwrap();
+        assert!(served(&files, &servers), "the files at the marker");
+    }
+
     #[test]
     fn the_lock_is_one_holder_s_at_a_time_and_names_it() {
         let (_dir, _db, files) = setup();
@@ -1154,43 +1451,105 @@ pub(crate) struct Cleaned {
 /// removed text, and those a killed writer left half written. Fails when
 /// the folder cannot be read or another process keeps the lock.
 pub(crate) fn clean(db: &Path) -> io::Result<Cleaned> {
-    let Some(files) = Files::of(&paths::store_identity(None, db)) else {
-        return Ok(Cleaned::default());
-    };
-    match fs::read_dir(&files.dir) {
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Cleaned::default()),
-        Err(err) => return Err(err),
-        Ok(_) => {}
+    match Files::of(&paths::store_identity(None, db)) {
+        Some(files) => files.cleaned(None),
+        None => Ok(Cleaned::default()),
     }
-    let wait = delivery_lock_wait();
-    let Some(lock) = files.lock_until(Instant::now() + wait)? else {
-        return Err(io::Error::other(held_by(files.holder(), wait)));
-    };
-    let partial = format!(".{PARTIAL}");
-    let before: Vec<PathBuf> = files
-        .voided()
-        .iter()
-        .map(|name| files.dir.join(name))
-        .chain(
-            files
-                .own()
-                .into_iter()
-                .filter(|(name, _)| name.ends_with(&partial))
-                .map(|(_, path)| path),
-        )
-        .filter(|path| path.exists())
-        .collect();
-    files.tidy(&lock, None);
-    let held: Vec<PathBuf> = files
-        .voided()
-        .iter()
-        .map(|name| files.dir.join(name))
-        .filter(|path| path.exists())
-        .collect();
-    Ok(Cleaned {
-        deleted: before.iter().filter(|path| !path.exists()).count(),
-        held,
-    })
+}
+
+/// For `user-memory doctor` on a memory server's client (#180): what
+/// [`clean`] deletes, of this machine's files of the server at `url`, and
+/// every base and overlay not written for [`DELIVERY_AGE`]: files no
+/// connector kept current, which may hold words the server's forgets took
+/// out.
+pub(crate) fn clean_served(url: &str) -> io::Result<Cleaned> {
+    match served_files(url) {
+        Some(files) => files.cleaned(Some(SystemTime::now())),
+        None => Ok(Cleaned::default()),
+    }
+}
+
+impl Files {
+    /// [`clean`]'s work on these files, with those not written for
+    /// [`DELIVERY_AGE`] before `aged`, when given.
+    fn cleaned(&self, aged: Option<SystemTime>) -> io::Result<Cleaned> {
+        let files = self;
+        match fs::read_dir(&files.dir) {
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Cleaned::default()),
+            Err(err) => return Err(err),
+            Ok(_) => {}
+        }
+        let wait = delivery_lock_wait();
+        let Some(lock) = files.lock_until(Instant::now() + wait)? else {
+            return Err(io::Error::other(held_by(files.holder(), wait)));
+        };
+        let partial = format!(".{PARTIAL}");
+        let before: Vec<PathBuf> = files
+            .voided()
+            .iter()
+            .map(|name| files.dir.join(name))
+            .chain(
+                files
+                    .own()
+                    .into_iter()
+                    .filter(|(name, _)| {
+                        let scoped = name.ends_with(&format!(".{BASE}"))
+                            || name.ends_with(&format!(".{OVERLAY}"));
+                        name.ends_with(&partial) || (aged.is_some() && scoped)
+                    })
+                    .map(|(_, path)| path),
+            )
+            .filter(|path| path.exists())
+            .collect();
+        files.tidy(&lock, aged);
+        let held: Vec<PathBuf> = files
+            .voided()
+            .iter()
+            .map(|name| files.dir.join(name))
+            .filter(|path| path.exists())
+            .collect();
+        Ok(Cleaned {
+            deleted: before.iter().filter(|path| !path.exists()).count(),
+            held,
+        })
+    }
+}
+
+/// For a memory server's client (#180): the overlay of the memories
+/// `projects` can see that changed in the store at `db` since the client's
+/// base at `since`, as [`super::delivery::delta`] makes it with this machine's
+/// [`OVERLAY_MEMORIES`]; none when the client needs a whole base.
+pub(crate) fn served_overlay(
+    db: &Path,
+    projects: &[String],
+    since: &str,
+) -> Result<Option<Vec<u8>>, super::delivery::Error> {
+    let made_for = Position::kept(since.to_owned());
+    super::delivery::delta(
+        db,
+        &scope(projects),
+        since,
+        |id, change| {
+            made_for
+                .within(&Position::at(id, change, 0))
+                .then(|| made_for.change())
+                .flatten()
+        },
+        overlay_memories(),
+        |id, change| Position::at(id, change, 0).as_str().to_owned(),
+    )
+}
+
+/// For a memory server's client (#180): the position the store at `db` is
+/// at, which names the base its clients share.
+pub(crate) fn served_position(db: &Path) -> Option<String> {
+    super::changes::position(db).map(|position| position.as_str().to_owned())
+}
+
+/// For a memory server's client (#180): a new base of `projects` from the
+/// store at `db`; none when the store's keyword index is not current.
+pub(crate) fn served_base(db: &Path, projects: &[String]) -> Option<Vec<u8>> {
+    base_and_overlay(db, &scope(projects)).map(|(base, _)| base)
 }
 
 /// A new base of `scope` from the store at `db`, and an empty overlay made
@@ -1203,4 +1562,260 @@ fn base_and_overlay(db: &Path, scope: &[String]) -> Option<(Vec<u8>, Vec<u8>)> {
     let header = DeliveryIndex::read(base.clone()).ok()?.header;
     let overlay = super::delivery::empty_overlay(&header).ok()?;
     Some((base, overlay))
+}
+
+/// The extension of the mark that a scope's base from a memory server did
+/// not arrive within a hook's limit: the prompt hook then leaves it to the
+/// next session start, so a slow link costs no prompt a download. A base
+/// written ends it.
+const MISSED: &str = "missed";
+
+/// The delivery files a client keeps of the store of the server at `url`
+/// (#180), named as the session snapshots name that store.
+fn served_files(url: &str) -> Option<Files> {
+    Files::of(&paths::store_identity(Some(url), Path::new("")))
+}
+
+impl Files {
+    fn missed(&self, scope: &[String]) -> PathBuf {
+        self.file(scope, MISSED)
+    }
+
+    /// The base of `scope` unless the void mark names it, whatever its
+    /// position.
+    fn readable_base(&self, scope: &[String]) -> Option<DeliveryIndex> {
+        let path = self.base(scope);
+        let name = path.file_name()?.to_string_lossy().into_owned();
+        if self.voided().contains(&name) {
+            return None;
+        }
+        DeliveryIndex::load(&path).ok()
+    }
+
+    /// Writes `base` in place of `scope`'s base, with an empty overlay made
+    /// for it, and drops the scope's `.missed` mark: a base is here now. A
+    /// base that can't be replaced, as when another program holds it open
+    /// on Windows, is named in the void mark with its overlay, so no reader
+    /// uses words it should no longer hold.
+    fn replace_base(&self, lock: &Lock, scope: &[String], base: &[u8]) -> io::Result<()> {
+        let header = DeliveryIndex::read(base.to_vec())
+            .map_err(|_| io::ErrorKind::InvalidData)?
+            .header;
+        let empty =
+            super::delivery::empty_overlay(&header).map_err(|_| io::ErrorKind::InvalidData)?;
+        if let Err(err) = self.write(lock, &self.base(scope), base) {
+            self.clear(lock, scope)?;
+            return Err(err);
+        }
+        self.write(lock, &self.overlay(scope), &empty)?;
+        match self.remove(lock, &self.missed(scope)) {
+            Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// What a client did with a delivery file its server sent.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Taken {
+    /// A base, or an overlay that took nothing out of the base, was written.
+    Written,
+    /// An overlay took words out of the base, so the base was written again
+    /// without them: no file holds them now.
+    Folded,
+    /// Another writer kept the lock past the deadline, or the base moved
+    /// since the file was asked for: nothing was written.
+    Left,
+}
+
+/// Takes `bytes`, the delivery file the server at `url` sent for the scope
+/// `projects` (#180), under the lock waited for until `deadline`. A base is
+/// written with an empty overlay. An overlay made for the base on disk is
+/// written beside it, unless it takes words out of that base (a memory
+/// forgotten, reworded or moved out of the scope): the base is then folded
+/// with it and written again, so the words leave this machine's disk now
+/// rather than at a download.
+pub(crate) fn take_served(
+    url: &str,
+    projects: &[String],
+    bytes: Vec<u8>,
+    deadline: Instant,
+) -> io::Result<Taken> {
+    served_files(url)
+        .ok_or(io::ErrorKind::NotFound)?
+        .take(&scope(projects), bytes, deadline)
+}
+
+impl Files {
+    /// [`take_served`] for these files.
+    fn take(&self, scope: &[String], bytes: Vec<u8>, deadline: Instant) -> io::Result<Taken> {
+        let (files, scope) = (self, scope);
+        let file = DeliveryIndex::read(bytes).map_err(|_| io::ErrorKind::InvalidData)?;
+        if file.header.projects != scope {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        let Some(lock) = files.lock_until(deadline)? else {
+            return Ok(Taken::Left);
+        };
+        files.tidy(&lock, None);
+        if file.header.part == super::delivery::Part::Base {
+            files.replace_base(&lock, scope, &file.bytes)?;
+            return Ok(Taken::Written);
+        }
+        let Some(base) = files.readable_base(scope) else {
+            return Ok(Taken::Left);
+        };
+        if base.header.position != file.header.made_for {
+            return Ok(Taken::Left);
+        }
+        let removes =
+            super::delivery::removes(&base, &file).map_err(|_| io::ErrorKind::InvalidData)?;
+        if removes {
+            let folded =
+                super::delivery::fold(&base, &file).map_err(|_| io::ErrorKind::InvalidData)?;
+            files.replace_base(&lock, scope, &folded)?;
+            return Ok(Taken::Folded);
+        }
+        files.write(&lock, &files.overlay(scope), &file.bytes)?;
+        Ok(Taken::Written)
+    }
+}
+
+/// The delivery index of the scope `projects` that a hook matches against:
+/// for the local store at `db` (`remote` none), its files as they stand at
+/// the store's position; for the server at `remote`, this machine's files
+/// of its store, only while a connector runs here, its marker is recent
+/// ([`crate::remote::marker::served`]), and the newest file is at or past
+/// the marker's position, so a removal the connector has heard of is never
+/// read. Until a hook reads it (#117), only tests call it.
+#[cfg(test)]
+#[expect(dead_code, reason = "the hooks of #117 part 4 call it")]
+pub(crate) fn open(remote: Option<&str>, db: &Path, projects: &[String]) -> Option<View> {
+    match remote {
+        None => Files::of(&paths::store_identity(None, db))?
+            .open(&scope(projects), &super::changes::position(db)?),
+        Some(url) => served_files(url)?.open_served(
+            crate::remote::marker::served(url).as_ref(),
+            &scope(projects),
+        ),
+    }
+}
+
+#[cfg(test)]
+impl Files {
+    /// The remote arm of [`open`], with the position `marker` gives: none
+    /// without one, or when the newest file is behind it.
+    fn open_served(&self, marker: Option<&Position>, scope: &[String]) -> Option<View> {
+        let marker = marker?;
+        let view = self.view(scope)?;
+        let newest = view
+            .overlay
+            .as_ref()
+            .map_or(&view.base.header, |overlay| &overlay.header);
+        marker
+            .within(&Position::kept(newest.position.clone()))
+            .then_some(view)
+    }
+}
+
+/// Each scope whose base this machine keeps of the server at `url`, with
+/// that base's position: what the connector asks the changes since.
+pub(crate) fn served_bases(url: &str) -> Vec<(Vec<String>, String)> {
+    let Some(files) = served_files(url) else {
+        return Vec::new();
+    };
+    let base = format!(".{BASE}");
+    files
+        .own()
+        .into_iter()
+        .filter(|(name, _)| name.ends_with(&base) && !files.voided().contains(name))
+        .filter_map(|(_, path)| DeliveryIndex::load(&path).ok())
+        .filter(|index| index.header.part == super::delivery::Part::Base)
+        .map(|index| (index.header.projects.clone(), index.header.position.clone()))
+        .collect()
+}
+
+/// What session start found of a scope's files of a memory server.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ServedStart {
+    /// The base is there, with any change folded in.
+    Ready,
+    /// There is no base: session start asks the server for one.
+    Missing,
+    /// Another writer kept the lock past the deadline.
+    Busy,
+}
+
+/// Session start's part for the scope `projects` of the server at `url`
+/// (#180), under the lock waited for until `deadline`: clears what
+/// [`Files::tidy`] clears with the files a day old, then folds a base's
+/// non-empty overlay into it, with no network call. Without a base, the
+/// caller downloads one, whatever the `.missed` mark says.
+pub(crate) fn served_at_session_start(
+    url: &str,
+    projects: &[String],
+    deadline: Instant,
+) -> io::Result<ServedStart> {
+    let files = served_files(url).ok_or(io::ErrorKind::NotFound)?;
+    let scope = scope(projects);
+    let Some(lock) = files.lock_until(deadline)? else {
+        return Ok(ServedStart::Busy);
+    };
+    files.tidy(&lock, Some(SystemTime::now()));
+    let Some(base) = files.readable_base(&scope) else {
+        return Ok(ServedStart::Missing);
+    };
+    let overlay = DeliveryIndex::load(&files.overlay(&scope))
+        .ok()
+        .filter(|overlay| overlay.header.made_for == base.header.position);
+    if let Some(overlay) = overlay
+        && (overlay.len() > 0 || !overlay.header.skip.is_empty())
+    {
+        let folded =
+            super::delivery::fold(&base, &overlay).map_err(|_| io::ErrorKind::InvalidData)?;
+        files.replace_base(&lock, &scope, &folded)?;
+    }
+    Ok(ServedStart::Ready)
+}
+
+/// Whether the prompt hook asks the server at `url` for the base of the
+/// scope `projects` (#180): there is none, and its last download did not
+/// miss; session start asks either way.
+pub(crate) fn served_wanted(url: &str, projects: &[String]) -> bool {
+    let Some(files) = served_files(url) else {
+        return false;
+    };
+    let scope = scope(projects);
+    files.readable_base(&scope).is_none() && !files.missed(&scope).exists()
+}
+
+/// Marks that the base of the scope `projects` of the server at `url` did
+/// not arrive in time, so no prompt asks for it again before the next
+/// session start.
+pub(crate) fn served_missed(url: &str, projects: &[String]) {
+    if let Some(files) = served_files(url) {
+        let _ = private::create_dir(&files.dir);
+        let _ = private::create_file(
+            OpenOptions::new().write(true).create(true).truncate(true),
+            &files.missed(&scope(projects)),
+        );
+    }
+}
+
+/// Deletes every delivery file of the server at `url`, under its lock
+/// waited for until `deadline`: what a client does when the server keeps no
+/// delivery index this version reads, so none stays that no one keeps
+/// current.
+pub(crate) fn drop_served(url: &str, deadline: Instant) {
+    let Some(files) = served_files(url) else {
+        return;
+    };
+    let Ok(Some(lock)) = files.lock_until(deadline) else {
+        return;
+    };
+    for (_, path) in files.own() {
+        if path != files.lock_path() {
+            let _ = files.remove(&lock, &path);
+        }
+    }
 }

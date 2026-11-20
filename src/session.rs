@@ -713,16 +713,21 @@ fn session_file(client: HookClient, payload: &[u8]) -> Option<PathBuf> {
 /// Session start's part in keeping the delivery index (#175), beside its
 /// own index so it adds nothing to the start's time on a machine with a
 /// free core: its scope's base, built when missing or behind (see
-/// [`memory::delivery_files::at_session_start`]). Prints nothing. A
-/// server's store has no delivery files here yet.
+/// [`memory::delivery_files::at_session_start`]); for a server's store,
+/// its base folded on this machine or downloaded when missing
+/// ([`crate::remote::delivery::at_session_start`]). Prints nothing.
 async fn deliver_at_start(looking: &Looking, deadline: tokio::time::Instant) {
-    if !matches!(setup::configured_remote(), Ok(None)) {
+    let Ok(remote) = setup::configured_remote() else {
         return;
-    }
-    let Ok(seen) = looking.seen(None).await else {
+    };
+    let Ok(seen) = looking.seen(remote.as_ref()).await else {
         return;
     };
     let projects: Vec<String> = seen.projects.iter().map(|p| p.key.clone()).collect();
+    if let Some(connection) = remote {
+        crate::remote::delivery::at_session_start(&connection, &projects, deadline).await;
+        return;
+    }
     let db = db_path();
     let until =
         std::time::Instant::now() + deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -782,7 +787,11 @@ pub async fn prompt_submit(client: HookClient) -> String {
         let _ = std::fs::remove_file(missed);
     }
     // The scope's delivery index, with what is left of the prompt's limit.
-    if let Some(projects) = projects
+    if let Some(projects) = &projects
+        && let Ok(Some(connection)) = setup::configured_remote()
+    {
+        crate::remote::delivery::at_prompt(&connection, projects, deadline).await;
+    } else if let Some(projects) = projects
         && matches!(setup::configured_remote(), Ok(None))
     {
         let db = db_path();
