@@ -272,6 +272,20 @@ fn session_start_builds_its_scope_s_base_and_a_second_session_shares_it() {
 }
 
 #[test]
+fn session_start_looks_at_its_projects_once_for_its_snapshot_and_indexes() {
+    let home = Home::new();
+    home.record("deploy", "quokka-deploy");
+    for (session, what) in [("s1", "building its base"), ("s2", "finding it")] {
+        let out = home.hook("SessionStart", session, &[]);
+        let looks = String::from_utf8_lossy(&out.stderr)
+            .matches("looked at the session's projects")
+            .count();
+        assert_eq!(looks, 1, "{what}: {out:?}");
+    }
+    assert!(holds(&home.base(), &hex("quokka-deploy")), "built");
+}
+
+#[test]
 fn a_base_not_written_for_a_day_is_built_again_and_leftovers_go() {
     let home = Home::new();
     home.record("deploy", "quokka-deploy");
