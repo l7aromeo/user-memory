@@ -95,12 +95,19 @@ FORGET_LEFT_POLLS = 3
 # the files, for the cost.
 HOOK_RUNS = 11
 FORGETS = 5
-# Words for the memories the tool hooks find, four each, none shared.
-UPKEEP_WORDS = """quartz bramble lantern meadow cobalt fennel harbor violet saffron
-tundra walnut ember juniper canyon pewter thistle orchid basalt glacier mango
-falcon cedar indigo marble nutmeg pylon quiver raven sorrel tamarind umber
-velvet willow yarrow zephyr anchor bison cinder dahlia egret fjord gravel
-hazel iris""".split()
+# Words for the memories the tool and prompt hooks find, four each, none
+# shared: three series of HOOK_RUNS.
+UPKEEP_WORDS = """quartz bramble lantern meadow cobalt fennel harbor violet saffron tundra walnut ember
+juniper canyon pewter thistle orchid basalt glacier mango falcon cedar indigo marble
+nutmeg pylon quiver raven sorrel tamarind umber velvet willow yarrow zephyr anchor bison
+cinder dahlia egret fjord gravel hazel iris acorn beacon carbon dagger elbow fossil
+goblet hammock jasper kettle locust mantle nectar oyster pepper quilt rhubarb satchel
+teapot ukulele vortex wombat xylem yodel zinnia almond bugle cactus dingo easel ferret
+garnet igloo jigsaw kayak lilac magpie nickel olive parsnip quokka radish salmon trowel
+urchin vellum walrus yeoman zircon apricot badger candle dolphin emerald flannel gopher
+hornet inkwell jackal kelp lemur mosaic nimbus otter pelican quince rosin sparrow tulip
+upland vulture wasabi yucca zest artichoke biscuit cricket drizzle eggplant fiddle
+gondola hyacinth icicle jubilee kumquat lagoon mammoth narwhal""".split()
 
 
 def sandbox(home):
@@ -421,29 +428,37 @@ def hook_env(home):
 
 
 def upkeep(binary, folder, drawn):
-    """#175's costs through the real binary on the store in `folder`: a tool
-    hook that finds a change, from process start; what a forget adds when
-    three scopes' files hold the memory; and the prompt hook building a
-    missing base. Returns the tool hook's median, the forget's added median
-    and whether the prompt hook built its base, with the prompt hook's time
-    and session start's medians building its base and finding it."""
+    """#175's and #117's costs through the real binary on the store in
+    `folder`, from process start: a tool hook that finds a change, pushing
+    nothing and pushing the memory its command names; the prompt hook
+    pushing the memory its words name; what a forget adds when three
+    scopes' files hold the memory; and the prompt hook building a missing
+    base. Returns their medians by name, whether the prompt hook built its
+    base, and session start's medians building its base and finding it."""
     home = folder / "home"
     env = hook_env(home)
     delivery = home / ".local/state/user-memory/delivery"
     if os.name == "nt":
         delivery = home / "AppData/Local/user-memory/state/delivery"
 
-    def run(*args, payload=None):
+    def said(*args, payload=None):
+        """The time `args` took, process start included, and what it printed."""
         started = time.perf_counter()
-        subprocess.run([str(binary), *args], env=env, check=True, capture_output=True,
-                       input=json.dumps(payload) if payload else None, text=True)
-        return (time.perf_counter() - started) * 1000
+        out = subprocess.run([str(binary), *args], env=env, check=True, capture_output=True,
+                             input=json.dumps(payload) if payload else None, text=True)
+        return (time.perf_counter() - started) * 1000, out.stdout
 
-    def hook(event, session, cwd, **extra):
+    def run(*args, payload=None):
+        return said(*args, payload=payload)[0]
+
+    def hook_said(event, session, cwd, **extra):
         name = {"SessionStart": "session-start", "UserPromptSubmit": "prompt-submit",
                 "PostToolUse": "post-tool-use"}[event]
-        return run(name, "--client", "claude",
-                   payload={"session_id": session, "cwd": str(cwd), "hook_event_name": event, **extra})
+        return said(name, "--client", "claude",
+                    payload={"session_id": session, "cwd": str(cwd), "hook_event_name": event, **extra})
+
+    def hook(event, session, cwd, **extra):
+        return hook_said(event, session, cwd, **extra)[0]
 
     # Three scopes: no project, and each of two projects' repositories.
     folders = [folder / "plain"]
@@ -468,23 +483,49 @@ def upkeep(binary, folder, drawn):
         hook("SessionStart", f"s{n}", cwd, source="startup")
 
     def record(n):
+        """Records upkeep memory `n`, naming a command of its own in a code
+        span; returns the command and the memory's short id."""
         # Words of its own, so no record is refused as like another.
         words = UPKEEP_WORDS[4 * n:4 * n + 4]
+        command = f"{words[2]}-{words[3]}"
         out = subprocess.run([str(binary), "record", "--type", "procedure", "--category", "build",
                               "--title", f"{words[0]} {words[1]}",
-                              "--content", f"Run `{words[2]}-{words[3]}` when {words[0]} {words[1]} drift.",
+                              "--content", f"Run `{command}` when {words[0]} {words[1]} drift.",
                               "--scope", "global"],
                              env=env, check=True, capture_output=True, text=True)
-        if json.loads(out.stdout).get("stored") is not True:
+        stored = json.loads(out.stdout)
+        if stored.get("stored") is not True:
             raise SystemExit(f"recording an upkeep memory was refused: {out.stdout}")
+        return command, stored["id"][:8]
 
-    tool = []
-    for n in range(HOOK_RUNS):
-        record(n)
-        took = hook("PostToolUse", "s0", folders[0], tool_name="Bash",
-                    tool_input={"command": "ls"}, tool_response={"stdout": ""})
-        if n:
-            tool.append(took)
+    def pushed(text, short, what):
+        """Fails unless `text`, a hook's output, pushes memory `short`: a
+        timing of the path that pushes must not time one that doesn't."""
+        if short not in text:
+            raise SystemExit(f"{what} did not push the memory it names: {text!r}")
+
+    # After each change, a call that matches nothing, a call naming the new
+    # memory's command, and in another session a prompt naming it.
+    tool, push, prompted = [], [], []
+    for n in range(3 * HOOK_RUNS):
+        command, short = record(n)
+        if n < HOOK_RUNS:
+            took = hook("PostToolUse", "s0", folders[0], tool_name="Bash",
+                        tool_input={"command": "ls"}, tool_response={"stdout": ""})
+            if n:
+                tool.append(took)
+        elif n < 2 * HOOK_RUNS:
+            took, out = hook_said("PostToolUse", "s0", folders[0], tool_name="Bash",
+                                  tool_input={"command": command}, tool_response={"stdout": ""})
+            pushed(out, short, "a tool hook")
+            if n > HOOK_RUNS:
+                push.append(took)
+        else:
+            took, out = hook_said("UserPromptSubmit", "s0", folders[0],
+                                  prompt=f"Run `{command}` next.")
+            pushed(out, short, "the prompt hook")
+            if n > 2 * HOOK_RUNS:
+                prompted.append(took)
 
     held = [m["id"] for m in drawn["memories"] if m["scope"] == "global"]
     added = []
@@ -501,8 +542,11 @@ def upkeep(binary, folder, drawn):
         path.unlink()
     prompt = hook("UserPromptSubmit", "s0", folders[0], prompt="go on")
     built = len(list(delivery.glob("*.index"))) == 1
-    return (statistics.median(tool), statistics.median(added), built, prompt,
-            statistics.median(starts["built"]), statistics.median(starts["found"]))
+    return {"tool": statistics.median(tool), "push": statistics.median(push),
+            "prompted": statistics.median(prompted), "added": statistics.median(added),
+            "built_at_prompt": built, "prompt": prompt,
+            "start_built": statistics.median(starts["built"]),
+            "start_found": statistics.median(starts["found"])}
 
 
 def served(binary, folder):
@@ -622,19 +666,25 @@ def cost(found, seed, size, keep):
         build_median = statistics.median(build_ms)
         print(f"  build       median {build_median:6.1f} ms, largest {build_ms[-1]:6.1f} ms "
               f"({BUILDS - 1} builds)")
-        tool, added, built_at_prompt, prompt, start_built, start_found = upkeep(
-            found["user-memory"], folder, drawn)
+        kept = upkeep(found["user-memory"], folder, drawn)
+        start_built, start_found = kept["start_built"], kept["start_found"]
+        tool_limit = rust_ms("src/session/tools.rs", "TOOL_HOOK_LIMIT")
+        prompt_limit = rust_ms("src/session.rs", "PROMPT_LIMIT")
         print(f"  session start median {start_built:6.1f} ms building its base, "
               f"{start_found:6.1f} ms finding it ({SESSION_PAIRS} pairs): "
               f"{(start_built - start_found) / build_median:.0%} of the build added "
               f"(limit {SESSION_BUILD_SHARE:.0%})")
-        print(f"  tool hook   median {tool:6.1f} ms after a change, process start included "
-              f"({HOOK_RUNS - 1} runs, limit {rust_ms('src/session/tools.rs', 'TOOL_HOOK_LIMIT')} ms)")
-        print(f"  forget      median {added:6.1f} ms added by three scopes' files "
+        print(f"  tool hook   median {kept['tool']:6.1f} ms after a change, nothing pushed, process "
+              f"start included ({HOOK_RUNS - 1} runs, limit {tool_limit} ms)")
+        print(f"  tool hook   median {kept['push']:6.1f} ms after a change, pushing the memory "
+              f"its command names ({HOOK_RUNS - 1} runs, limit {tool_limit} ms)")
+        print(f"  prompt hook median {kept['prompted']:6.1f} ms after a change, pushing the memory "
+              f"its words name ({HOOK_RUNS - 1} runs, limit {prompt_limit} ms)")
+        print(f"  forget      median {kept['added']:6.1f} ms added by three scopes' files "
               f"({FORGETS} pairs, limit {FORGET_ADDED_LIMIT_MS} ms)")
-        print(f"  prompt hook {prompt:6.1f} ms building a missing base: "
-              f"{'built' if built_at_prompt else 'NOT built'} "
-              f"(limit {rust_ms('src/session.rs', 'PROMPT_LIMIT')} ms)")
+        print(f"  prompt hook {kept['prompt']:6.1f} ms building a missing base: "
+              f"{'built' if kept['built_at_prompt'] else 'NOT built'} "
+              f"(limit {prompt_limit} ms)")
         downloading, finding, base_bytes, left = served(found["user-memory"], folder)
         poll = rust_ms("src/remote/marker.rs", "REMOTE_MARKER_POLL")
         print(f"  a server's client: session start median {downloading:6.1f} ms downloading its base "
@@ -653,7 +703,8 @@ def cost(found, seed, size, keep):
                   f"largest {samples[-1]:6.1f} ms")
         served_ok = (downloading <= rust_ms("src/session.rs", "LIMIT")
                      and left is not None and left <= FORGET_LEFT_POLLS * poll)
-        return worst, (start_built - start_found) / build_median, tool, added, built_at_prompt, served_ok
+        return (worst, (start_built - start_found) / build_median, kept, tool_limit, prompt_limit,
+                served_ok)
 
 
 def main():
@@ -679,7 +730,7 @@ def main():
     sizes = [int(s) for s in args.sizes.split(",")]
     tuning = {}
     if args.cost or args.check_cost:
-        worst, build_added, tool, added, built_at_prompt, served_ok = cost(
+        worst, build_added, kept, tool_limit, prompt_limit, served_ok = cost(
             found, REPORT_SEEDS[0], max(sizes), args.keep)
         over = False
         if args.check_cost and worst > LOOKUP_LIMIT_MS:
@@ -688,14 +739,18 @@ def main():
         if args.check_cost and build_added > SESSION_BUILD_SHARE:
             print(f"session start building its base adds over {SESSION_BUILD_SHARE:.0%} of the build")
             over = True
-        tool_limit = rust_ms("src/session/tools.rs", "TOOL_HOOK_LIMIT")
-        if args.check_cost and tool > tool_limit:
-            print(f"the tool hook is over its {tool_limit} ms limit")
-            over = True
-        if args.check_cost and added > FORGET_ADDED_LIMIT_MS:
+        # The hooks' limits are read from their constants in the Rust
+        # source (`rust_ms`), so the two cannot drift.
+        for key, what, limit in (("tool", "the tool hook pushing nothing", tool_limit),
+                                 ("push", "the tool hook pushing a memory", tool_limit),
+                                 ("prompted", "the prompt hook pushing a memory", prompt_limit)):
+            if args.check_cost and kept[key] > limit:
+                print(f"{what} is over its {limit} ms limit")
+                over = True
+        if args.check_cost and kept["added"] > FORGET_ADDED_LIMIT_MS:
             print(f"a forget adds over {FORGET_ADDED_LIMIT_MS} ms")
             over = True
-        if args.check_cost and not built_at_prompt:
+        if args.check_cost and not kept["built_at_prompt"]:
             print("the prompt hook did not build the missing base within its limit")
             over = True
         if args.check_cost and not served_ok:
