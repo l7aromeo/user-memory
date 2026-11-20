@@ -666,16 +666,16 @@ Commands:
     just delivery-bench --check-cost     # the same, failing past a budget
 
 `--cost` times one lookup from a new process, and the build of the index
-from the store (budget: 60 ms at 10,000 memories, so session start's build
-finishes beside its own index). Through the release binary, in the same
-throwaway home, it also times the delivery index's upkeep: a tool hook
-that finds a change, process start included (budget: `TOOL_HOOK_LIMIT`);
-what a forget adds when three scopes' files hold the memory (budget:
-400 ms); and whether the prompt hook builds a missing base within
-`PROMPT_LIMIT`. `--check-cost` fails when any is past its budget. It also
-reports session start with and without a build of its base, unchecked: the
-100 ms session start keeps at 10,000 memories rests on a free core for the
-build beside its own index. CI runs it on macOS, Linux and Windows.
+from the store, which it reports. Through the release binary, in the same
+throwaway home, it also times the delivery index's upkeep: session start
+building its scope's base against session start finding it (budget: 15 %
+slower on the same machine, since the build runs beside session start's own
+index and one that finishes first adds nothing); a tool hook that finds a
+change, process start included (budget: `TOOL_HOOK_LIMIT`); what a forget
+adds when three scopes' files hold the memory (budget: 400 ms); and
+whether the prompt hook builds a missing base within `PROMPT_LIMIT`.
+`--check-cost` fails when any is past its budget. CI runs it on macOS,
+Linux and Windows.
 
 The bars and window are set on the tuning seeds (`--sweep`) and reported on
 others, so the report isn't graded on what set them. The report uses the

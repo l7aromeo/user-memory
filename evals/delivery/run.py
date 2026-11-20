@@ -67,11 +67,19 @@ PROMPT_PRECISION = 0.9
 LOOKUP_LIMIT_MS = 100
 # Lookups timed per action for the cost, after one warm-up.
 LOOKUPS = 21
-# Budget of #175 for building a scope's delivery index from the store at the
-# largest size: session start builds it beside its own index, which takes 66
-# to 77 ms at 10,000 memories, so a build within this finishes first on a
-# machine with a free core.
-BUILD_LIMIT_MS = 60
+# How much slower session start may be when it builds its scope's delivery
+# index than when it finds one, on the same machine (#175). It builds on its
+# own thread beside its own index of the store, so a build that finishes
+# first adds nothing; one run after that index instead adds about the whole
+# build. The bar sits between the two ends. Below the smallest such failure:
+# build divided by session start finding is about 48 % on macOS, 69 % on
+# Linux, 31 % on Windows x64 and 23 % on Windows arm64 (estimates from CI's
+# figures; measured as a real failure only on macOS, +40 %). Above the
+# noise: 0 to 4.8 % on CI's runners, 9.5 % on a loaded Mac.
+SESSION_BUILD_SLOWER = 0.15
+# Session starts timed for it: pairs of one that builds (its base deleted)
+# and one that finds it, alternating so drift falls on both.
+SESSION_PAIRS = 11
 # Builds timed for the cost, after one warm-up.
 BUILDS = 11
 # Budget of #175 for what a forget adds when three scopes' files hold the
@@ -82,8 +90,6 @@ FORGET_ADDED_LIMIT_MS = 400
 # the files, for the cost.
 HOOK_RUNS = 11
 FORGETS = 5
-# The scopes the upkeep costs use: no project, and two projects' repositories.
-SESSION_SCOPES = ("none", "project", "other project")
 # Words for the memories the tool hooks find, four each, none shared.
 UPKEEP_WORDS = """quartz bramble lantern meadow cobalt fennel harbor violet saffron
 tundra walnut ember juniper canyon pewter thistle orchid basalt glacier mango
@@ -415,7 +421,7 @@ def upkeep(binary, folder, drawn):
     three scopes' files hold the memory; and the prompt hook building a
     missing base. Returns the tool hook's median, the forget's added median
     and whether the prompt hook built its base, with the prompt hook's time
-    and session start's median with and without a build."""
+    and session start's medians building its base and finding it."""
     home = folder / "home"
     env = hook_env(home)
     delivery = home / ".local/state/user-memory/delivery"
@@ -444,11 +450,17 @@ def upkeep(binary, folder, drawn):
         folders.append(repo)
     folders[0].mkdir()
     env["GIT_CEILING_DIRECTORIES"] = str(folder)
-    # Each first session start builds its scope's base; a second finds it.
+    # Session start in the first scope, building its base and finding it,
+    # before any other scope has files.
     starts = {"built": [], "found": []}
+    for n in range(SESSION_PAIRS):
+        for path in delivery.glob("*") if delivery.exists() else []:
+            if path.suffix != ".lock":
+                path.unlink()
+        starts["built"].append(hook("SessionStart", f"build{n}", folders[0], source="startup"))
+        starts["found"].append(hook("SessionStart", f"find{n}", folders[0], source="startup"))
     for n, cwd in enumerate(folders):
-        starts["built"].append(hook("SessionStart", f"s{n}", cwd, source="startup"))
-        starts["found"].append(hook("SessionStart", f"again{n}", cwd, source="startup"))
+        hook("SessionStart", f"s{n}", cwd, source="startup")
 
     def record(n):
         # Words of its own, so no record is refused as like another.
@@ -516,13 +528,12 @@ def cost(found, seed, size, keep):
               f"{built['bytes'] / 1e6:.1f} MB), {len(actions)} actions x {LOOKUPS - 1} runs, {sys.platform}")
         build_median = statistics.median(build_ms)
         print(f"  build       median {build_median:6.1f} ms, largest {build_ms[-1]:6.1f} ms "
-              f"({BUILDS - 1} builds, limit {BUILD_LIMIT_MS} ms)")
+              f"({BUILDS - 1} builds)")
         tool, added, built_at_prompt, prompt, start_built, start_found = upkeep(
             found["user-memory"], folder, drawn)
-        # Reported, not checked: #170's 100 ms for session start rests on a
-        # free core for the build beside its own index.
         print(f"  session start median {start_built:6.1f} ms building its base, "
-              f"{start_found:6.1f} ms finding it ({len(SESSION_SCOPES)} scopes)")
+              f"{start_found:6.1f} ms finding it ({SESSION_PAIRS} pairs, "
+              f"limit {SESSION_BUILD_SLOWER:.0%} slower)")
         print(f"  tool hook   median {tool:6.1f} ms after a change, process start included "
               f"({HOOK_RUNS - 1} runs, limit {rust_ms('src/session/tools.rs', 'TOOL_HOOK_LIMIT')} ms)")
         print(f"  forget      median {added:6.1f} ms added by three scopes' files "
@@ -538,7 +549,7 @@ def cost(found, seed, size, keep):
             worst = max(worst, median)
             print(f"  {mode:<11} median {median:6.1f} ms, 95th percentile {p95:6.1f} ms, "
                   f"largest {samples[-1]:6.1f} ms")
-        return worst, build_median, tool, added, built_at_prompt
+        return worst, (start_built, start_found), tool, added, built_at_prompt
 
 
 def main():
@@ -548,7 +559,7 @@ def main():
     parser.add_argument("--sweep", action="store_true", help="sweep bars and window on the tuning seeds")
     parser.add_argument("--cost", action="store_true", help="time one lookup on the largest size")
     parser.add_argument("--check-cost", action="store_true",
-                        help="fail when the lookup's or the build's median is over its limit")
+                        help="fail when a lookup, session start's build or an upkeep cost is over its limit")
     parser.add_argument("--bars", action="append",
                         help="PUSH,FAILURE,HOLD[,anchor][,scale=NAME] to report at instead of the matcher's; "
                              "NAME is what the bars test (score, share, mixed); repeatable")
@@ -564,13 +575,14 @@ def main():
     sizes = [int(s) for s in args.sizes.split(",")]
     tuning = {}
     if args.cost or args.check_cost:
-        worst, build_median, tool, added, built_at_prompt = cost(found, REPORT_SEEDS[0], max(sizes), args.keep)
+        worst, (start_built, start_found), tool, added, built_at_prompt = cost(
+            found, REPORT_SEEDS[0], max(sizes), args.keep)
         over = False
         if args.check_cost and worst > LOOKUP_LIMIT_MS:
             print(f"a lookup is over the {LOOKUP_LIMIT_MS} ms limit")
             over = True
-        if args.check_cost and build_median > BUILD_LIMIT_MS:
-            print(f"the build is over the {BUILD_LIMIT_MS} ms limit")
+        if args.check_cost and start_built > start_found * (1 + SESSION_BUILD_SLOWER):
+            print(f"session start building its base is over {SESSION_BUILD_SLOWER:.0%} slower than finding it")
             over = True
         tool_limit = rust_ms("src/session/tools.rs", "TOOL_HOOK_LIMIT")
         if args.check_cost and tool > tool_limit:
