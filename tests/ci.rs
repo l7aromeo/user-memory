@@ -690,6 +690,26 @@ fn ci_lints_the_release_profile_right_after_every_check() {
     }
 }
 
+// The delivery index's cost budgets hold on every platform the client ships
+// for: each check job runs the cost check after its tests.
+#[test]
+fn ci_checks_the_delivery_index_s_costs_on_every_platform() {
+    for file in ["check.yml", "windows.yml"] {
+        let docs =
+            YamlLoader::load_from_str(&repo_file(&format!(".github/workflows/{file}"))).unwrap();
+        let runs: Vec<&str> = docs[0]["jobs"]["check"]["steps"]
+            .as_vec()
+            .unwrap()
+            .iter()
+            .filter_map(|step| step["run"].as_str())
+            .collect();
+        assert!(
+            runs.contains(&"just delivery-bench --check-cost"),
+            "{file}: {runs:?}"
+        );
+    }
+}
+
 // CI reports every failing test in one run, through the nextest profile
 // both workflows select; a local `just check` keeps the default and stops
 // at the first failure.

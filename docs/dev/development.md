@@ -667,8 +667,13 @@ Commands:
 
 `--cost` times one lookup from a new process, and the build of the index
 from the store (budget: 60 ms at 10,000 memories, so session start's build
-finishes beside its own index); `--check-cost` fails when either median is
-past its budget.
+finishes beside its own index). Through the release binary, in the same
+throwaway home, it also times the delivery index's upkeep: a tool hook
+that finds a change, process start included (budget: `TOOL_HOOK_LIMIT`);
+what a forget adds when three scopes' files hold the memory (budget:
+400 ms); and whether the prompt hook builds a missing base within
+`PROMPT_LIMIT`. `--check-cost` fails when any is past its budget. CI runs
+it on macOS, Linux and Windows.
 
 The bars and window are set on the tuning seeds (`--sweep`) and reported on
 others, so the report isn't graded on what set them. The report uses the

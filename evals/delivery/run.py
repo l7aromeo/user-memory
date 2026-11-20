@@ -74,6 +74,20 @@ LOOKUPS = 21
 BUILD_LIMIT_MS = 60
 # Builds timed for the cost, after one warm-up.
 BUILDS = 11
+# Budget of #175 for what a forget adds when three scopes' files hold the
+# memory: the three are built again at once, one thread each, which took
+# 111 ms on macOS with a prototype; the room is for the slower runners.
+FORGET_ADDED_LIMIT_MS = 400
+# Tool hooks timed after a change each, and forgets timed with and without
+# the files, for the cost.
+HOOK_RUNS = 11
+FORGETS = 5
+# Words for the memories the tool hooks find, four each, none shared.
+UPKEEP_WORDS = """quartz bramble lantern meadow cobalt fennel harbor violet saffron
+tundra walnut ember juniper canyon pewter thistle orchid basalt glacier mango
+falcon cedar indigo marble nutmeg pylon quiver raven sorrel tamarind umber
+velvet willow yarrow zephyr anchor bison cinder dahlia egret fjord gravel
+hazel iris""".split()
 
 
 def sandbox(home):
@@ -375,6 +389,98 @@ def sweep(found, sizes, seeds, tuning, keep):
                                           f"{total['held before its action']:>4}  {total['unnamed held']:>4}")
 
 
+def rust_ms(path, name):
+    """The milliseconds of the `Duration` constant `name` in `path`."""
+    line = next(l for l in (ROOT / path).read_text().splitlines()
+                if f"const {name}: Duration = " in l)
+    unit, value = line.split("Duration::from_")[1].split(")")[0].split("(")
+    value = int(value.replace("_", ""))
+    return value * 1000 if unit == "secs" else value
+
+
+def hook_env(home):
+    """`sandbox(home)` with the per-user folders Windows reads in it too, so
+    the hooks' state stays in the throwaway home."""
+    env = sandbox(home)
+    env.update({"USERPROFILE": str(home), "APPDATA": str(home / "AppData/Roaming"),
+                "LOCALAPPDATA": str(home / "AppData/Local")})
+    return env
+
+
+def upkeep(binary, folder, drawn):
+    """#175's costs through the real binary on the store in `folder`: a tool
+    hook that finds a change, from process start; what a forget adds when
+    three scopes' files hold the memory; and the prompt hook building a
+    missing base. Returns the tool hook's median, the forget's added median
+    and whether the prompt hook built its base, with the prompt hook's time."""
+    home = folder / "home"
+    env = hook_env(home)
+    delivery = home / ".local/state/user-memory/delivery"
+    if os.name == "nt":
+        delivery = home / "AppData/Local/user-memory/state/delivery"
+
+    def run(*args, payload=None):
+        started = time.perf_counter()
+        subprocess.run([str(binary), *args], env=env, check=True, capture_output=True,
+                       input=json.dumps(payload) if payload else None, text=True)
+        return (time.perf_counter() - started) * 1000
+
+    def hook(event, session, cwd, **extra):
+        name = {"SessionStart": "session-start", "UserPromptSubmit": "prompt-submit",
+                "PostToolUse": "post-tool-use"}[event]
+        return run(name, "--client", "claude",
+                   payload={"session_id": session, "cwd": str(cwd), "hook_event_name": event, **extra})
+
+    # Three scopes: no project, and each of two projects' repositories.
+    folders = [folder / "plain"]
+    for project in (world.PROJECT, world.OTHER_PROJECT):
+        repo = folder / project.replace("/", "_")
+        repo.mkdir()
+        for args in (["init", "-q"], ["remote", "add", "origin", f"https://{project}.git"]):
+            subprocess.run(["git", *args], cwd=repo, env=env, check=True, capture_output=True)
+        folders.append(repo)
+    folders[0].mkdir()
+    env["GIT_CEILING_DIRECTORIES"] = str(folder)
+    for n, cwd in enumerate(folders):
+        hook("SessionStart", f"s{n}", cwd, source="startup")
+
+    def record(n):
+        # Words of its own, so no record is refused as like another.
+        words = UPKEEP_WORDS[4 * n:4 * n + 4]
+        out = subprocess.run([str(binary), "record", "--type", "procedure", "--category", "build",
+                              "--title", f"{words[0]} {words[1]}",
+                              "--content", f"Run `{words[2]}-{words[3]}` when {words[0]} {words[1]} drift.",
+                              "--scope", "global"],
+                             env=env, check=True, capture_output=True, text=True)
+        if json.loads(out.stdout).get("stored") is not True:
+            raise SystemExit(f"recording an upkeep memory was refused: {out.stdout}")
+
+    tool = []
+    for n in range(HOOK_RUNS):
+        record(n)
+        took = hook("PostToolUse", "s0", folders[0], tool_name="Bash",
+                    tool_input={"command": "ls"}, tool_response={"stdout": ""})
+        if n:
+            tool.append(took)
+
+    held = [m["id"] for m in drawn["memories"] if m["scope"] == "global"]
+    added = []
+    for n in range(FORGETS):
+        with_files = run("forget", held[2 * n])
+        for path in delivery.iterdir():
+            path.unlink()
+        without = run("forget", held[2 * n + 1])
+        added.append(with_files - without)
+        for k, cwd in enumerate(folders):
+            hook("UserPromptSubmit", f"s{k}", cwd, prompt="go on")
+
+    for path in delivery.glob("*.index"):
+        path.unlink()
+    prompt = hook("UserPromptSubmit", "s0", folders[0], prompt="go on")
+    built = len(list(delivery.glob("*.index"))) == 1
+    return statistics.median(tool), statistics.median(added), built, prompt
+
+
 def cost(found, seed, size, keep):
     """One lookup's time from a new process: start, load the delivery
     index, match one action; and with the passing passages' text cut from
@@ -404,6 +510,14 @@ def cost(found, seed, size, keep):
         build_median = statistics.median(build_ms)
         print(f"  build       median {build_median:6.1f} ms, largest {build_ms[-1]:6.1f} ms "
               f"({BUILDS - 1} builds, limit {BUILD_LIMIT_MS} ms)")
+        tool, added, built_at_prompt, prompt = upkeep(found["user-memory"], folder, drawn)
+        print(f"  tool hook   median {tool:6.1f} ms after a change, process start included "
+              f"({HOOK_RUNS - 1} runs, limit {rust_ms('src/session/tools.rs', 'TOOL_HOOK_LIMIT')} ms)")
+        print(f"  forget      median {added:6.1f} ms added by three scopes' files "
+              f"({FORGETS} pairs, limit {FORGET_ADDED_LIMIT_MS} ms)")
+        print(f"  prompt hook {prompt:6.1f} ms building a missing base: "
+              f"{'built' if built_at_prompt else 'NOT built'} "
+              f"(limit {rust_ms('src/session.rs', 'PROMPT_LIMIT')} ms)")
         worst = 0.0
         for mode, samples in times.items():
             samples.sort()
@@ -412,7 +526,7 @@ def cost(found, seed, size, keep):
             worst = max(worst, median)
             print(f"  {mode:<11} median {median:6.1f} ms, 95th percentile {p95:6.1f} ms, "
                   f"largest {samples[-1]:6.1f} ms")
-        return worst, build_median
+        return worst, build_median, tool, added, built_at_prompt
 
 
 def main():
@@ -438,13 +552,23 @@ def main():
     sizes = [int(s) for s in args.sizes.split(",")]
     tuning = {}
     if args.cost or args.check_cost:
-        worst, build_median = cost(found, REPORT_SEEDS[0], max(sizes), args.keep)
+        worst, build_median, tool, added, built_at_prompt = cost(found, REPORT_SEEDS[0], max(sizes), args.keep)
         over = False
         if args.check_cost and worst > LOOKUP_LIMIT_MS:
             print(f"a lookup is over the {LOOKUP_LIMIT_MS} ms limit")
             over = True
         if args.check_cost and build_median > BUILD_LIMIT_MS:
             print(f"the build is over the {BUILD_LIMIT_MS} ms limit")
+            over = True
+        tool_limit = rust_ms("src/session/tools.rs", "TOOL_HOOK_LIMIT")
+        if args.check_cost and tool > tool_limit:
+            print(f"the tool hook is over its {tool_limit} ms limit")
+            over = True
+        if args.check_cost and added > FORGET_ADDED_LIMIT_MS:
+            print(f"a forget adds over {FORGET_ADDED_LIMIT_MS} ms")
+            over = True
+        if args.check_cost and not built_at_prompt:
+            print("the prompt hook did not build the missing base within its limit")
             over = True
         return 1 if over else 0
     if args.sweep:
