@@ -9,7 +9,7 @@
 use super::{
     HookClient, LIMIT, Looking, hook_limit, hook_time, index, origin, payload,
     recall::{self, State},
-    tools::{Session, spawn_key},
+    tools::{Session, spawn_key, tool_deadline},
 };
 use crate::memory;
 use crate::memory::matcher::Kind;
@@ -133,7 +133,7 @@ pub(super) const CLAUDE_DEFAULT_AGENT: &str = "general-purpose";
 /// was kept for it or nothing passes. Claude Code's subagent claims the
 /// task of its turn and type; Codex's, the session's oldest unclaimed one.
 fn seed(client: HookClient, payload: &[u8], started: std::time::Instant) -> Option<String> {
-    let session = Session::of(client, payload, started)?;
+    let session = Session::of(client, payload, tool_deadline(started))?;
     let value: Value = serde_json::from_slice(payload).ok()?;
     let key = match client {
         HookClient::Claude => spawn_key(
