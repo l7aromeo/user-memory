@@ -335,12 +335,13 @@ otherwise), graded beside the store's, for the `memory` checks. `obeyed`
 is a transcript of a session that did right; by default, one that did
 nothing. `{seed:NAME}` works in both as in checks.
 
-`--rehearse` grades the scenario's decisive checks on the fresh trial
-against `obeyed`, where each must pass, and against each planted
-transcript, where each must fail at least once. Its line says how many were
-shown able to fail (`ok   NAME/claude (4 of 4 checks shown able to fail)`)
-and names any that `obeyed` fails or no planted transcript does. Nothing in
-a transcript is sent to a model or counted against the budget. A scenario
+`--rehearse` grades the scenario's checks, informational ones included, on
+the fresh trial against `obeyed`, where each must pass, and against each
+planted transcript, where each must fail at least once. Its line says how
+many were shown able to fail
+(`ok   NAME/claude (4 of 4 checks shown able to fail)`) and names any
+that `obeyed` fails or no planted transcript does. Nothing in a transcript
+is sent to a model or counted against the budget. A scenario
 without `planted` rehearses as before.
 
 Checks grade the final store (read with `search --scope all --status all`)
