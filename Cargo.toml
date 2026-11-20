@@ -26,7 +26,7 @@ doc = false
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-rmcp = { version = "3", features = ["server", "client", "macros", "schemars", "transport-io", "transport-streamable-http-server", "transport-streamable-http-client-reqwest"] }
+rmcp = { version = "3.11", features = ["server", "client", "macros", "schemars", "transport-io", "transport-streamable-http-server", "transport-streamable-http-client-reqwest"] }
 rusqlite = { version = "0.37", features = ["bundled", "backup"] }
 schemars = { version = "1", features = ["uuid1"] }
 uuid = { version = "1", features = ["v4", "serde"] }
