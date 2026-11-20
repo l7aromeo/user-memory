@@ -71,6 +71,13 @@ CREATE TABLE IF NOT EXISTS window(
     anchors TEXT NOT NULL,
     PRIMARY KEY(agent, seq)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS spawns(
+    seq INTEGER PRIMARY KEY,
+    key TEXT NOT NULL,
+    stems TEXT NOT NULL,
+    anchors TEXT NOT NULL,
+    claimed INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS shown(
     agent TEXT NOT NULL,
     memory TEXT NOT NULL,
@@ -315,6 +322,46 @@ impl State {
         )?;
         tx.commit()?;
         Ok(shown)
+    }
+}
+
+impl State {
+    /// Keeps a subagent's task, the terms of the words its parent gave it,
+    /// for the subagent's start to claim by `key`.
+    pub(super) fn spawn(&mut self, key: &str, terms: &Terms) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO spawns(key, stems, anchors) VALUES (?1, ?2, ?3)",
+            params![
+                key,
+                serde_json::to_string(&terms.stems)?,
+                serde_json::to_string(&terms.anchors)?
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The oldest task kept by `key` no subagent has claimed, now claimed:
+    /// of two subagents starting at once, each gets its own.
+    pub(super) fn claim(&mut self, key: &str) -> Result<Option<Terms>> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let found = tx
+            .query_row(
+                "SELECT seq, stems, anchors FROM spawns WHERE key = ?1 AND claimed = 0 ORDER BY seq LIMIT 1",
+                [key],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)),
+            )
+            .optional()?;
+        let Some((seq, stems, anchors)) = found else {
+            return Ok(None);
+        };
+        tx.execute("UPDATE spawns SET claimed = 1 WHERE seq = ?1", [seq])?;
+        tx.commit()?;
+        Ok(Some(Terms {
+            stems: serde_json::from_str(&stems)?,
+            anchors: serde_json::from_str(&anchors)?,
+        }))
     }
 }
 
@@ -772,6 +819,52 @@ mod tests {
         ] {
             assert_eq!(kind_of(kind_name(kind)), Some(kind));
         }
+    }
+
+    #[test]
+    fn each_subagent_claims_the_oldest_task_kept_for_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = file(&dir);
+        let mut state = State::start(&path, Source::Startup, &[], soon()).unwrap();
+        let task = |anchor: &str| Terms {
+            stems: BTreeSet::new(),
+            anchors: BTreeSet::from([anchor.to_owned()]),
+        };
+        state.spawn("p1\nExplore", &task("docs/notes.md")).unwrap();
+        state.spawn("p1\nPlan", &task("src/parse.rs")).unwrap();
+        state.spawn("p1\nExplore", &task("docs/guide.md")).unwrap();
+        assert_eq!(
+            state.claim("p1\nExplore").unwrap(),
+            Some(task("docs/notes.md"))
+        );
+        assert_eq!(
+            state.claim("p1\nExplore").unwrap(),
+            Some(task("docs/guide.md"))
+        );
+        assert_eq!(state.claim("p1\nExplore").unwrap(), None);
+        assert_eq!(state.claim("p2\nPlan").unwrap(), None);
+        // Two subagents starting at once never claim one task twice.
+        for i in 0..8 {
+            state
+                .spawn("p3\nExplore", &task(&format!("docs/{i}.md")))
+                .unwrap();
+        }
+        let barrier = Arc::new(Barrier::new(8));
+        let claimed: BTreeSet<String> = (0..8)
+            .map(|_| {
+                let (path, barrier) = (path.clone(), barrier.clone());
+                thread::spawn(move || {
+                    let mut state = State::open(&path, soon()).unwrap();
+                    barrier.wait();
+                    let terms = state.claim("p3\nExplore").unwrap().unwrap();
+                    terms.anchors.into_iter().next().unwrap()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|t| t.join().unwrap())
+            .collect();
+        assert_eq!(claimed.len(), 8);
     }
 
     #[test]

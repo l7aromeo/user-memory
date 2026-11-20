@@ -292,6 +292,12 @@ fn file_terms(path: &str, stems: &mut Stems, terms: &mut Terms) {
     }
 }
 
+/// The terms `action` adds to a window, outside one: what a hook keeps of
+/// an action another hook's window takes in later.
+pub(crate) fn terms_of(action: &Action) -> Terms {
+    terms(action, &mut Stems::new())
+}
+
 /// The terms `action` adds to the window.
 pub(in crate::memory) fn terms(action: &Action, stems: &mut Stems) -> Terms {
     let mut terms = Terms::default();
@@ -332,6 +338,13 @@ impl Default for Tuning {
 /// words they used.
 pub(crate) struct Window {
     tuning: Tuning,
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the delivery benchmark pushes actions; the hooks push the terms they keep"
+        )
+    )]
     stems: Stems,
     actions: VecDeque<(Kind, Terms, bool)>,
 }
@@ -353,8 +366,14 @@ impl Window {
     }
 
     /// Adds `action`, the one that fires the next match; the oldest past
-    /// [`WINDOW_ACTIONS`] falls out. Returns the terms it added, which a
-    /// hook keeps for the next one's window.
+    /// [`WINDOW_ACTIONS`] falls out. Returns the terms it added.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the delivery benchmark pushes actions; the hooks push the terms they keep"
+        )
+    )]
     pub(crate) fn push(&mut self, action: &Action) -> &Terms {
         let terms = terms(action, &mut self.stems);
         self.push_terms(action.kind, terms, action.failed)
