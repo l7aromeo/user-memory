@@ -1389,6 +1389,14 @@ fn the_semantic_search_question_offers_ollama_another_endpoint_or_off() {
         return;
     };
     assert_eq!(status, 0, "{screen}");
+    assert!(
+        screen.contains(
+            "  2) Another OpenAI-compatible endpoint: memory text and searches are sent to it"
+        ),
+        "{screen}"
+    );
+    // The test's endpoint is on this machine: nothing leaves it.
+    assert!(!screen.contains("Semantic search sends"), "{screen}");
     assert!(!screen.contains(key), "{screen}");
     let key_file = c.path(".config/user-memory/embedding-key");
     assert_eq!(fs::read_to_string(&key_file).unwrap(), format!("{key}\n"));
@@ -3106,6 +3114,8 @@ fn a_server_only_host_applies_its_embedding_choice_in_the_container() {
     ));
     let (stdout, stderr) = text(&out);
     assert!(out.status.success(), "{stdout}\n{stderr}");
+    // The endpoint is on this machine, as the container reaches it too.
+    assert!(!stdout.contains("Semantic search sends"), "{stdout}");
     let endpoint_port = endpoint.address.rsplit(':').next().unwrap();
     assert_eq!(
         fs::read_to_string(c.docker_dir().join("embedding.env")).unwrap(),

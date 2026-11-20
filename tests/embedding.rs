@@ -503,6 +503,8 @@ fn set_saves_a_checked_calibrated_setting_and_off_removes_it() {
         said.contains("Embedded 2 memories with fake-model"),
         "{said}"
     );
+    // The endpoint is on this machine: nothing leaves it.
+    assert!(!said.contains("Semantic search sends"), "{said}");
     assert_eq!(
         i.receipt()["embedding"],
         json!({
@@ -666,6 +668,8 @@ fn show_names_the_container_command_when_docker_cannot_answer() {
         "{said}"
     );
     assert!(said.contains("Model: fake-model"), "{said}");
+    // The host gateway is this machine: nothing to name.
+    assert!(!said.contains("Semantic search sends"), "{said}");
     // The key is named by where it is, never by its path or value.
     assert!(said.contains("API key: in the server's volume"), "{said}");
     assert!(!said.contains("embedding-key"), "{said}");
@@ -741,4 +745,68 @@ fn set_and_off_without_a_saved_setup_say_where_to_run_them() {
     assert!(said.contains(wanted), "{said}");
     let vectors: i64 = s.query("SELECT count(*) FROM memory_vectors");
     assert_eq!(vectors, 1);
+}
+
+/// An endpoint that isn't on this machine; `.invalid` never resolves, so
+/// its probe fails at once.
+const ELSEWHERE: &str = "https://embed.example.invalid/v1/embeddings";
+
+/// What show and doctor say about it.
+const SENDS: &str = "Semantic search sends memory text and searches to embed.example.invalid";
+
+// An endpoint elsewhere is named by show and doctor, whether or not its
+// probe answers; one on this machine never is.
+#[test]
+fn show_and_doctor_name_an_endpoint_that_is_not_on_this_machine() {
+    let s = Store::new();
+    s.record("Keep commits small");
+    let elsewhere = [
+        ("USER_MEMORY_EMBED_URL", ELSEWHERE),
+        ("USER_MEMORY_EMBED_MODEL", "fake-model"),
+    ];
+    let out = s.run_with(None, &elsewhere, &["embedding", "show"]);
+    let said = text(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(
+        said.contains(&format!(
+            "Endpoint: {ELSEWHERE}\n{SENDS}\nModel: fake-model"
+        )),
+        "{said}"
+    );
+    let out = s.run_with(None, &elsewhere, &["doctor"]);
+    let said = text(&out);
+    assert!(said.contains(&format!("{SENDS}\n")), "{said}");
+
+    let endpoint = Endpoint::start(Answer::Separating);
+    let out = s.run(Some(&endpoint), &["embedding", "show"]);
+    let said = text(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(said.contains("Vector length: "), "{said}");
+    assert!(!said.contains("Semantic search sends"), "{said}");
+    let said = text(&s.run(Some(&endpoint), &["doctor"]));
+    assert!(said.contains("Embedding: OK (fake-model"), "{said}");
+    assert!(!said.contains("Semantic search sends"), "{said}");
+}
+
+// On the Docker server's machine, show names an endpoint elsewhere once:
+// the container's own line is left out.
+#[test]
+fn show_on_the_docker_servers_machine_names_an_endpoint_elsewhere_once() {
+    let c = DockerClient::new(&format!(
+        "USER_MEMORY_EMBED_URL={ELSEWHERE}\nUSER_MEMORY_EMBED_MODEL=fake-model\n"
+    ));
+    let out = c.run(&["embedding", "show"]);
+    let said = text(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(
+        said.contains(&format!("Endpoint: {ELSEWHERE}\n{SENDS}\n")),
+        "{said}"
+    );
+    assert_eq!(said.matches("Semantic search sends").count(), 1, "{said}");
+    assert!(
+        c.docker_log()
+            .contains("exec -T memory user-memory embedding show"),
+        "{}",
+        c.docker_log()
+    );
 }

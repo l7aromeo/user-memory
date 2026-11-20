@@ -193,7 +193,11 @@ pub fn show(db: &Path, settings: &Settings) -> Result<String> {
     };
     let config = config(settings)?;
     let model = config.identity().0.to_owned();
-    let mut lines = vec![format!("Endpoint: {url}"), format!("Model: {model}")];
+    let mut lines = vec![format!("Endpoint: {url}")];
+    lines.extend(crate::memory::embedding_disclosure(&|name| {
+        settings.get(name).cloned()
+    }));
+    lines.push(format!("Model: {model}"));
     match config.embed(&["user-memory embedding probe".to_owned()]) {
         Ok(vectors) => {
             let length = vectors.first().map_or(0, Vec::len);

@@ -193,6 +193,14 @@ pub fn embedding_elsewhere(setting: &dyn Fn(&str) -> Option<String>) -> Option<S
     url.host_str().map(str::to_owned)
 }
 
+/// What `embedding set`, `embedding show` and doctor say when semantic
+/// search sends memory text off this machine: the endpoint's host, since
+/// every memory's text and every search goes there.
+pub fn embedding_disclosure(setting: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+    embedding_elsewhere(setting)
+        .map(|host| format!("Semantic search sends memory text and searches to {host}"))
+}
+
 /// Validates embedding settings and embeds one probe text.
 pub fn probe_embedding(
     setting: &dyn Fn(&str) -> Option<String>,

@@ -607,3 +607,37 @@ fn uninstall_ps1_falls_back_to_a_verified_release_binary() {
         }
     }
 }
+
+/// The semantic search choices each installer lists, in order: install.sh's
+/// menu lines and install.ps1's `Write-Host` lines that start with a number.
+fn semantic_choices(script: &str) -> Vec<String> {
+    let text = fs::read_to_string(repo_file(script)).unwrap();
+    text.lines()
+        .map(|line| {
+            let line = line.trim();
+            line.strip_prefix("Write-Host '")
+                .and_then(|line| line.strip_suffix('\''))
+                .unwrap_or(line)
+                .trim()
+        })
+        .filter(|line| {
+            ["1) Ollama", "2) Another", "3) Off"]
+                .iter()
+                .any(|choice| line.starts_with(choice))
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
+// Both installers offer the semantic search choices in the same words, the
+// endpoint's with what it receives.
+#[test]
+fn both_installers_offer_the_same_semantic_search_choices() {
+    let unix = semantic_choices("install.sh");
+    assert_eq!(unix.len(), 3, "{unix:?}");
+    assert_eq!(
+        unix[1],
+        "2) Another OpenAI-compatible endpoint: memory text and searches are sent to it"
+    );
+    assert_eq!(semantic_choices("install.ps1"), unix);
+}
