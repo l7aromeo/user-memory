@@ -82,6 +82,8 @@ FORGET_ADDED_LIMIT_MS = 400
 # the files, for the cost.
 HOOK_RUNS = 11
 FORGETS = 5
+# The scopes the upkeep costs use: no project, and two projects' repositories.
+SESSION_SCOPES = ("none", "project", "other project")
 # Words for the memories the tool hooks find, four each, none shared.
 UPKEEP_WORDS = """quartz bramble lantern meadow cobalt fennel harbor violet saffron
 tundra walnut ember juniper canyon pewter thistle orchid basalt glacier mango
@@ -412,7 +414,8 @@ def upkeep(binary, folder, drawn):
     hook that finds a change, from process start; what a forget adds when
     three scopes' files hold the memory; and the prompt hook building a
     missing base. Returns the tool hook's median, the forget's added median
-    and whether the prompt hook built its base, with the prompt hook's time."""
+    and whether the prompt hook built its base, with the prompt hook's time
+    and session start's median with and without a build."""
     home = folder / "home"
     env = hook_env(home)
     delivery = home / ".local/state/user-memory/delivery"
@@ -441,8 +444,11 @@ def upkeep(binary, folder, drawn):
         folders.append(repo)
     folders[0].mkdir()
     env["GIT_CEILING_DIRECTORIES"] = str(folder)
+    # Each first session start builds its scope's base; a second finds it.
+    starts = {"built": [], "found": []}
     for n, cwd in enumerate(folders):
-        hook("SessionStart", f"s{n}", cwd, source="startup")
+        starts["built"].append(hook("SessionStart", f"s{n}", cwd, source="startup"))
+        starts["found"].append(hook("SessionStart", f"again{n}", cwd, source="startup"))
 
     def record(n):
         # Words of its own, so no record is refused as like another.
@@ -478,7 +484,8 @@ def upkeep(binary, folder, drawn):
         path.unlink()
     prompt = hook("UserPromptSubmit", "s0", folders[0], prompt="go on")
     built = len(list(delivery.glob("*.index"))) == 1
-    return statistics.median(tool), statistics.median(added), built, prompt
+    return (statistics.median(tool), statistics.median(added), built, prompt,
+            statistics.median(starts["built"]), statistics.median(starts["found"]))
 
 
 def cost(found, seed, size, keep):
@@ -510,7 +517,12 @@ def cost(found, seed, size, keep):
         build_median = statistics.median(build_ms)
         print(f"  build       median {build_median:6.1f} ms, largest {build_ms[-1]:6.1f} ms "
               f"({BUILDS - 1} builds, limit {BUILD_LIMIT_MS} ms)")
-        tool, added, built_at_prompt, prompt = upkeep(found["user-memory"], folder, drawn)
+        tool, added, built_at_prompt, prompt, start_built, start_found = upkeep(
+            found["user-memory"], folder, drawn)
+        # Reported, not checked: #170's 100 ms for session start rests on a
+        # free core for the build beside its own index.
+        print(f"  session start median {start_built:6.1f} ms building its base, "
+              f"{start_found:6.1f} ms finding it ({len(SESSION_SCOPES)} scopes)")
         print(f"  tool hook   median {tool:6.1f} ms after a change, process start included "
               f"({HOOK_RUNS - 1} runs, limit {rust_ms('src/session/tools.rs', 'TOOL_HOOK_LIMIT')} ms)")
         print(f"  forget      median {added:6.1f} ms added by three scopes' files "

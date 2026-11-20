@@ -672,8 +672,10 @@ throwaway home, it also times the delivery index's upkeep: a tool hook
 that finds a change, process start included (budget: `TOOL_HOOK_LIMIT`);
 what a forget adds when three scopes' files hold the memory (budget:
 400 ms); and whether the prompt hook builds a missing base within
-`PROMPT_LIMIT`. `--check-cost` fails when any is past its budget. CI runs
-it on macOS, Linux and Windows.
+`PROMPT_LIMIT`. `--check-cost` fails when any is past its budget. It also
+reports session start with and without a build of its base, unchecked: the
+100 ms session start keeps at 10,000 memories rests on a free core for the
+build beside its own index. CI runs it on macOS, Linux and Windows.
 
 The bars and window are set on the tuning seeds (`--sweep`) and reported on
 others, so the report isn't graded on what set them. The report uses the
