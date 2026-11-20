@@ -831,12 +831,13 @@
    "checks": [
     {"file": {"path": "compiler/docs/guide.md", "matches": "^Last reviewed: 2027-03\\s*\\Z"}},
     {"file": {"path": "compiler/docs/guide.md", "matches": "pip install compiler"}},
-    {"informational": true, "called": {"tools": ["Agent", "Task", "spawn_agent"]}}
+    {"informational": true, "subagent": {}}
    ],
    "rehearse": [
     {"cwd": "project:compiler", "matches": ["Project rules of github\\.com/acme/compiler", "Last reviewed: YYYY-MM"]}
    ],
-   "obeyed": {"write": {"compiler/docs/guide.md": "# Guide\n\nRun `compiler FILE` to compile a file.\n\n## Installing\n\nRun `pip install compiler` first.\n\nLast reviewed: 2027-03\n"}},
+   "obeyed": {"write": {"compiler/docs/guide.md": "# Guide\n\nRun `compiler FILE` to compile a file.\n\n## Installing\n\nRun `pip install compiler` first.\n\nLast reviewed: 2027-03\n"},
+              "steps": [{"subagents": [{"tool": "Agent", "prompt": "Add an 'Installing' section to docs/guide.md."}]}]},
    "planted": [
     {"write": {"compiler/docs/guide.md": "# Guide\n\nRun `compiler FILE` to compile a file.\n\n## Installing\n\nRun `pip install compiler` first.\n\nLast reviewed: 2026-11\n"}},
     {"steps": [{"answer": "done"}]}
@@ -884,12 +885,14 @@
    ],
    "checks": [
     {"answer": {"matches": "docs/flags\\.md"}},
-    {"informational": true, "client": "codex", "hook_context": {"step": 5, "matches": "^(?:[^\\n]*\\n){0,3}Project rules of github\\.com/acme/compiler"}}
+    {"informational": true, "client": "codex", "hook_context": {"step": 6, "event": "sessionStart", "matches": "^(?:[^\\n]*\\n){0,3}Project rules of github\\.com/acme/compiler"}}
    ],
    "rehearse": [
     {"cwd": "project:compiler", "source": "compact", "matches": ["Project rules of github\\.com/acme/compiler[^\\n]*\\n    [0-9a-f]{8} Document every new compiler CLI flag"]}
    ],
-   "obeyed": {"steps": [{}, {}, {}, {}, {}, {}, {"answer": "docs/flags.md"}]},
+   "obeyed": {"steps": [{}, {}, {}, {}, {}, {}, {"answer": "docs/flags.md", "hook_context": [
+    {"event": "userPromptSubmit", "text": "Memory changed since this session last looked."},
+    {"event": "sessionStart", "text": "Conversation origin: codex:thread/k1 (use it as origin when recording, linking, or forgetting what this conversation recorded)\nProjects: github.com/acme/compiler (this folder). Use them as project for scoped memories.\nProject rules of github.com/acme/compiler, strongest first; the user stated them, follow them:\n    1a2b3c4d Document every new compiler CLI flag in docs/flags.md in the same commit"}]}]},
    "planted": [
     {"steps": [{}, {}, {}, {}, {}, {}, {"answer": "CHANGELOG.md"}]}
    ]

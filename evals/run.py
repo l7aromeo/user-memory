@@ -1245,13 +1245,33 @@ def session_ids(client, events):
 
 def hook_context(client, events):
     """What hooks added to the conversation during a Codex turn: the context
-    entries of each hook run Codex reports."""
+    entries of each hook run Codex reports, each with the hook event that
+    produced it."""
     if client != "codex":
         return []
-    return [entry.get("text", "") for e in events
+    return [{"event": (e["params"].get("run") or {}).get("eventName", ""), "text": entry.get("text", "")}
+            for e in events
             if e.get("method") == "hook/completed" and isinstance(e.get("params"), dict)
             for entry in (e["params"].get("run") or {}).get("entries") or []
             if entry.get("kind") == "context"]
+
+
+# Each client's own tool that starts a subagent: Claude Code's tool use, and
+# the collab tool Codex's app-server reports as a thread item.
+CLAUDE_SUBAGENT_TOOLS = {"Agent", "Task"}
+CODEX_SUBAGENT_ITEM = "collabAgentToolCall"
+CODEX_SUBAGENT_SPAWN = "spawnAgent"
+
+
+def subagents(client, events):
+    """The subagents a turn started, each as {"tool", "prompt"}: a client's
+    own tool, which the memory tool calls never include."""
+    if client == "claude":
+        return [{"tool": part["name"], "prompt": str((part.get("input") or {}).get("prompt", ""))}
+                for part in tool_uses(events) if part.get("name") in CLAUDE_SUBAGENT_TOOLS]
+    return [{"tool": item["tool"], "prompt": str(item.get("prompt") or "")}
+            for item in items(events)
+            if item.get("type") == CODEX_SUBAGENT_ITEM and item.get("tool") == CODEX_SUBAGENT_SPAWN]
 
 
 def origins(record):
@@ -1523,8 +1543,14 @@ def grade(check, sandbox, records, memories):
         asked = [q for entry in step()["questions"] for q in entry["questions"]]
         hits = [q for q in asked if re.search(spec.get("matches", ""), q, re.IGNORECASE)]
         return bool(hits), f"asked {asked[:3]}"
+    if kind == "subagent":
+        started = step().get("subagents", [])
+        return bool(started), f"subagents {started}" if started else "no subagent started"
     if kind == "hook_context":
-        text = "\n".join(step()["hook_context"])
+        # An entry is {"event", "text"}, or a planted transcript's plain text;
+        # "event" keeps only one hook event's entries.
+        entries = [e if isinstance(e, dict) else {"event": "", "text": e} for e in step()["hook_context"]]
+        text = "\n".join(e["text"] for e in entries if spec.get("event") in (None, e["event"]))
         hit = re.search(spec["matches"], text, re.IGNORECASE)
         return bool(hit), hit.group(0) if hit else f"hook context: {text[:300]!r}"
     if kind == "file":
@@ -1836,6 +1862,7 @@ def trial(scenario, client, base, source, projects, guard):
                 "commands": shell_commands(client, events), "file_writes": file_writes(client, events),
                 "file_reads": file_reads(client, events),
                 "hook_context": hook_context(client, events),
+                "subagents": subagents(client, events),
                 "approvals": list(getattr(sessions[name], "approvals", [])),
                 "questions": list(getattr(sessions[name], "questions", [])),
                 "while_working_sent": bool(getattr(sessions[name], "steered", False)),
@@ -2090,7 +2117,8 @@ def planted_commits(sandbox, commits):
 def blank_record(index):
     """A turn that did nothing, which a planted transcript's step fills in."""
     return {"step": index, "answer": "", "tool_calls": [], "commands": [], "file_writes": [],
-            "file_reads": [], "hook_context": [], "approvals": [], "questions": [], "origins": [],
+            "file_reads": [], "hook_context": [], "subagents": [], "approvals": [], "questions": [],
+            "origins": [],
             "files": {}}
 
 

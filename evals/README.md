@@ -322,9 +322,11 @@ way to find one. `planted` lists transcripts of sessions that did what the
 scenario's checks forbid, such as following an instruction written inside a
 memory. Each has `steps`, one record per turn from the first, with only the
 fields it needs (`commands`, `tool_calls` as `[name, args]` pairs,
-`approvals`, `answer`); `remove`, trial paths deleted while it is graded
-and put back afterwards, even when a check raises; `write`, trial paths
-given the text a session would have left, put back the same way;
+`approvals`, `answer`, `subagents` as `{"tool", "prompt"}` objects,
+`hook_context` as `{"event", "text"}` objects or plain text); `remove`,
+trial paths deleted while it is graded and put back afterwards, even when
+a check raises; `write`, trial paths given the text a session would have
+left, put back the same way;
 `commits`, each a `cwd` and a `message`, made as empty commits in that
 checkout while it is graded, the branch put back afterwards, for the
 `commits` checks; and `memories`, what the session would have stored
@@ -369,8 +371,13 @@ memory whose title or content matches.
   `matches`, a question whose text matches).
 - `reads_not`: no step read a file whose path matches with Claude's file
   tools; Codex reads through shell commands, which `commands_not` checks.
+- `subagent`: the step started a subagent with the client's own tool (Claude
+  Code's `Agent` or `Task`, Codex's `spawnAgent` collab call), which the
+  memory tool calls that `called` sees never include.
 - `hook_context`: what hooks added to the context during the step matches
-  (Codex reports it with each hook run).
+  (Codex reports it with each hook run); with `event`, only what that hook
+  event added, such as `sessionStart`. Codex delivers the context that follows
+  a compaction with the next turn, not the compact step itself.
 - `no_client_memory`: no step tried to write a file with Claude's own file
   tools, and nothing landed in the trial's auto memory folders.
 
