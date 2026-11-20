@@ -24,6 +24,12 @@
 //!   joined to one, such as `/.git` in `…/.git`, is checked only when a
 //!   string in the code holds it: the rest of a path the code builds is in
 //!   none.
+//! - A quote may stop partway through a message, but inside a value the
+//!   code fills in (a count, a path, an error) only after one word of it:
+//!   ``deleted 3`` of `deleted {} that held removed words.`, never
+//!   ``deleted 1 memory.``. To leave out more, end with `…`.
+//! - A quote may stop just before a value, at its `(`:
+//!   ``can't be read (…)`` quotes `can't be read ({err})`.
 //! - A line of an output block that shows a memory (an 8-character id) or a
 //!   group heading (`  workflow (3)`) is data, not a message.
 //! - Anything else in backticks or a fenced block is code: its
@@ -1270,8 +1276,10 @@ fn balanced(text: &[char]) -> bool {
 ///
 /// A hole stands for one word (a name, a path, a number), or for text the
 /// patterns print in full, one after the other, such as a list joined with
-/// `, `: any space in a hole comes from the code. Unless the quote stops
-/// inside it, what a hole holds closes every bracket it opens. A value that
+/// `, `: any space in a hole comes from the code. A hole the quote stops
+/// inside holds one word, the value it cut off; otherwise any words other
+/// messages print would pass for the rest. Unless the quote stops inside
+/// it, what a hole holds closes every bracket it opens. A value that
 /// is itself an unpaired bracket, such as `:(` or a regular expression in
 /// an example, is refused there; no doc quotes one today.
 ///
@@ -1498,6 +1506,12 @@ impl<'a> Matcher<'a> {
                     }
                     Piece::Hole => {
                         let len = self.fragment.len();
+                        // The quote stops just before this hole, as one of
+                        // `could not be written ({err})` stops at its `(`:
+                        // a whole quote may stop there, as before text.
+                        if p == len && p > at && need_word && worded && own {
+                            cut = true;
+                        }
                         // A hole stands for one word, up to the next space,
                         // or for text the code prints (see `reach`), and
                         // never for the whole quote.
@@ -1531,6 +1545,12 @@ impl<'a> Matcher<'a> {
                             let printed = if end <= word_end {
                                 false
                             } else if p == 0 && end == len {
+                                continue;
+                            } else if end == len && index + 1 < pieces.len() {
+                                // The quote stops inside this hole, before
+                                // the rest of its pattern: the hole holds
+                                // the one word cut off there, never a
+                                // sentence any other text could print.
                                 continue;
                             } else {
                                 let reached = reached.get_or_insert_with(|| {
@@ -2950,4 +2970,68 @@ fn only_the_newest_release_note_must_match_the_code() {
         .map(|(name, _)| name.clone())
         .collect();
     assert_eq!(failing, ["docs/page.md", "release-notes/v0.10.0.md"]);
+}
+
+/// Main's patterns and a delivery index's doctor lines: a prefix with a
+/// hole for its failure, and a fixed line whose count is built apart.
+fn with_delivery_lines(prefix_line: bool, fixed_line: bool) -> Corpus {
+    let mut added = vec!["1 file", "{} files"];
+    if prefix_line {
+        added.push("Delivery index: {}");
+    }
+    if fixed_line {
+        added.push("Delivery index: deleted {} that held removed words.");
+    }
+    Corpus::new(
+        source_patterns()
+            .into_iter()
+            .chain(added.into_iter().map(holes))
+            .collect(),
+    )
+}
+
+#[test]
+fn a_quote_that_stops_inside_a_hole_cuts_off_one_word_only() {
+    let corpus = with_delivery_lines(false, true);
+    let covered = |quote: &str| Matcher::new(&corpus, quote).covers();
+    assert!(covered(
+        "Delivery index: deleted 1 file that held removed words."
+    ));
+    assert!(covered(
+        "Delivery index: deleted 3 files that held removed words."
+    ));
+    assert!(covered("Delivery index: deleted 3"), "one word cut off");
+    // Each stops inside the count's hole, which would hold a sentence.
+    for changed in [
+        "Delivery index: deleted 1 file.",
+        "Delivery index: deleted 3 files.",
+        "Delivery index: deleted 1 memory.",
+    ] {
+        assert!(!covered(changed), "{changed}");
+    }
+}
+
+#[test]
+fn a_failure_line_after_a_prefix_still_quotes_its_error_cut_short() {
+    // `Delivery index: {err}` beside the fixed line: a quote cut short
+    // inside an error that another message prints still passes.
+    let corpus = with_delivery_lines(true, true);
+    let covered = |quote: &str| Matcher::new(&corpus, quote).covers();
+    assert!(covered("Probe and stored vectors: docker compose -f"));
+    assert!(covered(
+        "revoked this machine's token. Ask its operator for a new token file, then run the installer with --url"
+    ));
+    assert!(!covered("Delivery index: deleted 1 memory."));
+}
+
+#[test]
+fn a_quote_may_stop_where_its_error_follows_a_bracket() {
+    // `user-memory: the session handed over in {} can't be read ({err}); …`
+    // quoted up to its `(`, with a path in its first hole: no string holds
+    // the quote whole, so the matcher must stop where the error starts.
+    let quote = "user-memory: the session handed over in /tmp/s1 can't be read (";
+    let patterns = source_patterns();
+    assert!(Matcher::new(&Corpus::new(patterns.clone()), quote).covers());
+    let changed = Corpus::new(replaced(&patterns, "can't be read (", "can't be read ["));
+    assert!(!Matcher::new(&changed, quote).covers());
 }
