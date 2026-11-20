@@ -13,6 +13,7 @@ mod time;
 
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeMap,
     fs,
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
@@ -41,12 +42,13 @@ const DESCRIPTIONS_LIMIT: usize = 3400;
 /// never drops a rule it carries (the user's yes, what forget deletes,
 /// import's apply), even when the server instructions say it too.
 ///
-/// The reply measured 27,093 bytes at this limit's start. The room above
-/// it is one more field, counted as `"name":{schema}` and its comma: the
-/// larger of the largest field (record's user_confirmed, 505 bytes) and a
-/// filter added to the five tools that share them (5 × 137, the median of
-/// their filter fields). Raise it only with a new measurement.
-const TOOLS_LIST_LIMIT: usize = 27_778;
+/// The reply measured 28,140 bytes with every tool's four hints, 27,093
+/// before them. The room above it is one more field, counted as
+/// `"name":{schema}` and its comma: the larger of the largest field
+/// (record's user_confirmed, 505 bytes) and a filter added to the five tools
+/// that share them (5 × 137, the median of their filter fields). Raise it
+/// only with a new measurement.
+const TOOLS_LIST_LIMIT: usize = 28_825;
 
 /// A `user-memory serve` in `folder`, over the store in `home`.
 /// An empty git config file in `dir`, for GIT_CONFIG_GLOBAL: the user's own
@@ -982,12 +984,18 @@ fn link_without_an_origin_says_where_to_find_it() {
 
 // ─── The tool definitions ───────────────────────────────────────────────────
 
-/// The `tools/list` reply of a fresh `user-memory serve`: its line as a
-/// client receives it, and its tools.
+/// The `tools/list` reply of a fresh `user-memory serve` without an
+/// embedding setting: its line as a client receives it, and its tools.
 fn tools_list() -> (String, Vec<Value>) {
+    tools_list_with(&[])
+}
+
+/// [`tools_list`] with `env` added, such as an embedding setting.
+fn tools_list_with(env: &[(&str, &str)]) -> (String, Vec<Value>) {
     let tmp = tempdir().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_user-memory"))
         .arg("serve")
+        .envs(env.iter().copied())
         .sandboxed(tmp.path())
         .env("USER_MEMORY_DB", tmp.path().join("memory.sqlite3"))
         .env_remove("USER_MEMORY_URL")
@@ -1038,13 +1046,15 @@ fn without_descriptions(value: &Value) -> Value {
     }
 }
 
-/// The tools' published shape: each tool's name and input schema without its
-/// descriptions, so a reworded doc keeps it and a renamed field, a changed
-/// type or default, or an added value changes it.
+/// The tools' published shape: each tool's name, input schema without its
+/// descriptions, and hints, so a reworded doc keeps it and a renamed field,
+/// a changed type or default, an added value or a changed hint changes it.
+/// It is the shape without an embedding setting: `openWorldHint` follows
+/// the setting.
 fn tools_shape(tools: &[Value]) -> String {
     let shape: Vec<Value> = tools
         .iter()
-        .map(|tool| json!({"name": tool["name"], "inputSchema": without_descriptions(&tool["inputSchema"])}))
+        .map(|tool| json!({"name": tool["name"], "inputSchema": without_descriptions(&tool["inputSchema"]), "annotations": tool["annotations"]}))
         .collect();
     serde_json::to_string_pretty(&shape).unwrap() + "\n"
 }
@@ -1090,6 +1100,63 @@ fn only_description_strings_leave_the_shape() {
             },
         })
     );
+}
+
+/// Each tool's four hints by name, as `tools/list` gives them, failing on
+/// a tool that leaves one out or gives one that isn't a boolean.
+fn hints(tools: &[Value]) -> BTreeMap<String, [bool; 4]> {
+    tools
+        .iter()
+        .map(|tool| {
+            let hint = |name: &str| {
+                tool["annotations"][name]
+                    .as_bool()
+                    .unwrap_or_else(|| panic!("{} has no boolean {name}", tool["name"]))
+            };
+            (
+                tool["name"].as_str().unwrap().to_owned(),
+                [
+                    hint("readOnlyHint"),
+                    hint("destructiveHint"),
+                    hint("idempotentHint"),
+                    hint("openWorldHint"),
+                ],
+            )
+        })
+        .collect()
+}
+
+/// Every tool declares all four hints. `openWorldHint` is true only on the
+/// tools that send memory text to an embeddings endpoint that isn't on this
+/// machine; the other hints never depend on the setting.
+#[test]
+fn every_tool_declares_its_hints_and_open_world_follows_the_endpoint() {
+    let (_, tools) = tools_list();
+    let off = hints(&tools);
+    assert!(off.values().all(|hints| !hints[3]), "{off:?}");
+    for here in [
+        "http://127.0.0.1:11434/v1/embeddings",
+        "http://localhost:11434/v1/embeddings",
+        "http://[::1]:11434/v1/embeddings",
+    ] {
+        let (_, tools) = tools_list_with(&[("USER_MEMORY_EMBED_URL", here)]);
+        assert_eq!(hints(&tools), off, "{here}");
+    }
+    let (_, tools) = tools_list_with(&[(
+        "USER_MEMORY_EMBED_URL",
+        "https://embed.example.com/v1/embeddings",
+    )]);
+    let elsewhere = hints(&tools);
+    let open: Vec<&str> = elsewhere
+        .iter()
+        .filter(|(_, hints)| hints[3])
+        .map(|(name, _)| name.as_str())
+        .collect();
+    assert_eq!(open, ["index", "record", "search"]);
+    assert_eq!(elsewhere.len(), off.len());
+    for (name, hints) in &elsewhere {
+        assert_eq!(hints[..3], off[name][..3], "{name}");
+    }
 }
 
 #[test]

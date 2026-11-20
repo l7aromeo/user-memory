@@ -3,7 +3,7 @@
 //! after the environment. The installer's Docker server reads them from an
 //! `embedding.env` beside its compose.yaml instead.
 
-use crate::{paths, server::Compose};
+use crate::{memory::DOCKER_HOST, paths, server::Compose};
 use anyhow::{Context, Result, bail};
 use std::{
     collections::BTreeMap,
@@ -105,8 +105,6 @@ pub enum Home {
 pub(super) const DOCKER_ENV: &str = "embedding.env";
 /// Where that server reads an API key copied into its volume.
 const DOCKER_KEY: &str = "/data/embedding-key";
-/// This machine as the container reaches it (compose's host-gateway entry).
-const DOCKER_HOST: &str = "host.docker.internal";
 
 /// The folder of the Docker server the installer set up, when `url` is
 /// that server: its compose.yaml publishes the URL's port on 127.0.0.1.
