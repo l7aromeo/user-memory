@@ -363,3 +363,36 @@ on Windows), each private to you:
 All are only working state. Deleting the folder loses no memory; the next
 session start takes a new snapshot, and the next write waits for the file
 to go quiet. Uninstall removes the folder.
+
+### A delivery file another program holds
+
+On Windows, a virus scanner or a backup tool can hold a delivery file open
+so that it can be neither replaced nor deleted. When that happens to a
+file holding words a forget, an update or an import removed, the void mark
+written before the change names it, so recall skips it, and the reply lists
+it in `delivery_left` with this line in `next`:
+
+```output
+The files in delivery_left still hold the removed words because another program has them open. Readers skip them; user-memory deletes them at its next write, and `user-memory doctor` deletes them at once.
+```
+
+`user-memory doctor` deletes such files, and any a writer killed while
+writing left, and says how many:
+
+```output
+Delivery index: deleted 1 file that held removed words.
+Delivery index: deleted <n> files that held removed words.
+```
+
+A file still held is an action, one line per file:
+
+```output
+Action needed: Delivery index: <path> still holds removed words because another program has it open; close that program, then run `user-memory doctor` again
+```
+
+If another user-memory process keeps the delivery index's lock for 10 s,
+doctor fails with a line such as:
+
+```output
+Delivery index: user-memory process <pid> has held this machine's delivery index for 10 s
+```

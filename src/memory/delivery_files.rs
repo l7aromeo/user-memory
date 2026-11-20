@@ -679,16 +679,15 @@ mod tests {
             reply,
             serde_json::json!({"deleted": true, "next": "Undo with import."})
         );
-        let left = |marked| Left {
+        let left = Left {
             paths: vec![PathBuf::from("a.index")],
-            marked,
         };
-        left(true).note(&mut reply);
+        left.note(&mut reply);
         assert_eq!(reply["delivery_left"], serde_json::json!(["a.index"]));
-        assert_eq!(reply["next"], format!("Undo with import.\n{LEFT_MARKED}"));
+        assert_eq!(reply["next"], format!("Undo with import.\n{LEFT}"));
         let mut reply = serde_json::json!({"updated": true});
-        left(false).note(&mut reply);
-        assert_eq!(reply["next"], LEFT_UNMARKED);
+        left.note(&mut reply);
+        assert_eq!(reply["next"], LEFT);
     }
 
     #[test]
@@ -895,15 +894,24 @@ impl Removing {
             Self::Update => ("updated", "update"),
             Self::Import => ("imported", "import"),
         };
-        let who = holder.map_or_else(
-            || "another user-memory process".to_owned(),
-            |pid| format!("user-memory process {pid}"),
-        );
         format!(
-            "Nothing was {done}: {who} has held this machine's delivery index for {} s. Wait a moment and {verb} again; if it still holds it, stop that process first.",
-            wait.as_secs()
+            "Nothing was {done}: {}. Wait a moment and {verb} again; if it still holds it, stop that process first.",
+            held_by(holder, wait)
         )
     }
+}
+
+/// Who kept a store's delivery lock for all of `wait`: `holder`, the
+/// process id the lock file names, or another process when it names none.
+fn held_by(holder: Option<u32>, wait: Duration) -> String {
+    let who = holder.map_or_else(
+        || "another user-memory process".to_owned(),
+        |pid| format!("user-memory process {pid}"),
+    );
+    format!(
+        "{who} has held this machine's delivery index for {} s",
+        wait.as_secs()
+    )
 }
 
 /// A removing write's hold on its store's delivery files, from before its
@@ -1044,11 +1052,11 @@ impl Removal {
         }
         let mut names = self.kept.clone();
         names.extend(left.iter().map(|path| name_of(path)));
-        let marked = self.files.void(&self.lock, &names).is_ok();
-        Left {
-            paths: left,
-            marked,
-        }
+        // Every file left is named in the mark written before the commit,
+        // so a failure here leaves files voided that were built again,
+        // until the next writer: recall waits, no word stays in use.
+        let _ = self.files.void(&self.lock, &names);
+        Left { paths: left }
     }
 
     /// When the write failed after its files were voided: the void mark
@@ -1061,21 +1069,14 @@ impl Removal {
 
 /// The delivery files a removing write could neither build again nor
 /// delete, as another program had them open: they still hold the removed
-/// text.
+/// text. The void mark, written before the commit, names each of them.
 #[derive(Debug, Default)]
 pub(crate) struct Left {
     pub(crate) paths: Vec<PathBuf>,
-    /// Whether the void mark names them, so readers skip them.
-    pub(crate) marked: bool,
 }
 
-/// The reply's `next` line when files still hold removed text and the void
-/// mark names them.
-const LEFT_MARKED: &str = "The files in delivery_left still hold the removed words because another program has them open. Readers skip them; user-memory deletes them at its next write, and `user-memory doctor` deletes them at once.";
-
-/// The reply's `next` line when files still hold removed text and even the
-/// void mark could not be written.
-const LEFT_UNMARKED: &str = "The files in delivery_left still hold the removed words because another program has them open, and the mark that makes readers skip them could not be written. Close that program, then run `user-memory doctor` to delete them.";
+/// The reply's `next` line when files still hold removed text.
+const LEFT: &str = "The files in delivery_left still hold the removed words because another program has them open. Readers skip them; user-memory deletes them at its next write, and `user-memory doctor` deletes them at once.";
 
 impl Left {
     /// Adds to a removing command's `reply`, when files are left, their
@@ -1086,14 +1087,9 @@ impl Left {
             return;
         }
         reply["delivery_left"] = serde_json::json!(self.paths);
-        let line = if self.marked {
-            LEFT_MARKED
-        } else {
-            LEFT_UNMARKED
-        };
         let next = match reply["next"].as_str() {
-            Some(next) if !next.is_empty() => format!("{next}\n{line}"),
-            _ => line.to_owned(),
+            Some(next) if !next.is_empty() => format!("{next}\n{LEFT}"),
+            _ => LEFT.to_owned(),
         };
         reply["next"] = serde_json::json!(next);
     }
@@ -1111,17 +1107,21 @@ pub(crate) struct Cleaned {
 /// Doctor's part (#175), for the local store at `db`: under the store's
 /// lock, waited for up to [`DELIVERY_LOCK_WAIT`], deletes what
 /// [`Files::tidy`] deletes: the files the void mark names, which may hold
-/// removed text, and those a killed writer left half written. None when
-/// the lock could not be had.
-pub(crate) fn clean(db: &Path) -> Option<Cleaned> {
-    let files = Files::of(&paths::store_identity(None, db))?;
-    if !files.dir.exists() {
-        return Some(Cleaned::default());
+/// removed text, and those a killed writer left half written. Fails when
+/// the folder cannot be read or another process keeps the lock.
+pub(crate) fn clean(db: &Path) -> io::Result<Cleaned> {
+    let Some(files) = Files::of(&paths::store_identity(None, db)) else {
+        return Ok(Cleaned::default());
+    };
+    match fs::read_dir(&files.dir) {
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Cleaned::default()),
+        Err(err) => return Err(err),
+        Ok(_) => {}
     }
-    let lock = files
-        .lock_until(Instant::now() + delivery_lock_wait())
-        .ok()
-        .flatten()?;
+    let wait = delivery_lock_wait();
+    let Some(lock) = files.lock_until(Instant::now() + wait)? else {
+        return Err(io::Error::other(held_by(files.holder(), wait)));
+    };
     let partial = format!(".{PARTIAL}");
     let before: Vec<PathBuf> = files
         .voided()
@@ -1143,7 +1143,7 @@ pub(crate) fn clean(db: &Path) -> Option<Cleaned> {
         .map(|name| files.dir.join(name))
         .filter(|path| path.exists())
         .collect();
-    Some(Cleaned {
+    Ok(Cleaned {
         deleted: before.iter().filter(|path| !path.exists()).count(),
         held,
     })
