@@ -2044,7 +2044,7 @@ dependencies = [
  "serde",
  "serde_json",
  "subtle",
- "syn 2.0.119",
+ "syn 3.0.10",
  "tempfile",
  "tokio",
  "uuid",
