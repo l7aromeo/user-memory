@@ -173,6 +173,12 @@ other than the host connect only through the proxy.
    responses short. Point the host name straight at the proxy (on
    Cloudflare: a DNS-only record).
 
+   `/delivery` sends each client the delivery index of its sessions'
+   projects, 2.7 MB at 10,000 memories, when it has none. The server keeps
+   the last one it built for each of up to 32 sets of projects in memory,
+   about 90 MB at most at 10,000 memories, so many clients starting at once
+   cost one build.
+
 3. Check it from another machine. The first command prints one line; the
    second prints `401`, because it sends no token:
 
