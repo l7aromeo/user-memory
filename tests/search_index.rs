@@ -483,7 +483,11 @@ fn compare(store: &Store, embedder: &Embedder, stamp: &str, rng: &mut Rng, phase
         .join(format!("oracle-{}.sqlite3", rng.next()));
     store
         .sql()
-        .backup(rusqlite::MAIN_DB, &oracle, None)
+        .backup(
+            rusqlite::MAIN_DB,
+            &oracle,
+            None::<fn(rusqlite::backup::Progress)>,
+        )
         .unwrap();
     rusqlite::Connection::open(&oracle)
         .unwrap()
@@ -500,7 +504,11 @@ fn compare(store: &Store, embedder: &Embedder, stamp: &str, rng: &mut Rng, phase
     let _ = fs::remove_file(&rebuilt);
     store
         .sql()
-        .backup(rusqlite::MAIN_DB, &rebuilt, None)
+        .backup(
+            rusqlite::MAIN_DB,
+            &rebuilt,
+            None::<fn(rusqlite::backup::Progress)>,
+        )
         .unwrap();
     let out = store.command(&rebuilt).arg("reindex").output().unwrap();
     assert!(

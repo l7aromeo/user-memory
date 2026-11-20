@@ -216,7 +216,7 @@ fn is_date(text: &str) -> bool {
 /// The time a [`STAMP`] names, read back by SQLite, which wrote it; none
 /// for a stamp that names no real time.
 fn stamp_time(stamp: &str) -> Option<SystemTime> {
-    let seconds: u64 = Connection::open_in_memory()
+    let seconds: i64 = Connection::open_in_memory()
         .ok()?
         .query_row(
             "SELECT unixepoch(substr(?1,1,4)||'-'||substr(?1,5,2)||'-'||substr(?1,7,2)||' '||substr(?1,10,2)||':'||substr(?1,12,2)||':'||substr(?1,14,2))",
@@ -224,7 +224,7 @@ fn stamp_time(stamp: &str) -> Option<SystemTime> {
             |r| r.get(0),
         )
         .ok()?;
-    SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(seconds))
+    SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(u64::try_from(seconds).ok()?))
 }
 
 fn is_stamp(text: &str) -> bool {
@@ -891,10 +891,12 @@ pub fn describe(db: &Path) -> Result<String> {
 fn listed(name: &str, path: &Path, modified: SystemTime, bytes: u64) -> Result<String> {
     let when: String = Connection::open_in_memory()?.query_row(
         "SELECT strftime('%Y-%m-%dT%H:%MZ',?1,'unixepoch')",
-        [modified
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()],
+        [i64::try_from(
+            modified
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        )?],
         |r| r.get(0),
     )?;
     let memories = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)

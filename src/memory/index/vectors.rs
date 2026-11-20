@@ -178,7 +178,7 @@ pub(in crate::memory) fn stored(conn: &Connection, identity: (&str, i64)) -> Res
     let mut stored = Stored::default();
     while let Some(r) = rows.next()? {
         stored.count += 1;
-        stored.bytes += r.get::<_, u64>(8)?;
+        stored.bytes += u64::try_from(r.get::<_, i64>(8)?)?;
         if current(r)? {
             stored.current += 1;
         }
