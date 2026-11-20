@@ -65,3 +65,8 @@ jobs:
       # (justfile `check-release`).
       - run: just check-release
       - run: python3 -I evals/test_run.py
+      # The delivery index's costs at 10,000 memories, on this runner: a
+      # lookup and a build (#125), a tool hook, a forget and the prompt
+      # hook's build (#175), each against its budget (justfile
+      # `delivery-bench`, evals/delivery/run.py).
+      - run: just delivery-bench --check-cost
