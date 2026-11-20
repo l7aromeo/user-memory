@@ -255,6 +255,11 @@ pub(super) fn missed_path(snapshot: &Path) -> PathBuf {
 /// read to find the scope's delivery index without reading the snapshot.
 const SCOPE: &str = "scope";
 
+/// The extension of the file beside a session's snapshot that holds its
+/// recall state (`super::recall`), a SQLite file with its own write-ahead
+/// log and shared-memory index beside it while open.
+pub(super) const RECALL: &str = "recall";
+
 /// The scope file of the session whose snapshot is at `snapshot`.
 pub(super) fn scope_path(snapshot: &Path) -> PathBuf {
     snapshot.with_extension(SCOPE)
@@ -319,7 +324,7 @@ pub(crate) const HOLD_ABANDON: &str = "USER_MEMORY_HOLD_ABANDON";
 #[cfg(debug_assertions)]
 pub(super) use crate::memory::hold_for_tests;
 
-/// Removes the snapshots, [`MISSED`] marks and [`SCOPE`] files in `dir` last written over
+/// Removes the snapshots, [`MISSED`] marks, [`SCOPE`] files and [`RECALL`] states in `dir` last written over
 /// [`SNAPSHOT_AGE`] before `now`, and the temporary files of saves cut off
 /// over [`LEFTOVER_AGE`] before it. The rules each store last showed are
 /// left to session start's own clean-up ([`super::seen::update`]), which
@@ -344,9 +349,17 @@ fn remove_old(dir: &Path, now: SystemTime) {
             false
         } else {
             age > SNAPSHOT_AGE
-                && path
-                    .extension()
-                    .is_some_and(|e| e == "json" || e == MISSED || e == SCOPE)
+                && path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+                    [
+                        "json",
+                        MISSED,
+                        SCOPE,
+                        RECALL,
+                        &format!("{RECALL}-wal"),
+                        &format!("{RECALL}-shm"),
+                    ]
+                    .contains(&e)
+                })
         };
         if old {
             let _ = fs::remove_file(path);
@@ -641,6 +654,9 @@ mod tests {
         let recent = sessions.join("codex-recent.json");
         let old_scope = sessions.join("codex-gone.scope");
         let recent_scope = sessions.join("codex-recent.scope");
+        let old_recall = ["recall", "recall-wal", "recall-shm"]
+            .map(|e| sessions.join(format!("codex-gone.{e}")));
+        let recent_recall = sessions.join("codex-recent.recall");
         let other = sessions.join("notes.txt");
         // Temporary files of saves cut off by their hook's limit.
         let leftover = sessions.join(format!(".codex-cut.json.1{TEMPORARY}"));
@@ -674,6 +690,10 @@ mod tests {
             (&recent, DAY * 29),
             (&old_scope, DAY * 31),
             (&recent_scope, DAY * 29),
+            (&old_recall[0], DAY * 31),
+            (&old_recall[1], DAY * 31),
+            (&old_recall[2], DAY * 31),
+            (&recent_recall, DAY * 29),
             (&other, DAY * 31),
             (&leftover, LEFTOVER_AGE * 2),
             (&in_flight, Duration::ZERO),
@@ -702,10 +722,21 @@ mod tests {
             !old_scope.exists(),
             "a scope file goes with its snapshot's age"
         );
+        for file in &old_recall {
+            assert!(
+                !file.exists(),
+                "{} goes with its snapshot's age",
+                file.display()
+            );
+        }
+        assert!(
+            recent_recall.exists(),
+            "a recall state under 30 days old is kept"
+        );
         assert!(recent_scope.exists());
         assert_eq!(
             fs::read_dir(&sessions).unwrap().count(),
-            6,
+            7,
             "no temporary file of this save left"
         );
     }

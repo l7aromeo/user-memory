@@ -25,7 +25,7 @@ mod ids;
 mod index;
 mod links;
 #[cfg(test)]
-mod matcher;
+pub(crate) mod matcher;
 pub(crate) mod migrate;
 mod overview;
 mod page;
