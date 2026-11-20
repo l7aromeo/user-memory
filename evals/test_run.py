@@ -1149,6 +1149,72 @@ class Planted(unittest.TestCase):
             run.planted_notes(scenario, "claude", self.sandbox)
 
 
+class ClientToolsAndHooks(unittest.TestCase):
+    """What a turn record says about a client's own tools and hooks, which
+    the memory tool calls never show."""
+
+    SCENARIOS = {s["name"]: s for s in json.loads((HERE / "scenarios.json").read_text())["scenarios"]}
+
+    def test_a_subagent_started_by_either_client_is_recorded(self):
+        claude = [{"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "Agent", "input": {"prompt": "edit the guide"}},
+            {"type": "tool_use", "name": "mcp__user-memory__read", "input": {"ids": ["1a2b3c4d"]}},
+            {"type": "tool_use", "name": "Edit", "input": {"file_path": "docs/guide.md"}}]}}]
+        self.assertEqual(run.subagents("claude", claude), [{"tool": "Agent", "prompt": "edit the guide"}])
+        self.assertEqual(run.tool_calls("claude", claude), [("read", {"ids": ["1a2b3c4d"]})],
+                         "a memory tool call is still the only tool call")
+        codex = [{"method": "item/completed", "params": {"item": item}} for item in [
+            {"type": "collabAgentToolCall", "tool": "spawnAgent", "prompt": "edit the guide",
+             "senderThreadId": "t0", "receiverThreadIds": ["t1"]},
+            {"type": "collabAgentToolCall", "tool": "wait", "prompt": None},
+            {"type": "commandExecution", "command": "cat docs/guide.md"}]]
+        self.assertEqual(run.subagents("codex", codex), [{"tool": "spawnAgent", "prompt": "edit the guide"}])
+        self.assertEqual(run.subagents("codex", codex[1:]), [])
+
+    def test_the_subagent_check_passes_only_when_one_was_started(self):
+        started = [{**run.blank_record(0), "subagents": [{"tool": "Agent", "prompt": "x"}]}]
+        self.assertEqual(run.grade({"subagent": {}}, None, started, [])[0], True)
+        self.assertEqual(run.grade({"subagent": {}}, None, [run.blank_record(0)], []),
+                         (False, "no subagent started"))
+
+    def test_hook_context_keeps_each_entry_s_event_and_a_check_can_pick_one(self):
+        events = [{"method": "hook/completed", "params": {"run": {"eventName": name, "entries": [
+            {"kind": "context", "text": text}, {"kind": "warning", "text": "ignored"}]}}}
+            for name, text in [("userPromptSubmit", "Memory changed.\nTwo lines."),
+                               ("sessionStart", "Origin\nProjects\nProject rules of github.com/acme/x")]]
+        context = run.hook_context("codex", events)
+        self.assertEqual([e["event"] for e in context], ["userPromptSubmit", "sessionStart"])
+        records = [{**run.blank_record(0), "hook_context": context}]
+        heading = "^(?:[^\\n]*\\n){0,3}Project rules of"
+        self.assertTrue(run.grade({"hook_context": {"event": "sessionStart", "matches": heading}},
+                                  None, records, [])[0])
+        self.assertFalse(run.grade({"hook_context": {"matches": heading}}, None, records, [])[0],
+                         "without the event, the prompt hook's lines push the heading down")
+        self.assertFalse(run.grade({"hook_context": {"event": "postCompact", "matches": "."}},
+                                   None, records, [])[0])
+        planted = [{**run.blank_record(0), "hook_context": ["Project rules of github.com/acme/x"]}]
+        self.assertTrue(run.grade({"hook_context": {"matches": heading}}, None, planted, [])[0],
+                        "a planted transcript's plain text still counts")
+
+    def informational_grades(self, name, client, sandbox):
+        scenario = self.SCENARIOS[name]
+        checks = [{k: v for k, v in c.items() if k not in ("client", "informational")}
+                  for c in scenario["checks"] if c.get("informational") and c.get("client", client) == client]
+        self.assertEqual(len(checks), 1)
+        return [run.planted_grades(scenario, transcript, checks, sandbox, [])[0][0]
+                for transcript in [scenario["obeyed"], *scenario["planted"]]]
+
+    def test_s1_and_k1_informational_checks_pass_when_obeyed_and_fail_when_planted(self):
+        trial = Path(tempfile.mkdtemp()).resolve()
+        (trial / "compiler/docs").mkdir(parents=True)
+        (trial / "compiler/docs/guide.md").write_text("# Guide\n")
+        sandbox = types.SimpleNamespace(dir=trial, ids={}, memories=lambda: [])
+        self.assertEqual(self.informational_grades("a_subagent_follows_a_project_docs_rule", "claude", sandbox),
+                         [True, False, False])
+        self.assertEqual(self.informational_grades(
+            "a_conditional_project_rule_survives_three_compactions", "codex", sandbox), [True, False])
+
+
 class Batch(unittest.TestCase):
     """What a batch runs, and in which order."""
 
