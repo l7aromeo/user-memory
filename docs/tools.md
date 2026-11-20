@@ -27,6 +27,42 @@ The tools agents call, their filters, search, the index and paging. The
 | `export` | On the user's request: write every memory, or those the [filters](memory-model.md#exporting-or-importing-part-of-the-store) select, to a JSON file in the exports directory; returns a summary only, whose `next` says in words, never as a path, whether the file is beside the store on this machine or on the memory server |
 | `import` | On the user's request: preview an export file from the exports directory, or the memories the filters select from it; writes only with `apply` and `user_confirmed` after the user approves; `apply` without `user_confirmed` previews, and its reply's `reason` says it was not applied; a preview that applying would carry out says in `next` to show it to the user and wait for their answer; an import's reply holds no memory text except the titles of the rules it adds or replaces, each one line, at most 20 per list (`rules`) |
 
+## Hints
+
+Every tool declares the four MCP tool hints, so an agent app can run the
+tools that only read without asking and ask before the ones that change or
+remove memories. Each hint is set by what the tool can do at worst:
+
+| Tool | `readOnlyHint` | `destructiveHint` | `idempotentHint` | `openWorldHint` |
+|---|---|---|---|---|
+| `index` | true | false | true | false |
+| `search` | true | false | true | false |
+| `read` | true | false | true | false |
+| `review` | false | false | true | false |
+| `link` | false | false | true | false |
+| `record` | false | false | false | false |
+| `update` | false | true | false | false |
+| `forget` | false | true | true | false |
+| `import` | false | true | false | false |
+| `export` | false | true | false | false |
+
+- `search` and `index` stay read-only although they may save a vector for a
+  memory that lacks one: it is made from the memory's own text, and nothing
+  the user sees changes.
+- `review` writes only with `keep`, and `link` only records the
+  conversation's projects; neither changes or removes a memory.
+- `record` may supersede a memory, but the old one is kept and marked.
+- `update` overwrites fields, `forget` deletes, `import` can replace
+  memories with the file's, and `export` with `overwrite` replaces an
+  export file.
+- `openWorldHint` follows the embedding setting. With an embeddings
+  endpoint that isn't on this machine (see
+  [What leaves your machine](privacy.md#what-leaves-your-machine)), it is
+  true on `index` and `search`, which send the topic and any memory that
+  lacks a vector, and on `record`, which sends the new memory for its
+  duplicate check. A memory server decides from its own setting. The table
+  shows the hints with semantic search off or on this machine.
+
 ## Replies and errors
 
 A call that fails, such as an unknown id or a store that cannot be opened,

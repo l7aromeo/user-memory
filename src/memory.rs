@@ -179,6 +179,20 @@ pub fn calibration(
     calibration::state(&connect(db)?, model, length)
 }
 
+pub(crate) use index::embed::DOCKER_HOST;
+
+/// The host of the embeddings endpoint `setting` names, when it is not on
+/// this machine: memory text and searches are sent there. `None` when
+/// semantic search is off, its endpoint is on this machine, or its address
+/// is not a URL, which semantic search refuses.
+pub fn embedding_elsewhere(setting: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+    let url = reqwest::Url::parse(setting("USER_MEMORY_EMBED_URL")?.trim()).ok()?;
+    if index::embed::on_this_machine(&url) {
+        return None;
+    }
+    url.host_str().map(str::to_owned)
+}
+
 /// Validates embedding settings and embeds one probe text.
 pub fn probe_embedding(
     setting: &dyn Fn(&str) -> Option<String>,

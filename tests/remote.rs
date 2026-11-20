@@ -4018,3 +4018,34 @@ fn a_server_without_positions_is_asked_only_for_its_version_until_it_changes() {
     host.restart_as(Some("0.10.0"));
     machine.marker();
 }
+
+/// A memory server sends every tool's hints over HTTP too, with
+/// `openWorldHint` from its own embedding setting.
+#[test]
+fn a_server_sends_its_tools_hints_over_http() {
+    let open_world = |env: &[(&str, &str)]| {
+        let host = Host::start_with(root(), None, env);
+        host.rpc(initialize(1));
+        let listed = host.rpc(json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}));
+        let mut open: Vec<String> = Vec::new();
+        for tool in listed["result"]["tools"].as_array().unwrap() {
+            let hints = &tool["annotations"];
+            for hint in ["readOnlyHint", "destructiveHint", "idempotentHint"] {
+                assert!(hints[hint].is_boolean(), "{} has no {hint}", tool["name"]);
+            }
+            if hints["openWorldHint"].as_bool().unwrap() {
+                open.push(tool["name"].as_str().unwrap().to_owned());
+            }
+        }
+        open.sort();
+        open
+    };
+    assert!(open_world(&[]).is_empty());
+    assert_eq!(
+        open_world(&[(
+            "USER_MEMORY_EMBED_URL",
+            "https://embed.example.com/v1/embeddings"
+        )]),
+        ["index", "record", "search"]
+    );
+}

@@ -87,7 +87,13 @@ fn read_api_key(path: &Path) -> Result<String> {
     Ok(key.to_owned())
 }
 
-fn loopback(url: &reqwest::Url) -> bool {
+/// This machine as the installer's Docker server reaches it: compose's
+/// host-gateway entry.
+pub(crate) const DOCKER_HOST: &str = "host.docker.internal";
+
+/// Whether `url` is a loopback address, the only kind plain http may reach
+/// without `USER_MEMORY_EMBED_ALLOW_HTTP`.
+pub(crate) fn loopback(url: &reqwest::Url) -> bool {
     url.host_str().is_some_and(|host| {
         host.eq_ignore_ascii_case("localhost")
             || host
@@ -96,6 +102,13 @@ fn loopback(url: &reqwest::Url) -> bool {
                 .parse::<std::net::IpAddr>()
                 .is_ok_and(|ip| ip.is_loopback())
     })
+}
+
+/// Whether an endpoint at `url` is on this machine, so text sent to it never
+/// leaves it: a loopback address, or the host gateway through which the
+/// installer's Docker server reaches this machine.
+pub(crate) fn on_this_machine(url: &reqwest::Url) -> bool {
+    loopback(url) || url.host_str() == Some(DOCKER_HOST)
 }
 
 impl Config {

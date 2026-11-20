@@ -41,7 +41,7 @@
 )]
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -3034,4 +3034,49 @@ fn a_quote_may_stop_where_its_error_follows_a_bracket() {
     assert!(Matcher::new(&Corpus::new(patterns.clone()), quote).covers());
     let changed = Corpus::new(replaced(&patterns, "can't be read (", "can't be read ["));
     assert!(!Matcher::new(&changed, quote).covers());
+}
+
+/// The four MCP tool hints, in the docs table's column order.
+const HINTS: [&str; 4] = [
+    "readOnlyHint",
+    "destructiveHint",
+    "idempotentHint",
+    "openWorldHint",
+];
+
+/// docs/tools.md's hints table gives every tool's hints as the committed
+/// tool shape holds them, which tests/mcp.rs checks against `tools/list`.
+#[test]
+fn the_docs_give_every_tools_hints() {
+    let shape: Vec<serde_json::Value> = serde_json::from_str(
+        &fs::read_to_string(repo_file("tests/fixtures/tools/shape.json")).unwrap(),
+    )
+    .unwrap();
+    let code: BTreeMap<String, Vec<String>> = shape
+        .iter()
+        .map(|tool| {
+            let hints = HINTS
+                .iter()
+                .map(|hint| tool["annotations"][hint].to_string())
+                .collect();
+            (tool["name"].as_str().unwrap().to_owned(), hints)
+        })
+        .collect();
+    let docs = fs::read_to_string(repo_file("docs/tools.md")).unwrap();
+    let section = docs
+        .split("\n## Hints\n")
+        .nth(1)
+        .expect("docs/tools.md has a Hints section");
+    let section = section.split("\n## ").next().unwrap_or(section);
+    let header = format!("| Tool | `{}` |", HINTS.join("` | `"));
+    assert!(section.contains(&header), "the hints table starts {header}");
+    let documented: BTreeMap<String, Vec<String>> = section
+        .lines()
+        .filter_map(|line| {
+            let mut cells = line.trim().trim_matches('|').split('|').map(str::trim);
+            let name = cells.next()?.strip_prefix('`')?.strip_suffix('`')?;
+            Some((name.to_owned(), cells.map(str::to_owned).collect()))
+        })
+        .collect();
+    assert_eq!(documented, code);
 }
