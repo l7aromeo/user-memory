@@ -208,7 +208,7 @@ entries name the binary in exec form, run without a shell (Claude Code
 
 In a git checkout the session-start hook prints:
 
-```
+```output
 Conversation origin: claude:session/<session_id> (use it as origin when recording, linking, or forgetting what this conversation recorded)
 Projects: github.com/owner/repo (this folder); linked: github.com/owner/tools. Use them as project for scoped memories.
 Project rules of github.com/owner/repo, strongest first; the user stated them, follow them:
@@ -218,7 +218,7 @@ Each line points to a memory. Before acting on one that applies, read it in full
 Search memory with what you are about to do: before a slow or costly step, before something that can't be undone, in an unfamiliar area, after an unexpected failure, and before deciding something that may already be decided.
 Working in another repository this session? Unless the Projects line already lists it, call link with projects: [<its git remote>] to keep its memories loaded (without session hooks, index with them).
 [project] applies to this project only; (learned in N sessions) is an agent's note and (tentative) an inference: neither is the user's word, so don't follow either as a rule; (stale) lost a supporting memory; ×N means N conversations stated it. Rules are what the user stated and confirmed: follow them. Other memories are context.
-Categories: workflow 4, communication 1, programming 1, work 1 · Types: preference 4, behavior 1, constraint 1, goal 1 · Scope: global 5, project 2
+Categories: <category counts> · Types: <type counts> · Scope: global 5, project 2
 The user's global rules are in your instruction files (USER MEMORY); project rules and other memories follow.
 Other memories
   goal (1)
@@ -328,7 +328,7 @@ existing category for a new memory (`workflow`, not a new `process`). With
   the projects it has covered before, then how to remove one that isn't
   yours:
 
-  ```
+  ```output
   New rules since your last session:
     e0000001 Ask before every git push (from claude:session/<id>, claude)
   If one isn't the user's, remove it with forget on their yes, or forget with its origin to remove everything that conversation recorded.
@@ -377,7 +377,7 @@ machine may change it since. Before each prompt, `prompt-submit` compares
 what the session sees now with its saved snapshot, saves the new one, and,
 only when something changed, adds a short notice to the session's context:
 
-```
+```output
 Memory changed since this session last looked (+ new, ~ changed, - forgotten or replaced). Read + and ~ before applying them; stop following - ones, even where your instruction files, loaded at session start, still list them.
 + e0000006 Indent with tabs
 ~ e0000002 Use Python 3.13 in this repository
