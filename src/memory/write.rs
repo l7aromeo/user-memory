@@ -110,7 +110,7 @@ pub struct Record {
 
 #[derive(Args, Deserialize, Serialize, JsonSchema)]
 pub struct Update {
-    /// The memory to correct or confirm, by full id or the index's 8 characters. Changing only its title, context, reason or evidence keeps an observation or inference the agent's; any other change, or none, makes it the user's explicit statement.
+    /// The memory to correct or confirm, by its full id or the 8 characters the index shows; a superseded one whose replacement was forgotten becomes active again. Rewording only its title, context, reason or evidence keeps an observation or inference the agent's; any other change, or none (a confirmation), makes it the user's explicit statement.
     pub memory_id: MemoryRef,
     /// New type: preference, constraint or value for a rule the user wants followed (only these become rules); otherwise decision, goal, fact, behavior, pattern or another label.
     #[arg(long = "type")]

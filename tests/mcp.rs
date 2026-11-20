@@ -41,12 +41,12 @@ const DESCRIPTIONS_LIMIT: usize = 3400;
 /// never drops a rule it carries (the user's yes, what forget deletes,
 /// import's apply), even when the server instructions say it too.
 ///
-/// The reply measured 26,904 bytes at this limit's start. The room above
+/// The reply measured 27,093 bytes at this limit's start. The room above
 /// it is one more field, counted as `"name":{schema}` and its comma: the
 /// larger of the largest field (record's user_confirmed, 505 bytes) and a
 /// filter added to the five tools that share them (5 × 137, the median of
 /// their filter fields). Raise it only with a new measurement.
-const TOOLS_LIST_LIMIT: usize = 27_589;
+const TOOLS_LIST_LIMIT: usize = 27_778;
 
 /// A `user-memory serve` in `folder`, over the store in `home`.
 /// An empty git config file in `dir`, for GIT_CONFIG_GLOBAL: the user's own
