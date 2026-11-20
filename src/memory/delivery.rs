@@ -150,6 +150,14 @@ struct Posting {
     memory: u32,
 }
 
+/// The hasher of a build's maps, which hash every term and memory key in
+/// the scope: with std's SipHash a build at 10,000 memories took 40 ms on
+/// macOS, with this 37 ms. SipHash's resistance to chosen keys is not
+/// needed here, as the keys are the user's own memories, hashed on their
+/// machine. A fixed seed hashes alike on every run, so builds time alike;
+/// the file never depends on a map's order.
+type Fast = foldhash::fast::FixedState;
+
 /// An index being built: its rows, each term's key kept once, and every
 /// posting in the order met, which is row order. The file is written with
 /// one counting sort of the postings by term: keying a map by term for
@@ -157,7 +165,7 @@ struct Posting {
 #[derive(Default)]
 struct Builder {
     rows: Vec<Row>,
-    numbers: HashMap<Box<[u8]>, u32>,
+    numbers: HashMap<Box<[u8]>, u32, Fast>,
     keys: Vec<Box<[u8]>>,
     postings: Vec<Posting>,
 }
@@ -867,7 +875,7 @@ pub(crate) fn build(
         return Err(Error::NotCurrent);
     }
     let scope = json_array(projects);
-    let mut keys: HashMap<i64, usize> = HashMap::new();
+    let mut keys: HashMap<i64, usize, Fast> = HashMap::default();
     let mut ids: Vec<String> = Vec::new();
     let mut statement = conn.prepare(CANDIDATES)?;
     let mut found = statement.query(params_from_iter([scope]))?;

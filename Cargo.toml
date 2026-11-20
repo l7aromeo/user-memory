@@ -41,6 +41,9 @@ dunce = "1.0.5"
 rust-stemmers = "1.2"
 # SHA-256 for the instruction files' write records; rustls already builds it.
 aws-lc-rs = { version = "1", default-features = false, features = ["aws-lc-sys"] }
+# The delivery index's build hashes its terms with it (src/memory/delivery.rs);
+# serde_json and rusqlite already build it.
+foldhash = { version = "0.2", default-features = false }
 
 # serve's stdin reader, which waits for input with poll before each read,
 # so no read is under way when serve hands over by exec (src/handover.rs).

@@ -2011,6 +2011,7 @@ dependencies = [
  "axum",
  "clap",
  "dunce",
+ "foldhash 0.2.0",
  "proc-macro2",
  "rand 0.9.5",
  "reqwest",
