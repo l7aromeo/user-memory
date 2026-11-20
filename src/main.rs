@@ -1266,6 +1266,11 @@ async fn main() -> Result<()> {
                 // another server refuses.
                 println!("{}", setup::apply_embedding(&home, &settings)?);
             }
+            // Named by the address as given: the Docker server reaches this
+            // machine through its host gateway, which is this machine too.
+            if let Some(line) = memory::embedding_disclosure(&|name| settings.get(name).cloned()) {
+                println!("{line}");
+            }
         }
         Command::Embedding {
             command: EmbeddingCommand::Off,

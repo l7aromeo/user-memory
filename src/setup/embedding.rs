@@ -247,6 +247,9 @@ pub(super) fn docker_show(dir: &Path) -> Result<String> {
         return Ok("Embedding: off; search uses keywords only".into());
     };
     let mut lines = vec![endpoint_line(url)];
+    lines.extend(crate::memory::embedding_disclosure(&|name| {
+        settings.get(name).cloned()
+    }));
     let model = settings.get("USER_MEMORY_EMBED_MODEL");
     if let Some(model) = model {
         lines.push(format!("Model: {model}"));
@@ -258,13 +261,15 @@ pub(super) fn docker_show(dir: &Path) -> Result<String> {
     let answered = compose.exec(&[], &["embedding", "show"]);
     match answered {
         Ok(out) if out.status.success() => {
-            // The container read the same file: its endpoint, and its model
-            // when the file names one, are already shown.
+            // The container read the same file: its endpoint, where that
+            // sends memory text, and its model when the file names one are
+            // already shown.
             let own = String::from_utf8_lossy(&out.stdout);
             lines.extend(
                 own.lines()
                     .filter(|line| {
                         !line.starts_with("Endpoint: ")
+                            && !line.starts_with(SENDS)
                             && !(model.is_some() && line.starts_with("Model: "))
                     })
                     .map(str::to_owned),
@@ -283,6 +288,9 @@ pub(super) fn docker_show(dir: &Path) -> Result<String> {
     }
     Ok(lines.join("\n"))
 }
+
+/// How the line that names where semantic search sends memory text starts.
+const SENDS: &str = "Semantic search sends ";
 
 /// The endpoint line for `url` as embedding.env holds it, which is how the
 /// container reaches it: the host gateway is this machine.
@@ -329,6 +337,18 @@ pub(super) fn lookup<'a>(saved: &'a Settings, name: &str) -> Option<(String, &'a
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The container's line that `docker_show` leaves out is the one the
+    // host prints.
+    #[test]
+    fn the_containers_line_left_out_is_the_one_the_host_prints() {
+        let line = crate::memory::embedding_disclosure(&|name| {
+            (name == "USER_MEMORY_EMBED_URL").then(|| "https://api.example.com/v1".to_owned())
+        })
+        .expect("an endpoint elsewhere is named");
+        assert!(line.starts_with(SENDS), "{line}");
+        assert!(line.ends_with(" api.example.com"), "{line}");
+    }
 
     fn parsed(text: &str) -> Result<Settings> {
         parse(text, Path::new("/x/.env"))

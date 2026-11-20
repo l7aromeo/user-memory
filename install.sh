@@ -495,7 +495,7 @@ choose_embedding() {
         cat >/dev/tty <<'EOF'
 Semantic search finds memories by meaning as well as by their words. It needs an embedding model:
   1) Ollama on this machine (recommended: private, no API key)
-  2) Another OpenAI-compatible endpoint
+  2) Another OpenAI-compatible endpoint: memory text and searches are sent to it
   3) Off: keyword search only
 EOF
         case $(choose "Semantic search" 3 1) in

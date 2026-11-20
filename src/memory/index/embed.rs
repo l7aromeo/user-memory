@@ -404,6 +404,27 @@ mod tests {
     use super::*;
     use std::io::{BufRead, BufReader, Read, Write};
 
+    #[test]
+    fn this_machine_is_loopback_or_the_docker_servers_host_gateway() {
+        let here = |url: &str| on_this_machine(&reqwest::Url::parse(url).unwrap());
+        for url in [
+            "http://127.0.0.1:11434/v1/embeddings",
+            "http://127.0.0.2:11434/v1/embeddings",
+            "http://localhost:11434/v1/embeddings",
+            "http://[::1]:11434/v1/embeddings",
+            "http://host.docker.internal:11434/v1/embeddings",
+        ] {
+            assert!(here(url), "{url}");
+        }
+        for url in [
+            "https://api.example.com/v1/embeddings",
+            "http://192.168.1.20:11434/v1/embeddings",
+            "https://localhost.example.com/v1/embeddings",
+        ] {
+            assert!(!here(url), "{url}");
+        }
+    }
+
     /// Answers every embeddings request with one fixed vector per input.
     fn endpoint() -> Config {
         slow_endpoint(Duration::ZERO)

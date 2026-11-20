@@ -603,7 +603,7 @@ SHA-256 against the release before running it.
         } elseif (Test-Interactive) {
             Write-Host 'Semantic search finds memories by meaning as well as by their words. It needs an embedding model:'
             Write-Host '  1) Ollama on this machine (recommended: private, no API key)'
-            Write-Host '  2) Another OpenAI-compatible endpoint'
+            Write-Host '  2) Another OpenAI-compatible endpoint: memory text and searches are sent to it'
             Write-Host '  3) Off: keyword search only'
             switch (Choose -Question 'Semantic search' -Count 3 -Default 1) {
                 1 { Use-Ollama $true }

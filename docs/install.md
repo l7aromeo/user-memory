@@ -120,7 +120,7 @@ by meaning as well as by their words:
 | Choice | What you get |
 |---|---|
 | Ollama on this machine (default) | [Ollama](https://ollama.com) computes the embeddings here; nothing leaves the machine and no API key is needed. The installer lists the embedding models Ollama already has, with `qwen3-embedding:4b` recommended. |
-| Another endpoint | Any OpenAI-compatible embeddings endpoint: its address (`/v1/embeddings` is added to a bare host, `/embeddings` to another path), the model, and an API key, typed hidden and saved to `~/.config/user-memory/embedding-key` (mode 0600). |
+| Another endpoint | Any OpenAI-compatible embeddings endpoint: its address (`/v1/embeddings` is added to a bare host, `/embeddings` to another path), the model, and an API key, typed hidden and saved to `~/.config/user-memory/embedding-key` (mode 0600). Every memory's text and every search is sent to it; an endpoint that isn't on this machine is named once it is set, as in ``Semantic search sends memory text and searches to api.example.com``. |
 | Off | Search matches keywords only. |
 
 The installer installs or downloads nothing without asking first. When

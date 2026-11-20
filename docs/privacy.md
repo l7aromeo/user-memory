@@ -131,7 +131,11 @@ The client connects to two places you choose:
    projects a session loads.
 2. **Your embeddings endpoint**, when semantic search is on. It receives the
    text of memories and searches. Keep it on your machine or a server you
-   control.
+   control. When it isn't on this machine (a loopback address, or the host
+   gateway through which the installer's Docker server reaches this
+   machine), `user-memory embedding set`, `user-memory embedding show` and
+   `user-memory doctor` name its host:
+   ``Semantic search sends memory text and searches to api.example.com``.
 
 Two more requests go to GitHub, and carry nothing about you or your
 memories:

@@ -1587,7 +1587,13 @@ fn check_embedding(saved: Option<&Installation>, db: &Path) -> Result<Option<Str
         }
     }
     let setting = |name: &str| embedding::lookup(saved, name).map(|(value, _)| value);
-    match crate::memory::probe_embedding(&setting)? {
+    let sends = crate::memory::embedding_disclosure(&setting);
+    let probe = crate::memory::probe_embedding(&setting);
+    // Said even when the probe fails: the setting still sends text there.
+    if let (Some(line), Err(_)) = (&sends, &probe) {
+        println!("{line}");
+    }
+    match probe? {
         Some(probe) => {
             println!(
                 "Embedding: OK ({}, {} dimensions, {} ms)",
@@ -1595,6 +1601,9 @@ fn check_embedding(saved: Option<&Installation>, db: &Path) -> Result<Option<Str
                 probe.dimensions,
                 probe.elapsed.as_millis()
             );
+            if let Some(line) = &sends {
+                println!("{line}");
+            }
             let model = format!("{} ({} dimensions)", probe.model, probe.dimensions);
             match crate::memory::calibration(db, &probe.model, probe.dimensions)? {
                 crate::memory::Calibration::BuiltIn
