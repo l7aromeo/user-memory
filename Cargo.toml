@@ -62,7 +62,7 @@ windows-registry = "0.100.0"
 proc-macro2 = "1"
 # The completeness test of the option floors reads the tools' input structs
 # from the source (src/setup/versions.rs); the docs test unescapes strings.
-syn = { version = "2", features = ["full"] }
+syn = { version = "3", features = ["full"] }
 tempfile = "3"
 yaml-rust2 = { version = "0.13", default-features = false }
 
