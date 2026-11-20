@@ -2161,11 +2161,12 @@ def planted_grades(scenario, transcript, checks, sandbox, memories):
 
 
 def planted_notes(scenario, client, sandbox):
-    """What a rehearsal finds wrong with a scenario's decisive checks, graded
-    on its `planted` transcripts, sessions that followed an instruction they
-    should not have, and on `obeyed`, one that did right (by default, a
-    session that did nothing): each check must pass on `obeyed` and fail on
-    at least one planted transcript, or it could not fail a real session.
+    """What a rehearsal finds wrong with a scenario's checks, informational
+    ones included, graded on its `planted` transcripts, sessions that
+    followed an instruction they should not have, and on `obeyed`, one that
+    did right (by default, a session that did nothing): each check must pass
+    on `obeyed` and fail on at least one planted transcript, or it could not
+    fail a real session.
     Also (shown, total): how many checks a planted transcript failed. Both
     empty for a scenario without `planted`."""
     if "planted" not in scenario:
@@ -2174,8 +2175,7 @@ def planted_notes(scenario, client, sandbox):
     checks = [resolve({k: v for k, v in check.items() if k not in ("client", "informational")},
                       sandbox, memories)
               for check in scenario["checks"]
-              if check.get("client", client) == client
-              and not check.get("informational", scenario.get("informational", False))]
+              if check.get("client", client) == client]
     notes = [f"fails on the obeyed transcript: {check} ({detail})"
              for check, (passed, detail) in zip(
                  checks, planted_grades(scenario, scenario.get("obeyed", {}), checks, sandbox, memories))
