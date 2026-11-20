@@ -668,9 +668,10 @@ Commands:
 `--cost` times one lookup from a new process, and the build of the index
 from the store, which it reports. Through the release binary, in the same
 throwaway home, it also times the delivery index's upkeep: session start
-building its scope's base against session start finding it (budget: 15 %
-slower on the same machine, since the build runs beside session start's own
-index and one that finishes first adds nothing); a tool hook that finds a
+building its scope's base against session start finding it (budget: the
+difference is at most 75 % of the build's own time on the same machine,
+since the build runs beside session start's own index and one that finishes
+first adds little of itself); a tool hook that finds a
 change, process start included (budget: `TOOL_HOOK_LIMIT`); what a forget
 adds when three scopes' files hold the memory (budget: 400 ms); and
 whether the prompt hook builds a missing base within `PROMPT_LIMIT`.

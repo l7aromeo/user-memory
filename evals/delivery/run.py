@@ -67,16 +67,14 @@ PROMPT_PRECISION = 0.9
 LOOKUP_LIMIT_MS = 100
 # Lookups timed per action for the cost, after one warm-up.
 LOOKUPS = 21
-# How much slower session start may be when it builds its scope's delivery
-# index than when it finds one, on the same machine (#175). It builds on its
+# How much of its build a session start that builds its scope's delivery
+# index may add over one that finds it, on the same machine (#175):
+# (building - finding) / the build's median. Session start builds on its
 # own thread beside its own index of the store, so a build that finishes
-# first adds nothing; one run after that index instead adds about the whole
-# build. The bar sits between the two ends. Below the smallest such failure:
-# build divided by session start finding is about 48 % on macOS, 69 % on
-# Linux, 31 % on Windows x64 and 23 % on Windows arm64 (estimates from CI's
-# figures; measured as a real failure only on macOS, +40 %). Above the
-# noise: 0 to 4.8 % on CI's runners, 9.5 % on a loaded Mac.
-SESSION_BUILD_SLOWER = 0.15
+# first adds little of itself: 0 to 51 % on CI's runners, 17 to 20 % on
+# macOS. One awaited before that index adds all of it, measured on macOS at
+# 100 %. The bar sits between the two ends.
+SESSION_BUILD_SHARE = 0.75
 # Session starts timed for it: pairs of one that builds (its base deleted)
 # and one that finds it, alternating so drift falls on both.
 SESSION_PAIRS = 11
@@ -532,8 +530,9 @@ def cost(found, seed, size, keep):
         tool, added, built_at_prompt, prompt, start_built, start_found = upkeep(
             found["user-memory"], folder, drawn)
         print(f"  session start median {start_built:6.1f} ms building its base, "
-              f"{start_found:6.1f} ms finding it ({SESSION_PAIRS} pairs, "
-              f"limit {SESSION_BUILD_SLOWER:.0%} slower)")
+              f"{start_found:6.1f} ms finding it ({SESSION_PAIRS} pairs): "
+              f"{(start_built - start_found) / build_median:.0%} of the build added "
+              f"(limit {SESSION_BUILD_SHARE:.0%})")
         print(f"  tool hook   median {tool:6.1f} ms after a change, process start included "
               f"({HOOK_RUNS - 1} runs, limit {rust_ms('src/session/tools.rs', 'TOOL_HOOK_LIMIT')} ms)")
         print(f"  forget      median {added:6.1f} ms added by three scopes' files "
@@ -549,7 +548,7 @@ def cost(found, seed, size, keep):
             worst = max(worst, median)
             print(f"  {mode:<11} median {median:6.1f} ms, 95th percentile {p95:6.1f} ms, "
                   f"largest {samples[-1]:6.1f} ms")
-        return worst, (start_built, start_found), tool, added, built_at_prompt
+        return worst, (start_built - start_found) / build_median, tool, added, built_at_prompt
 
 
 def main():
@@ -575,14 +574,14 @@ def main():
     sizes = [int(s) for s in args.sizes.split(",")]
     tuning = {}
     if args.cost or args.check_cost:
-        worst, (start_built, start_found), tool, added, built_at_prompt = cost(
+        worst, build_added, tool, added, built_at_prompt = cost(
             found, REPORT_SEEDS[0], max(sizes), args.keep)
         over = False
         if args.check_cost and worst > LOOKUP_LIMIT_MS:
             print(f"a lookup is over the {LOOKUP_LIMIT_MS} ms limit")
             over = True
-        if args.check_cost and start_built > start_found * (1 + SESSION_BUILD_SLOWER):
-            print(f"session start building its base is over {SESSION_BUILD_SLOWER:.0%} slower than finding it")
+        if args.check_cost and build_added > SESSION_BUILD_SHARE:
+            print(f"session start building its base adds over {SESSION_BUILD_SHARE:.0%} of the build")
             over = True
         tool_limit = rust_ms("src/session/tools.rs", "TOOL_HOOK_LIMIT")
         if args.check_cost and tool > tool_limit:
