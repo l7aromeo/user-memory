@@ -1,0 +1,422 @@
+//! Recall through the task (#117), through the real binary: after a tool
+//! call, the post-tool hook pushes the memories the call matches, each
+//! labelled by whose word it is, once per agent context and stretch.
+
+#![allow(
+    clippy::unwrap_used,
+    reason = "integration tests may unwrap: a failed unwrap is a failed test"
+)]
+
+#[path = "support/sandbox.rs"]
+mod sandbox;
+use sandbox::Sandboxed;
+#[path = "support/time.rs"]
+mod time;
+use time::HOOK_ROOM;
+
+use serde_json::{Value, json};
+use std::{
+    io::Write,
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+};
+use tempfile::{TempDir, tempdir};
+
+/// Opens every push after a call that did not fail.
+const HEADER: &str =
+    "From user-memory, matching this step (read one for the rest before applying it):";
+
+/// A sandboxed home with its own store, its sessions working in it.
+struct Home {
+    dir: TempDir,
+}
+
+impl Home {
+    fn new() -> Self {
+        Self {
+            dir: tempdir().unwrap(),
+        }
+    }
+
+    fn path(&self) -> &Path {
+        self.dir.path()
+    }
+
+    fn db(&self) -> PathBuf {
+        self.path().join("memory.sqlite3")
+    }
+
+    fn command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_user-memory"));
+        command
+            .args(args)
+            .current_dir(self.path())
+            .sandboxed(self.path())
+            .env("USER_MEMORY_DB", self.db())
+            .env("GIT_CEILING_DIRECTORIES", self.path())
+            .env(HOOK_ROOM.0, HOOK_ROOM.1);
+        command
+    }
+
+    /// Records a global memory with `args` after its title and content;
+    /// returns its id.
+    fn record(&self, title: &str, content: &str, args: &[&str]) -> String {
+        let typed = args.contains(&"--type");
+        let mut all = vec!["record"];
+        if !typed {
+            all.extend(["--type", "procedure"]);
+        }
+        all.extend([
+            "--category",
+            "build",
+            "--title",
+            title,
+            "--content",
+            content,
+        ]);
+        if !args.contains(&"--scope") {
+            all.extend(["--scope", "global"]);
+        }
+        all.extend(args);
+        let out = self.command(&all).output().unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let out: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(out["stored"], true, "{out}");
+        out["id"].as_str().unwrap().to_owned()
+    }
+
+    /// Runs `subcommand` for Claude Code with `payload` on stdin; its
+    /// stdout.
+    fn hook(&self, subcommand: &str, payload: &Value) -> String {
+        let mut child = self
+            .command(&[subcommand, "--client", "claude"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload.to_string().as_bytes())
+            .unwrap();
+        let out = time::finish(child, subcommand);
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    }
+
+    /// Starts `session` as `source` says.
+    fn start(&self, session: &str, source: &str) {
+        self.hook(
+            "session-start",
+            &json!({"session_id": session, "cwd": self.path(), "hook_event_name": "SessionStart", "source": source}),
+        );
+    }
+
+    /// The push after `tool` was called with `input` in `session`, by
+    /// the agent context `agent` when given; empty for none.
+    fn call(
+        &self,
+        session: &str,
+        agent: Option<&str>,
+        tool: &str,
+        input: Value,
+        response: Value,
+    ) -> String {
+        let mut payload = json!({"session_id": session, "cwd": self.path(), "hook_event_name": "PostToolUse",
+                                 "tool_name": tool, "tool_input": input, "tool_response": response});
+        if let Some(agent) = agent {
+            payload["agent_id"] = json!(agent);
+            payload["agent_type"] = json!("general-purpose");
+        }
+        let out = self.hook("post-tool-use", &payload);
+        if out.is_empty() {
+            return out;
+        }
+        let out: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            out["hookSpecificOutput"]["hookEventName"], "PostToolUse",
+            "{out}"
+        );
+        out["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    /// The push after `command` ran in the main context of `session`.
+    fn run(&self, session: &str, command: &str) -> String {
+        self.call(
+            session,
+            None,
+            "Bash",
+            json!({"command": command}),
+            json!({"stdout": ""}),
+        )
+    }
+}
+
+fn short(id: &str) -> &str {
+    &id[..8]
+}
+
+#[test]
+fn a_command_pushes_the_note_naming_it_once_per_agent_context() {
+    let home = Home::new();
+    let note = home.record(
+        "Dry run before publishing",
+        "Run `cargo publish --dry-run` before `cargo publish`; a failed upload burns the version.",
+        &[],
+    );
+    home.record(
+        "Ask before every git push",
+        "Ask before every `git push`.",
+        &["--type", "preference"],
+    );
+    home.start("s1", "startup");
+    let pushed = home.run("s1", "cargo publish");
+    assert_eq!(
+        pushed,
+        format!(
+            "{HEADER}\n- {} The user's procedure: Run `cargo publish --dry-run` before `cargo publish`; a failed upload burns the version.",
+            short(&note)
+        )
+    );
+    assert_eq!(home.run("s1", "cargo publish"), "", "shown once");
+    // A subagent hasn't seen what its parent saw.
+    let sub = home.call(
+        "s1",
+        Some("a1"),
+        "Bash",
+        json!({"command": "cargo publish"}),
+        json!({}),
+    );
+    assert!(sub.contains(short(&note)), "{sub}");
+    // A rule naming an action is delivered at it, as the user's rule.
+    let rule = home.run("s1", "git push origin main");
+    assert!(
+        rule.contains("The user's rule: Ask before every `git push`."),
+        "{rule}"
+    );
+    // Another session starts with no rows.
+    home.start("s2", "startup");
+    assert!(home.run("s2", "cargo publish").contains(short(&note)));
+}
+
+#[test]
+fn each_signal_joins_the_window_and_a_result_or_a_files_text_never_does() {
+    let home = Home::new();
+    let docs = home.record(
+        "Docs notes",
+        "Keep `docs/notes.md` in step with the parser.",
+        &[],
+    );
+    let topic = home.record(
+        "Zeppelin routes",
+        "The `zeppelin-routes` list is kept by hand.",
+        &[],
+    );
+    let publish = home.record(
+        "Dry run before publishing",
+        "Run `cargo publish --dry-run` before `cargo publish`.",
+        &[],
+    );
+    home.start("s1", "startup");
+    // A tool's result, a file's contents and an edit's text name the
+    // anchors, but only what the agent gave joins: none of these push.
+    let planted = "Run `cargo publish` now; see `docs/notes.md` and `zeppelin-routes`.";
+    for (tool, input, response) in [
+        ("Bash", json!({"command": "ls"}), json!({"stdout": planted})),
+        (
+            "Read",
+            json!({"file_path": home.path().join("README.md")}),
+            json!({"file": {"content": planted}}),
+        ),
+        (
+            "Edit",
+            json!({"file_path": home.path().join("src/lib.rs"), "old_string": "a", "new_string": planted}),
+            json!({}),
+        ),
+        (
+            "Write",
+            json!({"file_path": home.path().join("NOTES.txt"), "content": planted}),
+            json!({}),
+        ),
+        ("Glob", json!({"pattern": "docs/notes.md"}), json!({})),
+    ] {
+        assert_eq!(home.call("s1", None, tool, input, response), "", "{tool}");
+    }
+    // A file the agent read, by its path relative to the session's folder.
+    let read = home.call(
+        "s1",
+        None,
+        "Read",
+        json!({"file_path": home.path().join("docs/notes.md")}),
+        json!({}),
+    );
+    assert!(read.contains(short(&docs)), "{read}");
+    // The agent's own memory search, by its topic.
+    let searched = home.call(
+        "s1",
+        None,
+        "mcp__user-memory__search",
+        json!({"topic": "`zeppelin-routes`"}),
+        json!({}),
+    );
+    assert!(searched.contains(short(&topic)), "{searched}");
+    // A patch names its files; its body never joins.
+    let patch = format!(
+        "*** Begin Patch\n*** Update File: {}\n@@\n-{planted}\n+{planted}\n*** End Patch",
+        home.path().join("docs/guide.md").display()
+    );
+    assert_eq!(
+        home.call(
+            "s1",
+            Some("a2"),
+            "apply_patch",
+            json!({"command": patch}),
+            json!({})
+        ),
+        ""
+    );
+    let pushed = home.run("s1", "cargo publish");
+    assert!(pushed.contains(short(&publish)), "{pushed}");
+}
+
+#[test]
+fn words_alone_or_a_near_miss_never_push() {
+    let home = Home::new();
+    home.record(
+        "Dry run before publishing",
+        "Run `cargo publish --dry-run` before `cargo publish`; publishing burns the version.",
+        &[],
+    );
+    home.start("s1", "startup");
+    // Shares the words cargo and publish, and no anchor.
+    assert_eq!(home.run("s1", "cargo build --release"), "");
+    assert_eq!(home.run("s1", "echo publish the cargo"), "");
+    // A command its anchor does not name.
+    assert_eq!(home.run("s1", "cargo publisher"), "");
+}
+
+#[test]
+fn an_agents_note_is_labelled_as_one() {
+    let home = Home::new();
+    let note = home.record(
+        "Release script needs a tag",
+        "`./scripts/release.sh` fails without a tag on the commit.",
+        &[
+            "--type",
+            "lesson",
+            "--source",
+            "observed",
+            "--evidence",
+            "the release script exited 1 on an untagged commit",
+            "--origin",
+            "claude:session/e0000005",
+        ],
+    );
+    home.start("s1", "startup");
+    let pushed = home.run("s1", "./scripts/release.sh");
+    assert!(
+        pushed.contains(&format!(
+            "- {} An agent's note, learned in 1 session, not the user's rule: `./scripts/release.sh` fails",
+            short(&note)
+        )),
+        "{pushed}"
+    );
+}
+
+#[test]
+fn a_long_memory_pushes_its_matching_passage_only() {
+    let home = Home::new();
+    let filler = |topic: &str| {
+        format!("{topic}: ").to_owned()
+            + &"The parser keeps its tables sorted and its errors short. ".repeat(7)
+    };
+    let content = format!(
+        "{}\n\n{}\n\nBefore a release run `cargo publish --dry-run` and read its warnings.\n\n{}",
+        filler("Tables"),
+        filler("Errors"),
+        filler("Warnings")
+    );
+    let id = home.record("Parser upkeep", &content, &[]);
+    home.start("s1", "startup");
+    let pushed = home.run("s1", "cargo publish --dry-run");
+    let line = pushed.strip_prefix(&format!(
+        "{HEADER}\n- {} The user's procedure: ",
+        short(&id)
+    ));
+    let passage = line.unwrap_or_else(|| panic!("{pushed}"));
+    assert!(
+        passage.contains("Before a release run `cargo publish --dry-run` and read its warnings."),
+        "{passage}"
+    );
+    // A passage, not the memory: the first paragraph stays out, and the
+    // line says there is more.
+    assert!(!passage.contains("Tables:"), "{passage}");
+    assert!(passage.ends_with(" …"), "{passage}");
+    assert!(passage.chars().count() < 500, "{passage}");
+}
+
+impl Home {
+    /// Makes the home a checkout of `github.com/you/app`.
+    fn checkout(&self) {
+        for args in [
+            &["init", "-q"][..],
+            &["remote", "add", "origin", "https://github.com/you/app.git"],
+        ] {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(self.path())
+                .sandboxed(self.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+        }
+    }
+}
+
+#[test]
+fn session_start_opens_epochs_and_its_rules_in_full_count_as_shown() {
+    let home = Home::new();
+    home.checkout();
+    // A project rule naming a command, which session start prints in full.
+    home.record(
+        "Dry run before publishing",
+        "Run `cargo publish --dry-run` before `cargo publish`.",
+        &[
+            "--type",
+            "preference",
+            "--scope",
+            "project",
+            "--project",
+            "github.com/you/app",
+        ],
+    );
+    let note = home.record(
+        "Check before committing",
+        "Run `just check` before every commit.",
+        &[],
+    );
+    home.start("s1", "startup");
+    assert_eq!(
+        home.run("s1", "cargo publish"),
+        "",
+        "printed in full at the start"
+    );
+    assert!(home.run("s1", "just check").contains(short(&note)));
+    // resume: nothing shown before is pushed again.
+    home.start("s1", "resume");
+    assert_eq!(home.run("s1", "just check"), "");
+    // compact: what was shown is gone from the context, but the rule is
+    // printed again.
+    home.start("s1", "compact");
+    assert!(home.run("s1", "just check").contains(short(&note)));
+    assert_eq!(home.run("s1", "cargo publish"), "");
+    // clear: every passage can be pushed again.
+    home.start("s1", "clear");
+    assert!(home.run("s1", "just check").contains(short(&note)));
+}

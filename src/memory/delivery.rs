@@ -4,8 +4,8 @@
 //! store (issue #117, measured by #125). `super::matcher` ranks memories'
 //! passages against it.
 //!
-//! No hook builds it yet, so the shipped binary declares this module for
-//! its tests only. The delivery benchmark's binary (`user-memory-bench`,
+//! The hooks keep it (`super::delivery_files`) and match on it. The
+//! delivery benchmark's binary (`user-memory-bench`,
 //! evals/delivery/entry.rs) compiles it through a `#[path]` mirror of
 //! `src/memory`: use only std, rusqlite and the mirrored modules here.
 
@@ -112,6 +112,8 @@ impl fmt::Display for Error {
         }
     }
 }
+
+impl std::error::Error for Error {}
 
 impl From<rusqlite::Error> for Error {
     fn from(e: rusqlite::Error) -> Self {

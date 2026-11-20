@@ -673,11 +673,10 @@ year of synthetic changes.
 `just delivery-bench` measures delivery matching (`src/memory/matcher.rs`,
 over the index file of `src/memory/delivery.rs`): what an agent's actions
 match among a store's passages, and what the bars push after an action,
-push after a failed one, or hold before a command. No hook calls the
-matcher yet, so the shipped binary declares both modules for its tests
-only. The benchmark reaches them through `user-memory-bench`, a second
-binary (`evals/delivery/entry.rs`) that releases never build, as they never
-build `user-memory-fake`.
+push after a failed one, or hold before a command. The tool hooks use the
+same modules in the shipped binary. The benchmark reaches them through
+`user-memory-bench`, a second binary (`evals/delivery/entry.rs`) that
+releases never build, as they never build `user-memory-fake`.
 
 That binary compiles the matcher and the modules it uses from their own
 files, through a `#[path]` mirror of `src/memory`: `delivery.rs`,

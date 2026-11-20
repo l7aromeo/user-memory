@@ -451,6 +451,19 @@ pub(crate) fn at_session_start(
     )
 }
 
+/// The scope's base and overlay a hook matches on, for the session's
+/// `projects`: the store at `db` on this machine when `remote` is none, as
+/// they stand at the store's latest change; none when the files are
+/// missing, voided, damaged or behind it.
+pub(crate) fn open(remote: Option<&str>, db: &Path, projects: &[String]) -> Option<View> {
+    match remote {
+        None => Files::of(&paths::store_identity(None, db))?
+            .open(&scope(projects), &super::changes::position(db)?),
+        // A server's files are kept by its connector (#180).
+        Some(_) => None,
+    }
+}
+
 /// The prompt hook's part (#175), for the local store at `db` and the
 /// session's `projects`: refreshes the scope's overlay, waiting for the lock
 /// until `deadline`, and builds the scope's base when there is none it can
