@@ -544,7 +544,10 @@ grading the stored memories, tool calls, commands and answers. It signs in
 with dedicated eval logins you create once, and every session counts against
 that plan or API usage; the runner enforces a session budget and aborts if
 your real memory, client configuration, instruction files or logins change.
-See [evals/README.md](../../evals/README.md).
+The budget's counter and the reports live in a per-user folder a restart
+keeps (`~/Library/Caches/user-memory-eval/reports` on macOS, the XDG state
+folder elsewhere), and a folder that lost its counter is refused rather than
+counted as zero. See [evals/README.md](../../evals/README.md).
 
 A batch runs each provider's cheaper model from its latest family: Claude
 Code's `sonnet` alias and Codex's `gpt-6-luna`. A weaker agent makes a pass
