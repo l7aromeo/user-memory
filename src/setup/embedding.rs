@@ -144,8 +144,9 @@ pub(super) fn docker_env(settings: &Settings) -> Result<String> {
             "USER_MEMORY_EMBED_URL" => {
                 let mut url = reqwest::Url::parse(value.trim())
                     .context("USER_MEMORY_EMBED_URL is not a URL")?;
-                let here = matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"));
-                if url.scheme() == "http" && here {
+                // This machine by the same rule that lets plain http reach
+                // it; inside the container, only the host gateway is.
+                if url.scheme() == "http" && crate::memory::loopback(&url) {
                     if settings.contains_key("USER_MEMORY_EMBED_API_KEY_FILE") {
                         bail!(
                             "the Docker server reaches {value} over plain http at {DOCKER_HOST}, and an API key is never sent over plain http to another host; use an https endpoint"
@@ -418,18 +419,32 @@ USER_MEMORY_EMBED_MODEL=qwen3-embedding:8b
              USER_MEMORY_EMBED_QUERY_INSTRUCTION=Instruct: Given a question, retrieve the user's matching memory\\nQuery:\n\
              USER_MEMORY_EMBED_ALLOW_HTTP=1\n"
         );
+        // Every loopback address is this machine, which the container
+        // reaches only through the host gateway.
         for here in [
             "http://localhost:8080/embeddings",
             "http://[::1]:8080/embeddings",
+            "http://127.0.0.2:8080/embeddings",
         ] {
             let text = docker_env(&settings(&[("URL", here), ("MODEL", "m")])).unwrap();
-            assert!(
-                text.starts_with(
-                    "USER_MEMORY_EMBED_URL=http://host.docker.internal:8080/embeddings\n"
-                ),
-                "{text}"
+            assert_eq!(
+                text,
+                "USER_MEMORY_EMBED_URL=http://host.docker.internal:8080/embeddings\n\
+                 USER_MEMORY_EMBED_MODEL=m\n\
+                 USER_MEMORY_EMBED_ALLOW_HTTP=1\n",
+                "{here}"
             );
         }
+        // Plain http to another machine the user allowed stays as it is.
+        assert_eq!(
+            docker_env(&settings(&[
+                ("URL", "http://192.168.1.20:8080/embeddings"),
+                ("ALLOW_HTTP", "1"),
+            ]))
+            .unwrap(),
+            "USER_MEMORY_EMBED_URL=http://192.168.1.20:8080/embeddings\n\
+             USER_MEMORY_EMBED_ALLOW_HTTP=1\n"
+        );
         // An https endpoint is left as it is; its key is the volume's copy.
         assert_eq!(
             docker_env(&settings(&[
