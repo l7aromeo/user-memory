@@ -282,6 +282,31 @@ Projects changed: + github.com/you/api (linked)
 The notice never delays a prompt: if the store is slow or cannot be reached,
 it is skipped.
 
+## The delivery index
+
+To find the memories a task needs while it runs, each machine keeps a
+delivery index of its local store: for the global memories and the
+session's projects, every word as its stem and every anchor (code spans,
+paths, names) as written, with the passage it comes from, but no
+sentence. The hooks build and keep it, so no step waits for the store:
+
+- **Session start** builds the index of its projects when it is missing or
+  holds changes, beside its own index of the store; a second session of the
+  same projects shares it.
+- **The prompt hook** builds it when the session's projects changed (after
+  a `link`, for example) or the files are gone, within its own time limit.
+- **The tool hooks** add the memories changed since, from this machine or
+  another session, in a small file beside it, so the index stays current
+  between prompts. A hook never waits for another: it leaves the work to
+  the next.
+- **A forget, a correction, or an import that replaces text** builds the
+  files holding the old words again before it replies, so no copy keeps
+  them ([privacy](privacy.md#what-a-forgotten-memory-leaves)).
+
+The files are private to you, in the state folder
+([storage](storage.md)), and go after a day unused. Not yet kept for a
+memory server's store.
+
 ## How search finds a memory
 
 Search looks at the words of your question and, with semantic search on, at
