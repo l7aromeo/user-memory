@@ -35,7 +35,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "process", "io-util", "io-std", "sync"] }
 axum = "0.8"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream"] }
-rand = "0.9"
+rand = "0.10"
 subtle = "2"
 dunce = "1.0.5"
 rust-stemmers = "1.2"
