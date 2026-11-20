@@ -360,8 +360,18 @@ the vectors, a server's memory stays about the same however much it
 searches: each search reuses the working space of the one before, about
 20 MB at 100,000 memories.
 
+`user-memory embedding show` and `user-memory doctor` count your own vectors
+where the store is, and on the machine that runs the installer's Docker
+server:
+``Stored vectors: 4,120 (4,080 current), 16.9 MB; a server holds the current ones in memory``.
+They count the vectors of the model and vector length set now, the ones a
+server loads. A memory changed since its vector was made is not current: its
+next search or `user-memory reindex` makes a new one.
+
 With semantic search on, memory text is sent to the embeddings endpoint. Keep
-it on your own machine or a server you control.
+it on your own machine or a server you control. For an endpoint that isn't
+on this machine, `embedding set`, `embedding show` and `doctor` name its
+host.
 
 ## Upgrade
 

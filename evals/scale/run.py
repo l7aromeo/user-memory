@@ -6,7 +6,8 @@ otherwise), builds its keyword index with `user-memory reindex`, gives every
 memory a current vector, then times `user-memory search` as a whole
 command-line process and as one call to a long-running `user-memory serve`,
 keyword-only and fused with meaning, for topics whose words few, some and
-many memories hold. Query embeddings come from a stand-in endpoint in this
+many memories hold, and `user-memory embedding show`, which counts the
+stored vectors. Query embeddings come from a stand-in endpoint in this
 script that answers at once, so the times are user-memory's own. Prints each
 median and exits with status 1 if one is over its budget. Nothing here
 touches the user's own store or settings.
@@ -46,6 +47,11 @@ SERVER_BUDGET_MS = 100
 # store cold. A fused one reads every vector, which no budget bounds: it is
 # reported, not checked.
 CLI_KEYWORD_BUDGET_MS = 150
+# `embedding show` and doctor count the stored vectors and compare each
+# with its memory's text (issue #47). Measured at 205 ms on 100,000 at 2,560
+# dimensions, process start and the probe included; a count that read every
+# vector, as a fused command-line search does, takes over 800 ms.
+SHOW_BUDGET_MS = 500
 
 # Vector length: qwen3-embedding's default, the longest a default install
 # stores.
@@ -195,6 +201,21 @@ def median_ms(samples):
     return round(statistics.median(samples[1:]) * 1000, 1)
 
 
+def time_show(binary, env, count):
+    """Median `embedding show` time, which counts the stored vectors, after
+    checking it counts every one as current."""
+    samples = []
+    for _ in range(RUNS + 1):
+        started = time.perf_counter()
+        out = subprocess.run([str(binary), "embedding", "show"], env=env, check=True,
+                             capture_output=True, text=True).stdout
+        samples.append(time.perf_counter() - started)
+    wanted = f"Stored vectors: {count:,} ({count:,} current), "
+    if wanted not in out:
+        raise RuntimeError(f"embedding show did not print {wanted!r}:\n{out}")
+    return median_ms(samples)
+
+
 def time_cli(binary, env, topic):
     samples = []
     for _ in range(RUNS + 1):
@@ -289,6 +310,11 @@ def main():
                      "USER_MEMORY_EMBED_MODEL": MODEL, "USER_MEMORY_EMBED_DIMENSIONS": str(args.dimensions),
                      "USER_MEMORY_EMBED_ALLOW_HTTP": "1"}
         over = []
+        memories = sqlite3.connect(db).execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+        show_ms = time_show(args.binary, fused_env, memories)
+        print(f"embedding show, counting {memories:,} stored vectors: {show_ms} ms")
+        if show_ms > SHOW_BUDGET_MS:
+            over.append(f"embedding show: {show_ms} ms > {SHOW_BUDGET_MS} ms")
         chosen = topics(db, words)
         times = {}
         for mode, mode_env in (("keyword", env), ("fused", fused_env)):
@@ -324,7 +350,7 @@ def main():
         print("Over budget:\n  " + "\n  ".join(over))
         sys.exit(1)
     print(f"Within budget: CLI keyword under {CLI_KEYWORD_BUDGET_MS} ms, server keyword and fused "
-          f"under {SERVER_BUDGET_MS} ms")
+          f"under {SERVER_BUDGET_MS} ms, embedding show under {SHOW_BUDGET_MS} ms")
 
 
 if __name__ == "__main__":

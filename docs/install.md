@@ -230,6 +230,11 @@ Claude Code: OK
 Claude Code session hook: OK
 ```
 
+On the machine that runs the installer's Docker server, the embedding line
+shows that server's setting instead, ``Embedding: qwen3-embedding:4b, in the memory server's embedding.env``
+or ``Embedding: off; search uses keywords only``, followed by the vectors
+its store holds ([semantic search](server.md#semantic-search)).
+
 It exits with code 0 when all is well, 3 when nothing is broken but a step
 is left for you (its `Action needed:` lines, last), and 1 on an error.
 

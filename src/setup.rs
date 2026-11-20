@@ -1589,9 +1589,16 @@ fn check_embedding(saved: Option<&Installation>, db: &Path) -> Result<Option<Str
     let setting = |name: &str| embedding::lookup(saved, name).map(|(value, _)| value);
     let sends = crate::memory::embedding_disclosure(&setting);
     let probe = crate::memory::probe_embedding(&setting);
-    // Said even when the probe fails: the setting still sends text there.
-    if let (Some(line), Err(_)) = (&sends, &probe) {
-        println!("{line}");
+    let stored = crate::memory::embedding::stored_vectors(db, &setting);
+    // Said even when the probe fails: the setting still sends text there,
+    // and the store still holds what it holds.
+    if probe.is_err() {
+        for line in sends
+            .iter()
+            .chain(stored.as_ref().ok().and_then(Option::as_ref))
+        {
+            println!("{line}");
+        }
     }
     match probe? {
         Some(probe) => {
@@ -1601,7 +1608,7 @@ fn check_embedding(saved: Option<&Installation>, db: &Path) -> Result<Option<Str
                 probe.dimensions,
                 probe.elapsed.as_millis()
             );
-            if let Some(line) = &sends {
+            for line in sends.iter().chain(&stored?) {
                 println!("{line}");
             }
             let model = format!("{} ({} dimensions)", probe.model, probe.dimensions);
@@ -1626,6 +1633,24 @@ fn check_embedding(saved: Option<&Installation>, db: &Path) -> Result<Option<Str
         None => println!("Embedding: off; search uses keywords only"),
     }
     Ok(None)
+}
+
+/// Doctor's embedding lines on a client: the installer's Docker server on
+/// this machine shows its setting and stored vectors; another server keeps
+/// both to itself.
+fn remote_embedding(url: &str, failures: &mut Vec<String>) {
+    let Some(dir) = docker_dir(url) else {
+        println!("Embedding: managed by the memory server");
+        return;
+    };
+    match embedding::docker_doctor(&dir) {
+        Ok(lines) => {
+            for line in lines {
+                println!("{line}");
+            }
+        }
+        Err(err) => failures.push(format!("Embedding: {err:#}")),
+    }
 }
 
 /// `value` on one line: a newline, tab or other control character shown as
@@ -1772,8 +1797,8 @@ pub async fn doctor(options: &Options) -> Result<Health> {
     {
         println!("{notice}");
     }
-    if paths.remote.is_some() {
-        println!("Embedding: managed by the memory server");
+    if let Some(remote) = &paths.remote {
+        remote_embedding(&remote.url, &mut failures);
     } else {
         match check_embedding(saved.as_ref(), &paths.db) {
             Ok(Some(step)) => actions.push(step),

@@ -238,12 +238,7 @@ fn apply_docker_with(docker: &Path, dir: &Path, settings: &Settings) -> Result<S
 /// container's own probe and calibration lines. When the container can't
 /// answer, Docker's reason goes to stderr and the command to run follows.
 pub(super) fn docker_show(dir: &Path) -> Result<String> {
-    let file = dir.join(DOCKER_ENV);
-    let settings = match fs::read_to_string(&file) {
-        Ok(text) => parse(&text, &file)?,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Settings::new(),
-        Err(err) => return Err(err).with_context(|| format!("Cannot read {}", file.display())),
-    };
+    let settings = docker_settings(dir)?;
     let Some(url) = settings.get("USER_MEMORY_EMBED_URL") else {
         return Ok("Embedding: off; search uses keywords only".into());
     };
@@ -289,6 +284,64 @@ pub(super) fn docker_show(dir: &Path) -> Result<String> {
     }
     Ok(lines.join("\n"))
 }
+
+/// The Docker server's setting in `dir`, from its embedding.env; none when
+/// the file is missing.
+fn docker_settings(dir: &Path) -> Result<Settings> {
+    let file = dir.join(DOCKER_ENV);
+    match fs::read_to_string(&file) {
+        Ok(text) => parse(&text, &file),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Settings::new()),
+        Err(err) => Err(err).with_context(|| format!("Cannot read {}", file.display())),
+    }
+}
+
+/// What doctor prints about embedding on a client of the installer's
+/// Docker server in `dir`: the setting from its embedding.env, where it
+/// sends memory text, and the vectors the server's store holds, from the
+/// container's `embedding show`. When the container can't answer, Docker's
+/// reason goes to stderr and the command to run follows.
+pub(super) fn docker_doctor(dir: &Path) -> Result<Vec<String>> {
+    docker_doctor_with(Path::new("docker"), dir)
+}
+
+/// [`docker_doctor`] with `docker` as the Docker command.
+fn docker_doctor_with(docker: &Path, dir: &Path) -> Result<Vec<String>> {
+    let settings = docker_settings(dir)?;
+    if !settings.contains_key("USER_MEMORY_EMBED_URL") {
+        return Ok(vec!["Embedding: off; search uses keywords only".into()]);
+    }
+    let setting = |name: &str| settings.get(name).cloned();
+    let model = setting("USER_MEMORY_EMBED_MODEL")
+        .unwrap_or_else(|| crate::memory::DEFAULT_EMBED_MODEL.to_owned());
+    let mut lines = vec![format!(
+        "Embedding: {model}, in the memory server's {DOCKER_ENV}"
+    )];
+    lines.extend(crate::memory::embedding_disclosure(&setting));
+    let compose = Compose::with_docker(docker.to_owned(), dir.join("compose.yaml"));
+    match compose.exec(&[], &["embedding", "show"]) {
+        Ok(out) if out.status.success() => lines.extend(
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter(|line| line.starts_with(STORED))
+                .map(str::to_owned),
+        ),
+        answered => {
+            match answered {
+                Ok(out) => eprint!("{}", String::from_utf8_lossy(&out.stderr)),
+                Err(err) => eprintln!("{err:#}"),
+            }
+            lines.push(format!(
+                "Probe and stored vectors: {}",
+                compose.exec_hint("embedding show")
+            ));
+        }
+    }
+    Ok(lines)
+}
+
+/// How the container's line on the vectors its store holds starts.
+const STORED: &str = "Stored vectors: ";
 
 /// How the line that names where semantic search sends memory text starts.
 const SENDS: &str = "Semantic search sends ";
@@ -501,24 +554,91 @@ case " $* " in
         [ ! -f "$VOLUME/sync-fails" ] || { echo "probe failed" >&2; exit 1; }
         echo "Embedded 3 memories"
         ;;
+    *" embedding show "*)
+        [ ! -f "$VOLUME/container-down" ] || { echo 'service "memory" is not running' >&2; exit 1; }
+        printf '%s\n' 'Endpoint: https://api.example.com/v1/embeddings' \
+            'Semantic search sends memory text and searches to api.example.com' \
+            'Model: m' 'Vector length: 3' \
+            'Stored vectors: 2 (1 current), 0.0 MB; a server holds the current ones in memory' \
+            'Calibration: built in'
+        ;;
 esac
 "#;
 
+    /// A fake Docker command in `tmp`, its volume folder beside it.
     #[cfg(unix)]
-    #[test]
-    fn a_docker_change_applies_whole_or_puts_the_old_setting_back() {
+    fn fake_docker(tmp: &Path) -> (PathBuf, PathBuf) {
         use std::os::unix::fs::PermissionsExt;
-        let tmp = tempfile::tempdir().unwrap();
-        let (dir, volume) = (tmp.path().join("docker"), tmp.path().join("volume"));
-        fs::create_dir_all(&dir).unwrap();
+        let volume = tmp.join("volume");
         fs::create_dir_all(&volume).unwrap();
-        let docker = tmp.path().join("fake-docker");
+        let docker = tmp.join("fake-docker");
         fs::write(
             &docker,
             FAKE_DOCKER.replace("$VOLUME", volume.to_str().unwrap()),
         )
         .unwrap();
         fs::set_permissions(&docker, fs::Permissions::from_mode(0o755)).unwrap();
+        (docker, volume)
+    }
+
+    // On a client of the Docker server, doctor shows the setting from
+    // embedding.env and only the container's stored-vectors line; the
+    // command to run when the container can't answer.
+    #[cfg(unix)]
+    #[test]
+    fn doctor_on_a_docker_client_shows_the_setting_and_the_stored_vectors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (docker, volume) = fake_docker(tmp.path());
+        let dir = tmp.path().join("docker");
+        fs::create_dir_all(&dir).unwrap();
+        let doctor = || docker_doctor_with(&docker, &dir).unwrap();
+        assert_eq!(doctor(), ["Embedding: off; search uses keywords only"]);
+        assert!(!volume.join("docker.log").exists(), "off asks no container");
+
+        fs::write(
+            dir.join(DOCKER_ENV),
+            "USER_MEMORY_EMBED_URL=http://host.docker.internal:11434/v1/embeddings\nUSER_MEMORY_EMBED_ALLOW_HTTP=1\n",
+        )
+        .unwrap();
+        assert_eq!(
+            doctor(),
+            [
+                "Embedding: qwen3-embedding:4b, in the memory server's embedding.env",
+                "Stored vectors: 2 (1 current), 0.0 MB; a server holds the current ones in memory",
+            ]
+        );
+
+        fs::write(
+            dir.join(DOCKER_ENV),
+            "USER_MEMORY_EMBED_URL=https://api.example.com/v1/embeddings\nUSER_MEMORY_EMBED_MODEL=m\n",
+        )
+        .unwrap();
+        assert_eq!(
+            doctor(),
+            [
+                "Embedding: m, in the memory server's embedding.env",
+                "Semantic search sends memory text and searches to api.example.com",
+                "Stored vectors: 2 (1 current), 0.0 MB; a server holds the current ones in memory",
+            ]
+        );
+
+        fs::write(volume.join("container-down"), "").unwrap();
+        let lines = doctor();
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert!(
+            lines[2].starts_with("Probe and stored vectors: docker compose -f ")
+                && lines[2].ends_with(" exec memory user-memory embedding show"),
+            "{lines:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_docker_change_applies_whole_or_puts_the_old_setting_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (docker, volume) = fake_docker(tmp.path());
+        let dir = tmp.path().join("docker");
+        fs::create_dir_all(&dir).unwrap();
         let old_env = "USER_MEMORY_EMBED_URL=https://old.example.com/v1/embeddings\nUSER_MEMORY_EMBED_MODEL=old\nUSER_MEMORY_EMBED_API_KEY_FILE=/data/embedding-key\n";
         fs::write(dir.join(DOCKER_ENV), old_env).unwrap();
         fs::write(volume.join("embedding-key"), "old-key\n").unwrap();

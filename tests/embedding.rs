@@ -810,3 +810,74 @@ fn show_on_the_docker_servers_machine_names_an_endpoint_elsewhere_once() {
         c.docker_log()
     );
 }
+
+/// The stored-vectors line for `count` vectors, `current` of them current,
+/// of `bytes` in all.
+fn stored_line(count: u64, current: u64, bytes: i64) -> String {
+    format!(
+        "Stored vectors: {count} ({current} current), {:.1} MB; a server holds the current ones in memory",
+        bytes as f64 / 1_000_000.0
+    )
+}
+
+// show and doctor count the vectors stored for the configured model and
+// requested length, the ones a server loads, whether or not the endpoint
+// answers; another model's, or another length's, are not counted.
+#[test]
+fn show_and_doctor_count_the_vectors_a_server_would_hold() {
+    let s = Store::new();
+    for content in [
+        "Keep commits small",
+        "Answer in short paragraphs",
+        "Run the tests before pushing",
+    ] {
+        s.record(content);
+    }
+    let endpoint = Endpoint::start(Answer::Separating);
+    let out = s.run(Some(&endpoint), &["embedding", "sync"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let conn = rusqlite::Connection::open(&s.db).unwrap();
+    // One vector is stale: its memory's text changed since it was made.
+    conn.execute(
+        "UPDATE memory_vectors SET source='an older text' WHERE rowid=(SELECT min(rowid) FROM memory_vectors)",
+        [],
+    )
+    .unwrap();
+    // Another model's vector is never held with this model's.
+    conn.execute(
+        "INSERT INTO memory_vectors (id,model,dimensions,source,vector) VALUES ('other','other-model',0,'s',zeroblob(4096))",
+        [],
+    )
+    .unwrap();
+    let bytes: i64 =
+        s.query("SELECT sum(length(vector)) FROM memory_vectors WHERE model='fake-model'");
+    let line = stored_line(3, 2, bytes);
+
+    let out = s.run(Some(&endpoint), &["embedding", "show"]);
+    let said = text(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(said.contains(&format!("\n{line}\nCalibration: ")), "{said}");
+    let said = text(&s.run(Some(&endpoint), &["doctor"]));
+    assert!(said.contains(&format!("\n{line}\n")), "{said}");
+    // The count reads the store only: an endpoint that doesn't answer
+    // leaves it as it is.
+    let gone = [
+        ("USER_MEMORY_EMBED_URL", ELSEWHERE),
+        ("USER_MEMORY_EMBED_MODEL", "fake-model"),
+    ];
+    let said = text(&s.run_with(None, &gone, &["embedding", "show"]));
+    assert!(said.contains("Probe: failed ("), "{said}");
+    assert!(said.contains(&line), "{said}");
+    // Vectors made at the model's own length aren't the ones a requested
+    // length loads.
+    let said = text(&s.run_with(
+        Some(&endpoint),
+        &[("USER_MEMORY_EMBED_DIMENSIONS", "3")],
+        &["embedding", "show"],
+    ));
+    assert!(said.contains(&stored_line(0, 0, 0)), "{said}");
+    // With semantic search off, nothing is counted.
+    let said = text(&s.run(None, &["embedding", "show"]));
+    assert!(said.contains("Embedding: off"), "{said}");
+    assert!(!said.contains("Stored vectors"), "{said}");
+}

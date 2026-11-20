@@ -585,11 +585,13 @@ builds a throwaway store of 100,000 synthetic memories (`--memories N` for
 another size), builds its keyword index with `reindex`, gives every memory a
 vector of 2,560 dimensions (`--dimensions N`), then times searches whose
 words few, some and many memories hold, keyword-only and fused, as a whole
-command-line process and inside one long-running `serve`. Query embeddings
-come from a stand-in endpoint in the script that answers at once. It prints
-each median, the server's memory and its first fused search, and fails when
-one is over its budget: 150 ms for a keyword search on the command line, and
-100 ms for any search on the server (`evals/scale/run.py`). A fused search
+command-line process and inside one long-running `serve`, and times
+`user-memory embedding show`, which counts the stored vectors. Query
+embeddings come from a stand-in endpoint in the script that answers at once.
+It prints each median, the server's memory and its first fused search, and
+fails when one is over its budget: 150 ms for a keyword search on the
+command line, 100 ms for any search on the server, and 500 ms for
+`embedding show` (`evals/scale/run.py`). A fused search
 on the command line reads every vector and is reported, not checked.
 `--keep DIR` keeps the built store and `--store FILE` times it again. Run it
 after a change to search, the keyword index or the vectors, and report what

@@ -5,7 +5,7 @@
 use super::{
     calibration::{self, Calibration},
     connect,
-    index::{embed::Config, reindex_with},
+    index::{embed::Config, reindex_with, vectors},
 };
 use anyhow::{Context, Result, bail};
 use clap::Args;
@@ -184,9 +184,49 @@ pub fn drop_vectors(db: &Path) -> Result<usize> {
     Ok(dropped)
 }
 
+/// Bytes in a megabyte as the stored-vectors line counts them: 10^6, as
+/// the docs' per-memory figures do.
+const MEGABYTE: f64 = 1_000_000.0;
+
+/// Digits between the commas of a grouped count: thousands.
+const GROUP: usize = 3;
+
+/// `n` with its thousands grouped by commas, as in 4,120.
+fn grouped(n: u64) -> String {
+    let digits = n.to_string();
+    let mut text = String::with_capacity(digits.len() + digits.len() / GROUP);
+    for (at, digit) in digits.chars().enumerate() {
+        if at > 0 && (digits.len() - at).is_multiple_of(GROUP) {
+            text.push(',');
+        }
+        text.push(digit);
+    }
+    text
+}
+
+/// The line `embedding show` and doctor print for the vectors the store at
+/// `db` holds for `setting`'s model and requested length, the key a server
+/// loads them by; `None` with semantic search off. It reads the store
+/// only, so it never depends on the endpoint answering.
+pub fn stored_vectors(
+    db: &Path,
+    setting: &dyn Fn(&str) -> Option<String>,
+) -> Result<Option<String>> {
+    let Some(config) = Config::from_settings(setting)? else {
+        return Ok(None);
+    };
+    let stored = vectors::stored(&connect(db)?, config.identity())?;
+    Ok(Some(format!(
+        "Stored vectors: {} ({} current), {:.1} MB; a server holds the current ones in memory",
+        grouped(stored.count),
+        grouped(stored.current),
+        stored.bytes as f64 / MEGABYTE
+    )))
+}
+
 /// What `embedding show` prints for `settings` and the store at `db`: the
-/// endpoint and model, then the vector length and calibration from one
-/// probe, or why the probe failed.
+/// endpoint and model, then the vector length from one probe, or why the
+/// probe failed, the vectors stored, and the calibration.
 pub fn show(db: &Path, settings: &Settings) -> Result<String> {
     let Some(url) = settings.get("USER_MEMORY_EMBED_URL") else {
         return Ok("Embedding: off; search uses keywords only".into());
@@ -198,11 +238,13 @@ pub fn show(db: &Path, settings: &Settings) -> Result<String> {
         settings.get(name).cloned()
     }));
     lines.push(format!("Model: {model}"));
+    let stored = stored_vectors(db, &|name| settings.get(name).cloned())?;
     match config.embed(&["user-memory embedding probe".to_owned()]) {
         Ok(vectors) => {
             let length = vectors.first().map_or(0, Vec::len);
             let calibration = super::calibration(db, &model, length)?;
             lines.push(format!("Vector length: {length}"));
+            lines.extend(stored);
             lines.push(format!(
                 "Calibration: {}",
                 match calibration {
@@ -215,7 +257,10 @@ pub fn show(db: &Path, settings: &Settings) -> Result<String> {
                 }
             ));
         }
-        Err(err) => lines.push(format!("Probe: failed ({err:#})")),
+        Err(err) => {
+            lines.push(format!("Probe: failed ({err:#})"));
+            lines.extend(stored);
+        }
     }
     Ok(lines.join("\n"))
 }
@@ -223,6 +268,51 @@ pub fn show(db: &Path, settings: &Settings) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn counts_group_their_thousands() {
+        for (n, text) in [
+            (0, "0"),
+            (999, "999"),
+            (1_000, "1,000"),
+            (4_120, "4,120"),
+            (100_000, "100,000"),
+            (1_234_567, "1,234,567"),
+        ] {
+            assert_eq!(grouped(n), text);
+        }
+    }
+
+    // The size is the stored bytes in megabytes of 10^6; vectors of another
+    // model, or whose memory is gone, are counted only where they belong.
+    #[test]
+    fn the_stored_vectors_line_gives_their_bytes_in_megabytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("memories.sqlite3");
+        let conn = connect(&db).unwrap();
+        for i in 0..100 {
+            conn.execute(
+                "INSERT INTO memory_vectors (id,model,dimensions,source,vector) VALUES (?1,'m',0,'s',zeroblob(25000))",
+                [format!("gone-{i}")],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO memory_vectors (id,model,dimensions,source,vector) VALUES ('other','other',0,'s',zeroblob(10240))",
+            [],
+        )
+        .unwrap();
+        let setting = |name: &str| match name {
+            "USER_MEMORY_EMBED_URL" => Some("http://127.0.0.1:9/v1/embeddings".to_owned()),
+            "USER_MEMORY_EMBED_MODEL" => Some("m".to_owned()),
+            _ => None,
+        };
+        assert_eq!(
+            stored_vectors(&db, &setting).unwrap().unwrap(),
+            "Stored vectors: 100 (0 current), 2.5 MB; a server holds the current ones in memory"
+        );
+        assert_eq!(stored_vectors(&db, &|_| None).unwrap(), None);
+    }
 
     fn choice(url: &str, model: &str) -> Choice {
         Choice {
