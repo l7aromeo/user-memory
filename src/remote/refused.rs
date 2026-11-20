@@ -9,12 +9,9 @@ use rmcp::{
     transport::streamable_http_client::{AuthRequiredError, StreamableHttpError},
 };
 
-/// How rmcp's HTTP client begins the text of an answer it did not expect
-/// when the server answered 503. rmcp gives no status code to match, only
-/// this text; `a_damaged_or_newer_registry_refuses_every_request_until_moved_aside`
-/// in tests/tokens.rs runs the real client against a 503 and fails if a
-/// newer rmcp words it differently, so change this only with that test.
-const UNAVAILABLE_STATUS: &str = "HTTP 503";
+/// The status a memory server answers while it cannot serve requests, as
+/// it does while its token registry cannot be read.
+const UNAVAILABLE_STATUS: u16 = 503;
 
 /// What the user is told when the server at `url` answered 503, as it does
 /// while its token registry cannot be read: it is up, and its log says why.
@@ -48,8 +45,8 @@ pub fn unavailable(err: &anyhow::Error) -> bool {
         wrapped(cause).any(|cause| {
             matches!(
                 cause.downcast_ref::<StreamableHttpError<reqwest::Error>>(),
-                Some(StreamableHttpError::UnexpectedServerResponse(said))
-                    if said.starts_with(UNAVAILABLE_STATUS)
+                Some(StreamableHttpError::HttpStatus(answered))
+                    if answered.status == UNAVAILABLE_STATUS
             )
         })
     })

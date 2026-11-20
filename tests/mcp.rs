@@ -889,6 +889,63 @@ fn only_a_failed_call_is_flagged_as_an_error() {
     assert_eq!(text(&answered), "No user memories recorded yet.");
 }
 
+/// The server offers tools only, so a host that asks for resources, prompts
+/// or completions anyway is told the method does not exist, as the MCP spec
+/// has it, rather than handed an empty result.
+#[test]
+fn methods_the_server_does_not_offer_are_not_found() {
+    /// JSON-RPC's code for a method the server does not have.
+    const METHOD_NOT_FOUND: i64 = -32601;
+    let tmp = tempdir().unwrap();
+    let mut child = server(tmp.path(), tmp.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let unoffered = [
+        json!({"method":"resources/list","params":{}}),
+        json!({"method":"resources/templates/list","params":{}}),
+        json!({"method":"prompts/list","params":{}}),
+        json!({"method":"completion/complete","params":{"ref":{"type":"ref/prompt","name":"any"},"argument":{"name":"any","value":""}}}),
+    ];
+    let mut messages = vec![
+        json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"integration-test","version":"1"}}}),
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+    ];
+    for (id, request) in (1..).zip(&unoffered) {
+        let mut request = request.clone();
+        request["jsonrpc"] = json!("2.0");
+        request["id"] = json!(id);
+        messages.push(request);
+    }
+    for msg in messages {
+        writeln!(input, "{msg}").unwrap();
+        input.flush().unwrap();
+    }
+    let mut answers = BTreeMap::new();
+    while answers.len() <= unoffered.len() {
+        let mut line = String::new();
+        assert!(output.read_line(&mut line).unwrap() > 0);
+        let msg: Value = serde_json::from_str(&line).unwrap();
+        if let Some(id) = msg["id"].as_i64() {
+            answers.insert(id, msg);
+        }
+    }
+    drop(input);
+    child.wait().unwrap();
+    for (id, request) in (1..).zip(&unoffered) {
+        let answer = &answers[&id];
+        assert_eq!(
+            answer["error"]["code"], METHOD_NOT_FOUND,
+            "{}: {answer}",
+            request["method"]
+        );
+    }
+}
+
 /// The fields user-memory's own client sends, which the tools' schemas leave
 /// out, still work: the session hooks ask index for stamps.
 #[test]
