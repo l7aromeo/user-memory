@@ -62,8 +62,8 @@ const FRAGMENT_CHARS: usize = 3;
 
 /// The most matching work one quote may take, in matcher steps. Counted,
 /// not timed, so a slow machine fails nothing: a doc's quotes take at most
-/// about 12,000 steps, and the longest No-project line the code can print
-/// about 240,000. A matcher that backtracks over hole boundaries, or that
+/// about 53,000 steps, and the longest No-project line the code can print
+/// about 740,000. A matcher that backtracks over hole boundaries, or that
 /// matches patterns which cannot change the answer, takes millions on that
 /// line, so a slowdown that size fails here instead of creeping into every
 /// `just check`.
