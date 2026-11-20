@@ -9,20 +9,19 @@
 //! - The score: what a memory's slot 0 and one passage hold of the window,
 //!   each term by its field and its rarity, as search ranks a topic.
 //!
-//! It reads the delivery index (`super::delivery`). No hook matches yet, so
-//! the shipped binary declares this module for its tests only; the delivery
+//! It reads the delivery index (`super::delivery`), a base with its overlay
+//! ([`View`]). The delivery
 //! benchmark's binary (`user-memory-bench`, evals/delivery/entry.rs)
 //! compiles it through a `#[path]` mirror of `src/memory`: use only std,
 //! rusqlite and the mirrored modules here.
 
-use super::delivery::{DeliveryIndex, Error, POSTING_BYTES, Row, prefix, u32_at};
+use super::delivery::{DeliveryIndex, Error, POSTING_BYTES, Row, View, prefix, u32_at};
 use crate::memory::index::{
     passages::{self, CONTEXT_SLOT},
     stems::{Field, Stems, token},
     weights::{ANCHOR_WEIGHT, rarity, weight},
 };
-use rusqlite::Connection;
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 /// Actions the window keeps: older ones fall out. #117's starting value,
 /// which the delivery benchmark cannot measure: each of its tasks is
@@ -68,6 +67,13 @@ pub(crate) const COMMAND_FAILURE_BAR: f64 = 0.6;
 /// [`COMMAND_PUSH_BAR`], as a hold interrupts the agent. At 0.75 a task
 /// sees 1.69 holds at 1,000 memories, 0.91 of held passages needed then;
 /// at 1.0 it would see 1.14 and lose 0.09 of anchored recall.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "measured by the delivery benchmark; no hook holds a command yet (#118)"
+    )
+)]
 pub(crate) const HOLD_BAR: f64 = 0.75;
 
 /// The `mixed` score a passage needs to be pushed after any action but a
@@ -122,7 +128,8 @@ pub(crate) enum Kind {
     Plan,
     /// A shell command line.
     Command,
-    /// A file read or edited, by its path relative to the project root.
+    /// A file read or edited, by its path relative to the project root;
+    /// one action of a patch names each of its files on a line.
     File,
     /// A message the agent sent.
     Message,
@@ -290,7 +297,12 @@ pub(in crate::memory) fn terms(action: &Action, stems: &mut Stems) -> Terms {
     let mut terms = Terms::default();
     match action.kind {
         Kind::Command => command_terms(&action.text, stems, &mut terms),
-        Kind::File => file_terms(&action.text, stems, &mut terms),
+        // A patch names several files, one per line.
+        Kind::File => {
+            for path in action.text.lines() {
+                file_terms(path, stems, &mut terms);
+            }
+        }
         Kind::Prompt | Kind::Task | Kind::Plan | Kind::Message | Kind::Search => {
             terms.words(stems, &action.text);
             terms.anchors.extend(passages::query_anchors(&action.text));
@@ -341,13 +353,21 @@ impl Window {
     }
 
     /// Adds `action`, the one that fires the next match; the oldest past
-    /// [`WINDOW_ACTIONS`] falls out.
-    pub(crate) fn push(&mut self, action: &Action) {
+    /// [`WINDOW_ACTIONS`] falls out. Returns the terms it added, which a
+    /// hook keeps for the next one's window.
+    pub(crate) fn push(&mut self, action: &Action) -> &Terms {
         let terms = terms(action, &mut self.stems);
-        self.actions.push_back((action.kind, terms, action.failed));
+        self.push_terms(action.kind, terms, action.failed)
+    }
+
+    /// Adds an action already taken to terms, as a hook reads it back.
+    pub(crate) fn push_terms(&mut self, kind: Kind, terms: Terms, failed: bool) -> &Terms {
+        self.actions.push_back((kind, terms, failed));
         while self.actions.len() > self.tuning.window_actions {
             self.actions.pop_front();
         }
+        let (_, terms, _) = self.actions.back().expect("an action was just added");
+        terms
     }
 }
 
@@ -425,6 +445,13 @@ impl Matched {
     }
     /// Holds the command: one of its anchors, and past [`HOLD_BAR`].
     /// Stems alone never hold.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "measured by the delivery benchmark; no hook holds a command yet (#118)"
+        )
+    )]
     pub(crate) fn hold(&self) -> bool {
         self.command && self.share >= HOLD_BAR
     }
@@ -510,151 +537,273 @@ impl DeliveryIndex {
         }
         Ok(None)
     }
+}
 
-    /// The passages `window` matches, one per memory (its best), strongest
-    /// first, each scored as search scores a topic: what slot 0 holds plus
-    /// the best passage's own terms, each by its field's weight, its rarity
-    /// among the indexed memories and its age in the window. A memory's
-    /// other passages add nothing, as in search (#124), so a long memory
-    /// matching in many places does not outrank a short one matching as
-    /// well in one. Rarity is divided by the rarest possible; that changes
-    /// the scale only, not the order, and search's own score is untouched.
-    pub(crate) fn rank(&self, window: &Window) -> Result<Vec<Matched>, Error> {
-        let mut wanted: BTreeMap<Vec<u8>, Wanted> = BTreeMap::new();
-        let newest = window.actions.len().saturating_sub(1);
-        let on_command = window
-            .actions
-            .back()
-            .is_some_and(|(kind, _, _)| *kind == Kind::Command);
-        for (i, (kind, terms, failed)) in window.actions.iter().enumerate() {
-            let age = (newest - i) as f64;
-            let fired = i == newest;
-            let weight = 0.5f64.powf(age / window.tuning.half_life);
-            let keys = terms
-                .stems
-                .iter()
-                .map(|stem| (key(false, stem), false))
-                .chain(terms.anchors.iter().map(|anchor| (key(true, anchor), true)));
-            for (key, anchor) in keys {
-                let w = wanted.entry(key).or_default();
-                w.weight = w.weight.max(weight);
-                w.fired |= fired;
-                w.failed |= fired && *failed;
-                w.anchored |= fired && anchor;
-                w.command |= fired && anchor && *kind == Kind::Command;
-            }
-        }
-        let all = self.memories as f64;
-        let rarest = rarity(all, 1.0);
-        /// One passage's hits: its row, its gain and what it holds of the
-        /// firing action.
-        type Passage = (Row, Gain, Wanted);
-        /// One memory's hits: slot 0's score and flags, and each passage's.
-        #[derive(Default)]
-        struct Hits {
-            whole: Gain,
-            whole_wanted: Wanted,
-            passages: BTreeMap<u16, Passage>,
-        }
-        let mut found: HashMap<u32, Hits> = HashMap::new();
-        // What the action that fired could score at most: each of its terms
-        // once as text, a term no memory holds as rare as one memory's.
-        let mut possible = 0.0;
-        for (key, want) in &wanted {
-            let postings = self.postings(key)?;
-            let anchor = key.first() == Some(&b'a');
-            if want.fired {
-                let holders = postings.as_ref().map_or(1, |f| f.holders.max(1));
-                let base = if anchor {
-                    ANCHOR_WEIGHT
-                } else {
-                    weight(Field::Body)
-                };
-                possible += base * rarity(all, holders as f64) / rarest;
-            }
-            let Some(Found {
-                holders,
-                rows: list,
-            }) = postings
-            else {
-                continue;
-            };
-            let worth = |field: Field| {
-                let base = if anchor { ANCHOR_WEIGHT } else { weight(field) } * want.weight;
-                let held = holders.max(1) as f64;
-                Gain {
-                    store: base * rarity(all, held) / rarest,
-                    mixed: if anchor {
-                        base / held.sqrt()
-                    } else {
-                        base / held
-                    },
-                }
-            };
-            let mut want = *want;
-            if want.anchored {
-                want.fewest = holders;
-            }
-            let want = &want;
-            for (row, field) in list {
-                let hits = found.entry(row.memory).or_default();
-                if row.slot == 0 {
-                    hits.whole.add(worth(field));
-                    merge(&mut hits.whole_wanted, want);
-                } else {
-                    let entry = hits.passages.entry(row.slot).or_insert((
-                        row,
-                        Gain::default(),
-                        Wanted::default(),
-                    ));
-                    entry.1.add(worth(field));
-                    merge(&mut entry.2, want);
-                }
-            }
-        }
-        let mut matched = Vec::with_capacity(found.len());
-        for (memory, hits) in found {
-            let best =
-                hits.passages
-                    .values()
-                    .fold(None::<&Passage>, |best, candidate| match best {
-                        Some(b) if b.1.store >= candidate.1.store => Some(b),
-                        _ => Some(candidate),
-                    });
-            let (row, gain, own) = match best {
-                Some((row, gain, own)) => (*row, *gain, *own),
-                None => match self.first_passage(memory)? {
-                    Some(row) => (row, Gain::default(), Wanted::default()),
-                    None => continue,
-                },
-            };
-            let mut flags = hits.whole_wanted;
-            merge(&mut flags, &own);
-            let mut total = hits.whole;
-            total.add(gain);
-            matched.push(Matched {
-                memory: memory as usize,
-                slot: i64::from(row.slot),
-                start: row.start as usize,
-                length: row.length as usize,
-                score: total.store,
-                mixed: total.mixed,
-                share: if possible > 0.0 {
-                    total.store / possible
-                } else {
-                    0.0
-                },
-                fired: flags.fired,
-                failed: flags.failed,
-                anchored: flags.anchored,
-                command: flags.command,
-                on_command,
-                fewest: flags.fewest,
-            });
-        }
-        matched.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.memory.cmp(&b.memory)));
-        Ok(matched)
+/// Where a ranking reads its postings and passages: one delivery index,
+/// or a base with the overlay made for it.
+trait Lookup {
+    /// How many memories the rows come from.
+    fn memories(&self) -> usize;
+    /// The rows holding `key`, each with the field holding it there, and
+    /// how many memories hold it.
+    fn postings(&self, key: &[u8]) -> Result<Option<Found>, Error>;
+    /// The first passage row of memory `m`.
+    fn first_passage(&self, m: u32) -> Result<Option<Row>, Error>;
+}
+
+impl Lookup for DeliveryIndex {
+    fn memories(&self) -> usize {
+        self.memories
     }
+    fn postings(&self, key: &[u8]) -> Result<Option<Found>, Error> {
+        DeliveryIndex::postings(self, key)
+    }
+    fn first_passage(&self, m: u32) -> Result<Option<Row>, Error> {
+        DeliveryIndex::first_passage(self, m)
+    }
+}
+
+/// A base with its overlay, as one index: the overlay's memories numbered
+/// after the base's, and the base's rows of the memories the overlay's skip
+/// list names left out, so a changed memory is matched on its new words
+/// only and a forgotten one not at all.
+struct Joined<'a> {
+    base: &'a DeliveryIndex,
+    overlay: &'a DeliveryIndex,
+    /// The base's positions of the memories the overlay skips.
+    skipped: HashSet<u32>,
+}
+
+impl Joined<'_> {
+    /// The overlay's memory `m` as numbered here.
+    fn shifted(&self, m: u32) -> u32 {
+        m + self.base.memories as u32
+    }
+}
+
+impl Lookup for Joined<'_> {
+    fn memories(&self) -> usize {
+        self.base.memories - self.skipped.len() + self.overlay.memories
+    }
+    fn postings(&self, key: &[u8]) -> Result<Option<Found>, Error> {
+        let mut rows = Vec::new();
+        if let Some(found) = self.base.postings(key)? {
+            rows.extend(
+                found
+                    .rows
+                    .into_iter()
+                    .filter(|(row, _)| !self.skipped.contains(&row.memory)),
+            );
+        }
+        if let Some(found) = self.overlay.postings(key)? {
+            rows.extend(found.rows.into_iter().map(|(row, field)| {
+                (
+                    Row {
+                        memory: self.shifted(row.memory),
+                        ..row
+                    },
+                    field,
+                )
+            }));
+        }
+        // Each term's rarity among the memories kept, not the base's count.
+        let holders: HashSet<u32> = rows.iter().map(|(row, _)| row.memory).collect();
+        Ok((!rows.is_empty()).then_some(Found {
+            holders: holders.len(),
+            rows,
+        }))
+    }
+    fn first_passage(&self, m: u32) -> Result<Option<Row>, Error> {
+        let offset = self.base.memories as u32;
+        if m < offset {
+            return self.base.first_passage(m);
+        }
+        Ok(self.overlay.first_passage(m - offset)?.map(|row| Row {
+            memory: self.shifted(row.memory),
+            ..row
+        }))
+    }
+}
+
+impl View {
+    /// The passages `window` matches in the base and its overlay, as
+    /// [`ranked`] ranks one index; each [`Matched::memory`] is a position
+    /// [`View::id`] names.
+    pub(crate) fn rank(&self, window: &Window) -> Result<Vec<Matched>, Error> {
+        let Some(overlay) = &self.overlay else {
+            return ranked(&self.base, window);
+        };
+        let skip: HashSet<&str> = overlay.header.skip.iter().map(String::as_str).collect();
+        let mut skipped = HashSet::new();
+        if !skip.is_empty() {
+            for m in 0..self.base.memories {
+                if skip.contains(self.base.id(m)?) {
+                    skipped.insert(m as u32);
+                }
+            }
+        }
+        ranked(
+            &Joined {
+                base: &self.base,
+                overlay,
+                skipped,
+            },
+            window,
+        )
+    }
+
+    /// The id of the memory at position `m` of a [`View::rank`] match.
+    pub(crate) fn id(&self, m: usize) -> Result<&str, Error> {
+        match &self.overlay {
+            Some(overlay) if m >= self.base.memories => overlay.id(m - self.base.memories),
+            _ => self.base.id(m),
+        }
+    }
+}
+
+/// The passages `window` matches, one per memory (its best), strongest
+/// first, each scored as search scores a topic: what slot 0 holds plus
+/// the best passage's own terms, each by its field's weight, its rarity
+/// among the indexed memories and its age in the window. A memory's
+/// other passages add nothing, as in search (#124), so a long memory
+/// matching in many places does not outrank a short one matching as
+/// well in one. Rarity is divided by the rarest possible; that changes
+/// the scale only, not the order, and search's own score is untouched.
+fn ranked(source: &impl Lookup, window: &Window) -> Result<Vec<Matched>, Error> {
+    let mut wanted: BTreeMap<Vec<u8>, Wanted> = BTreeMap::new();
+    let newest = window.actions.len().saturating_sub(1);
+    let on_command = window
+        .actions
+        .back()
+        .is_some_and(|(kind, _, _)| *kind == Kind::Command);
+    for (i, (kind, terms, failed)) in window.actions.iter().enumerate() {
+        let age = (newest - i) as f64;
+        let fired = i == newest;
+        let weight = 0.5f64.powf(age / window.tuning.half_life);
+        let keys = terms
+            .stems
+            .iter()
+            .map(|stem| (key(false, stem), false))
+            .chain(terms.anchors.iter().map(|anchor| (key(true, anchor), true)));
+        for (key, anchor) in keys {
+            let w = wanted.entry(key).or_default();
+            w.weight = w.weight.max(weight);
+            w.fired |= fired;
+            w.failed |= fired && *failed;
+            w.anchored |= fired && anchor;
+            w.command |= fired && anchor && *kind == Kind::Command;
+        }
+    }
+    let all = source.memories() as f64;
+    let rarest = rarity(all, 1.0);
+    /// One passage's hits: its row, its gain and what it holds of the
+    /// firing action.
+    type Passage = (Row, Gain, Wanted);
+    /// One memory's hits: slot 0's score and flags, and each passage's.
+    #[derive(Default)]
+    struct Hits {
+        whole: Gain,
+        whole_wanted: Wanted,
+        passages: BTreeMap<u16, Passage>,
+    }
+    let mut found: HashMap<u32, Hits> = HashMap::new();
+    // What the action that fired could score at most: each of its terms
+    // once as text, a term no memory holds as rare as one memory's.
+    let mut possible = 0.0;
+    for (key, want) in &wanted {
+        let postings = source.postings(key)?;
+        let anchor = key.first() == Some(&b'a');
+        if want.fired {
+            let holders = postings.as_ref().map_or(1, |f| f.holders.max(1));
+            let base = if anchor {
+                ANCHOR_WEIGHT
+            } else {
+                weight(Field::Body)
+            };
+            possible += base * rarity(all, holders as f64) / rarest;
+        }
+        let Some(Found {
+            holders,
+            rows: list,
+        }) = postings
+        else {
+            continue;
+        };
+        let worth = |field: Field| {
+            let base = if anchor { ANCHOR_WEIGHT } else { weight(field) } * want.weight;
+            let held = holders.max(1) as f64;
+            Gain {
+                store: base * rarity(all, held) / rarest,
+                mixed: if anchor {
+                    base / held.sqrt()
+                } else {
+                    base / held
+                },
+            }
+        };
+        let mut want = *want;
+        if want.anchored {
+            want.fewest = holders;
+        }
+        let want = &want;
+        for (row, field) in list {
+            let hits = found.entry(row.memory).or_default();
+            if row.slot == 0 {
+                hits.whole.add(worth(field));
+                merge(&mut hits.whole_wanted, want);
+            } else {
+                let entry = hits.passages.entry(row.slot).or_insert((
+                    row,
+                    Gain::default(),
+                    Wanted::default(),
+                ));
+                entry.1.add(worth(field));
+                merge(&mut entry.2, want);
+            }
+        }
+    }
+    let mut matched = Vec::with_capacity(found.len());
+    for (memory, hits) in found {
+        let best = hits
+            .passages
+            .values()
+            .fold(None::<&Passage>, |best, candidate| match best {
+                Some(b) if b.1.store >= candidate.1.store => Some(b),
+                _ => Some(candidate),
+            });
+        let (row, gain, own) = match best {
+            Some((row, gain, own)) => (*row, *gain, *own),
+            None => match source.first_passage(memory)? {
+                Some(row) => (row, Gain::default(), Wanted::default()),
+                None => continue,
+            },
+        };
+        let mut flags = hits.whole_wanted;
+        merge(&mut flags, &own);
+        let mut total = hits.whole;
+        total.add(gain);
+        matched.push(Matched {
+            memory: memory as usize,
+            slot: i64::from(row.slot),
+            start: row.start as usize,
+            length: row.length as usize,
+            score: total.store,
+            mixed: total.mixed,
+            share: if possible > 0.0 {
+                total.store / possible
+            } else {
+                0.0
+            },
+            fired: flags.fired,
+            failed: flags.failed,
+            anchored: flags.anchored,
+            command: flags.command,
+            on_command,
+            fewest: flags.fewest,
+        });
+    }
+    matched.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.memory.cmp(&b.memory)));
+    Ok(matched)
 }
 
 /// A match's score by the store's rarity, and free of the store's size
@@ -683,24 +832,19 @@ fn merge(into: &mut Wanted, other: &Wanted) {
     }
 }
 
-/// The text of `matched` from the store at `db`: the passage cut from the
-/// memory's content, or its context.
-pub(crate) fn text(conn: &Connection, id: &str, matched: &Matched) -> Result<String, Error> {
-    let (content, context): (String, String) = conn.query_row(
-        "SELECT content,context FROM memories WHERE id=?1",
-        [id],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )?;
+/// `matched`'s passage of a memory whose content and context are
+/// `content` and `context`: empty when the memory changed since the index
+/// was made and the passage no longer falls on its text.
+pub(crate) fn cut<'a>(content: &'a str, context: &'a str, matched: &Matched) -> &'a str {
     let source = if matched.slot == CONTEXT_SLOT {
         context
     } else {
         content
     };
-    Ok(source
+    source
         .get(matched.start..matched.start + matched.length)
         .unwrap_or("")
         .trim()
-        .to_owned())
 }
 
 #[cfg(test)]
@@ -834,11 +978,23 @@ mod tests {
     /// An index of `memories`, each given as its title and content, from
     /// rows built as the store builds them.
     fn index(memories: &[(&str, &str)]) -> DeliveryIndex {
-        let mut stems = Stems::new();
-        let sources: Vec<Source> = memories
+        let ids: Vec<String> = (0..memories.len())
+            .map(|i| format!("00000000-0000-4000-8000-{i:012}"))
+            .collect();
+        let with: Vec<(&str, &str, &str)> = ids
             .iter()
-            .enumerate()
-            .map(|(i, (title, content))| {
+            .zip(memories)
+            .map(|(id, (title, content))| (id.as_str(), *title, *content))
+            .collect();
+        DeliveryIndex::read(DeliveryIndex::write(&sources(&with)).unwrap()).unwrap()
+    }
+
+    /// The rows of memories given as id, title and content.
+    fn sources(memories: &[(&str, &str, &str)]) -> Vec<Source> {
+        let mut stems = Stems::new();
+        memories
+            .iter()
+            .map(|(id, title, content)| {
                 let whole: Vec<(String, Field)> = stems
                     .all(title)
                     .into_iter()
@@ -868,12 +1024,87 @@ mod tests {
                     });
                 }
                 Source {
-                    id: format!("00000000-0000-4000-8000-{i:012}"),
+                    id: (*id).to_owned(),
                     rows,
                 }
             })
-            .collect();
-        DeliveryIndex::read(DeliveryIndex::write(&sources).unwrap()).unwrap()
+            .collect()
+    }
+
+    /// A view of `base` with an overlay of `changed` memories hiding
+    /// `skip`, as a refresh writes one.
+    fn view(base: &[(&str, &str, &str)], changed: &[(&str, &str, &str)], skip: &[&str]) -> View {
+        use crate::memory::delivery::{Header, Part};
+        let base = DeliveryIndex::read(DeliveryIndex::write(&sources(base)).unwrap()).unwrap();
+        let header = Header {
+            part: Part::Overlay,
+            position: "later".into(),
+            made_for: base.header.position.clone(),
+            projects: base.header.projects.clone(),
+            skip: skip.iter().map(|id| (*id).to_owned()).collect(),
+        };
+        let overlay =
+            DeliveryIndex::read(DeliveryIndex::write_with(&header, &sources(changed)).unwrap())
+                .unwrap();
+        View::new(base, Some(overlay)).unwrap()
+    }
+
+    #[test]
+    fn a_view_matches_the_overlays_rows_for_what_changed_and_hides_what_it_skips() {
+        const A: &str = "e0000001-0000-4000-8000-000000000001";
+        const B: &str = "e0000002-0000-4000-8000-000000000002";
+        const C: &str = "e0000003-0000-4000-8000-000000000003";
+        const D: &str = "e0000004-0000-4000-8000-000000000004";
+        let publish = "Run `cargo publish --dry-run` before `cargo publish`.";
+        let base = [
+            (A, "Publish note", publish),
+            (B, "Second publish note", publish),
+            (C, "Parser tables", "Keep `tables.rs` sorted."),
+        ];
+        let window = |command: &str| {
+            let mut window = Window::default();
+            window.push(&action(Kind::Command, command));
+            window
+        };
+        // The memories pushed, by id.
+        let ids = |view: &View, found: &[Matched]| -> Vec<String> {
+            found
+                .iter()
+                .filter(|m| m.push())
+                .map(|m| view.id(m.memory).unwrap().to_owned())
+                .collect()
+        };
+        // Without changes both notes match, each anchor held by two.
+        let plain = view(&base, &[], &[]);
+        let found = plain.rank(&window("cargo publish")).unwrap();
+        assert_eq!(ids(&plain, &found), [A, B]);
+        assert_eq!(found[0].fewest, 2);
+        // A changed to no longer name it, B forgotten, D new: only D, and
+        // the anchor's holders are counted over the memories kept.
+        let changed = view(
+            &base,
+            &[
+                (A, "Publish note", "Run `git tag` first."),
+                (D, "Fourth publish note", publish),
+            ],
+            &[A, B],
+        );
+        let found = changed.rank(&window("cargo publish")).unwrap();
+        assert_eq!(ids(&changed, &found), [D]);
+        assert_eq!(found[0].fewest, 1);
+        // A's new words match it, by its id.
+        assert_eq!(
+            ids(&changed, &changed.rank(&window("git tag v1")).unwrap()),
+            [A]
+        );
+        assert_eq!(
+            ids(&plain, &plain.rank(&window("git tag v1")).unwrap()),
+            [] as [&str; 0]
+        );
+        // C, unchanged, still matches from the base.
+        let mut parser = Window::default();
+        parser.push(&action(Kind::File, "src/tables.rs"));
+        assert_eq!(ids(&changed, &changed.rank(&parser).unwrap()), [C]);
     }
 
     /// A store of `n` filler memories, each sharing `common`, plus `extra`.
@@ -899,7 +1130,7 @@ mod tests {
         for action in actions {
             window.push(action);
         }
-        index.rank(&window).unwrap()
+        ranked(index, &window).unwrap()
     }
 
     fn by_id<'a>(
@@ -967,7 +1198,7 @@ mod tests {
         let damaged = DeliveryIndex::read(bytes).unwrap();
         let mut window = Window::default();
         window.push(&action(Kind::Prompt, "deploy step"));
-        assert!(matches!(damaged.rank(&window), Err(Error::Format)));
+        assert!(matches!(ranked(&damaged, &window), Err(Error::Format)));
         assert!(matches!(damaged.id(40), Err(Error::Format)));
     }
 

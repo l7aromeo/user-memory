@@ -1,5 +1,5 @@
 //! The delivery benchmark's way into the matcher (`src/memory/matcher.rs`),
-//! which no shipped command calls yet. `just delivery-bench` builds it as
+//! the one the tool hooks use. `just delivery-bench` builds it as
 //! `user-memory-bench`; releases build only `--bin user-memory`, so it never
 //! ships.
 //!
@@ -37,7 +37,7 @@ mod memory {
 
 use clap::{Parser, Subcommand};
 use memory::{
-    delivery::{self, DeliveryIndex},
+    delivery::{self, DeliveryIndex, View},
     matcher::{self, Action, Kind, Matched, Tuning, Window},
 };
 use rusqlite::{Connection, OpenFlags};
@@ -151,7 +151,24 @@ fn action(input: &ActionInput) -> Result<Action, String> {
     })
 }
 
-fn matched(index: &DeliveryIndex, m: &Matched) -> Result<Value, String> {
+/// The text of `m`, a match of memory `id`, from the store `conn`: the
+/// passage cut from its content, or its context.
+fn text(conn: &Connection, id: &str, m: &Matched) -> rusqlite::Result<String> {
+    let (content, context): (String, String) = conn.query_row(
+        "SELECT content,context FROM memories WHERE id=?1",
+        [id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    Ok(matcher::cut(&content, &context, m).to_owned())
+}
+
+/// The base file at `path`, read as a hook reads a scope with no overlay.
+fn base(path: &std::path::Path) -> Result<View, String> {
+    let index = DeliveryIndex::load(path).map_err(|e| e.to_string())?;
+    View::new(index, None).ok_or_else(|| format!("{}: not a base file", path.display()))
+}
+
+fn matched(index: &View, m: &Matched) -> Result<Value, String> {
     Ok(json!({
         "id": index.id(m.memory).map_err(|e| e.to_string())?,
         "slot": m.slot,
@@ -192,7 +209,7 @@ fn run(cli: Cli) -> Result<(), String> {
             top,
             tuning,
         } => {
-            let index = DeliveryIndex::load(&index).map_err(|e| e.to_string())?;
+            let index = base(&index)?;
             let text =
                 fs::read_to_string(&tasks).map_err(|e| format!("{}: {e}", tasks.display()))?;
             let tasks: Vec<Task> = serde_json::from_str(&text).map_err(|e| e.to_string())?;
@@ -222,7 +239,7 @@ fn run(cli: Cli) -> Result<(), String> {
             action: input,
             db,
         } => {
-            let index = DeliveryIndex::load(&index).map_err(|e| e.to_string())?;
+            let index = base(&index)?;
             let input: ActionInput = serde_json::from_str(&input).map_err(|e| e.to_string())?;
             let mut window = Window::default();
             window.push(&action(&input)?);
@@ -240,7 +257,7 @@ fn run(cli: Cli) -> Result<(), String> {
                 let mut value = matched(&index, m)?;
                 if let Some(conn) = &conn {
                     value["text"] = json!(
-                        matcher::text(conn, index.id(m.memory).map_err(|e| e.to_string())?, m)
+                        text(conn, index.id(m.memory).map_err(|e| e.to_string())?, m)
                             .map_err(|e| e.to_string())?
                     );
                 }

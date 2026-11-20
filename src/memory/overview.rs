@@ -849,6 +849,29 @@ pub fn rules_part(text: &str) -> &str {
     .trim_end_matches('\n')
 }
 
+/// The ids, as [`full_rule`] prints them, of the rules a rules part shows
+/// in full: each project's rule lines before its [`BY_TITLE`] line. Recall
+/// counts these as shown, so a hook does not push them again.
+pub fn rules_in_full(part: &str) -> Vec<&str> {
+    let mut full = false;
+    let mut ids = Vec::new();
+    for line in part.lines() {
+        if line.starts_with(PROJECT_RULES) {
+            full = true;
+        } else if line == BY_TITLE {
+            full = false;
+        } else if full
+            && let Some(id) = line
+                .strip_prefix("    ")
+                .and_then(|rest| rest.get(..SHORT_ID))
+            && id.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            ids.push(id);
+        }
+    }
+    ids
+}
+
 /// The headings in a rules part, one per project, as [`rules_heading`]
 /// writes them: the subagent hook looks for each in a forked Codex
 /// sub-agent's transcript to tell that the parent's session start already
@@ -1704,5 +1727,31 @@ mod tests {
             text.ends_with("  big: 5 more (index projects: [big])"),
             "{text}"
         );
+    }
+    #[test]
+    fn the_rules_in_full_are_read_back_from_the_part() {
+        let rule = |id: &str, shown| {
+            (
+                format!("    {id} A rule in full: what it says"),
+                format!("    {id} A rule by title"),
+                shown,
+            )
+        };
+        let app = ProjectRules {
+            key: "github.com/you/app",
+            rules: vec![
+                rule("e0000001", Shown::Full),
+                rule("e0000002", Shown::Full),
+                rule("e0000003", Shown::Titled),
+                rule("e0000004", Shown::Counted),
+            ],
+        };
+        let docs = ProjectRules {
+            key: "github.com/you/docs",
+            rules: vec![rule("e0000005", Shown::Full)],
+        };
+        let part = [app.lines(), docs.lines()].concat().join("\n");
+        assert_eq!(rules_in_full(&part), ["e0000001", "e0000002", "e0000005"]);
+        assert_eq!(rules_in_full(""), [] as [&str; 0]);
     }
 }

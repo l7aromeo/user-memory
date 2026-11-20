@@ -24,11 +24,11 @@ mod history;
 mod ids;
 mod index;
 mod links;
-#[cfg(test)]
 pub(crate) mod matcher;
 pub(crate) mod migrate;
 mod overview;
 mod page;
+pub(crate) mod push;
 mod read;
 mod repair;
 mod review;
@@ -51,7 +51,8 @@ pub use links::{Link, link};
 pub use migrate::{Migration, check_migration, migrate};
 pub use overview::{
     FitUnit, INDEX_FLOOR, INDEX_UNAVAILABLE, Index, ProjectIndex, RulesLeftOut, index,
-    index_failure, merge, next_cursor, rules_headings, rules_left_out, rules_part, shorten, tiered,
+    index_failure, merge, next_cursor, rules_headings, rules_in_full, rules_left_out, rules_part,
+    shorten, tiered,
 };
 pub use page::stale_cursor;
 pub use read::{Read, Search, read, search};
@@ -503,6 +504,7 @@ mod tests {
         std::fs::write(&file, built.unwrap()).unwrap();
         let index = DeliveryIndex::load(&file).unwrap();
         assert_eq!(index.len(), 1, "only this project's stated memory");
+        let index = delivery::View::new(index, None).unwrap();
         let mut window = Window::default();
         window.push(&Action {
             kind: Kind::Prompt,
@@ -511,7 +513,14 @@ mod tests {
         });
         let found = index.rank(&window).unwrap();
         let conn = rusqlite::Connection::open(&db).unwrap();
-        let cut = matcher::text(&conn, index.id(found[0].memory).unwrap(), &found[0]).unwrap();
+        let (content, context): (String, String) = conn
+            .query_row(
+                "SELECT content,context FROM memories WHERE id=?1",
+                [index.id(found[0].memory).unwrap()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        let cut = matcher::cut(&content, &context, &found[0]);
         assert_eq!(cut, door);
     }
 

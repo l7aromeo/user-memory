@@ -16,13 +16,15 @@
 
 use super::live::RECALL;
 use crate::{
-    memory::matcher::{Kind, Terms, WINDOW_ACTIONS},
+    memory::{
+        matcher::{Kind, Terms, WINDOW_ACTIONS},
+        push::PUSH_PER_EVENT,
+    },
     private,
 };
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::{
-    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
     time::Instant,
@@ -45,7 +47,8 @@ pub(super) const STRETCH_ACTIONS: i64 = 100;
 pub(super) const SESSION_PUSH_CHARS: usize = 8_000;
 
 /// The passage number that stands for a whole memory, as session start
-/// prints a rule in full: every passage of it counts as shown.
+/// prints a rule in full: every passage of it counts as shown. Such a row
+/// holds the id as session start prints it, its first characters.
 const WHOLE: i64 = -1;
 
 /// The state file's layout. Another layout is refused, never read: the
@@ -84,6 +87,28 @@ pub(super) enum Source {
     Resume,
     Clear,
     Compact,
+}
+
+impl Source {
+    /// The source a session-start payload names, as both clients name it;
+    /// none for a payload without one this build knows.
+    pub(super) fn of(payload: &[u8]) -> Option<Self> {
+        #[derive(serde::Deserialize)]
+        struct Started {
+            source: String,
+        }
+        match serde_json::from_slice::<Started>(payload)
+            .ok()?
+            .source
+            .as_str()
+        {
+            "startup" => Some(Self::Startup),
+            "resume" => Some(Self::Resume),
+            "clear" => Some(Self::Clear),
+            "compact" => Some(Self::Compact),
+            _ => None,
+        }
+    }
 }
 
 /// One action as the window keeps it.
@@ -220,14 +245,16 @@ impl State {
     }
 
     /// Adds `step` to `agent`'s window and marks as shown those of `offers`
-    /// not shown in this stretch, in order, while the epoch's budget holds;
-    /// returns their positions in `offers`. All or nothing: a hook that
-    /// cannot write before its deadline pushes nothing and loses its step.
+    /// not shown in this stretch, in order, at most [`PUSH_PER_EVENT`]
+    /// within `room` characters, while the epoch's budget holds; returns
+    /// their positions in `offers`. All or nothing: a hook that cannot write
+    /// before its deadline pushes nothing and loses its step.
     pub(super) fn record(
         &mut self,
         agent: &str,
         step: &Step,
         offers: &[Offer],
+        room: usize,
     ) -> Result<Vec<usize>> {
         let tx = self
             .conn
@@ -251,13 +278,17 @@ impl State {
             params![agent, at - kept],
         )?;
         let mut shown = Vec::new();
+        let mut event = 0;
         for (position, offer) in offers.iter().enumerate() {
-            if chars + offer.chars > SESSION_PUSH_CHARS {
+            if shown.len() == PUSH_PER_EVENT {
+                break;
+            }
+            if chars + offer.chars > SESSION_PUSH_CHARS || event + offer.chars > room {
                 continue;
             }
             let whole: bool = tx
                 .query_row(
-                    "SELECT 1 FROM shown WHERE agent = ?1 AND memory = ?2 AND passage = ?3 AND ?4 - at <= ?5",
+                    "SELECT 1 FROM shown WHERE agent = ?1 AND memory = substr(?2, 1, length(memory)) AND passage = ?3 AND ?4 - at <= ?5",
                     params![agent, offer.memory, WHOLE, at, STRETCH_ACTIONS],
                     |_| Ok(true),
                 )
@@ -274,6 +305,7 @@ impl State {
             )?;
             if marked == 1 {
                 chars += offer.chars;
+                event += offer.chars;
                 shown.push(position);
             }
         }
@@ -343,6 +375,7 @@ fn kind_of(name: &str) -> Option<Kind> {
 mod tests {
     use super::*;
     use std::{
+        collections::BTreeSet,
         sync::{Arc, Barrier},
         thread,
         time::Duration,
@@ -350,6 +383,8 @@ mod tests {
 
     /// Room for a test's hook on a loaded machine.
     const ROOM: Duration = Duration::from_secs(30);
+    /// A push's room in these tests, more than any offers here take.
+    const ROOM_CHARS: usize = SESSION_PUSH_CHARS;
 
     fn soon() -> Instant {
         Instant::now() + ROOM
@@ -388,14 +423,19 @@ mod tests {
         let path = file(&dir);
         let mut state = State::start(&path, Source::Startup, &[], soon()).unwrap();
         let offers = [offer("e0000001", 0), offer("e0000001", 1)];
-        assert_eq!(state.record(MAIN, &command(), &offers).unwrap(), [0, 1]);
         assert_eq!(
-            state.record(MAIN, &command(), &offers).unwrap(),
+            state.record(MAIN, &command(), &offers, ROOM_CHARS).unwrap(),
+            [0, 1]
+        );
+        assert_eq!(
+            state.record(MAIN, &command(), &offers, ROOM_CHARS).unwrap(),
             [] as [usize; 0]
         );
         // A subagent hasn't seen what its parent saw.
         assert_eq!(
-            state.record("agent-1", &command(), &offers).unwrap(),
+            state
+                .record("agent-1", &command(), &offers, ROOM_CHARS)
+                .unwrap(),
             [0, 1]
         );
         assert_eq!(path.extension().unwrap(), RECALL);
@@ -425,7 +465,7 @@ mod tests {
                             let mut state = State::open(&path, soon()).unwrap();
                             barrier.wait();
                             state
-                                .record(MAIN, &command(), &[offer(&memory, 0)])
+                                .record(MAIN, &command(), &[offer(&memory, 0)], ROOM_CHARS)
                                 .unwrap()
                                 .len()
                         })
@@ -465,7 +505,10 @@ mod tests {
                                 chars,
                             }];
                             barrier.wait();
-                            state.record(MAIN, &command(), &offers).unwrap().len()
+                            state
+                                .record(MAIN, &command(), &offers, ROOM_CHARS)
+                                .unwrap()
+                                .len()
                         })
                     })
                     .collect::<Vec<_>>()
@@ -489,24 +532,29 @@ mod tests {
         };
         // A passage past what is left is skipped; a smaller one after it fits.
         let offers = [big("e0000001"), big("e0000002"), offer("e0000003", 0)];
-        assert_eq!(state.record(MAIN, &command(), &offers).unwrap(), [0, 2]);
+        assert_eq!(
+            state.record(MAIN, &command(), &offers, ROOM_CHARS).unwrap(),
+            [0, 2]
+        );
         assert_eq!(
             state
-                .record(MAIN, &command(), &[offer("e0000004", 0)])
+                .record(MAIN, &command(), &[offer("e0000004", 0)], ROOM_CHARS)
                 .unwrap(),
             [] as [usize; 0]
         );
         // Another context has its own budget.
         assert_eq!(
             state
-                .record("agent-1", &command(), &[big("e0000002")])
+                .record("agent-1", &command(), &[big("e0000002")], ROOM_CHARS)
                 .unwrap(),
             [0]
         );
         for source in [Source::Clear, Source::Compact] {
             let mut state = State::start(&path, source, &[], soon()).unwrap();
             assert_eq!(
-                state.record(MAIN, &command(), &[big("e0000005")]).unwrap(),
+                state
+                    .record(MAIN, &command(), &[big("e0000005")], ROOM_CHARS)
+                    .unwrap(),
                 [0],
                 "{source:?}"
             );
@@ -520,15 +568,49 @@ mod tests {
             chars: 101,
         };
         assert_eq!(
-            state.record(MAIN, &command(), &[over]).unwrap(),
+            state.record(MAIN, &command(), &[over], ROOM_CHARS).unwrap(),
             [] as [usize; 0]
         );
         assert_eq!(
             state
-                .record(MAIN, &command(), &[offer("e0000006", 0)])
+                .record(MAIN, &command(), &[offer("e0000006", 0)], ROOM_CHARS)
                 .unwrap(),
             [0]
         );
+    }
+
+    #[test]
+    fn a_push_holds_at_most_push_per_event_within_its_room() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = file(&dir);
+        let mut state = State::start(&path, Source::Startup, &[], soon()).unwrap();
+        let ids = ["e0000001", "e0000002", "e0000003", "e0000004", "e0000005"];
+        let offers: Vec<Offer> = ids.iter().map(|id| offer(id, 0)).collect();
+        assert_eq!(
+            state.record(MAIN, &command(), &offers, ROOM_CHARS).unwrap(),
+            (0..PUSH_PER_EVENT).collect::<Vec<_>>()
+        );
+        // The rest are not marked: the next action may push them.
+        assert_eq!(
+            state.record(MAIN, &command(), &offers, ROOM_CHARS).unwrap(),
+            [3, 4]
+        );
+        // A line past the push's room is skipped and a shorter one after it
+        // fits.
+        let lines = [
+            offer("e0000006", 0),
+            Offer {
+                memory: "e0000007",
+                passage: 0,
+                chars: 151,
+            },
+            Offer {
+                memory: "e0000008",
+                passage: 0,
+                chars: 150,
+            },
+        ];
+        assert_eq!(state.record(MAIN, &command(), &lines, 250).unwrap(), [0, 2]);
     }
 
     #[test]
@@ -538,27 +620,40 @@ mod tests {
         let mut state = State::start(&path, Source::Startup, &["e0000009"], soon()).unwrap();
         let rule = [offer("e0000001", 2)];
         let printed = [offer("e0000009", 0)];
-        assert_eq!(state.record(MAIN, &command(), &rule).unwrap(), [0]);
+        assert_eq!(
+            state.record(MAIN, &command(), &rule, ROOM_CHARS).unwrap(),
+            [0]
+        );
         // Shown at action 1; actions 2 to 1 + STRETCH_ACTIONS are within it.
         for _ in 1..STRETCH_ACTIONS {
-            state.record(MAIN, &command(), &[]).unwrap();
+            state.record(MAIN, &command(), &[], ROOM_CHARS).unwrap();
         }
         assert_eq!(
-            state.record(MAIN, &command(), &rule).unwrap(),
+            state.record(MAIN, &command(), &rule, ROOM_CHARS).unwrap(),
             [] as [usize; 0]
         );
-        assert_eq!(state.record(MAIN, &command(), &rule).unwrap(), [0]);
         assert_eq!(
-            state.record(MAIN, &command(), &rule).unwrap(),
+            state.record(MAIN, &command(), &rule, ROOM_CHARS).unwrap(),
+            [0]
+        );
+        assert_eq!(
+            state.record(MAIN, &command(), &rule, ROOM_CHARS).unwrap(),
             [] as [usize; 0]
         );
         // A memory session start printed whole, at action 0, likewise.
-        assert_eq!(state.record(MAIN, &command(), &printed).unwrap(), [0]);
+        assert_eq!(
+            state
+                .record(MAIN, &command(), &printed, ROOM_CHARS)
+                .unwrap(),
+            [0]
+        );
         // What a resume prints whole counts as shown from then.
         let mut state = State::start(&path, Source::Resume, &["e0000008"], soon()).unwrap();
         let reprinted = [offer("e0000008", 1)];
         assert_eq!(
-            state.record(MAIN, &command(), &reprinted).unwrap(),
+            state
+                .record(MAIN, &command(), &reprinted, ROOM_CHARS)
+                .unwrap(),
             [] as [usize; 0]
         );
     }
@@ -569,48 +664,74 @@ mod tests {
         let path = file(&dir);
         let mut state = State::start(&path, Source::Startup, &["e0000009"], soon()).unwrap();
         let both = [offer("e0000001", 0), offer("e0000002", 0)];
-        assert_eq!(state.record(MAIN, &command(), &both).unwrap(), [0, 1]);
+        assert_eq!(
+            state.record(MAIN, &command(), &both, ROOM_CHARS).unwrap(),
+            [0, 1]
+        );
         assert_eq!(
             state
-                .record(MAIN, &command(), &[offer("e0000009", 3)])
+                .record(MAIN, &command(), &[offer("e0000009", 3)], ROOM_CHARS)
                 .unwrap(),
             [] as [usize; 0],
             "printed whole at session start"
         );
-        state.record("agent-1", &command(), &both).unwrap();
+        // Session start prints an id's first characters; a passage of that
+        // memory, by its full id, counts as shown.
+        let full = offer("e0000009-0000-4000-8000-000000000009", 1);
+        assert_eq!(
+            state.record(MAIN, &command(), &[full], ROOM_CHARS).unwrap(),
+            [] as [usize; 0]
+        );
+        state
+            .record("agent-1", &command(), &both, ROOM_CHARS)
+            .unwrap();
 
         // resume: nothing shown before is pushed again.
         let mut state = State::start(&path, Source::Resume, &[], soon()).unwrap();
         assert_eq!(
-            state.record(MAIN, &command(), &both).unwrap(),
+            state.record(MAIN, &command(), &both, ROOM_CHARS).unwrap(),
             [] as [usize; 0]
         );
-        assert_eq!(state.window(MAIN).unwrap().len(), 3);
+        assert_eq!(state.window(MAIN).unwrap().len(), 4);
 
         // compact: the window goes on; only what session start restored
         // counts as shown.
         let mut state = State::start(&path, Source::Compact, &["e0000001"], soon()).unwrap();
-        assert_eq!(state.window(MAIN).unwrap().len(), 3);
-        assert_eq!(state.record(MAIN, &command(), &both).unwrap(), [1]);
+        assert_eq!(state.window(MAIN).unwrap().len(), 4);
+        assert_eq!(
+            state.record(MAIN, &command(), &both, ROOM_CHARS).unwrap(),
+            [1]
+        );
         // A subagent's context is its own.
         assert_eq!(
-            state.record("agent-1", &command(), &both).unwrap(),
+            state
+                .record("agent-1", &command(), &both, ROOM_CHARS)
+                .unwrap(),
             [] as [usize; 0]
         );
 
         // clear: an empty window, and every passage can be pushed again.
         let mut state = State::start(&path, Source::Clear, &[], soon()).unwrap();
         assert_eq!(state.window(MAIN).unwrap(), []);
-        assert_eq!(state.record(MAIN, &command(), &both).unwrap(), [0, 1]);
+        assert_eq!(
+            state.record(MAIN, &command(), &both, ROOM_CHARS).unwrap(),
+            [0, 1]
+        );
 
         // A new session, or a startup that reuses an id: no rows.
         let mut state = State::start(&path, Source::Startup, &[], soon()).unwrap();
         assert_eq!(state.window(MAIN).unwrap(), []);
         assert_eq!(state.window("agent-1").unwrap(), []);
-        assert_eq!(state.record(MAIN, &command(), &both).unwrap(), [0, 1]);
+        assert_eq!(
+            state.record(MAIN, &command(), &both, ROOM_CHARS).unwrap(),
+            [0, 1]
+        );
         let other = path.with_file_name("claude-s2-key.recall");
         let mut state = State::start(&other, Source::Startup, &[], soon()).unwrap();
-        assert_eq!(state.record(MAIN, &command(), &both).unwrap(), [0, 1]);
+        assert_eq!(
+            state.record(MAIN, &command(), &both, ROOM_CHARS).unwrap(),
+            [0, 1]
+        );
     }
 
     #[test]
@@ -624,10 +745,12 @@ mod tests {
         for i in 0..total {
             let mut prompt = step(Kind::Prompt, &[], &[]);
             prompt.terms.stems = BTreeSet::from([format!("word{i}")]);
-            state.record(MAIN, &prompt, &[]).unwrap();
+            state.record(MAIN, &prompt, &[], ROOM_CHARS).unwrap();
         }
-        state.record(MAIN, &failed, &[]).unwrap();
-        state.record("agent-1", &command(), &[]).unwrap();
+        state.record(MAIN, &failed, &[], ROOM_CHARS).unwrap();
+        state
+            .record("agent-1", &command(), &[], ROOM_CHARS)
+            .unwrap();
         let window = state.window(MAIN).unwrap();
         assert_eq!(window.len(), WINDOW_ACTIONS);
         assert_eq!(window.last(), Some(&failed));
@@ -663,7 +786,7 @@ mod tests {
             .unwrap();
         let mut late = State::open(&path, Instant::now()).unwrap();
         assert!(
-            late.record(MAIN, &command(), &[offer("e0000001", 0)])
+            late.record(MAIN, &command(), &[offer("e0000001", 0)], ROOM_CHARS)
                 .is_err()
         );
         held.commit().unwrap();
@@ -671,7 +794,7 @@ mod tests {
         assert_eq!(state.window(MAIN).unwrap(), []);
         assert_eq!(
             state
-                .record(MAIN, &command(), &[offer("e0000001", 0)])
+                .record(MAIN, &command(), &[offer("e0000001", 0)], ROOM_CHARS)
                 .unwrap(),
             [0]
         );
@@ -691,7 +814,7 @@ mod tests {
         let mut state = State::start(&path, Source::Startup, &[], soon()).unwrap();
         assert_eq!(
             state
-                .record(MAIN, &command(), &[offer("e0000001", 0)])
+                .record(MAIN, &command(), &[offer("e0000001", 0)], ROOM_CHARS)
                 .unwrap(),
             [0]
         );

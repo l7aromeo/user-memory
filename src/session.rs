@@ -7,7 +7,6 @@
 //! session continues normally.
 
 mod live;
-#[cfg(test)]
 mod recall;
 mod seen;
 mod subagent;
@@ -319,6 +318,20 @@ pub async fn start(
         // Never past the hook's limit: by then the repair has had all of it.
         let until = (tokio::time::Instant::now() + hook_time(RECONCILE_GRACE)).min(deadline);
         let _ = tokio::time::timeout_at(until, reconcile).await;
+    }
+    // Recall's state (#117): a new file, or a new epoch, as the start's
+    // source says, with the rules it prints in full counted as shown.
+    if let Some((client, payload)) = client.zip(payload.as_deref())
+        && let Some(snapshot) = session_file(client, payload)
+        && let Some(source) = recall::Source::of(payload)
+    {
+        let whole = match &index {
+            Ok(Ok((_, index, _))) => memory::rules_in_full(memory::rules_part(index)),
+            _ => Vec::new(),
+        };
+        let until = std::time::Instant::now()
+            + deadline.saturating_duration_since(tokio::time::Instant::now());
+        let _ = recall::State::start(&recall::path(&snapshot), source, &whole, until);
     }
     let (limit, unit) = hook_limit(client, context_limit);
     let found = match (seen.ok().flatten(), &index) {
