@@ -778,3 +778,58 @@ fn a_prompt_pushes_what_its_words_name_after_the_notice_and_a_task_notification_
         ""
     );
 }
+
+impl Home {
+    /// Runs the CLI with `args`, which must succeed.
+    fn cli(&self, args: &[&str]) {
+        let out = self.command(args).output().unwrap();
+        assert!(out.status.success(), "{out:?}");
+    }
+}
+
+#[test]
+fn a_memory_recorded_changed_or_forgotten_mid_turn_reaches_the_next_call() {
+    let home = Home::new();
+    home.record("Parser tables", "Keep `src/tables.rs` sorted.", &[]);
+    home.start("s1", "startup");
+    assert_eq!(home.run("s1", "cargo publish"), "");
+    // Recorded by another process after the session started: matched at
+    // the next call.
+    let note = home.record(
+        "Dry run before publishing",
+        "Run `cargo publish --dry-run` before `cargo publish`.",
+        &[],
+    );
+    assert!(home.run("s1", "cargo publish").contains(short(&note)));
+    // Changed to name another command: matched on its new words only.
+    home.cli(&[
+        "update",
+        &note,
+        "--content",
+        "Run `just release` before tagging.",
+    ]);
+    assert_eq!(home.run("s2", "cargo publish"), "");
+    home.start("s3", "startup");
+    home.cli(&[
+        "update",
+        &note,
+        "--content",
+        "Run `just release-check` before tagging.",
+    ]);
+    assert_eq!(home.run("s3", "cargo publish"), "", "its old words");
+    let pushed = home.run("s3", "just release-check");
+    assert!(
+        pushed.contains("Run `just release-check` before tagging."),
+        "{pushed}"
+    );
+    // Forgotten: never pushed again, in any context.
+    home.cli(&["forget", &note]);
+    let sub = home.call(
+        "s3",
+        Some("a1"),
+        "Bash",
+        json!({"command": "just release-check"}),
+        json!({}),
+    );
+    assert_eq!(sub, "");
+}
