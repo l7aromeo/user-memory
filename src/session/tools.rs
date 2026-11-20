@@ -21,7 +21,7 @@ use rusqlite::{Connection, OpenFlags};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
-    io::{IsTerminal, Read},
+    io::{IsTerminal, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -108,9 +108,10 @@ pub fn post_tool_use(client: HookClient, _context_limit: Option<usize>) -> Strin
     let Ok(payload) = serde_json::from_slice::<Value>(&payload) else {
         return String::new();
     };
-    let Some(action) = action(&payload) else {
+    let Some(mut action) = action(&payload) else {
         return String::new();
     };
+    action.failed = failed(client, &payload);
     session
         .recall(&payload, action)
         .ok()
@@ -246,6 +247,114 @@ fn action(payload: &Value) -> Option<Action> {
         kind,
         text,
         failed: false,
+    })
+}
+
+/// Whether the call in `payload` failed. Claude Code says so with its own
+/// event, `PostToolUseFailure`; one the user interrupted is not the
+/// command's failure. Codex's payload does not say, so its transcript's
+/// end is read for the call's result ([`codex_failed`]).
+fn failed(client: HookClient, payload: &Value) -> bool {
+    match client {
+        HookClient::Claude => {
+            payload["hook_event_name"] == "PostToolUseFailure" && payload["is_interrupt"] != true
+        }
+        HookClient::Codex => payload["transcript_path"]
+            .as_str()
+            .zip(payload["tool_use_id"].as_str())
+            .is_some_and(|(transcript, id)| codex_failed(Path::new(transcript), id)),
+    }
+}
+
+/// The most of a Codex transcript's end read for a call's result. The
+/// result's line carries the command's whole output, so it can end far
+/// from where the call's id is; 1 MiB bounds a read at well under 1 ms.
+const TRANSCRIPT_TAIL_BYTES: u64 = 1024 * 1024;
+
+/// How much more of the transcript each step reads, backwards from its
+/// end: a pipe's buffer, so a short result is found in one read.
+const TRANSCRIPT_STEP: u64 = 64 * 1024;
+
+/// Whether the Codex transcript at `path` records the call `id` as failed:
+/// its `item_completed` event, as Codex 0.163.0 writes it before the
+/// post-tool hook runs, with the item's `status` failed or a nonzero
+/// `exit_code`. Read backwards from the end in [`TRANSCRIPT_STEP`]s up to
+/// [`TRANSCRIPT_TAIL_BYTES`]. A missing transcript (an ephemeral thread
+/// has none), a line not found within the bound, or one not yet written
+/// reads as a success: the match is the same, only the failure's header
+/// and bars are lost.
+fn codex_failed(path: &Path, id: &str) -> bool {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let Ok(length) = file.metadata().map(|m| m.len()) else {
+        return false;
+    };
+    let mut read = 0;
+    while read < length.min(TRANSCRIPT_TAIL_BYTES) {
+        read = (read + TRANSCRIPT_STEP)
+            .min(length)
+            .min(TRANSCRIPT_TAIL_BYTES);
+        let mut tail = Vec::new();
+        if file.seek(SeekFrom::Start(length - read)).is_err()
+            || (&mut file).take(read).read_to_end(&mut tail).is_err()
+        {
+            return false;
+        }
+        // The first line may be cut by the read's start, unless it is the
+        // file's own first line.
+        let whole = if read == length {
+            &tail[..]
+        } else {
+            match tail.iter().position(|b| *b == b'\n') {
+                Some(at) => &tail[at + 1..],
+                None => continue,
+            }
+        };
+        let found = whole
+            .split(|b| *b == b'\n')
+            .rev()
+            .filter_map(|line| std::str::from_utf8(line).ok())
+            .filter(|line| line.contains(id) && line.contains("\"item_completed\""))
+            .find_map(|line| result(line, id));
+        if let Some(failed) = found {
+            return failed;
+        }
+    }
+    false
+}
+
+/// Whether `line`, a Codex transcript line, is call `id`'s `item_completed`
+/// event, and if so whether the call failed. Only the event's and the
+/// item's `type`, the item's `id`, `status` and `exit_code` are read: the
+/// item's `aggregated_output` is the command's output, which never joins
+/// the window.
+fn result(line: &str, id: &str) -> Option<bool> {
+    #[derive(Deserialize)]
+    struct Event {
+        #[serde(rename = "type")]
+        kind: String,
+        payload: Payload,
+    }
+    #[derive(Deserialize)]
+    struct Payload {
+        #[serde(rename = "type")]
+        kind: String,
+        item: Option<Item>,
+    }
+    #[derive(Deserialize)]
+    struct Item {
+        id: Option<String>,
+        status: Option<String>,
+        exit_code: Option<i64>,
+    }
+    let event: Event = serde_json::from_str(line).ok()?;
+    let item = event.payload.item?;
+    (event.kind == "event_msg"
+        && event.payload.kind == "item_completed"
+        && item.id.as_deref() == Some(id))
+    .then(|| {
+        item.status.as_deref() == Some("failed") || item.exit_code.is_some_and(|code| code != 0)
     })
 }
 
@@ -448,6 +557,78 @@ mod tests {
         ] {
             assert_eq!(of(tool, input), None, "{tool}");
         }
+    }
+
+    /// A Codex transcript line for call `id`'s result, as Codex 0.163.0
+    /// writes it, with `output` as the command's output.
+    fn completed(id: &str, status: &str, exit_code: i64, output: &str) -> String {
+        json!({"timestamp": "2026-11-21T10:00:00.000Z", "type": "event_msg", "payload": {
+            "type": "item_completed", "item": {"type": "CommandExecution", "id": id,
+            "command": ["/bin/zsh", "-lc", "./scripts/release.sh"], "status": status,
+            "aggregated_output": output, "exit_code": exit_code}}})
+        .to_string()
+    }
+
+    #[test]
+    fn a_codex_calls_failure_is_read_from_its_transcripts_end() {
+        const CALL: &str = "exec-e0000001-0000-4000-8000-000000000001";
+        const OTHER: &str = "exec-e0000002-0000-4000-8000-000000000002";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout.jsonl");
+        let read = |lines: &[String]| {
+            std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+            codex_failed(&path, CALL)
+        };
+        let filler = |bytes: usize| {
+            json!({"type": "response_item", "payload": {"type": "message", "text": "x".repeat(bytes)}})
+                .to_string()
+        };
+        assert!(read(&[completed(
+            CALL,
+            "failed",
+            128,
+            "fatal: not a git repository"
+        )]));
+        assert!(
+            read(&[completed(CALL, "completed", 2, "")]),
+            "a nonzero exit code"
+        );
+        assert!(!read(&[completed(CALL, "completed", 0, "")]));
+        // The output is never read: a success whose output says otherwise.
+        let says = r#"{"status":"failed","exit_code":1,"type":"item_completed"}"#;
+        assert!(!read(&[completed(CALL, "completed", 0, says)]));
+        // Another call's failure, even one whose output names this call.
+        assert!(!read(&[completed(OTHER, "failed", 1, CALL)]));
+        // Found past the first step, the cut line at the read's start
+        // skipped.
+        let far = TRANSCRIPT_STEP as usize * 3;
+        assert!(read(&[
+            filler(far),
+            completed(CALL, "failed", 1, ""),
+            filler(far)
+        ]));
+        // Past the bound, or no transcript at all: a success.
+        let past = TRANSCRIPT_TAIL_BYTES as usize;
+        assert!(!read(&[completed(CALL, "failed", 1, ""), filler(past)]));
+        assert!(!codex_failed(&dir.path().join("missing.jsonl"), CALL));
+    }
+
+    #[test]
+    fn a_claude_code_failure_is_its_own_event_unless_interrupted() {
+        let event = |name: &str, interrupted: bool| json!({"hook_event_name": name, "is_interrupt": interrupted});
+        assert!(failed(
+            HookClient::Claude,
+            &event("PostToolUseFailure", false)
+        ));
+        assert!(!failed(
+            HookClient::Claude,
+            &event("PostToolUseFailure", true)
+        ));
+        assert!(!failed(HookClient::Claude, &event("PostToolUse", false)));
+        assert!(!failed(
+            HookClient::Codex,
+            &event("PostToolUseFailure", false)
+        ));
     }
 
     #[test]
