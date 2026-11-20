@@ -380,7 +380,7 @@ The mark is written before the change. When it can't be, the command
 changes nothing and says so, as here for a forget:
 
 ```output
-Nothing was forgotten: the mark that keeps this machine's delivery index from using the removed words could not be written: …. Make the state folder writable, or free space on its disk, then forget again.
+Nothing was forgotten: the mark that keeps this machine's delivery index from using the removed words could not be written to …: …. Make that folder writable, or free space on its disk, then forget again.
 ```
 
 `user-memory doctor` deletes such files, and any a writer killed while

@@ -1155,14 +1155,17 @@ fn a_removal_whose_void_mark_cannot_be_written_refuses_and_changes_nothing() {
         .unwrap();
     assert!(!out.status.success(), "{out:?}");
     let stderr = String::from_utf8_lossy(&out.stderr);
+    let mark = base.with_file_name(&void);
     assert!(
-        stderr.contains("Nothing was forgotten: the mark that keeps this machine's delivery index from using the removed words could not be written: "),
+        stderr.contains(&format!(
+            "Nothing was forgotten: the mark that keeps this machine's delivery index from using the removed words could not be written to {}: ",
+            mark.display()
+        )),
         "{stderr}"
     );
     assert!(
-        stderr.contains(
-            ". Make the state folder writable, or free space on its disk, then forget again."
-        ),
+        stderr
+            .contains(". Make that folder writable, or free space on its disk, then forget again."),
         "{stderr}"
     );
     let still = home.cli(&["read", &id]);
@@ -1174,4 +1177,37 @@ fn a_removal_whose_void_mark_cannot_be_written_refuses_and_changes_nothing() {
     assert_eq!(modified(&base), written, "the base is kept");
     assert!(home.files(".void").is_empty());
     assert!(home.files(".partial").is_empty());
+}
+
+#[test]
+fn a_mark_that_cannot_be_rewritten_after_the_commit_still_names_the_files_left() {
+    let (home, id) = started();
+    let base = home.base();
+    let overlay = home.overlay();
+    let name = base.file_name().unwrap().to_str().unwrap().to_owned();
+    let key = name.split('-').next().unwrap();
+    // The base is held open; the mark's first write, before the commit,
+    // succeeds, and its rewrite after the commit fails.
+    let held = format!("{name},{key}.void#2");
+    let reply = home.cli_with(&["forget", &id], &[("USER_MEMORY_TEST_HELD_FILE", &held)]);
+    assert_eq!(reply["deleted"], true, "{reply}");
+    assert_eq!(reply["delivery_left"], json!([base]), "{reply}");
+    assert!(reply["next"].as_str().unwrap().ends_with(LEFT), "{reply}");
+    let gone = home.cli(&["read", &id]);
+    assert_eq!(gone["memories"].as_array().map(Vec::len), Some(0), "{gone}");
+    // The first mark still names both files, so readers skip both.
+    let void = home.files(".void");
+    assert_eq!(void.len(), 1);
+    let named = fs::read_to_string(&void[0]).unwrap();
+    for file in [&base, &overlay] {
+        let file = file.file_name().unwrap().to_str().unwrap();
+        assert!(named.lines().any(|line| line == file), "{named}");
+    }
+    home.hook("PostToolUse", "s1", &[]);
+    assert_eq!(delivered(&home, "quokka-deploy"), Vec::<PathBuf>::new());
+    assert!(
+        !base.exists() && !overlay.exists(),
+        "the next writer deletes them"
+    );
+    assert!(home.files(".void").is_empty(), "and the mark");
 }
