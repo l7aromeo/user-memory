@@ -6,7 +6,7 @@
 //! transcript holds it; every doubt prints the rules, so the cost of a wrong
 //! guess is a duplicate, never a missing rule.
 
-use super::{HookClient, LIMIT, hook_limit, hook_time, index, origin, payload};
+use super::{HookClient, LIMIT, Looking, hook_limit, hook_time, index, origin, payload};
 use crate::memory;
 use serde::Serialize;
 use serde_json::Value;
@@ -85,7 +85,8 @@ pub async fn subagent_rules(
         .or_else(|| std::env::current_dir().ok())?;
     // The global rules are the instruction files'; only the rules part is
     // printed, so only the rules are asked for, without an index.
-    let (_, text) = index(folder, Some(client), context_limit, origin, true, 0, true)
+    let looking = Looking::new(folder, origin);
+    let (_, text) = index(&looking, Some(client), context_limit, true, 0, true)
         .await
         .ok()?;
     let part = memory::rules_part(&text);

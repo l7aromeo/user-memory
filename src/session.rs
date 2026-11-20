@@ -292,28 +292,26 @@ pub async fn start(
     if let Some(missed) = &missed {
         let _ = live::mark_missed(missed);
     }
-    let checkout = path.clone();
+    // The snapshot, the index and the delivery index all need the session's
+    // projects; whichever asks first looks, once.
+    let looking = Looking::new(path, origin.clone());
     let snapshot = async {
         let (client, payload) = client.zip(payload.as_deref())?;
         // The session's first snapshot: its first prompt then reports
         // only what changed after this.
         tokio::time::timeout(
             hook_time(SNAPSHOT_SHARE),
-            remember(client, payload, checkout, origin.clone()),
+            remember(client, payload, &looking),
         )
         .await
         .ok()
         .flatten()
     };
-    let path_again = path.clone();
     let (seen, index, versions, _) = tokio::join!(
         tokio::time::timeout_at(deadline, snapshot),
-        tokio::time::timeout_at(
-            deadline,
-            start_index(path.clone(), client, context_limit, origin.clone()),
-        ),
+        tokio::time::timeout_at(deadline, start_index(&looking, client, context_limit)),
         tokio::time::timeout_at(deadline, version_line()),
-        tokio::time::timeout_at(deadline, deliver_at_start(path, origin.clone(), deadline))
+        tokio::time::timeout_at(deadline, deliver_at_start(&looking, deadline))
     );
     if let Some(reconcile) = reconcile {
         // Never past the hook's limit: by then the repair has had all of it.
@@ -367,10 +365,9 @@ pub async fn start(
                         index
                     } else {
                         let again = self::index(
-                            path_again,
+                            &looking,
                             client,
                             context_limit,
-                            origin.clone(),
                             rules_elsewhere,
                             unit.len(&listed) + 1,
                             false,
@@ -687,11 +684,10 @@ async fn payload() -> Option<Vec<u8>> {
 async fn remember(
     client: HookClient,
     payload: &[u8],
-    checkout: PathBuf,
-    origin: Option<String>,
+    looking: &Looking,
 ) -> Option<(live::Snapshot, memory::StampsReply)> {
     let path = session_file(client, payload)?;
-    let (snapshot, reply) = snapshot(checkout, origin, None, true).await.ok()?;
+    let (snapshot, reply) = snapshot(looking, None, true).await.ok()?;
     // On a blocking thread, so the snapshot's share of the limit bounds the
     // save too.
     let (saved, snapshot) = tokio::task::spawn_blocking(move || {
@@ -719,15 +715,11 @@ fn session_file(client: HookClient, payload: &[u8]) -> Option<PathBuf> {
 /// free core: its scope's base, built when missing or behind (see
 /// [`memory::delivery_files::at_session_start`]). Prints nothing. A
 /// server's store has no delivery files here yet.
-async fn deliver_at_start(
-    checkout: PathBuf,
-    origin: Option<String>,
-    deadline: tokio::time::Instant,
-) {
+async fn deliver_at_start(looking: &Looking, deadline: tokio::time::Instant) {
     if !matches!(setup::configured_remote(), Ok(None)) {
         return;
     }
-    let Ok(seen) = look(checkout, origin.as_deref(), None).await else {
+    let Ok(seen) = looking.seen(None).await else {
         return;
     };
     let projects: Vec<String> = seen.projects.iter().map(|p| p.key.clone()).collect();
@@ -846,6 +838,9 @@ async fn changes(
     let checkout = PathBuf::from(payload["cwd"].as_str().unwrap_or("."));
     let before = live::load(&path);
     let missed = Some(live::missed_path(&path)).filter(|missed| missed.exists());
+    // The snapshot and a late index share one look at the session's
+    // projects.
+    let looking = Looking::new(checkout.clone(), origin.clone());
     let late_index = async {
         missed.as_ref()?;
         let index = async {
@@ -854,27 +849,16 @@ async fn changes(
                 tokio::task::spawn_blocking(|| live::hold_for_tests(live::HOLD_LATE_INDEX)).await;
             // The global rules come too: a session that started without
             // memory may hold none, or an old copy, in its instruction files.
-            index(
-                checkout.clone(),
-                Some(client),
-                None,
-                origin.clone(),
-                false,
-                0,
-                false,
-            )
-            .await
-            .map(|(lines, index)| format!("{lines}\n{index}"))
+            index(&looking, Some(client), None, false, 0, false)
+                .await
+                .map(|(lines, index)| format!("{lines}\n{index}"))
         };
         tokio::time::timeout_at(deadline - hook_time(LATE_INDEX_MARGIN), index)
             .await
             .ok()?
             .ok()
     };
-    let (seen, late_index) = tokio::join!(
-        snapshot(checkout.clone(), origin.clone(), before.as_ref(), false),
-        late_index
-    );
+    let (seen, late_index) = tokio::join!(snapshot(&looking, before.as_ref(), false), late_index);
     let (now, reply) = seen.ok()?;
     // What this conversation changed last, it knows already.
     let own: BTreeSet<String> = reply
@@ -941,11 +925,11 @@ async fn told(
 /// memory's latest change, where the store gave one, and with `prints`, the
 /// rules and agents' memories among them.
 async fn snapshot(
-    checkout: PathBuf,
-    origin: Option<String>,
+    looking: &Looking,
     before: Option<&live::Snapshot>,
     prints: bool,
 ) -> anyhow::Result<(live::Snapshot, memory::StampsReply)> {
+    let (checkout, origin) = (looking.folder.clone(), looking.origin.as_deref());
     let remote = setup::configured_remote()?;
     // One spelling per folder, however the client or the command line gives
     // it, so a project seen there is matched on the next prompt.
@@ -982,7 +966,7 @@ async fn snapshot(
             let folder = tokio::task::spawn_blocking(move || project::folder(&checkout)).await?;
             seen(&folder, &linked)
         }
-        None => look(checkout, origin.as_deref(), remote.as_ref()).await?,
+        None => looking.seen(remote.as_ref()).await?,
     };
     let projects = live::kept(
         seen.projects,
@@ -1009,7 +993,7 @@ async fn snapshot(
             ..memory::StampsReply::default()
         }
     } else {
-        stamps(remote.as_ref(), &keys, origin.as_deref(), since, prints).await?
+        stamps(remote.as_ref(), &keys, origin, since, prints).await?
     };
     let mut reply = reply;
     // Says, in debug builds, what the hook read, so tests can tell a read
@@ -1074,14 +1058,45 @@ async fn stamps(
     memory::parse_stamps_reply(&reply).context("The memory server sent no stamps; update it")
 }
 
+/// A session's folder and origin, and the look at its projects that the
+/// parts of a hook given the same `Looking` share: taken once, by whichever
+/// part asks first. Every part asks with the configured remote.
+struct Looking {
+    folder: PathBuf,
+    origin: Option<String>,
+    seen: tokio::sync::OnceCell<Result<Seen, String>>,
+}
+
+impl Looking {
+    fn new(folder: PathBuf, origin: Option<String>) -> Self {
+        Looking {
+            folder,
+            origin,
+            seen: tokio::sync::OnceCell::new(),
+        }
+    }
+
+    /// The session's projects: [`look`], once.
+    async fn seen(&self, remote: Option<&crate::remote::Connection>) -> anyhow::Result<Seen> {
+        self.seen
+            .get_or_init(|| async {
+                look(self.folder.clone(), self.origin.as_deref(), remote)
+                    .await
+                    .map_err(|err| format!("{err:#}"))
+            })
+            .await
+            .clone()
+            .map_err(anyhow::Error::msg)
+    }
+}
+
 /// Session start's index: [`index`], after the instruction files are
 /// brought up to date. When the client's instruction file then holds the
 /// global rules, they are left out rather than repeated.
 async fn start_index(
-    path: PathBuf,
+    looking: &Looking,
     client: Option<HookClient>,
     context_limit: Option<usize>,
-    origin: Option<String>,
 ) -> anyhow::Result<(String, String, bool)> {
     // Changes made from other machines reach the instruction files here,
     // before the client reads them at its next launch.
@@ -1091,16 +1106,7 @@ async fn start_index(
         .and_then(Result::ok)
         .unwrap_or_default();
     let rules_elsewhere = client.is_some_and(|client| current.contains(&client.installed()));
-    let (lines, index) = index(
-        path,
-        client,
-        context_limit,
-        origin,
-        rules_elsewhere,
-        0,
-        false,
-    )
-    .await?;
+    let (lines, index) = index(looking, client, context_limit, rules_elsewhere, 0, false).await?;
     Ok((lines, index, rules_elsewhere))
 }
 
@@ -1113,18 +1119,18 @@ async fn start_index(
 /// when `rules_only` (a released server without the rules part sends an
 /// index as short as their room).
 async fn index(
-    path: PathBuf,
+    looking: &Looking,
     client: Option<HookClient>,
     context_limit: Option<usize>,
-    origin: Option<String>,
     rules_elsewhere: bool,
     new_rules: usize,
     rules_only: bool,
 ) -> anyhow::Result<(String, String)> {
     let remote = setup::configured_remote()?;
+    let (path, origin) = (looking.folder.clone(), looking.origin.as_deref());
     let here = path.clone();
     // Links the store cannot list leave the folder's projects to show.
-    let seen = match look(path.clone(), origin.as_deref(), remote.as_ref()).await {
+    let seen = match looking.seen(remote.as_ref()).await {
         Ok(seen) => seen,
         Err(_) => seen(
             &tokio::task::spawn_blocking(move || project::folder(&path)).await?,
@@ -1170,7 +1176,7 @@ async fn index(
     let index = fitted(
         &mut fetch,
         &seen,
-        origin.as_deref(),
+        origin,
         rules_elsewhere,
         (room, rules_room),
         unit,
@@ -1274,6 +1280,7 @@ async fn linked(
 
 /// What a session sees: its projects in load order, without duplicates,
 /// and what to raise with the user about them.
+#[derive(Clone)]
 struct Seen {
     projects: Vec<live::Project>,
     /// The folder's own keys: its project and a key waiting for a move to
@@ -1296,6 +1303,10 @@ async fn look(
     origin: Option<&str>,
     remote: Option<&crate::remote::Connection>,
 ) -> anyhow::Result<Seen> {
+    // Says, in debug builds, that the hook looked, so tests can count its
+    // looks: each runs git and reads the store's links.
+    #[cfg(debug_assertions)]
+    eprintln!("user-memory: looked at the session's projects");
     let folder = tokio::task::spawn_blocking(move || project::folder(&checkout)).await?;
     let linked = match origin {
         Some(origin) => linked(remote, origin).await?,
