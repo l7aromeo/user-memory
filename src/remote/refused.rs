@@ -23,19 +23,16 @@ pub fn unavailable_sentence(url: &str) -> String {
     )
 }
 
-/// `cause` and what it wraps: rmcp's handshake and call errors do not give
-/// their transport error as their source, so the walk steps into it.
+/// `cause` and what it wraps: rmcp's handshake error does not give its
+/// transport error as its source, as a call's error does, so the walk
+/// steps into it.
 fn wrapped<'a>(
     cause: &'a (dyn std::error::Error + 'static),
 ) -> impl Iterator<Item = &'a (dyn std::error::Error + 'static)> {
-    let start: &(dyn std::error::Error + 'static) =
-        match (cause.downcast_ref(), cause.downcast_ref()) {
-            (Some(ClientInitializeError::TransportError { error, .. }), _) => error,
-            // rmcp has no accessor for a call's challenge, as `auth_challenge`
-            // is for the handshake's; use one if added.
-            (_, Some(ServiceError::TransportSend(error))) => error,
-            _ => cause,
-        };
+    let start: &(dyn std::error::Error + 'static) = match cause.downcast_ref() {
+        Some(ClientInitializeError::TransportError { error, .. }) => error,
+        _ => cause,
+    };
     std::iter::successors(Some(start), |cause| cause.source())
 }
 
@@ -76,22 +73,29 @@ impl Reason {
         }
     }
 
-    /// The reason in a failure's chain: rmcp reports a 401 as an
-    /// [`AuthRequiredError`] with the server's challenge.
+    /// The reason in a failure's chain, from the server's 401 challenge as
+    /// the first cause that knows it gives it.
     pub fn of(err: &anyhow::Error) -> Option<Self> {
-        err.chain().find_map(Self::in_chain)
+        err.chain()
+            .find_map(Self::challenge)
+            .flatten()
+            .and_then(Self::from_challenge)
     }
 
-    /// The reason in `cause` or what it wraps; a handshake's challenge comes
-    /// from rmcp's own accessor.
-    fn in_chain(cause: &(dyn std::error::Error + 'static)) -> Option<Self> {
-        let challenge = match cause.downcast_ref::<ClientInitializeError>() {
-            Some(handshake) => handshake.auth_challenge(),
-            None => wrapped(cause)
-                .find_map(|cause| cause.downcast_ref::<AuthRequiredError>())
-                .map(|refused| refused.www_authenticate_header.as_str()),
-        };
-        challenge.and_then(Self::from_challenge)
+    /// The challenge `cause` answers for, once it is one that knows: rmcp's
+    /// handshake and call errors give theirs through their accessors, and
+    /// the relay's own transport reports the 401 itself. `None` for any
+    /// other cause, so the walk goes on.
+    fn challenge<'a>(cause: &'a (dyn std::error::Error + 'static)) -> Option<Option<&'a str>> {
+        if let Some(handshake) = cause.downcast_ref::<ClientInitializeError>() {
+            Some(handshake.auth_challenge())
+        } else if let Some(call) = cause.downcast_ref::<ServiceError>() {
+            Some(call.auth_challenge())
+        } else {
+            cause
+                .downcast_ref::<AuthRequiredError>()
+                .map(|refused| Some(refused.www_authenticate_header.as_str()))
+        }
     }
 
     /// What the user is told for the server at `url`.
