@@ -1776,7 +1776,7 @@ pub async fn doctor(options: &Options) -> Result<Health> {
         check_search_index(&paths.db, &mut actions, &mut failures);
         check_backups(&paths.db, &mut actions, &mut failures);
         check_privacy(&paths.db, &mut actions, &mut failures);
-        check_delivery(&paths.db, &mut actions);
+        check_delivery(&paths.db, &mut actions, &mut failures);
     }
     let check_hooks = options.hooks_enabled(saved.as_ref());
     let check_skill = options.skill_enabled(saved.as_ref());
@@ -2022,7 +2022,7 @@ fn store_doctor(paths: &Paths) -> Result<Health> {
     }
     check_search_index(&paths.db, &mut actions, &mut failures);
     check_backups(&paths.db, &mut actions, &mut failures);
-    check_delivery(&paths.db, &mut actions);
+    check_delivery(&paths.db, &mut actions, &mut failures);
     conclude(&actions, &failures)
 }
 
@@ -2085,12 +2085,16 @@ fn check_privacy(db: &Path, actions: &mut Vec<String>, failures: &mut Vec<String
 /// Deletes this machine's delivery files of the store at `db` that may still
 /// hold removed words (#175): those a removal could not delete while
 /// another program held them, and those a killed writer left. Says so when
-/// it deleted any; a file still held is an action, one line each. Silent
-/// when there is nothing to do, or when the lock stays taken: the next
-/// writer deletes them then.
-fn check_delivery(db: &Path, actions: &mut Vec<String>) {
-    let Some(cleaned) = crate::memory::delivery_files::clean(db) else {
-        return;
+/// it deleted any; a file still held is an action, one line each; silent
+/// when there is nothing to do. A folder it cannot read, or a lock another
+/// process keeps, is a failure.
+fn check_delivery(db: &Path, actions: &mut Vec<String>, failures: &mut Vec<String>) {
+    let cleaned = match crate::memory::delivery_files::clean(db) {
+        Ok(cleaned) => cleaned,
+        Err(err) => {
+            failures.push(format!("Delivery index: {err}"));
+            return;
+        }
     };
     if cleaned.deleted > 0 {
         println!(

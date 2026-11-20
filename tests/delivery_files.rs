@@ -963,7 +963,7 @@ fn a_migration_deletes_the_store_s_files() {
 }
 
 /// The reply's line when a removal left files another program holds open.
-const LEFT_MARKED: &str = "The files in delivery_left still hold the removed words because another program has them open. Readers skip them; user-memory deletes them at its next write, and `user-memory doctor` deletes them at once.";
+const LEFT: &str = "The files in delivery_left still hold the removed words because another program has them open. Readers skip them; user-memory deletes them at its next write, and `user-memory doctor` deletes them at once.";
 
 /// Makes renames and deletes of the file named `name` fail, as another
 /// program holding it open does on Windows.
@@ -983,10 +983,7 @@ fn delivered(home: &Home, word: &str) -> Vec<PathBuf> {
 /// mark names it, and the next tool hook deletes it and every word with it.
 fn left_until_the_next_writer(home: &Home, reply: &Value, base: &Path, gone: &str) {
     assert_eq!(reply["delivery_left"], json!([base]), "{reply}");
-    assert!(
-        reply["next"].as_str().unwrap().ends_with(LEFT_MARKED),
-        "{reply}"
-    );
+    assert!(reply["next"].as_str().unwrap().ends_with(LEFT), "{reply}");
     let void = home.files(".void");
     assert_eq!(void.len(), 1);
     let name = base.file_name().unwrap().to_str().unwrap();
@@ -1072,19 +1069,68 @@ fn doctor_deletes_the_files_a_removal_left_and_names_one_still_held() {
     let still = doctor(&home, &[held(&name)]);
     assert!(
         still.contains(&format!(
-            "Delivery index: {} still holds removed words because another program has it open; close that program, then run `user-memory doctor` again",
+            "\nAction needed: Delivery index: {} still holds removed words because another program has it open; close that program, then run `user-memory doctor` again\n",
             base.display()
         )),
         "{still}"
     );
     assert!(!still.contains("Delivery index: deleted"), "{still}");
+    // A writer killed while writing left a file too.
+    let partial = |n: u32| {
+        fs::write(base.with_extension(format!("overlay.{n}.partial")), "x").unwrap();
+    };
+    partial(4242);
     let done = doctor(&home, &[]);
     assert!(
-        done.contains("Delivery index: deleted 1 file that held removed words.\n"),
+        done.contains("\nDelivery index: deleted 2 files that held removed words.\n"),
         "{done}"
     );
     assert_eq!(holding(&home, "quokka-deploy"), Vec::<PathBuf>::new());
     assert!(home.files(".void").is_empty());
+    partial(4243);
+    let one = doctor(&home, &[]);
+    assert!(
+        one.contains("\nDelivery index: deleted 1 file that held removed words.\n"),
+        "{one}"
+    );
     let again = doctor(&home, &[]);
     assert!(!again.contains("Delivery index"), "silent: {again}");
+}
+
+#[test]
+fn doctor_fails_while_another_process_keeps_the_lock() {
+    let (home, _) = started();
+    home.record("test", "numbat-test");
+    let hold = home.path().join("hold");
+    fs::write(&hold, "").unwrap();
+    let hook = home.spawn(
+        "PostToolUse",
+        "s1",
+        &[("USER_MEMORY_HOLD_REFRESH", hold.to_str().unwrap())],
+    );
+    time::until("the hook holds the lock", || {
+        home.path().join("hold.reached").exists()
+    });
+    let out = home
+        .command(&["doctor"], &[("USER_MEMORY_TEST_DELIVERY_LOCK_WAIT", "1")])
+        .output()
+        .unwrap();
+    fs::remove_file(&hold).unwrap();
+    let pid = hook.id();
+    time::finish(hook, "the hook");
+    assert!(!out.status.success(), "{out:?}");
+    #[cfg(not(windows))]
+    let who = format!("user-memory process {pid}");
+    #[cfg(windows)]
+    let who = {
+        let _ = pid;
+        "another user-memory process".to_owned()
+    };
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "Delivery index: {who} has held this machine's delivery index for 1 s"
+        )),
+        "{stderr}"
+    );
 }
