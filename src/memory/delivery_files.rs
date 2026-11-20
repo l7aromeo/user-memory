@@ -629,28 +629,51 @@ pub(crate) fn refresh(
 #[cfg(debug_assertions)]
 pub(crate) const HOLD_REFRESH: &str = "USER_MEMORY_HOLD_REFRESH";
 
-/// Names, in debug builds only, a file name that renames and deletes in the
+/// Names, in debug builds only, the files that renames and deletes in the
 /// delivery folder then fail on, as on Windows while another program holds
-/// the file open without sharing delete, so every platform tests it.
+/// a file open without sharing delete, so every platform tests it: file
+/// names joined by commas, each failing every time, or, written `name#k`,
+/// only the `k`th time this process writes it.
 #[cfg(debug_assertions)]
 const HELD_FILE: &str = "USER_MEMORY_TEST_HELD_FILE";
 
-/// In debug builds, the error [`HELD_FILE`] makes for `path`.
-fn held_for_tests(path: &Path) -> io::Result<()> {
+/// In debug builds, the error [`HELD_FILE`] makes for `path`, which this
+/// process is about to write when `writing`, else to delete.
+fn held_for_tests(path: &Path, writing: bool) -> io::Result<()> {
     #[cfg(debug_assertions)]
-    if let Some(held) = std::env::var_os(HELD_FILE)
-        && path.file_name() == Some(held.as_os_str())
+    if let Some(held) = std::env::var(HELD_FILE).ok()
+        && let Some(name) = path.file_name().and_then(|name| name.to_str())
     {
-        return Err(io::ErrorKind::PermissionDenied.into());
+        static SEEN: std::sync::Mutex<Vec<(String, usize)>> = std::sync::Mutex::new(Vec::new());
+        let mut seen = SEEN
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let times = match seen.iter_mut().find(|(seen, _)| seen == name) {
+            Some((_, times)) => {
+                *times += usize::from(writing);
+                *times
+            }
+            None => {
+                seen.push((name.to_owned(), usize::from(writing)));
+                usize::from(writing)
+            }
+        };
+        let fails = held.split(',').any(|entry| match entry.split_once('#') {
+            Some((entry, at)) => writing && entry == name && at.parse() == Ok(times),
+            None => entry == name,
+        });
+        if fails {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
     }
-    let _ = path;
+    let _ = (path, writing);
     Ok(())
 }
 
 /// Renames `from` over `to`, on Windows trying again for up to
 /// [`DELIVERY_REPLACE_WAIT`] while another program holds either file.
 fn replace(from: &Path, to: &Path) -> io::Result<()> {
-    held_for_tests(to)?;
+    held_for_tests(to, true)?;
     #[cfg(windows)]
     return crate::platform::windows::rename(from, to, DELIVERY_REPLACE_WAIT);
     #[cfg(not(windows))]
@@ -659,7 +682,7 @@ fn replace(from: &Path, to: &Path) -> io::Result<()> {
 
 /// Deletes `path`, on Windows trying again as [`replace`] does.
 fn remove(path: &Path) -> io::Result<()> {
-    held_for_tests(path)?;
+    held_for_tests(path, false)?;
     #[cfg(windows)]
     return crate::platform::windows::remove_file(path, DELIVERY_REPLACE_WAIT);
     #[cfg(not(windows))]
@@ -908,13 +931,14 @@ impl Removing {
         }
     }
 
-    /// The reply when the void mark could not be written before the
-    /// commit: without it, a file left after the commit would keep the
+    /// The reply when the void mark at `mark` could not be written before
+    /// the commit: without it, a file left after the commit would keep the
     /// removed words in use, so the write is refused.
-    fn unmarked(self, err: &io::Error) -> String {
+    fn unmarked(self, mark: &Path, err: &io::Error) -> String {
         let (done, verb) = self.words();
         format!(
-            "Nothing was {done}: the mark that keeps this machine's delivery index from using the removed words could not be written: {err}. Make the state folder writable, or free space on its disk, then {verb} again."
+            "Nothing was {done}: the mark that keeps this machine's delivery index from using the removed words could not be written to {}: {err}. Make that folder writable, or free space on its disk, then {verb} again.",
+            mark.display()
         )
     }
 }
@@ -1005,7 +1029,7 @@ pub(crate) fn before_removal(
     if names.len() > removal.kept.len()
         && let Err(err) = removal.files.void(&removal.lock, &names)
     {
-        anyhow::bail!(removing.unmarked(&err));
+        anyhow::bail!(removing.unmarked(&removal.files.void_path(), &err));
     }
     Ok(Some(removal))
 }
