@@ -1165,6 +1165,60 @@ class Batch(unittest.TestCase):
                          [(0, "main"), (0, "a"), (1, "main"), (1, "a")])
 
 
+class OutputFolder(unittest.TestCase):
+    """Where reports and the run counter go, and what a lost counter does."""
+
+    def setUp(self):
+        self.out = Path(tempfile.mkdtemp()).resolve()
+
+    def batch(self, name, *files):
+        folder = self.out / name
+        folder.mkdir()
+        for f in files:
+            (folder / f).write_text("{}")
+        return folder
+
+    def test_the_default_folder_survives_a_restart_on_each_platform(self):
+        home = Path("/home/u")
+        self.assertEqual(run.default_out("darwin", {}, home),
+                         home / "Library/Caches/user-memory-eval/reports")
+        self.assertEqual(run.default_out("linux", {"XDG_STATE_HOME": "/s"}, home),
+                         Path("/s/user-memory-eval/reports"))
+        self.assertEqual(run.default_out("linux", {}, home),
+                         home / ".local/state/user-memory-eval/reports")
+        self.assertEqual(run.default_out("linux", {"XDG_STATE_HOME": ""}, home),
+                         home / ".local/state/user-memory-eval/reports")
+
+    def test_an_empty_or_missing_folder_counts_nothing(self):
+        self.assertEqual(run.counted_runs(self.out), 0)
+        self.assertEqual(run.counted_runs(self.out / "absent"), 0)
+
+    def test_batches_that_only_rehearsed_count_nothing(self):
+        self.batch("20261120-185704", "binaries.json", "guard.log")
+        self.assertEqual(run.counted_runs(self.out), 0)
+
+    def test_batches_with_session_results_and_no_counter_refuse(self):
+        self.batch("20261116-062449", "binaries.json", "s-claude-0.json", "summary.md")
+        self.batch("20261116-065449", "s-claude-0.json")
+        self.batch("20261120-185704", "binaries.json")
+        self.batch("notes", "s-claude-0.json")
+        with self.assertRaises(SystemExit) as refused:
+            run.counted_runs(self.out)
+        self.assertEqual(str(refused.exception),
+                         f"refusing: {self.out} holds 2 batches with session results but no "
+                         f"run-count; write the sessions already run there to {self.out / 'run-count'}")
+
+    def test_the_counter_is_read_when_present(self):
+        self.batch("20261116-062449", "s-claude-0.json")
+        (self.out / "run-count").write_text("300")
+        self.assertEqual(run.counted_runs(self.out), 300)
+
+    def test_the_plan_names_the_counter_it_read(self):
+        (self.out / "run-count").write_text("300")
+        self.assertEqual(run.budget_line(6, 306, self.out),
+                         f"6 agent sessions planned; 300 already counted ({self.out / 'run-count'}); budget 306")
+
+
 class Rehearsal(unittest.TestCase):
     def test_a_rehearse_entry_can_require_text_to_be_absent(self):
         trial = Path(tempfile.mkdtemp())

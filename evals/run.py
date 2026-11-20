@@ -28,8 +28,10 @@ Before the first session and after every session the guard checks that the
 user's real memory, client configuration, instruction files and logins are
 unchanged, and aborts otherwise.
 
-Reports and raw transcripts go to $USER_MEMORY_EVAL_OUT (default
-/tmp/user-memory-evals), never into the repository.
+Reports, raw transcripts and the run counter go to $USER_MEMORY_EVAL_OUT
+(default: ~/Library/Caches/user-memory-eval/reports on macOS, else
+$XDG_STATE_HOME/user-memory-eval/reports or ~/.local/state/...), a folder
+a restart keeps, never into the repository.
 """
 
 import argparse
@@ -56,7 +58,20 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fake_model  # noqa: E402
 HOME = Path.home()
-OUT = Path(os.environ.get("USER_MEMORY_EVAL_OUT", "/tmp/user-memory-evals"))
+
+
+def default_out(platform, environ, home):
+    """Where reports and the run counter go unless USER_MEMORY_EVAL_OUT says:
+    a per-user folder a restart keeps, never /tmp, whose emptying would reset
+    the budget. On macOS beside the trial homes; elsewhere the XDG state
+    folder."""
+    if platform == "darwin":
+        return home / "Library/Caches/user-memory-eval/reports"
+    state = environ.get("XDG_STATE_HOME") or str(home / ".local/state")
+    return Path(state) / "user-memory-eval/reports"
+
+
+OUT = Path(os.environ.get("USER_MEMORY_EVAL_OUT") or default_out(sys.platform, os.environ, HOME))
 
 # Each batch runs the cheaper model of each provider's latest family: a pass
 # then says more about memory, the batch costs less, and the names follow new
@@ -313,11 +328,28 @@ def claude_token():
 
 # ---------------------------------------------------------------- run budget
 
-def counted_runs():
+def counted_runs(out=None):
+    """Sessions recorded in the output folder's run counter. A folder without
+    one counts 0 only when no batch there ran a session: a lost counter would
+    otherwise let `--budget` allow a full budget again."""
+    out = OUT if out is None else out
     try:
-        return int((OUT / "run-count").read_text())
+        return int((out / "run-count").read_text())
     except FileNotFoundError:
+        ran = [b for b in out.glob("*") if b.is_dir() and BATCH_NAME.fullmatch(b.name)
+               and any(b.glob("*-[0-9]*.json"))]
+        if ran:
+            sys.exit(f"refusing: {out} holds {len(ran)} batches with session results but no "
+                     f"run-count; write the sessions already run there to {out / 'run-count'}")
         return 0
+
+
+def budget_line(planned, budget, out=None):
+    """The plan's first line: sessions planned, the count read and the
+    counter file it was read from, and the budget."""
+    out = OUT if out is None else out
+    return (f"{planned} agent sessions planned; {counted_runs(out)} already counted "
+            f"({out / 'run-count'}); budget {budget}")
 
 
 def count_run():
@@ -2213,7 +2245,7 @@ def main():
     binaries = under_test(args.binary or [str(ROOT / "target/debug/user-memory")])
     planned = len(binaries) * sum(session_opens(s) * len(runs_of(s, clients, args.repeat))
                                   for s in scenarios)
-    print(f"{planned} agent sessions planned; {counted_runs()} already counted; budget {args.budget}")
+    print(budget_line(planned, args.budget))
     for s in scenarios:
         runs = runs_of(s, clients, args.repeat)
         per = {c: sum(1 for rc, _ in runs if rc == c) * session_opens(s) for c in clients}

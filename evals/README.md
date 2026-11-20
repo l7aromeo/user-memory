@@ -25,11 +25,19 @@ Codex's approval of the hooks), plus the session-start header a scenario's
 `rehearse` entries describe, and grades a scenario's checks on its
 [planted transcripts](#planted-transcripts). `--budget` refuses a batch that would take the
 total past that many sessions; the total is kept in
-`$USER_MEMORY_EVAL_OUT/run-count`. Reports, per-trial JSON with raw event
-streams, and the guard log go to `$USER_MEMORY_EVAL_OUT` (default
-`/tmp/user-memory-evals`), never into the repository: the harness
-refuses an output folder inside it. The trials themselves (homes, stores,
-binaries, projects) go to `$USER_MEMORY_EVAL_TRIALS` (default
+`$USER_MEMORY_EVAL_OUT/run-count`, and `--dry-run` names the file it read.
+Reports, per-trial JSON with raw event streams, and the guard log go to
+`$USER_MEMORY_EVAL_OUT`, by default a folder a restart keeps:
+`~/Library/Caches/user-memory-eval/reports` on macOS, and
+`$XDG_STATE_HOME/user-memory-eval/reports` (or
+`~/.local/state/user-memory-eval/reports`) elsewhere. Never `/tmp`, which a
+restart empties, taking the count with it. A folder whose batches ran
+sessions but that has no `run-count` is refused, with the number of such
+batches, rather than counted as zero; batches that only rehearsed count as
+none. To carry a tally from another folder, write its count to `run-count`
+in the new one before the first batch. Never into the repository: the
+harness refuses an output folder inside it. The trials themselves (homes,
+stores, binaries, projects) go to `$USER_MEMORY_EVAL_TRIALS` (default
 `~/Library/Caches/user-memory-eval/trials`), one 0700 folder per batch:
 outside `/tmp`, `TMPDIR` and the repository, which the harness refuses,
 because Codex's workspace sandbox may write anywhere in `/tmp` and `TMPDIR`
