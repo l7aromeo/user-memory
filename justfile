@@ -58,7 +58,7 @@ delivery-bench *args:
     cargo build --release --locked --bin user-memory --bin user-memory-bench
     python3 -I evals/delivery/run.py {{ args }}
 
-# Search speed on 100,000 synthetic memories against the budgets of issue #11; fails past one: `just search-budget --memories 20000`.
+# Search speed and the stored-vector count on 100,000 synthetic memories against their budgets; fails past one: `just search-budget --memories 20000`.
 search-budget *args:
     cargo build --release --locked
     python3 -I evals/scale/run.py {{ args }}

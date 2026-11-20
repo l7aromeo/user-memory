@@ -179,7 +179,7 @@ pub fn calibration(
     calibration::state(&connect(db)?, model, length)
 }
 
-pub(crate) use index::embed::{DOCKER_HOST, loopback};
+pub(crate) use index::embed::{DEFAULT_MODEL as DEFAULT_EMBED_MODEL, DOCKER_HOST, loopback};
 
 /// The host of the embeddings endpoint `setting` names, when it is not on
 /// this machine: memory text and searches are sent there. `None` when

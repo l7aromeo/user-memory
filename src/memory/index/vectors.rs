@@ -129,6 +129,63 @@ static HELD: Mutex<Option<Held>> = Mutex::new(None);
 /// the stored `source` must equal `document` of the memory as it is now.
 const CURRENT: &str = "SELECT m.id,m.category,m.memory_type,m.content,m.context,m.reason,m.evidence,v.source,v.vector FROM memory_vectors v JOIN memories m ON m.id=v.id WHERE v.model=?1 AND v.dimensions=?2";
 
+/// Every stored vector of one model and requested length, with its
+/// memory's text while the memory is there and the vector's size, in
+/// [`CURRENT`]'s column order.
+const STORED: &str = "SELECT m.id,m.category,m.memory_type,m.content,m.context,m.reason,m.evidence,v.source,length(v.vector) FROM memory_vectors v LEFT JOIN memories m ON m.id=v.id WHERE v.model=?1 AND v.dimensions=?2";
+
+/// Whether the vector in a [`CURRENT`] or [`STORED`] row was made from its
+/// memory's text as it is now: its `source` equals `document` of the memory.
+fn current(r: &rusqlite::Row) -> Result<bool> {
+    let mut text: [&str; 6] = [""; 6];
+    for (at, field) in text.iter_mut().enumerate() {
+        // A vector whose memory is gone is never current.
+        let Some(value) = r.get_ref(at + 1)?.as_str_or_null()? else {
+            return Ok(false);
+        };
+        *field = value;
+    }
+    let [category, memory_type, content, context, reason, evidence] = text;
+    let draft = Draft {
+        memory_type,
+        category,
+        content,
+        context,
+        reason,
+        evidence,
+        scope: Scope::Global,
+        project: "",
+    };
+    Ok(r.get_ref(7)?.as_str()? == document(&draft))
+}
+
+/// What the store holds for one model and requested length.
+#[derive(Debug, Default, PartialEq)]
+pub(in crate::memory) struct Stored {
+    pub(in crate::memory) count: u64,
+    /// Those made from their memory's present text: the ones a process
+    /// holds in memory to search.
+    pub(in crate::memory) current: u64,
+    /// The vectors' stored size.
+    pub(in crate::memory) bytes: u64,
+}
+
+/// The vectors the store behind `conn` holds for `identity`, the model and
+/// requested length [`Held`] loads by.
+pub(in crate::memory) fn stored(conn: &Connection, identity: (&str, i64)) -> Result<Stored> {
+    let mut statement = conn.prepare(STORED)?;
+    let mut rows = statement.query(rusqlite::params![identity.0, identity.1])?;
+    let mut stored = Stored::default();
+    while let Some(r) = rows.next()? {
+        stored.count += 1;
+        stored.bytes += r.get::<_, u64>(8)?;
+        if current(r)? {
+            stored.current += 1;
+        }
+    }
+    Ok(stored)
+}
+
 impl Held {
     fn new(db: PathBuf, identity: (String, i64)) -> Self {
         Self {
@@ -209,26 +266,7 @@ impl Held {
         };
         let mut vector = Vec::new();
         while let Some(r) = rows.next()? {
-            let text: [String; 6] = [
-                r.get(1)?,
-                r.get(2)?,
-                r.get(3)?,
-                r.get(4)?,
-                r.get(5)?,
-                r.get(6)?,
-            ];
-            let [category, memory_type, content, context, reason, evidence] = &text;
-            let draft = Draft {
-                memory_type,
-                category,
-                content,
-                context,
-                reason,
-                evidence,
-                scope: Scope::Global,
-                project: "",
-            };
-            if r.get_ref(7)?.as_str()? != document(&draft) {
+            if !current(r)? {
                 continue;
             }
             let Ok(id) = Uuid::parse_str(r.get_ref(0)?.as_str()?) else {

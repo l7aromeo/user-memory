@@ -24,7 +24,7 @@ use std::{
     time::Duration,
 };
 
-const DEFAULT_MODEL: &str = "qwen3-embedding:4b";
+pub(crate) const DEFAULT_MODEL: &str = "qwen3-embedding:4b";
 /// Inputs per request; keeps request bodies and model batches moderate.
 const BATCH: usize = 32;
 /// Most of an error reply's body read for its reason: a provider's error
