@@ -21,6 +21,8 @@ reports precision and recall of what the bars deliver
 import argparse
 import json
 import os
+import secrets
+import shutil
 import sqlite3
 import statistics
 import subprocess
@@ -84,6 +86,11 @@ BUILDS = 11
 # memory: the three are built again at once, one thread each, which took
 # 111 ms on macOS with a prototype; the room is for the slower runners.
 FORGET_ADDED_LIMIT_MS = 400
+# Polls a forget on a server may take to leave a client's delivery files
+# (#180): the connector's next poll finds it, at most one poll after the
+# forget, and the fold is a small part of the next; the third is the
+# runner's room.
+FORGET_LEFT_POLLS = 3
 # Tool hooks timed after a change each, and forgets timed with and without
 # the files, for the cost.
 HOOK_RUNS = 11
@@ -498,6 +505,94 @@ def upkeep(binary, folder, drawn):
             statistics.median(starts["built"]), statistics.median(starts["found"]))
 
 
+def served(binary, folder):
+    """#180's costs through the real binary, with the store in `folder`
+    served by `host` on loopback to a client in a throwaway home: session
+    start downloading its scope's base against finding it, the base's size,
+    and how long a forget on the server takes to leave the client's files
+    with a connector running. Returns session start's medians downloading
+    and finding, the base's bytes, and the forget's time (None when the
+    words never left)."""
+    server = folder / "server"
+    server.mkdir()
+    shutil.copy(folder / "home" / "memories.sqlite3", server / "memories.sqlite3")
+    token = server / "token"
+    # A token made here for the run, never shown.
+    token.write_text(secrets.token_urlsafe(48) + "\n")
+    if os.name != "nt":
+        token.chmod(0o600)
+    host = subprocess.Popen([str(binary), "host", "--listen", "127.0.0.1:0", "--db",
+                             str(server / "memories.sqlite3"), "--token-file", str(token)],
+                            env=hook_env(server), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    connector = None
+    try:
+        line = host.stdout.readline()
+        if not line.startswith("Listening: "):
+            raise SystemExit(f"the host did not start: {line!r}")
+        url = line.split(" ", 1)[1].strip()
+        home = folder / "client"
+        home.mkdir()
+        env = hook_env(home)
+        env.update({"USER_MEMORY_URL": url, "USER_MEMORY_TOKEN_FILE": str(token)})
+        env.pop("USER_MEMORY_DB")
+        cwd = folder / "plain"
+        delivery = home / ".local/state/user-memory/delivery"
+        if os.name == "nt":
+            delivery = home / "AppData/Local/user-memory/state/delivery"
+
+        def start(session):
+            payload = {"session_id": session, "cwd": str(cwd), "hook_event_name": "SessionStart",
+                       "source": "startup"}
+            began = time.perf_counter()
+            subprocess.run([str(binary), "session-start", "--client", "claude"], env=env, check=True,
+                           capture_output=True, input=json.dumps(payload), text=True)
+            return (time.perf_counter() - began) * 1000
+
+        starts = {"downloading": [], "finding": []}
+        for n in range(SESSION_PAIRS):
+            for path in delivery.glob("*") if delivery.exists() else []:
+                if path.suffix != ".lock":
+                    path.unlink()
+            starts["downloading"].append(start(f"download{n}"))
+            starts["finding"].append(start(f"find{n}"))
+        bases = list(delivery.glob("*.index"))
+        size = bases[0].stat().st_size if bases else 0
+
+        connector = subprocess.Popen([str(binary), "connect", "--url", url, "--token-file", str(token)],
+                                     env=env, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL)
+        word = "zircon-tally"
+        hexed = word.encode().hex().encode()
+        out = subprocess.run([str(binary), "record", "--type", "procedure", "--category", "build",
+                              "--title", "Zircon tally", "--content", f"Run `{word}` before counting.",
+                              "--scope", "global"], env=env, check=True, capture_output=True, text=True)
+        memory = json.loads(out.stdout)["id"]
+
+        def held():
+            return any(hexed in path.read_bytes() for path in delivery.glob("*.*")
+                       if path.suffix in (".index", ".overlay"))
+
+        poll = rust_ms("src/remote/marker.rs", "REMOTE_MARKER_POLL")
+        deadline = time.perf_counter() + 10 * poll / 1000
+        while not held() and time.perf_counter() < deadline:
+            time.sleep(0.05)
+        subprocess.run([str(binary), "forget", memory], env=env, check=True, capture_output=True)
+        forgot = time.perf_counter()
+        left = None
+        while time.perf_counter() < forgot + 10 * poll / 1000:
+            if not held():
+                left = (time.perf_counter() - forgot) * 1000
+                break
+            time.sleep(0.05)
+        return (statistics.median(starts["downloading"]), statistics.median(starts["finding"]),
+                size, left)
+    finally:
+        for process in (connector, host):
+            if process:
+                process.kill()
+                process.wait()
+
+
 def cost(found, seed, size, keep):
     """One lookup's time from a new process: start, load the delivery
     index, match one action; and with the passing passages' text cut from
@@ -540,6 +635,14 @@ def cost(found, seed, size, keep):
         print(f"  prompt hook {prompt:6.1f} ms building a missing base: "
               f"{'built' if built_at_prompt else 'NOT built'} "
               f"(limit {rust_ms('src/session.rs', 'PROMPT_LIMIT')} ms)")
+        downloading, finding, base_bytes, left = served(found["user-memory"], folder)
+        poll = rust_ms("src/remote/marker.rs", "REMOTE_MARKER_POLL")
+        print(f"  a server's client: session start median {downloading:6.1f} ms downloading its base "
+              f"({base_bytes / 1e6:.1f} MB), {finding:6.1f} ms finding it ({SESSION_PAIRS} pairs, "
+              f"limit {rust_ms('src/session.rs', 'LIMIT')} ms)")
+        print(f"  a server's client: a forget left its files in "
+              f"{'never' if left is None else f'{left:.0f} ms'} "
+              f"(limit {FORGET_LEFT_POLLS} polls of {poll} ms)")
         worst = 0.0
         for mode, samples in times.items():
             samples.sort()
@@ -548,7 +651,9 @@ def cost(found, seed, size, keep):
             worst = max(worst, median)
             print(f"  {mode:<11} median {median:6.1f} ms, 95th percentile {p95:6.1f} ms, "
                   f"largest {samples[-1]:6.1f} ms")
-        return worst, (start_built - start_found) / build_median, tool, added, built_at_prompt
+        served_ok = (downloading <= rust_ms("src/session.rs", "LIMIT")
+                     and left is not None and left <= FORGET_LEFT_POLLS * poll)
+        return worst, (start_built - start_found) / build_median, tool, added, built_at_prompt, served_ok
 
 
 def main():
@@ -574,7 +679,7 @@ def main():
     sizes = [int(s) for s in args.sizes.split(",")]
     tuning = {}
     if args.cost or args.check_cost:
-        worst, build_added, tool, added, built_at_prompt = cost(
+        worst, build_added, tool, added, built_at_prompt, served_ok = cost(
             found, REPORT_SEEDS[0], max(sizes), args.keep)
         over = False
         if args.check_cost and worst > LOOKUP_LIMIT_MS:
@@ -592,6 +697,10 @@ def main():
             over = True
         if args.check_cost and not built_at_prompt:
             print("the prompt hook did not build the missing base within its limit")
+            over = True
+        if args.check_cost and not served_ok:
+            print("a server's client downloaded its base past session start's limit, "
+                  "or a forget did not leave its files within the polls allowed")
             over = True
         return 1 if over else 0
     if args.sweep:

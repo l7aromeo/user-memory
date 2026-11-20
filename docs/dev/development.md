@@ -675,8 +675,13 @@ difference is at most 75 % of the build's own time on the same machine,
 since the build runs beside session start's own index and one that finishes
 first adds little of itself); a tool hook that finds a
 change, process start included (budget: `TOOL_HOOK_LIMIT`); what a forget
-adds when three scopes' files hold the memory (budget: 400 ms); and
-whether the prompt hook builds a missing base within `PROMPT_LIMIT`.
+adds when three scopes' files hold the memory (budget: 400 ms);
+whether the prompt hook builds a missing base within `PROMPT_LIMIT`; and,
+with the store served by `host` on loopback to a client in a throwaway
+home, session start downloading its base against finding it (budget:
+session start's `LIMIT`), the base's size, and how long a forget on the
+server takes to leave the client's files with its connector running
+(budget: three of `REMOTE_MARKER_POLL`).
 `--check-cost` fails when any is past its budget. CI runs it on macOS,
 Linux and Windows.
 
