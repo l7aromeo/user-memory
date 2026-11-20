@@ -47,6 +47,10 @@ const WANTED: &str = "wanted";
 /// The extension of the file a connector touches as it starts a poll, so
 /// another connector's tick in the meantime does not poll too.
 const CLAIM: &str = "polling";
+/// The extension of the file every running connector holds a shared lock
+/// on, which the system lets go when it exits or is killed: the hooks read
+/// a server's delivery files only while one holds it (#180).
+const CONNECTED: &str = "connected";
 
 /// [`REMOTE_MARKER_POLL`], which debug builds take in milliseconds from
 /// `USER_MEMORY_MARKER_POLL_MS` so tests can see the quiet interval and a
@@ -67,6 +71,7 @@ struct Files {
     marker: PathBuf,
     wanted: PathBuf,
     claim: PathBuf,
+    connected: PathBuf,
 }
 
 impl Files {
@@ -80,6 +85,7 @@ impl Files {
             marker: dir.join(format!("{key}.{MARKER}")),
             wanted: dir.join(format!("{key}.{WANTED}")),
             claim: dir.join(format!("{key}.{CLAIM}")),
+            connected: dir.join(format!("{key}.{CONNECTED}")),
         }
     }
 
@@ -183,6 +189,36 @@ impl Files {
     }
 }
 
+impl Files {
+    /// Takes the shared lock that says a connector runs; none when the file
+    /// can't be had, and the hooks then read no delivery file of the server.
+    fn connect(&self) -> Option<fs::File> {
+        let dir = self.connected.parent()?;
+        private::create_dir(dir).ok()?;
+        let file = private::create_file(
+            fs::OpenOptions::new().read(true).write(true).create(true),
+            &self.connected,
+        )
+        .ok()?;
+        file.lock_shared().ok()?;
+        Some(file)
+    }
+
+    /// Whether a connector runs: the lock it shares is held. The exclusive
+    /// lock tried without waiting, and let go at once when had.
+    #[cfg(test)]
+    fn connected(&self) -> bool {
+        let Ok(file) = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&self.connected)
+        else {
+            return false;
+        };
+        matches!(file.try_lock(), Err(fs::TryLockError::WouldBlock))
+    }
+}
+
 /// How long ago `path` was last written, none when it is missing.
 fn age(path: &Path, now: SystemTime) -> Option<Duration> {
     let modified = fs::metadata(path).and_then(|m| m.modified()).ok()?;
@@ -200,6 +236,78 @@ pub fn position(url: &str) -> Option<Position> {
         .is_some_and(|age| age <= poll_every() * STALE_AFTER_POLLS);
     fresh.then(|| files.position()).flatten()
 }
+
+/// For a hook reading the delivery files of the server at `url` (#180): the
+/// position its connector last found it at, when a connector runs on this
+/// machine and found it in the last [`SERVED_AFTER_POLLS`] quiet polls;
+/// else none, and the hook reads none of its files, since no one would
+/// take a removal on the server out of them. Says a hook ran, as
+/// [`position`] does.
+#[cfg(test)]
+#[expect(dead_code, reason = "the hooks of #117 part 4 call it, through `open`")]
+pub(crate) fn served(url: &str) -> Option<Position> {
+    Files::of(url)?.served()
+}
+
+#[cfg(test)]
+impl Files {
+    /// [`served`] for these files.
+    fn served(&self) -> Option<Position> {
+        let _ = touch(&self.wanted);
+        let recent = age(&self.marker, SystemTime::now())
+            .is_some_and(|age| age <= poll_every() * QUIET_POLLS * SERVED_AFTER_POLLS);
+        (recent && self.connected())
+            .then(|| self.position())
+            .flatten()
+    }
+}
+
+/// A connector's marker files in a folder of a test's own, for tests of
+/// what the hooks read (#180).
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+
+    /// Writes `position` in the marker of the server at `url` in `dir`,
+    /// as a poll does, its age `ago`.
+    pub(crate) fn mark(dir: &Path, url: &str, position: &Position, ago: Duration) {
+        let files = Files::in_dir(dir, url);
+        files.write(position).unwrap();
+        let marker = fs::OpenOptions::new()
+            .write(true)
+            .open(&files.marker)
+            .unwrap();
+        marker.set_modified(SystemTime::now() - ago).unwrap();
+    }
+
+    /// Holds the lock a connector holds while it runs, until dropped.
+    pub(crate) fn connect(dir: &Path, url: &str) -> fs::File {
+        Files::in_dir(dir, url).connect().unwrap()
+    }
+
+    /// The lock file a connector holds, for a process of a test's own.
+    pub(crate) fn connected_path(dir: &Path, url: &str) -> PathBuf {
+        Files::in_dir(dir, url).connected
+    }
+
+    /// [`served`] for the marker files in `dir`.
+    pub(crate) fn served(dir: &Path, url: &str) -> Option<Position> {
+        Files::in_dir(dir, url).served()
+    }
+
+    /// The age past which a running connector's marker no longer counts.
+    pub(crate) fn served_age() -> Duration {
+        poll_every() * QUIET_POLLS * SERVED_AFTER_POLLS
+    }
+}
+
+/// Quiet polls a connector that runs may miss before the hooks no longer
+/// read its server's delivery files: one whose server can't be reached
+/// learns of no removal there. A quiet connector polls once in
+/// [`QUIET_POLLS`] polls, so it never misses this many while it reaches
+/// the server.
+#[cfg(test)]
+const SERVED_AFTER_POLLS: u32 = STALE_AFTER_POLLS;
 
 /// Wakes this process's poller after a write the relay passed on.
 static WROTE: tokio::sync::Notify = tokio::sync::Notify::const_new();
@@ -241,6 +349,12 @@ pub async fn poll(connection: Connection) {
     let Some(files) = Files::of(&connection.url) else {
         return;
     };
+    // Held until the connector exits, by this process's open file.
+    let _connected = files.connect();
+    // Whether a delivery file may be behind the server: at this connector's
+    // first poll, even when the marker already names the server's position,
+    // and after an upkeep that left one behind.
+    let mut behind = true;
     // The version of a server that answered with no position.
     let mut without_positions: Option<serde_json::Value> = None;
     let mut last_asked: Option<tokio::time::Instant> = None;
@@ -284,6 +398,14 @@ pub async fn poll(connection: Connection) {
         };
         match reply.since {
             Some(position) => {
+                // The delivery files first: a hook reads them only once they
+                // are at or past the marker.
+                let moved = files
+                    .position()
+                    .is_none_or(|marked| !marked.same_change(&position));
+                if moved || behind {
+                    behind = !super::delivery::upkeep(&connection, &position).await;
+                }
                 let _ = files.write(&position);
             }
             None => {

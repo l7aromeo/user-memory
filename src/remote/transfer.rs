@@ -224,8 +224,8 @@ fn ascii(value: &Value) -> String {
 
 impl Connection {
     /// Posts `body` to the server's endpoint `name`, beside its MCP
-    /// endpoint; a refusal becomes an error with the server's message.
-    async fn post(
+    /// endpoint, whatever the server answers.
+    pub(super) async fn send(
         &self,
         name: &str,
         content: &'static str,
@@ -233,7 +233,7 @@ impl Connection {
     ) -> Result<reqwest::Response> {
         self.validate()?;
         let url = reqwest::Url::parse(&self.url)?.join(name)?;
-        let response = reqwest::Client::builder()
+        reqwest::Client::builder()
             .connect_timeout(CONNECT)
             .redirect(reqwest::redirect::Policy::none())
             .build()?
@@ -243,7 +243,18 @@ impl Connection {
             .body(body)
             .send()
             .await
-            .context("Cannot connect to memory server")?;
+            .context("Cannot connect to memory server")
+    }
+
+    /// [`Connection::send`], with a refusal made an error with the
+    /// server's message.
+    async fn post(
+        &self,
+        name: &str,
+        content: &'static str,
+        body: Vec<u8>,
+    ) -> Result<reqwest::Response> {
+        let response = self.send(name, content, body).await?;
         let status = response.status();
         if status.is_success() {
             return Ok(response);

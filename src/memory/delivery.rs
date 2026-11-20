@@ -25,6 +25,19 @@ pub(in crate::memory) fn prefix(anchor: bool) -> u8 {
 /// in the last byte: 2 added the header of [`Header`].
 const MAGIC: &[u8; 8] = b"UMDELIV2";
 
+/// The file format this code writes and reads, as a client names it to a
+/// server (#180).
+pub(crate) fn format() -> &'static str {
+    // The magic is ASCII.
+    std::str::from_utf8(MAGIC).unwrap_or_default()
+}
+
+/// The stamp of the stems this code makes, which a file's terms must have
+/// been made with for a lookup to find them.
+pub(crate) fn stems() -> String {
+    stamp()
+}
+
 /// Which of a scope's two files an index is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Part {
@@ -191,19 +204,28 @@ impl Builder {
     /// [`Builder::term`] with the field as its byte.
     fn term_field(&mut self, key: &[u8], field: u8) -> Result<(), Error> {
         let row = self.rows.len().checked_sub(1).ok_or(Error::Format)?;
-        let memory = self.rows[row].memory;
-        let term = match self.numbers.get(key) {
-            Some(&term) => term,
-            None => {
-                let term = u32::try_from(self.keys.len()).map_err(|_| Error::Format)?;
-                self.keys.push(key.into());
-                self.numbers.insert(key.into(), term);
-                term
-            }
-        };
+        let term = self.number(key)?;
+        self.posting(term, u32::try_from(row).map_err(|_| Error::Format)?, field)
+    }
+
+    /// The number of the term keyed `key`, given it when first met.
+    fn number(&mut self, key: &[u8]) -> Result<u32, Error> {
+        if let Some(&term) = self.numbers.get(key) {
+            return Ok(term);
+        }
+        let term = u32::try_from(self.keys.len()).map_err(|_| Error::Format)?;
+        self.keys.push(key.into());
+        self.numbers.insert(key.into(), term);
+        Ok(term)
+    }
+
+    /// Adds term number `term` to row `row`, held there in `field`. A term's
+    /// postings go in row order, as the file keeps them.
+    fn posting(&mut self, term: u32, row: u32, field: u8) -> Result<(), Error> {
+        let memory = self.rows.get(row as usize).ok_or(Error::Format)?.memory;
         self.postings.push(Posting {
             term,
-            row: u32::try_from(row).map_err(|_| Error::Format)?,
+            row,
             field,
             memory,
         });
@@ -565,6 +587,16 @@ impl DeliveryIndex {
         Ok(found)
     }
 
+    /// Every memory's id with its rows and their terms, by id: what two
+    /// files hold, compared in tests whatever the memories' order.
+    #[cfg(test)]
+    pub(crate) fn contents(&self) -> Result<std::collections::BTreeMap<String, String>, Error> {
+        let terms = self.terms_of(&(0..self.memories).collect::<Vec<_>>())?;
+        (0..self.memories)
+            .map(|m| Ok((self.id(m)?.to_owned(), format!("{:?}", terms.get(&m)))))
+            .collect()
+    }
+
     /// The position of memory `id` in the file, if it holds it.
     fn find(&self, ids: &HashMap<String, usize>, id: &str) -> Option<usize> {
         ids.get(id).copied()
@@ -674,33 +706,17 @@ fn current_rows(conn: &Connection, key: i64) -> Result<Vec<Terms>, Error> {
     Ok(rows)
 }
 
-/// The overlay of `base` from the store at `db`, read without writing in
-/// one transaction: the rows of at most `limit` memories the scope can see
-/// that changed after the base's change `since`, each as it is now, and
-/// every memory changed since in its skip list, so the base's older rows
-/// of it are never used. A memory past `limit` is in the skip list alone,
-/// and waits for the next base. With the position `position` makes of the
-/// store's id and latest change, and whether the base holds words a removal
-/// took out ([`Overlay::stale`]).
-pub(crate) fn overlay(
-    db: &Path,
-    base: &DeliveryIndex,
-    since: i64,
-    limit: usize,
-    position: impl FnOnce(&str, i64) -> String,
-) -> Result<Overlay, Error> {
-    let mut conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let conn = conn.transaction()?;
-    let (store_id, change, pruned): (String, i64, i64) = conn
+/// The store's id, latest change and the change it no longer counts
+/// before, read in `conn`'s transaction, after checking its keyword index
+/// is current for this code with nothing queued.
+fn current_changes(conn: &Connection) -> Result<(String, i64, i64), Error> {
+    let state: (String, i64, i64) = conn
         .query_row(
             "SELECT store_id,last_change,pruned_through FROM store_changes WHERE id=1",
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .map_err(|_| Error::NotCurrent)?;
-    if since < pruned {
-        return Err(Error::Pruned);
-    }
     let current: Option<String> = conn
         .query_row("SELECT stemmed_by FROM search_state WHERE id=1", [], |r| {
             r.get(0)
@@ -710,7 +726,13 @@ pub(crate) fn overlay(
     if current.as_deref() != Some(stamp().as_str()) || queued > 0 {
         return Err(Error::NotCurrent);
     }
-    let mut changed: Vec<(String, bool)> = Vec::new();
+    Ok(state)
+}
+
+/// Each memory changed after change `since`, in change order, with whether
+/// it was removed.
+fn changed_since(conn: &Connection, since: i64) -> Result<Vec<(String, bool)>, Error> {
+    let mut changed = Vec::new();
     let mut statement = conn.prepare(
         "SELECT memory_id,removed_at IS NOT NULL FROM memory_changes WHERE change>?1 ORDER BY change",
     )?;
@@ -718,41 +740,226 @@ pub(crate) fn overlay(
     while let Some(r) = rows.next()? {
         changed.push((r.get(0)?, r.get(1)?));
     }
-    drop(rows);
-    let skip: Vec<String> = changed.iter().map(|(id, _)| id.clone()).collect();
-    let stale = !changed.is_empty() && holds_removed(&conn, base, &changed)?;
+    Ok(changed)
+}
+
+/// The overlay file of the memories of `skip` that `projects` can see, each
+/// as it is now, at most `limit` of them, with `skip` as its skip list.
+/// Past `limit`: none when `whole`, else the file of the first `limit`.
+fn overlay_file(
+    conn: &Connection,
+    projects: &[String],
+    skip: Vec<String>,
+    (limit, whole): (usize, bool),
+    position: String,
+    made_for: String,
+) -> Result<Option<Vec<u8>>, Error> {
     let mut ids: Vec<String> = Vec::new();
     let mut built = Builder::default();
     let mut statement = conn.prepare(CHANGED_CANDIDATES)?;
-    let mut found = statement.query(params_from_iter([
-        json_array(&base.header.projects),
-        json_array(&skip),
-    ]))?;
-    while let Some(r) = found.next()?
-        && ids.len() < limit
-    {
+    let mut found = statement.query(params_from_iter([json_array(projects), json_array(&skip)]))?;
+    while let Some(r) = found.next()? {
+        if ids.len() == limit {
+            if whole {
+                return Ok(None);
+            }
+            break;
+        }
         let key: i64 = r.get(0)?;
         let m = ids.len();
         ids.push(r.get(1)?);
-        for row in current_rows(&conn, key)? {
+        for row in current_rows(conn, key)? {
             built.row(m, row.slot, row.start as usize, row.length as usize)?;
             for (term, field) in &row.keys {
                 built.term_field(term, *field)?;
             }
         }
     }
-    let position = position(&store_id, change);
     let header = Header {
         part: Part::Overlay,
         position,
-        made_for: base.header.position.clone(),
-        projects: base.header.projects.clone(),
+        made_for,
+        projects: projects.to_vec(),
         skip,
     };
-    Ok(Overlay {
-        bytes: built.bytes(&header, ids.iter().map(String::as_str))?,
-        stale,
-    })
+    built
+        .bytes(&header, ids.iter().map(String::as_str))
+        .map(Some)
+}
+
+/// The overlay of `base` from the store at `db`, read without writing in
+/// one transaction: the rows of at most `limit` memories the scope can see
+/// that changed after the base's change `since`, each as it is now, and
+/// every memory changed since in its skip list, so the base's older rows
+/// of it are never used. A memory past `limit` is in the skip list alone,
+/// and waits for the next base. With the position
+/// `position` makes of the store's id and latest change, and whether the
+/// base holds words a removal took out ([`Overlay::stale`]).
+pub(crate) fn overlay(
+    db: &Path,
+    base: &DeliveryIndex,
+    since: i64,
+    limit: usize,
+    position: impl FnOnce(&str, i64) -> String,
+) -> Result<Overlay, Error> {
+    let mut conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let conn = conn.transaction()?;
+    let (store_id, change, pruned) = current_changes(&conn)?;
+    if since < pruned {
+        return Err(Error::Pruned);
+    }
+    let changed = changed_since(&conn, since)?;
+    let skip: Vec<String> = changed.iter().map(|(id, _)| id.clone()).collect();
+    let stale = !changed.is_empty() && holds_removed(&conn, base, &changed)?;
+    let position = position(&store_id, change);
+    let bytes = overlay_file(
+        &conn,
+        &base.header.projects,
+        skip,
+        (limit, false),
+        position,
+        base.header.position.clone(),
+    )?
+    .ok_or(Error::Format)?;
+    Ok(Overlay { bytes, stale })
+}
+
+/// For a client of the server whose store is at `db` (#180): the overlay
+/// of the memories `projects` can see that changed since the client's base
+/// at `made_for`, read without writing in one transaction, each memory as
+/// it is now and every changed one in its skip list; with the position
+/// `position` makes of the store's id and latest change. `since` gives the
+/// base's change from the store's id and latest change, none when the
+/// base is of another store or past its latest change. None as well when
+/// the store no longer counts the changes since, or more than `limit` of
+/// them are seen: the client then takes a whole base. Whether the base
+/// holds words the changes took out is the client's to tell
+/// ([`removes`]), from the base it alone has.
+pub(crate) fn delta(
+    db: &Path,
+    projects: &[String],
+    made_for: &str,
+    since: impl FnOnce(&str, i64) -> Option<i64>,
+    limit: usize,
+    position: impl FnOnce(&str, i64) -> String,
+) -> Result<Option<Vec<u8>>, Error> {
+    let mut conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let conn = conn.transaction()?;
+    let (store_id, change, pruned) = current_changes(&conn)?;
+    let Some(since) = since(&store_id, change).filter(|since| *since >= pruned) else {
+        return Ok(None);
+    };
+    let skip = changed_since(&conn, since)?
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    overlay_file(
+        &conn,
+        projects,
+        skip,
+        (limit, true),
+        position(&store_id, change),
+        made_for.to_owned(),
+    )
+}
+
+/// Whether `overlay` takes words out of `base`, the client's own: `base`
+/// holds a memory of its skip list that the overlay doesn't hold (removed,
+/// or no longer in the scope), or holds with other terms (reworded). What
+/// [`holds_removed`] tells for a local store, told from the overlay.
+pub(crate) fn removes(base: &DeliveryIndex, overlay: &DeliveryIndex) -> Result<bool, Error> {
+    let in_base = base.ids()?;
+    let in_overlay = overlay.ids()?;
+    let mut held = Vec::new();
+    for id in &overlay.header.skip {
+        let Some(m) = base.find(&in_base, id) else {
+            continue;
+        };
+        let Some(o) = overlay.find(&in_overlay, id) else {
+            return Ok(true);
+        };
+        held.push((m, o));
+    }
+    if held.is_empty() {
+        return Ok(false);
+    }
+    let then = base.terms_of(&held.iter().map(|(m, _)| *m).collect::<Vec<_>>())?;
+    let now = overlay.terms_of(&held.iter().map(|(_, o)| *o).collect::<Vec<_>>())?;
+    Ok(held.iter().any(|(m, o)| then.get(m) != now.get(o)))
+}
+
+/// Adds to `built` the memories of `index` that `keep` keeps, their ids
+/// to `ids`, and their rows: each row's number in the new file, none for a
+/// row dropped.
+fn renumber<'i>(
+    index: &'i DeliveryIndex,
+    ids: &mut Vec<&'i str>,
+    built: &mut Builder,
+    keep: &dyn Fn(&str) -> bool,
+) -> Result<Vec<Option<u32>>, Error> {
+    let mut memories = vec![None; index.len()];
+    for (m, number) in memories.iter_mut().enumerate() {
+        let id = index.id(m)?;
+        if keep(id) {
+            *number = Some(ids.len());
+            ids.push(id);
+        }
+    }
+    let mut rows = vec![None; index.rows];
+    for (r, number) in rows.iter_mut().enumerate() {
+        let row = index.row(r)?;
+        if let Some(m) = memories[row.memory as usize] {
+            *number = Some(u32::try_from(built.rows.len()).map_err(|_| Error::Format)?);
+            built.row(
+                m,
+                i64::from(row.slot),
+                row.start as usize,
+                row.length as usize,
+            )?;
+        }
+    }
+    Ok(rows)
+}
+
+/// The base of `base` with `overlay`, made for it, folded in: the base's
+/// memories but those the overlay's skip list names, then the overlay's,
+/// at the overlay's position. The client of a server writes it in place of
+/// a base whose words an overlay took out, so they leave its disk without
+/// a download. One pass over each file's postings.
+pub(crate) fn fold(base: &DeliveryIndex, overlay: &DeliveryIndex) -> Result<Vec<u8>, Error> {
+    let skipped: std::collections::HashSet<&str, Fast> =
+        overlay.header.skip.iter().map(String::as_str).collect();
+    let mut ids: Vec<&str> = Vec::new();
+    let mut built = Builder::default();
+    let base_rows = renumber(base, &mut ids, &mut built, &|id| !skipped.contains(id))?;
+    let overlay_rows = renumber(overlay, &mut ids, &mut built, &|_| true)?;
+    for (index, rows) in [(base, &base_rows), (overlay, &overlay_rows)] {
+        for e in 0..index.entries {
+            let (key, _, first, count) = index.entry(e)?;
+            let mut term = None;
+            for p in first..first + count {
+                let at = index.postings_at + p * POSTING_BYTES;
+                let row = u32_at(&index.bytes, at)? as usize;
+                let Some(Some(new)) = rows.get(row).copied() else {
+                    continue;
+                };
+                let field = *index.bytes.get(at + 4).ok_or(Error::Format)?;
+                let term = match term {
+                    Some(term) => term,
+                    None => *term.insert(built.number(key)?),
+                };
+                built.posting(term, new, field)?;
+            }
+        }
+    }
+    let header = Header {
+        part: Part::Base,
+        position: overlay.header.position.clone(),
+        made_for: overlay.header.position.clone(),
+        projects: base.header.projects.clone(),
+        skip: Vec::new(),
+    };
+    built.bytes(&header, ids.into_iter())
 }
 
 /// Whether `base` holds a memory of `changed` (each id, and whether it was

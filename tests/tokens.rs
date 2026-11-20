@@ -778,6 +778,51 @@ fn a_read_only_clients_hooks_work_links_included() {
         !notice.contains("read-only") && !said.contains("read-only"),
         "{notice}{said}"
     );
+    // The read-only token fetched the scope's delivery index (#180),
+    // linked project included: it holds what `read` gives that token.
+    let base = delivery_bases(home.path());
+    assert_eq!(base.len(), 1, "{base:?}");
+    let tabs: String = "tab".bytes().map(|b| format!("{b:02x}")).collect();
+    let bytes = fs::read(&base[0]).unwrap();
+    assert!(bytes.windows(tabs.len()).any(|w| w == tabs.as_bytes()));
+}
+
+/// The delivery bases under `home`.
+fn delivery_bases(home: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let mut dirs = vec![home.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if dir.ends_with("delivery") && path.extension().is_some_and(|e| e == "index") {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+
+/// A request to the delivery route without a valid token is refused as one
+/// to the export route is.
+#[test]
+fn the_delivery_route_refuses_a_request_without_a_valid_token_as_export_does() {
+    let host = Host::start();
+    let body = r#"{"projects":[],"format":"UMDELIV2","stems":""}"#;
+    for token in ["", "not-a-token-of-this-server-at-all-0123456789"] {
+        let delivery = host.send("POST", "/delivery", token, body);
+        let export = host.send("POST", "/export", token, "{}");
+        assert_eq!(delivery.status, 401, "{}", delivery.body);
+        assert_eq!(
+            (delivery.status, delivery.challenge),
+            (export.status, export.challenge)
+        );
+    }
+    // A valid token from another version is told so, not refused as a
+    // stranger.
+    let other = host.send("POST", "/delivery", SHARED, body);
+    assert_eq!(other.status, 409, "{}", other.body);
 }
 
 /// A new rule's list ends, on a machine whose token is read-only, with who

@@ -25,6 +25,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub(crate) mod delivery;
 mod gate;
 pub(crate) mod marker;
 pub(crate) mod refused;
@@ -476,7 +477,8 @@ pub async fn host(options: HostOptions) -> Result<()> {
             allowed.clone(),
             transfer::admit,
         ));
-    let transfers = transfer::routes(db.clone(), allowed);
+    let transfers = transfer::routes(db.clone(), allowed.clone());
+    let delivery = delivery::routes(db.clone(), allowed);
     let health = Health::new(db.clone());
     let service: StreamableHttpService<crate::UserMemoryServer, LocalSessionManager> =
         StreamableHttpService::new(
@@ -489,13 +491,14 @@ pub async fn host(options: HostOptions) -> Result<()> {
             Default::default(),
             config,
         );
-    // /mcp, the export and import endpoints and a token's own revocation
+    // /mcp, the export, import and delivery endpoints and a token's own revocation
     // need a token (src/remote/gate.rs). `/` names the service for health
     // checks and reverse-proxy smoke tests, reads no memory and needs no
     // token; other paths are 404.
     let router = Router::new()
         .nest_service("/mcp", service)
         .merge(transfers)
+        .merge(delivery)
         .merge(own_token)
         .layer(middleware::from_fn_with_state(gate, gate::authenticate))
         .route("/", get(move || health.clone().answer()))
