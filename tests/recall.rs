@@ -145,6 +145,54 @@ impl Home {
             .to_owned()
     }
 
+    /// The push `client`'s post-tool hook prints for `payload`, and the
+    /// event it names; empty for none.
+    fn push(&self, client: &str, payload: &Value) -> (String, String) {
+        let mut child = self
+            .command(&["post-tool-use", "--client", client])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload.to_string().as_bytes())
+            .unwrap();
+        let out = time::finish(child, "post-tool-use");
+        assert!(out.status.success(), "{out:?}");
+        if out.stdout.is_empty() {
+            return (String::new(), String::new());
+        }
+        let out: Value = serde_json::from_slice(&out.stdout).unwrap();
+        let context = &out["hookSpecificOutput"];
+        (
+            context["hookEventName"].as_str().unwrap().to_owned(),
+            context["additionalContext"].as_str().unwrap().to_owned(),
+        )
+    }
+
+    /// Starts Codex's `session`.
+    fn start_codex(&self, session: &str) {
+        let mut child = self
+            .command(&["session-start", "--client", "codex"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let payload = json!({"session_id": session, "cwd": self.path(), "hook_event_name": "SessionStart", "source": "startup"});
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload.to_string().as_bytes())
+            .unwrap();
+        assert!(time::finish(child, "session-start").status.success());
+    }
+
     /// The push after `command` ran in the main context of `session`.
     fn run(&self, session: &str, command: &str) -> String {
         self.call(
@@ -419,4 +467,88 @@ fn session_start_opens_epochs_and_its_rules_in_full_count_as_shown() {
     // clear: every passage can be pushed again.
     home.start("s1", "clear");
     assert!(home.run("s1", "just check").contains(short(&note)));
+}
+
+/// Opens every push after a call that failed.
+const FAILED_HEADER: &str =
+    "From user-memory, matching this failed step (read one for the rest before applying it):";
+
+#[test]
+fn after_a_claude_code_failure_the_anchored_note_is_pushed_as_a_failure() {
+    let home = Home::new();
+    let trap = home.record(
+        "Release script needs a tag",
+        "`./scripts/release.sh` fails without a tag on the commit.",
+        &[],
+    );
+    home.record(
+        "Releases need care",
+        "Scripts for a release fail when a commit lacks its tag.",
+        &[],
+    );
+    home.start("s1", "startup");
+    let failure = json!({"session_id": "s1", "cwd": home.path(), "hook_event_name": "PostToolUseFailure",
+                         "tool_name": "Bash", "tool_input": {"command": "./scripts/release.sh"},
+                         "error": "Exit code 1", "is_interrupt": false});
+    let (event, pushed) = home.push("claude", &failure);
+    assert_eq!(event, "PostToolUseFailure");
+    // The note naming the command, and not the one sharing its words only.
+    assert_eq!(
+        pushed,
+        format!(
+            "{FAILED_HEADER}\n- {} The user's procedure: `./scripts/release.sh` fails without a tag on the commit.",
+            short(&trap)
+        )
+    );
+}
+
+#[test]
+fn a_codex_failure_is_read_from_its_transcript_and_never_its_output() {
+    let home = Home::new();
+    let trap = home.record(
+        "Release script needs a tag",
+        "`./scripts/release.sh` fails without a tag on the commit.",
+        &[],
+    );
+    let publish = home.record(
+        "Dry run before publishing",
+        "Run `cargo publish --dry-run` before `cargo publish`.",
+        &[],
+    );
+    home.start_codex("c1");
+    let transcript = home.path().join("rollout.jsonl");
+    let call = |id: &str, status: &str, exit_code: i64| {
+        // The command's output names the other note's command.
+        let line = json!({"type": "event_msg", "payload": {"type": "item_completed", "item": {
+            "type": "CommandExecution", "id": id, "status": status, "exit_code": exit_code,
+            "aggregated_output": "error: run `cargo publish` from a tagged commit"}}});
+        std::fs::write(&transcript, format!("{line}\n")).unwrap();
+        json!({"session_id": "c1", "cwd": home.path(), "hook_event_name": "PostToolUse",
+               "tool_name": "Bash", "tool_use_id": id, "transcript_path": transcript,
+               "tool_input": {"command": "./scripts/release.sh"},
+               "tool_response": "error: run `cargo publish` from a tagged commit"})
+    };
+    let (event, pushed) = home.push("codex", &call("exec-e0000001", "failed", 1));
+    assert_eq!(event, "PostToolUse");
+    assert!(pushed.starts_with(FAILED_HEADER), "{pushed}");
+    assert!(pushed.contains(short(&trap)), "{pushed}");
+    assert!(
+        !pushed.contains(short(&publish)),
+        "the output never joins: {pushed}"
+    );
+    // A later call that succeeded pushes under the plain header, and its
+    // output still never joins.
+    home.record(
+        "Release notes go with the tag",
+        "After `./scripts/release.sh` succeeds, write the release notes.",
+        &[],
+    );
+    home.start_codex("c2");
+    let (_, pushed) = home.push("codex", &{
+        let mut payload = call("exec-e0000002", "completed", 0);
+        payload["session_id"] = json!("c2");
+        payload
+    });
+    assert!(pushed.starts_with(HEADER), "{pushed}");
+    assert!(!pushed.contains(short(&publish)), "{pushed}");
 }
