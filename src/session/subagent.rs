@@ -6,8 +6,13 @@
 //! transcript holds it; every doubt prints the rules, so the cost of a wrong
 //! guess is a duplicate, never a missing rule.
 
-use super::{HookClient, LIMIT, Looking, hook_limit, hook_time, index, origin, payload};
+use super::{
+    HookClient, LIMIT, Looking, hook_limit, hook_time, index, origin, payload,
+    recall::{self, State},
+    tools::{Session, spawn_key},
+};
 use crate::memory;
+use crate::memory::matcher::Kind;
 use serde::Serialize;
 use serde_json::Value;
 use std::{io::Read, path::PathBuf};
@@ -41,6 +46,16 @@ pub async fn subagent_start(client: HookClient, context_limit: Option<usize>) ->
     .ok()
     .flatten()
     .unwrap_or_default();
+    // The task, after the rules: what its words match, pushed to the
+    // subagent as after its own action.
+    let recalled = payload
+        .as_deref()
+        .and_then(|payload| seed(client, payload, std::time::Instant::now()));
+    let rules = match recalled {
+        Some(recalled) if rules.is_empty() => recalled,
+        Some(recalled) => format!("{rules}\n\n{recalled}"),
+        None => rules,
+    };
     if rules.is_empty() {
         return rules;
     }
@@ -108,6 +123,29 @@ pub async fn subagent_rules(
         unit,
         super::NOTICE_CUT,
     ))
+}
+
+/// The type Claude Code gives a subagent its parent's call names none of.
+pub(super) const CLAUDE_DEFAULT_AGENT: &str = "general-purpose";
+
+/// Starts the subagent's window with the task its parent's call gave it
+/// (#117) and returns the push of what the task matches; none when no task
+/// was kept for it or nothing passes. Claude Code's subagent claims the
+/// task of its turn and type; Codex's, the session's oldest unclaimed one.
+fn seed(client: HookClient, payload: &[u8], started: std::time::Instant) -> Option<String> {
+    let session = Session::of(client, payload, started)?;
+    let value: Value = serde_json::from_slice(payload).ok()?;
+    let key = match client {
+        HookClient::Claude => spawn_key(
+            value["prompt_id"].as_str()?,
+            value["agent_type"].as_str().unwrap_or(CLAUDE_DEFAULT_AGENT),
+        ),
+        HookClient::Codex => String::new(),
+    };
+    let terms = State::open(&recall::path(session.snapshot()), session.deadline())
+        .and_then(|mut state| state.claim(&key))
+        .ok()??;
+    session.recall(&value, Kind::Task, terms, false).ok()?
 }
 
 /// The transcript the payload names.

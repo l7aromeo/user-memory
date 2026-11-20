@@ -552,3 +552,174 @@ fn a_codex_failure_is_read_from_its_transcript_and_never_its_output() {
     assert!(pushed.starts_with(HEADER), "{pushed}");
     assert!(!pushed.contains(short(&publish)), "{pushed}");
 }
+
+impl Home {
+    /// Runs `subcommand` for `client` with `payload`; the event and the
+    /// text it prints, empty for none.
+    fn run_hook(&self, subcommand: &str, client: &str, payload: &Value) -> (String, String) {
+        let mut child = self
+            .command(&[subcommand, "--client", client])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload.to_string().as_bytes())
+            .unwrap();
+        let out = time::finish(child, subcommand);
+        assert!(out.status.success(), "{out:?}");
+        if out.stdout.is_empty() {
+            return (String::new(), String::new());
+        }
+        let out: Value = serde_json::from_slice(&out.stdout).unwrap();
+        let context = &out["hookSpecificOutput"];
+        (
+            context["hookEventName"].as_str().unwrap().to_owned(),
+            context["additionalContext"].as_str().unwrap().to_owned(),
+        )
+    }
+}
+
+#[test]
+fn a_subagent_starts_with_its_task_and_its_own_context() {
+    let home = Home::new();
+    let docs = home.record(
+        "Docs notes",
+        "Keep `docs/notes.md` in step with the parser.",
+        &[],
+    );
+    home.start("s1", "startup");
+    let spawn = |prompt_id: &str, kind: &str, prompt: &str| {
+        json!({"session_id": "s1", "cwd": home.path(), "hook_event_name": "PreToolUse", "prompt_id": prompt_id,
+               "tool_name": "Agent", "tool_use_id": format!("t-{kind}"),
+               "tool_input": {"prompt": prompt, "description": "Docs", "subagent_type": kind}})
+    };
+    let started = |prompt_id: &str, agent: &str, kind: &str| {
+        json!({"session_id": "s1", "cwd": home.path(), "hook_event_name": "SubagentStart",
+               "prompt_id": prompt_id, "agent_id": agent, "agent_type": kind})
+    };
+    home.run_hook(
+        "pre-tool-use",
+        "claude",
+        &spawn("p1", "Explore", "Update `docs/notes.md` for the parser."),
+    );
+    // A subagent of another turn or type does not take it.
+    assert_eq!(
+        home.run_hook("subagent-start", "claude", &started("p2", "a0", "Explore"))
+            .1,
+        ""
+    );
+    assert_eq!(
+        home.run_hook("subagent-start", "claude", &started("p1", "a0", "Plan"))
+            .1,
+        ""
+    );
+    let (event, pushed) =
+        home.run_hook("subagent-start", "claude", &started("p1", "a1", "Explore"));
+    assert_eq!(event, "SubagentStart");
+    assert!(pushed.starts_with(HEADER), "{pushed}");
+    assert!(pushed.contains(short(&docs)), "{pushed}");
+    // Shown to the subagent once; its parent has not seen it.
+    let read = json!({"file_path": home.path().join("docs/notes.md")});
+    assert_eq!(
+        home.call("s1", Some("a1"), "Read", read.clone(), json!({})),
+        ""
+    );
+    assert!(
+        home.call("s1", None, "Read", read, json!({}))
+            .contains(short(&docs))
+    );
+    // A call naming no type starts Claude Code's default one.
+    let mut untyped = spawn("p3", "Explore", "Update `docs/notes.md` for the parser.");
+    untyped["tool_input"]
+        .as_object_mut()
+        .unwrap()
+        .remove("subagent_type");
+    home.run_hook("pre-tool-use", "claude", &untyped);
+    let pushed = home
+        .run_hook(
+            "subagent-start",
+            "claude",
+            &started("p3", "a3", "general-purpose"),
+        )
+        .1;
+    assert!(pushed.contains(short(&docs)), "{pushed}");
+}
+
+#[test]
+fn a_codex_sub_agent_claims_the_oldest_task_of_its_session() {
+    let home = Home::new();
+    let docs = home.record(
+        "Docs notes",
+        "Keep `docs/notes.md` in step with the parser.",
+        &[],
+    );
+    let release = home.record(
+        "Release script needs a tag",
+        "`./scripts/release.sh` fails without a tag on the commit.",
+        &[],
+    );
+    home.start_codex("c1");
+    let spawn = |message: &str| {
+        json!({"session_id": "c1", "cwd": home.path(), "hook_event_name": "PreToolUse", "turn_id": "u1",
+               "tool_name": "collaborationspawn_agent", "tool_use_id": "call_1",
+               "tool_input": {"message": message, "task_name": "task"}})
+    };
+    let started = |agent: &str| {
+        json!({"session_id": "c1", "cwd": home.path(), "hook_event_name": "SubagentStart",
+               "turn_id": format!("turn-{agent}"), "agent_id": agent, "agent_type": "default"})
+    };
+    // Two spawned in one turn: nothing ties a start to its call, so each
+    // start takes the oldest task left, whichever sub-agent it is.
+    home.run_hook(
+        "pre-tool-use",
+        "codex",
+        &spawn("Update `docs/notes.md` for the parser."),
+    );
+    home.run_hook(
+        "pre-tool-use",
+        "codex",
+        &spawn("Run `./scripts/release.sh` for the tag."),
+    );
+    let first = home.run_hook("subagent-start", "codex", &started("x2")).1;
+    let second = home.run_hook("subagent-start", "codex", &started("x1")).1;
+    assert!(
+        first.contains(short(&docs)) && !first.contains(short(&release)),
+        "{first}"
+    );
+    assert!(
+        second.contains(short(&release)) && !second.contains(short(&docs)),
+        "{second}"
+    );
+    assert_eq!(
+        home.run_hook("subagent-start", "codex", &started("x3")).1,
+        ""
+    );
+}
+
+#[test]
+fn a_parents_words_to_a_subagent_join_its_window_and_the_reply_never_does() {
+    let home = Home::new();
+    let docs = home.record(
+        "Docs notes",
+        "Keep `docs/notes.md` in step with the parser.",
+        &[],
+    );
+    let publish = home.record(
+        "Dry run before publishing",
+        "Run `cargo publish --dry-run` before `cargo publish`.",
+        &[],
+    );
+    home.start_codex("c1");
+    let message = json!({"session_id": "c1", "cwd": home.path(), "hook_event_name": "PostToolUse",
+                         "tool_name": "collaborationsend_message", "tool_use_id": "call_2",
+                         "tool_input": {"target": "/root/docs", "message": "Also check `docs/notes.md`."},
+                         "tool_response": "Done; ran `cargo publish`."});
+    let (_, pushed) = home.run_hook("post-tool-use", "codex", &message);
+    assert!(pushed.contains(short(&docs)), "{pushed}");
+    assert!(!pushed.contains(short(&publish)), "{pushed}");
+}

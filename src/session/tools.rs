@@ -14,7 +14,7 @@ use super::{
 };
 use crate::memory::{
     delivery_files,
-    matcher::{Action, Kind, Matched, Window},
+    matcher::{Action, Kind, Matched, Terms, Window, terms_of},
     push,
 };
 use rusqlite::{Connection, OpenFlags};
@@ -81,7 +81,8 @@ pub(crate) fn acts_on(client: HookClient, tool: &str) -> bool {
 
 /// What `client`'s pre-tool hook prints for the call on stdin, within its
 /// `context_limit` (the client's default room when `None`): nothing for a
-/// tool it does not act on, and nothing yet for one it does.
+/// tool it does not act on, and nothing yet for one it does. A call that
+/// starts a subagent keeps its task for the subagent's start (#117).
 pub fn pre_tool_use(client: HookClient, _context_limit: Option<usize>) -> String {
     let started = Instant::now();
     let payload = payload();
@@ -90,8 +91,76 @@ pub fn pre_tool_use(client: HookClient, _context_limit: Option<usize>) -> String
     };
     if let Some(session) = Session::of(client, &payload, started) {
         session.keep_current();
+        if let Ok(payload) = serde_json::from_slice::<Value>(&payload)
+            && let Some((key, task)) = spawned(client, &payload)
+        {
+            let _ = State::open(&recall::path(&session.snapshot), session.deadline)
+                .and_then(|mut state| state.spawn(&key, &terms_of(&task)));
+        }
     }
     String::new()
+}
+
+/// The tools Claude Code starts a subagent with, its task in
+/// `tool_input.prompt`.
+const CLAUDE_SPAWNS: [&str; 2] = ["Agent", "Task"];
+
+/// The tools Codex starts a sub-agent with, its task in
+/// `tool_input.message`: `collaborationspawn_agent`, as the hook payload
+/// names it in Codex 0.163.0's default setup (namespace and tool joined,
+/// probed against the fake model), and `spawn_agent` in the default or
+/// `multi_agent_v1` namespace.
+const CODEX_SPAWNS: [&str; 2] = ["collaborationspawn_agent", "spawn_agent"];
+
+/// The tools Codex sends a running sub-agent a message or task with, the
+/// text in `tool_input.message`.
+const CODEX_MESSAGES: [&str; 6] = [
+    "send_input",
+    "multi_agent_v1send_input",
+    "send_message",
+    "followup_task",
+    "collaborationsend_message",
+    "collaborationfollowup_task",
+];
+
+/// The task a call that starts a subagent gives it, and the key its start
+/// claims it by. Claude Code's start names the turn (`prompt_id`) and the
+/// subagent's type, as the call does. Codex's start shares nothing with the
+/// call that spawned it but the session, so the key is empty and each
+/// start claims the session's oldest task: two spawned at once may pair
+/// crosswise, a sibling's task in each.
+fn spawned(client: HookClient, payload: &Value) -> Option<(String, Action)> {
+    let tool = payload["tool_name"].as_str()?;
+    let input = &payload["tool_input"];
+    let (key, text) = match client {
+        HookClient::Claude if CLAUDE_SPAWNS.contains(&tool) => (
+            spawn_key(
+                payload["prompt_id"].as_str()?,
+                input["subagent_type"]
+                    .as_str()
+                    .unwrap_or(super::subagent::CLAUDE_DEFAULT_AGENT),
+            ),
+            input["prompt"].as_str()?,
+        ),
+        HookClient::Codex if CODEX_SPAWNS.contains(&tool) => {
+            (String::new(), input["message"].as_str()?)
+        }
+        _ => return None,
+    };
+    Some((
+        key,
+        Action {
+            kind: Kind::Task,
+            text: text.to_owned(),
+            failed: false,
+        },
+    ))
+}
+
+/// The key a subagent's task is kept and claimed by: the turn and the
+/// subagent's type for Claude Code.
+pub(super) fn spawn_key(prompt_id: &str, agent_type: &str) -> String {
+    format!("{prompt_id}\n{agent_type}")
 }
 
 /// What `client`'s post-tool hook prints for the result on stdin, within
@@ -113,7 +182,7 @@ pub fn post_tool_use(client: HookClient, _context_limit: Option<usize>) -> Strin
     };
     action.failed = failed(client, &payload);
     session
-        .recall(&payload, action)
+        .recall(&payload, action.kind, terms_of(&action), action.failed)
         .ok()
         .flatten()
         .map(|text| {
@@ -126,7 +195,7 @@ pub fn post_tool_use(client: HookClient, _context_limit: Option<usize>) -> Strin
 
 /// What a tool hook knows of its session: the store, the session's state
 /// files and scope, and the hook's deadline.
-struct Session {
+pub(super) struct Session {
     /// The server the store is on, or none for a store on this machine.
     remote: Option<String>,
     snapshot: PathBuf,
@@ -139,7 +208,7 @@ impl Session {
     /// last prompt or start wrote, and a deadline [`TOOL_HOOK_LIMIT`] from
     /// `started`. None for a session with no scope file, as one started by
     /// an earlier version, or when the store's setup can't be read.
-    fn of(client: HookClient, payload: &[u8], started: Instant) -> Option<Self> {
+    pub(super) fn of(client: HookClient, payload: &[u8], started: Instant) -> Option<Self> {
         let remote = crate::setup::configured_remote()
             .ok()?
             .map(|connection| connection.url);
@@ -151,6 +220,16 @@ impl Session {
             projects,
             deadline: started + super::hook_time(TOOL_HOOK_LIMIT),
         })
+    }
+
+    /// The session's snapshot file, which names its state files.
+    pub(super) fn snapshot(&self) -> &Path {
+        &self.snapshot
+    }
+
+    /// When the hook's time is up.
+    pub(super) fn deadline(&self) -> Instant {
+        self.deadline
     }
 
     /// Keeps the session's delivery overlay current (#175), never waiting
@@ -167,11 +246,18 @@ impl Session {
         }
     }
 
-    /// Adds `action` to its agent context's window and returns the push of
-    /// what it matches that the context was not shown in this stretch; none
-    /// when nothing passes, or the hook runs out of time, which then writes
-    /// nothing. On a server's store each line names the id alone.
-    fn recall(&self, payload: &Value, action: Action) -> anyhow::Result<Option<String>> {
+    /// Adds an action of `kind` that gave `terms` to its agent context's
+    /// window and returns the push of what it matches that the context was
+    /// not shown in this stretch; none when nothing passes, or the hook
+    /// runs out of time, which then writes nothing. On a server's store
+    /// each line names the id alone.
+    pub(super) fn recall(
+        &self,
+        payload: &Value,
+        kind: Kind,
+        terms: Terms,
+        failed: bool,
+    ) -> anyhow::Result<Option<String>> {
         let mut state = State::open(&recall::path(&self.snapshot), self.deadline)?;
         let agent = payload["agent_id"].as_str().unwrap_or(recall::MAIN);
         let mut window = Window::default();
@@ -179,9 +265,9 @@ impl Session {
             window.push_terms(step.kind, step.terms, step.failed);
         }
         let step = Step {
-            kind: action.kind,
-            failed: action.failed,
-            terms: window.push(&action).clone(),
+            kind,
+            failed,
+            terms: window.push_terms(kind, terms, failed).clone(),
         };
         let db = super::db_path();
         let mut lines = Vec::new();
@@ -189,7 +275,7 @@ impl Session {
             let found = view.rank(&window)?;
             let passing: Vec<&Matched> = found
                 .iter()
-                .filter(|m| push::passes(m, action.failed))
+                .filter(|m| push::passes(m, failed))
                 .take(push::READ_PER_EVENT)
                 .collect();
             if !passing.is_empty() {
@@ -215,12 +301,9 @@ impl Session {
                 chars: line.text.chars().count() + 1,
             })
             .collect();
-        let room = push::RECALL_CHARS - push::header_chars(action.failed);
+        let room = push::RECALL_CHARS - push::header_chars(failed);
         let shown = state.record(agent, &step, &offers, room)?;
-        Ok(
-            (!shown.is_empty())
-                .then(|| push::text(shown.iter().map(|&i| &lines[i]), action.failed)),
-        )
+        Ok((!shown.is_empty()).then(|| push::text(shown.iter().map(|&i| &lines[i]), failed)))
     }
 }
 
@@ -240,6 +323,15 @@ fn action(payload: &Value) -> Option<Action> {
             relative(payload, input["notebook_path"].as_str()?),
         ),
         "apply_patch" => (Kind::File, patched(payload, input["command"].as_str()?)?),
+        // The words a parent gives a subagent are its own; what the
+        // subagent returns is the tool's result.
+        tool if CLAUDE_SPAWNS.contains(&tool) => {
+            (Kind::Message, input["prompt"].as_str()?.to_owned())
+        }
+        "SendMessage" => (Kind::Message, input["message"].as_str()?.to_owned()),
+        tool if CODEX_SPAWNS.contains(&tool) || CODEX_MESSAGES.contains(&tool) => {
+            (Kind::Message, input["message"].as_str()?.to_owned())
+        }
         SEARCH_CLAUDE | SEARCH_CODEX => (Kind::Search, input["topic"].as_str()?.to_owned()),
         _ => return None,
     };
@@ -508,7 +600,13 @@ mod tests {
         };
         let payload = json!({"tool_name": "Bash", "tool_input": {"command": "cargo publish"}});
         let action = action(&payload).unwrap();
-        assert!(session.recall(&payload, action).unwrap().is_none());
+        let terms = terms_of(&action);
+        assert!(
+            session
+                .recall(&payload, action.kind, terms, false)
+                .unwrap()
+                .is_none()
+        );
         let state = State::open(&recall::path(&session.snapshot), session.deadline).unwrap();
         let window = state.window(recall::MAIN).unwrap();
         assert_eq!(window.len(), 1);
