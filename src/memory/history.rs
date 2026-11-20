@@ -422,7 +422,9 @@ pub(super) fn observations(conn: &Connection, id: Uuid) -> rusqlite::Result<Vec<
 }
 
 /// Removes the observations of conversation `origin` from the events of
-/// memory `id`, or of every memory with none.
+/// memory `id`, or of every memory with none. The kept ones are wrapped
+/// in `json()`: a subquery's result carries no JSON subtype, so
+/// `json_set` would store the array as a string.
 fn without_observations(
     conn: &Connection,
     id: Option<Uuid>,
@@ -432,8 +434,8 @@ fn without_observations(
         "UPDATE memory_events SET before=CASE
              WHEN (SELECT count(*) FROM json_each(before,'$.observations') WHERE json_extract(value,'$.origin') IS NOT ?1)=0
              THEN nullif(json_remove(before,'$.observations'),'{}')
-             ELSE json_set(before,'$.observations',(SELECT json_group_array(json(value)) FROM json_each(before,'$.observations')
-                 WHERE json_extract(value,'$.origin') IS NOT ?1)) END
+             ELSE json_set(before,'$.observations',json((SELECT json_group_array(json(value)) FROM json_each(before,'$.observations')
+                 WHERE json_extract(value,'$.origin') IS NOT ?1))) END
          WHERE (?2 IS NULL OR memory_id=?2) AND json_valid(before)
          AND EXISTS (SELECT 1 FROM json_each(before,'$.observations') WHERE json_extract(value,'$.origin') IS ?1)",
         params![origin, id.map(|id| id.to_string())],
@@ -521,7 +523,10 @@ pub(super) fn forgotten(conn: &Connection, wanted: &str) -> Result<Option<Uuid>>
     }
     let found: Vec<String> = conn
         .prepare("SELECT DISTINCT memory_id FROM memory_events WHERE substr(memory_id,1,?2)=?1 AND memory_id NOT IN (SELECT id FROM memories) LIMIT 2")?
-        .query_map(params![wanted, super::ids::SHORT_ID], |r| r.get(0))?
+        .query_map(
+            params![wanted, i64::try_from(super::ids::SHORT_ID)?],
+            |r| r.get(0),
+        )?
         .collect::<rusqlite::Result<_>>()?;
     Ok(match found.as_slice() {
         [one] => Uuid::parse_str(one).ok(),

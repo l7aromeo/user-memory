@@ -1205,12 +1205,18 @@ mod tests {
             "{err:#}"
         );
         assert_eq!(fs::read(&db).unwrap(), before);
+        // The reason in parentheses is SQLite's own text for the busy store,
+        // which its releases word as they like; the rest is ours.
         assert_eq!(
             compact_skipped(&db, &err),
             format!(
-                "user-memory: rewriting {} without its free space was skipped (database is locked: Error code 5: The database file is locked); text forgotten before this version may stay in it until the next setup or migrate",
+                "user-memory: rewriting {} without its free space was skipped ({err:#}); text forgotten before this version may stay in it until the next setup or migrate",
                 db.display()
             )
+        );
+        assert_eq!(
+            err.to_string(),
+            err.downcast_ref::<rusqlite::Error>().unwrap().to_string()
         );
         writer.execute_batch("ROLLBACK").unwrap();
         assert!(compact_waiting(&db, Duration::from_millis(100)).unwrap());

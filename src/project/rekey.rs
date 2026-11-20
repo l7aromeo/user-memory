@@ -86,7 +86,11 @@ pub fn move_project(db: &Path, old: &str, new: &str) -> Result<Moved> {
     // check, which counts a writer row as damage; the row goes before the
     // commit.
     crate::memory::note_writer(&tx, None, None, "")?;
-    let count = |sql: &str, key: &str| tx.query_row(sql, [key], |r| r.get::<_, usize>(0));
+    let count = |sql: &str, key: &str| -> Result<usize> {
+        Ok(usize::try_from(
+            tx.query_row(sql, [key], |r| r.get::<_, i64>(0))?,
+        )?)
+    };
     let memories = count(PROJECT_MEMORIES, &old)?;
     let links = count(
         "SELECT COUNT(*) FROM conversation_projects WHERE project = ?1",

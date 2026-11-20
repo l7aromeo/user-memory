@@ -302,7 +302,11 @@ fn rebuilt_keyword_index(dir: &Path, db: &Path) -> Vec<Vec<String>> {
     let copy = dir.join("rebuilt.sqlite3");
     Connection::open(db)
         .unwrap()
-        .backup(rusqlite::MAIN_DB, &copy, None)
+        .backup(
+            rusqlite::MAIN_DB,
+            &copy,
+            None::<fn(rusqlite::backup::Progress)>,
+        )
         .unwrap();
     let out = user_memory(dir, &copy, &["reindex"]);
     assert!(out.status.success(), "{}", stderr(&out));

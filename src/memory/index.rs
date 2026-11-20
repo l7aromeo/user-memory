@@ -380,7 +380,13 @@ pub(super) fn drain(conn: &Connection) -> Result<()> {
         let (first, last) = row_numbers(*key);
         forget.execute([first, last])?;
         for (row, [category, title, kind, body, anchors]) in stored {
-            let place = (row.slot != 0).then(|| (row.place.start, row.place.len()));
+            let place = match row.slot {
+                0 => None,
+                _ => Some((
+                    i64::try_from(row.place.start)?,
+                    i64::try_from(row.place.len())?,
+                )),
+            };
             insert.execute(params![
                 first + row.slot,
                 category,
