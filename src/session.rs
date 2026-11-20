@@ -825,18 +825,31 @@ pub async fn prompt_submit(client: HookClient) -> String {
         std::time::Instant::now() + deadline.saturating_duration_since(tokio::time::Instant::now());
     let recalled = asked.and_then(|payload| recall_prompt(client, &payload, until));
     let (limit, unit) = hook_limit(Some(client), None);
-    let room = limit.saturating_sub(recalled.as_deref().map_or(0, |r| unit.len(r) + 2));
-    let notice = notice.map(|text| capped(text, room, unit, NOTICE_CUT));
-    let text = [notice, recalled]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join("\n\n");
+    let text = prompt_text(notice, recalled, limit, unit);
     if text.is_empty() {
         return text;
     }
     json!({"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":text}})
         .to_string()
+}
+
+/// The prompt hook's text: `notice`, then `recalled` after a blank line,
+/// within `limit` in `unit`. The notice is cut to leave the push its room:
+/// a session that started without memory gets the whole index in its
+/// notice, which can fill the limit by itself.
+fn prompt_text(
+    notice: Option<String>,
+    recalled: Option<String>,
+    limit: usize,
+    unit: FitUnit,
+) -> String {
+    let room = limit.saturating_sub(recalled.as_deref().map_or(0, |r| unit.len(r) + 2));
+    let notice = notice.map(|text| capped(text, room, unit, NOTICE_CUT));
+    [notice, recalled]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// Opens a prompt that is a subagent's result delivered to its parent, not
@@ -1664,6 +1677,39 @@ fn capped(text: String, limit: usize, unit: FitUnit, note: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_notice_that_fills_the_limit_is_cut_and_the_push_kept() {
+        let bytes = FitUnit::Utf8Bytes;
+        let notice: String = (0..40)
+            .map(|i| format!("+ e00000{i:02} A memory line of the index\n"))
+            .collect();
+        let recalled = "From user-memory, matching this step (read one for the rest before applying it):\n- e0000001 The user's rule: Ask before every git push".to_owned();
+        let limit = bytes.len(&notice);
+        let text = prompt_text(Some(notice.clone()), Some(recalled.clone()), limit, bytes);
+        assert!(text.len() <= limit, "{} of {limit}", text.len());
+        let (cut, pushed) = text.split_once("\n\n").unwrap();
+        assert!(cut.ends_with(NOTICE_CUT), "{cut}");
+        assert_eq!(pushed, recalled);
+        // Room enough: both whole.
+        let both = prompt_text(
+            Some(notice.clone()),
+            Some(recalled.clone()),
+            limit * 2,
+            bytes,
+        );
+        assert_eq!(both, format!("{notice}\n\n{recalled}"));
+        // Either alone, or neither.
+        assert_eq!(
+            prompt_text(None, Some(recalled.clone()), limit, bytes),
+            recalled
+        );
+        assert_eq!(
+            prompt_text(Some(notice.clone()), None, limit, bytes),
+            notice
+        );
+        assert_eq!(prompt_text(None, None, limit, bytes), "");
+    }
 
     /// The fields Codex 0.163.0 reads from a session-start hook's JSON
     /// (codex-rs/hooks/schema/generated/session-start.command.output.schema.json),
