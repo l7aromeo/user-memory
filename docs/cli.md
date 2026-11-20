@@ -167,7 +167,10 @@ index again without the removed words before it replies; a file another
 program held open, so it could be neither replaced nor deleted, is listed
 in `delivery_left` with a line of `next`, and `user-memory doctor`
 deletes it. If another user-memory process holds the delivery index for
-10 s, the command changes nothing and names that process. The memory's history
+10 s, the command changes nothing and names that process; if it cannot
+write the mark that keeps the delivery index from using the old words, it
+changes nothing and says so
+([storage](storage.md#a-delivery-file-another-program-holds)). The memory's history
 keeps only tombstones, each change's operation and time, which
 `user-memory history` shows. Forgetting cannot be undone, except from a
 backup. Nothing is ever deleted automatically, so write a
