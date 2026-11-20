@@ -345,6 +345,16 @@ on Windows), each private to you:
   `migrate` and `project move` delete the store's files, and the next
   prompt builds them again. A file not written for a day goes at that
   store's next session start.
+  For a memory server's store the files are the same, keyed by the
+  server's address: session start downloads a missing base from the
+  server (`POST /delivery`) and folds a full overlay into its base on this
+  machine; the prompt hook downloads one the session lacks, unless its
+  last download missed its time limit (`<store key>-<scope key>.missed`,
+  gone once a base arrives; the next session start asks again); and the
+  connector takes each change
+  in at its poll, writing a base again without the words a forget or a
+  correction on the server took out. `user-memory doctor` deletes a
+  server's files not written for a day.
   Deleting the folder loses nothing: the next session start builds it
   again.
 - `servers/`: for each memory server this machine is a client of, the
@@ -352,7 +362,9 @@ on Windows), each private to you:
   key a hash of the server's address), when a hook last ran
   (`<key>.wanted`) and when a connector last started to ask
   (`<key>.polling`, which one connector at a time takes), all empty or a
-  few bytes. A prompt whose snapshot
+  few bytes; and `<key>.connected`, which every running connector holds a
+  shared lock on, so the hooks read the server's delivery files only while
+  one runs. A prompt whose snapshot
   holds that position asks the server nothing
   ([session hooks](clients.md#session-hooks)).
 - `instructions/`: one record per instruction file user-memory wrote, with
@@ -389,6 +401,14 @@ writing left, and says how many:
 ```output
 Delivery index: deleted 1 file that held removed words.
 Delivery index: deleted <n> files that held removed words.
+```
+
+On a memory server's client, doctor deletes those and the server's files
+not written for a day:
+
+```output
+Delivery index: deleted 1 file that may hold words the memory server removed.
+Delivery index: deleted <n> files that may hold words the memory server removed.
 ```
 
 A file still held is an action, one line per file:

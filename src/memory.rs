@@ -18,6 +18,7 @@ pub(crate) mod delivery_files;
 #[cfg(test)]
 pub use changes::position as store_position;
 pub use changes::{marked, reconcile};
+pub(crate) use delivery::{format as delivery_format, stems as delivery_stems};
 pub mod embedding;
 mod history;
 mod ids;

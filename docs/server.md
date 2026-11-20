@@ -152,7 +152,7 @@ other than the host connect only through the proxy.
        proxy_send_timeout 300s;
    }
 
-   location ~ ^/(export|import)$ {              # export and import from clients
+   location ~ ^/(export|import|delivery)$ {     # export, import, delivery index
        client_max_body_size 129m;               # a 64 MiB file and titles map
        proxy_pass http://127.0.0.1:8765;
        proxy_set_header Host $host;
@@ -172,6 +172,12 @@ other than the host connect only through the proxy.
    often strip `Authorization`, cache or restrict `POST`, and cut streamed
    responses short. Point the host name straight at the proxy (on
    Cloudflare: a DNS-only record).
+
+   `/delivery` sends each client the delivery index of its sessions'
+   projects, 2.7 MB at 10,000 memories, when it has none. The server keeps
+   the last one it built for each of up to 32 sets of projects in memory,
+   about 90 MB at most at 10,000 memories, so many clients starting at once
+   cost one build.
 
 3. Check it from another machine. The first command prints one line; the
    second prints `401`, because it sends no token:

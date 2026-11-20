@@ -304,8 +304,16 @@ sentence. The hooks build and keep it, so no step waits for the store:
   them ([privacy](privacy.md#what-a-forgotten-memory-leaves)).
 
 The files are private to you, in the state folder
-([storage](storage.md)), and go after a day unused. Not yet kept for a
-memory server's store.
+([storage](storage.md)), and go after a day unused.
+
+A client of a memory server keeps the same index of the server's store.
+Session start downloads it when it is missing (and folds the changes into
+it on the machine otherwise), the prompt hook downloads one the session
+lacks, and the connector takes each change in at its poll. A forget or a
+correction on the server leaves the client's files at the connector's next
+poll, and the hooks read them only while a connector runs
+([privacy](privacy.md#what-a-forgotten-memory-leaves)). The tool hooks
+never ask the server.
 
 ## How search finds a memory
 

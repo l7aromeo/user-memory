@@ -48,8 +48,8 @@ On each machine running the client:
 | `~/.local/bin/.user-memory.json` | Setup's choices: the server address or store path, clients, hooks, skill. |
 | `~/.local/state/user-memory/sessions/` | For each recent session, the id, last change, status and title of each memory it saw, so the change notice can compare, and in a second file the keys of its projects, which the first already holds, for the tool hooks. A file's name holds a key made from the store's path or the server's address (a hash, not the path or address itself). Files unused for 30 days are removed. |
 | `~/.local/state/user-memory/handover-*.json` | Only while an open session moves to a new binary after an upgrade: the session's handshake, the tools it was given and the input read but not yet answered, which can hold a memory being recorded. Readable only by you. The new binary deletes it as it starts; if a dying process leaves one behind, the next session to start deletes it once it is ten minutes old. |
-| `~/.local/state/user-memory/delivery/` | For each store on this machine and each set of projects a session worked in, the delivery index: every word of the global memories and those projects' memories as a stem in hex, which decodes back to the word, and their literal anchors (code spans, paths, names) as written, with each passage's place, but no sentence. Beside it, the changes since, a lock and at times the names of files to ignore. File names hold hashes of the store's path and of the project keys. A file not written for a day is deleted at the next session start of that store. Not yet kept for a memory server's store. |
-| `~/.local/state/user-memory/servers/` | For each memory server this machine uses, the server's position in its count of changes (an opaque string, not its id) as the connector last polled it, and the times a hook last ran and a poll last started. A file's name is a hash of the server's address. |
+| `~/.local/state/user-memory/delivery/` | For each store on this machine and each set of projects a session worked in, the delivery index: every word of the global memories and those projects' memories as a stem in hex, which decodes back to the word, and their literal anchors (code spans, paths, names) as written, with each passage's place, but no sentence. Beside it, the changes since, a lock and at times the names of files to ignore. For a memory server's store, the same for every memory the server lets this machine's sessions see in their projects, downloaded from the server; no sentence, title or passage text either. File names hold hashes of the store's path or the server's address and of the project keys. A file not written for a day is deleted at the next session start of that store, and by `user-memory doctor` for a server's. |
+| `~/.local/state/user-memory/servers/` | For each memory server this machine uses, the server's position in its count of changes (an opaque string, not its id) as the connector last polled it, and the times a hook last ran and a poll last started; and a lock each running connector holds, so the hooks know one runs. A file's name is a hash of the server's address. |
 | `~/.local/state/user-memory/instructions/` | For each instruction file user-memory last wrote: its path, time, size and a SHA-256 of its text, never the text itself, so the next write can tell nobody has saved it since. |
 | `~/.claude/rules/user-memory.md`, the block in `~/.codex/AGENTS.md` | The titles of your global rules. |
 
@@ -77,7 +77,22 @@ process holds the delivery index for 10 s, the forget changes nothing and
 names that process. A delivery file another program, such as a virus scanner
 or a backup tool, holds open can be neither replaced nor deleted: the
 reply lists it in `delivery_left`, readers skip it, and the next write or
-`user-memory doctor` deletes it. A correction keeps the text it replaced in the
+`user-memory doctor` deletes it.
+
+On a memory server, a forget or a correction can't reach the client
+machines' delivery index itself. Each client's connector takes the words
+out: at its next poll, within 5 seconds while a session there is active
+and within a minute on a quiet machine, it asks the server what changed
+and writes the files again without them. Until then a hook there may
+still match those words. The hooks read a server's files only while a
+connector runs on the machine and has heard from the server in the last
+three minutes, and only once the files hold every change the connector
+has heard of. A client whose connector doesn't run keeps the files,
+unread, until its next connection, whose first poll takes the words out
+before any hook reads them; its next session start or `user-memory
+doctor` once they are a day old; or uninstall.
+
+A correction keeps the text it replaced in the
 memory's [history](memory-model.md#history) for a year, then drops it as an
 automatic backup is made; `update --drop-history` drops it at once, with
 the rest of that memory's history. Copies made before keep it, and

@@ -317,7 +317,10 @@ passages are worked out again whenever the memory is indexed.
   access token, which already reads and writes every memory. The server's
   `/export` and `/import` endpoints take the same token and host checks as
   `/mcp`, and refuse an import request over 128 MiB (a 64 MiB file and a
-  titles map) before reading it; the file itself is held to 64 MiB.
+  titles map) before reading it; the file itself is held to 64 MiB. So does
+  `/delivery`, which sends a client its projects' delivery index
+  ([how it works](how-it-works.md#the-delivery-index)) and which a
+  read-only token may ask for.
 - Agents export and import only by file name inside the exports directory beside
   the store (`~/.local/share/user-memory/exports/`,
   `%LOCALAPPDATA%\user-memory\exports\` on Windows, or `/data/exports/` in
