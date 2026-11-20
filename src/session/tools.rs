@@ -89,7 +89,7 @@ pub fn pre_tool_use(client: HookClient, _context_limit: Option<usize>) -> String
     let Some(_tool) = tool_name(&payload).filter(|tool| acts_on(client, tool)) else {
         return String::new();
     };
-    if let Some(session) = Session::of(client, &payload, started) {
+    if let Some(session) = Session::of(client, &payload, tool_deadline(started)) {
         session.keep_current();
         if let Ok(payload) = serde_json::from_slice::<Value>(&payload)
             && let Some((key, task)) = spawned(client, &payload)
@@ -170,7 +170,7 @@ pub(super) fn spawn_key(prompt_id: &str, agent_type: &str) -> String {
 pub fn post_tool_use(client: HookClient, _context_limit: Option<usize>) -> String {
     let started = Instant::now();
     let payload = payload();
-    let Some(session) = Session::of(client, &payload, started) else {
+    let Some(session) = Session::of(client, &payload, tool_deadline(started)) else {
         return String::new();
     };
     session.keep_current();
@@ -193,6 +193,11 @@ pub fn post_tool_use(client: HookClient, _context_limit: Option<usize>) -> Strin
         .unwrap_or_default()
 }
 
+/// A tool hook's deadline: [`TOOL_HOOK_LIMIT`] after it `started`.
+pub(super) fn tool_deadline(started: Instant) -> Instant {
+    started + super::hook_time(TOOL_HOOK_LIMIT)
+}
+
 /// What a tool hook knows of its session: the store, the session's state
 /// files and scope, and the hook's deadline.
 pub(super) struct Session {
@@ -205,10 +210,10 @@ pub(super) struct Session {
 
 impl Session {
     /// The session the payload names, its scope from the scope file its
-    /// last prompt or start wrote, and a deadline [`TOOL_HOOK_LIMIT`] from
-    /// `started`. None for a session with no scope file, as one started by
-    /// an earlier version, or when the store's setup can't be read.
-    pub(super) fn of(client: HookClient, payload: &[u8], started: Instant) -> Option<Self> {
+    /// last prompt or start wrote, and the hook's `deadline`. None for a
+    /// session with no scope file, as one started by an earlier version, or
+    /// when the store's setup can't be read.
+    pub(super) fn of(client: HookClient, payload: &[u8], deadline: Instant) -> Option<Self> {
         let remote = crate::setup::configured_remote()
             .ok()?
             .map(|connection| connection.url);
@@ -218,7 +223,7 @@ impl Session {
             remote,
             snapshot,
             projects,
-            deadline: started + super::hook_time(TOOL_HOOK_LIMIT),
+            deadline,
         })
     }
 

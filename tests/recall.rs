@@ -723,3 +723,58 @@ fn a_parents_words_to_a_subagent_join_its_window_and_the_reply_never_does() {
     assert!(pushed.contains(short(&docs)), "{pushed}");
     assert!(!pushed.contains(short(&publish)), "{pushed}");
 }
+
+impl Home {
+    /// The text the prompt hook adds before `prompt` in `session`; empty
+    /// for none.
+    fn prompt(&self, session: &str, prompt: &str) -> String {
+        let payload = json!({"session_id": session, "cwd": self.path(),
+                             "hook_event_name": "UserPromptSubmit", "prompt": prompt});
+        let out = self.hook("prompt-submit", &payload);
+        if out.is_empty() {
+            return out;
+        }
+        let out: Value = serde_json::from_str(&out).unwrap();
+        out["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+}
+
+#[test]
+fn a_prompt_pushes_what_its_words_name_after_the_notice_and_a_task_notification_does_not() {
+    let home = Home::new();
+    let docs = home.record(
+        "Docs notes",
+        "Keep `docs/notes.md` in step with the parser.",
+        &[],
+    );
+    home.start("s1", "startup");
+    // A subagent's result delivered as a prompt is not the user's words.
+    let notification =
+        "<task-notification>\n<result>Updated `docs/notes.md`.</result>\n</task-notification>";
+    assert_eq!(home.prompt("s1", notification), "");
+    // A memory recorded since the start: the notice first, then recall.
+    let later = home.record("Parser tables", "Keep `src/tables.rs` sorted.", &[]);
+    let said = home.prompt("s1", "Please bring `docs/notes.md` up to date.");
+    let (notice, recalled) = said
+        .split_once(&format!("\n\n{HEADER}\n"))
+        .unwrap_or_else(|| panic!("{said}"));
+    assert!(notice.contains(short(&later)), "{said}");
+    assert_eq!(
+        recalled,
+        format!(
+            "- {} The user's procedure: Keep `docs/notes.md` in step with the parser.",
+            short(&docs)
+        )
+    );
+    // Shown in this stretch: the next step on that file pushes nothing.
+    let read = json!({"file_path": home.path().join("docs/notes.md")});
+    assert_eq!(home.call("s1", None, "Read", read, json!({})), "");
+    // Words alone never push.
+    assert_eq!(
+        home.prompt("s1", "Keep the notes in step with the parser."),
+        ""
+    );
+}

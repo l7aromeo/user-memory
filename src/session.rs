@@ -769,12 +769,14 @@ pub async fn prompt_submit(client: HookClient) -> String {
     let landing = std::sync::Arc::new(live::Landing::default());
     let mut missed = None;
     let mut projects = None;
+    let mut asked = None;
     let notice =
         match tokio::time::timeout_at(deadline, changes(client, landing.clone(), deadline)).await {
             Ok(Some(found)) => match tokio::time::timeout_at(deadline, found.saved).await {
                 Ok(_) => {
                     projects = found.projects;
                     missed = found.missed;
+                    asked = Some(found.payload);
                     found.notice
                 }
                 // Told only with the snapshot that records it: a save abandoned
@@ -817,14 +819,54 @@ pub async fn prompt_submit(client: HookClient) -> String {
         });
         let _ = tokio::time::timeout_at(deadline, kept).await;
     }
+    // Recall from the prompt's words (#117), after the notice, within what
+    // is left of the limit.
+    let until =
+        std::time::Instant::now() + deadline.saturating_duration_since(tokio::time::Instant::now());
+    let recalled = asked.and_then(|payload| recall_prompt(client, &payload, until));
     let (limit, unit) = hook_limit(Some(client), None);
-    notice
-        .map(|text| capped(text, limit, unit, NOTICE_CUT))
-        .map(|text| {
-            json!({"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":text}})
-                .to_string()
-        })
-        .unwrap_or_default()
+    let room = limit.saturating_sub(recalled.as_deref().map_or(0, |r| unit.len(r) + 2));
+    let notice = notice.map(|text| capped(text, room, unit, NOTICE_CUT));
+    let text = [notice, recalled]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if text.is_empty() {
+        return text;
+    }
+    json!({"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":text}})
+        .to_string()
+}
+
+/// Opens a prompt that is a subagent's result delivered to its parent, not
+/// the user's words.
+const TASK_NOTIFICATION: &str = "<task-notification>";
+
+/// The push of what the prompt in `payload` matches for its agent context
+/// (#117), read until `deadline`; none for a task notification, a
+/// session with no scope file, or when nothing passes.
+fn recall_prompt(
+    client: HookClient,
+    payload: &[u8],
+    deadline: std::time::Instant,
+) -> Option<String> {
+    let value: Value = serde_json::from_slice(payload).ok()?;
+    let prompt = value["prompt"].as_str()?;
+    if prompt.trim_start().starts_with(TASK_NOTIFICATION) {
+        return None;
+    }
+    let session = tools::Session::of(client, payload, deadline)?;
+    let action = memory::matcher::Action {
+        kind: memory::matcher::Kind::Prompt,
+        text: prompt.to_owned(),
+        failed: false,
+    };
+    let terms = memory::matcher::terms_of(&action);
+    session
+        .recall(&value, action.kind, terms, false)
+        .ok()
+        .flatten()
 }
 
 /// Says, in a debug build, that the prompt hook stopped at its time limit, so
@@ -842,6 +884,8 @@ struct Found {
     missed: Option<PathBuf>,
     /// The session's project keys now.
     projects: Option<Vec<String>>,
+    /// The hook's payload, which the prompt's recall reads after the save.
+    payload: Vec<u8>,
 }
 
 /// What changed since the session in the hook payload last looked, and the
@@ -916,6 +960,7 @@ async fn changes(
         saved,
         missed,
         projects,
+        payload: bytes,
     })
 }
 
