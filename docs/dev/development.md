@@ -116,9 +116,11 @@ source out.
 - `tests/docs.rs` — the docs, the skill and the newest release note against
   the binary: every user-memory command they show runs as written, and every
   message they quote is one the code prints. A quote in double backticks may
-  wrap within its paragraph; one left open there fails. Older release notes
-  are history: each was checked when its release was built and stays as
-  written.
+  wrap within its paragraph; one left open there fails. A quote may stop
+  inside a value the code fills in only after one word of it, and just
+  before a value, at its `(`; to leave out more, it ends with `…`. Older
+  release notes are history: each was checked when its release was built
+  and stays as written.
 - `tests/skill.rs` — every tool, parameter, value and result field the skill
   mentions exists in the binary; `tests/docs.rs` checks its commands, quoted
   messages and links with the docs'.
