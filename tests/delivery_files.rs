@@ -1134,3 +1134,44 @@ fn doctor_fails_while_another_process_keeps_the_lock() {
         "{stderr}"
     );
 }
+
+#[test]
+fn a_removal_whose_void_mark_cannot_be_written_refuses_and_changes_nothing() {
+    let (home, id) = started();
+    let base = home.base();
+    let written = modified(&base);
+    let key = base
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split('-')
+        .next()
+        .unwrap();
+    let void = format!("{key}.void");
+    let out = home
+        .command(&["forget", &id], &[held(&void)])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("Nothing was forgotten: the mark that keeps this machine's delivery index from using the removed words could not be written: "),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(
+            ". Make the state folder writable, or free space on its disk, then forget again."
+        ),
+        "{stderr}"
+    );
+    let still = home.cli(&["read", &id]);
+    assert_eq!(
+        still["memories"].as_array().map(Vec::len),
+        Some(1),
+        "{still}"
+    );
+    assert_eq!(modified(&base), written, "the base is kept");
+    assert!(home.files(".void").is_empty());
+    assert!(home.files(".partial").is_empty());
+}

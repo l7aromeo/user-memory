@@ -889,14 +889,32 @@ impl Removing {
     /// The reply when `holder` (a process id, when the lock file names one)
     /// kept the lock for all of `wait`.
     fn refusal(self, holder: Option<u32>, wait: Duration) -> String {
-        let (done, verb) = match self {
-            Self::Forget => ("forgotten", "forget"),
-            Self::Update => ("updated", "update"),
-            Self::Import => ("imported", "import"),
-        };
+        let (done, verb) = self.words();
         format!(
             "Nothing was {done}: {}. Wait a moment and {verb} again; if it still holds it, stop that process first.",
             held_by(holder, wait)
+        )
+    }
+}
+
+impl Removing {
+    /// The words of the reply for what this write does: what was not done,
+    /// and the command to run again.
+    fn words(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Forget => ("forgotten", "forget"),
+            Self::Update => ("updated", "update"),
+            Self::Import => ("imported", "import"),
+        }
+    }
+
+    /// The reply when the void mark could not be written before the
+    /// commit: without it, a file left after the commit would keep the
+    /// removed words in use, so the write is refused.
+    fn unmarked(self, err: &io::Error) -> String {
+        let (done, verb) = self.words();
+        format!(
+            "Nothing was {done}: the mark that keeps this machine's delivery index from using the removed words could not be written: {err}. Make the state folder writable, or free space on its disk, then {verb} again."
         )
     }
 }
@@ -984,8 +1002,10 @@ pub(crate) fn before_removal(
     };
     let mut names = removal.kept.clone();
     names.extend(removal.voided().iter().map(|path| name_of(path)));
-    if names.len() > removal.kept.len() {
-        removal.files.void(&removal.lock, &names)?;
+    if names.len() > removal.kept.len()
+        && let Err(err) = removal.files.void(&removal.lock, &names)
+    {
+        anyhow::bail!(removing.unmarked(&err));
     }
     Ok(Some(removal))
 }

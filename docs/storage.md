@@ -376,6 +376,13 @@ it in `delivery_left` with this line in `next`:
 The files in delivery_left still hold the removed words because another program has them open. Readers skip them; user-memory deletes them at its next write, and `user-memory doctor` deletes them at once.
 ```
 
+The mark is written before the change. When it can't be, the command
+changes nothing and says so, as here for a forget:
+
+```output
+Nothing was forgotten: the mark that keeps this machine's delivery index from using the removed words could not be written: …. Make the state folder writable, or free space on its disk, then forget again.
+```
+
 `user-memory doctor` deletes such files, and any a writer killed while
 writing left, and says how many:
 
