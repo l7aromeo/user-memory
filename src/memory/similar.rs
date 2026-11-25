@@ -9,7 +9,7 @@
 use super::{
     Memory, Scope, clean,
     index::embed,
-    schema::{SELECT, row},
+    schema::{LIVE, SELECT, row},
     words::{CATEGORY_ALIASES, tokenize},
 };
 use anyhow::Result;
@@ -329,7 +329,7 @@ pub(super) fn similar(
     };
     let memories = conn
         .prepare(&format!(
-            "{SELECT} WHERE status IN ('confirmed','tentative') AND (scope='global' OR (scope='project' AND project=?1 AND ?1!=''))"
+            "{SELECT} WHERE {LIVE} AND (scope='global' OR (scope='project' AND project=?1 AND ?1!=''))"
         ))?
         .query_map([project], row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;

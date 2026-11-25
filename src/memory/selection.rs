@@ -6,7 +6,7 @@
 use super::{
     Memory, Source, clean, project_key,
     read::rule_condition,
-    schema::{SELECT, row},
+    schema::{LIVE, SELECT, row},
     similar::category_group,
 };
 use anyhow::{Result, bail};
@@ -296,13 +296,17 @@ pub(super) fn condition(filter: &Filter) -> Result<(String, Vec<Sql>)> {
     if let Some(source) = filter.source {
         clauses.push(format!("source IN ({})", list(&[source.name().to_owned()])));
     }
-    let statuses: Vec<String> = filter
-        .status
-        .statuses()
-        .iter()
-        .map(|s| (*s).to_owned())
-        .collect();
-    clauses.push(format!("status IN ({})", list(&statuses)));
+    if filter.status == StatusFilter::Active {
+        clauses.push(LIVE.to_owned());
+    } else {
+        let statuses: Vec<String> = filter
+            .status
+            .statuses()
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        clauses.push(format!("status IN ({})", list(&statuses)));
+    }
     if !filter.origin.is_empty() {
         clauses.push(format!(
             "EXISTS (SELECT 1 FROM memory_origins WHERE memory_id=memories.id AND origin IN ({}))",

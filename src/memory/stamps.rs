@@ -46,16 +46,26 @@ pub const AGENT: &str = "agent";
 /// none is given for one.
 const WRITER: &str = "coalesce((SELECT origin||char(31)||CASE op WHEN 'import' THEN '' ELSE client END FROM memory_events e WHERE memory_id={id} AND op NOT IN ('confirm','distinct','origin_removed') AND NOT {undone} ORDER BY seq DESC LIMIT 1),char(31))";
 
-/// The columns a rule's print covers: what the rule says and where it
-/// applies. Not its project key, so a move or a rekey keeps it, nor its
-/// category, type or evidence, which change nothing it asks.
-const PRINTED: [&str; 5] = ["title", "content", "context", "reason", "scope"];
+/// The columns a rule's print covers: what the rule says, where it
+/// applies and what ends it. Not its project key, so a move or a rekey
+/// keeps it, nor its category, type or evidence, which change nothing it
+/// asks.
+const PRINTED: [&str; 8] = [
+    "title",
+    "content",
+    "context",
+    "reason",
+    "scope",
+    "until_kind",
+    "until_value",
+    "until_project",
+];
 
 /// The way [`print`] hashes rules, which session hooks keep beside the
 /// prints they saved. A new way gets a new number, and a hook that kept
 /// prints of the old way starts afresh rather than listing every rule as
 /// changed; a test pins one print, so the way never changes unnoticed.
-pub const PRINT_FORMAT: u32 = 1;
+pub const PRINT_FORMAT: u32 = 2;
 
 /// A standing rule's fingerprint: [`digest`] of the [`PRINT_FORMAT`] and
 /// the [`PRINTED`] columns, quoted and joined as [`printed`] reads them.
@@ -668,10 +678,11 @@ mod tests {
             [A],
         )
         .unwrap();
-        assert_eq!(PRINT_FORMAT, 1);
-        // SHA-256 of "print 1", then each column quoted as SQLite's quote()
-        // does, all joined by U+001F; its first 8 bytes in hex.
-        assert_eq!(ruled(&conn).rules[A].print, "a0b34f6246b14fe9");
+        assert_eq!(PRINT_FORMAT, 2);
+        // SHA-256 of "print 2", then each column quoted as SQLite's quote()
+        // does (the three condition columns empty), all joined by U+001F;
+        // its first 8 bytes in hex.
+        assert_eq!(ruled(&conn).rules[A].print, "dc0e98c26b88deb3");
     }
 
     /// The rule condition read in SQL holds exactly for the memories

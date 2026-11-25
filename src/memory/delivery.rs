@@ -650,7 +650,7 @@ pub(crate) struct Overlay {
 /// The memories changed since a position that a scope can see, in key
 /// order: [`CANDIDATES`] for the ids in `?2`.
 const CHANGED_CANDIDATES: &str = "SELECT k.key,m.id FROM search_keys k JOIN memories m ON m.id=k.id \
-     WHERE m.status IN ('confirmed','tentative') AND m.source!='inferred' \
+     WHERE m.id IN (SELECT id FROM live_memories) AND m.source!='inferred' \
      AND m.memory_type NOT IN ('behavior','pattern') \
      AND (m.scope='global' OR (m.scope='project' AND m.project IN (SELECT value FROM json_each(?1)))) \
      AND m.id IN (SELECT value FROM json_each(?2)) \
@@ -1043,7 +1043,7 @@ impl View {
 /// scope and of `projects`, never a guess or an observation about the user
 /// (inferred memories, types `behavior` and `pattern`).
 pub(in crate::memory) const CANDIDATES: &str = "SELECT k.key,m.id FROM search_keys k JOIN memories m ON m.id=k.id \
-     WHERE m.status IN ('confirmed','tentative') AND m.source!='inferred' \
+     WHERE m.id IN (SELECT id FROM live_memories) AND m.source!='inferred' \
      AND m.memory_type NOT IN ('behavior','pattern') \
      AND (m.scope='global' OR (m.scope='project' AND m.project IN (SELECT value FROM json_each(?1)))) \
      ORDER BY k.key";

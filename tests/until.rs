@@ -461,3 +461,157 @@ fn the_tools_take_until_as_an_object_and_null_clears_it() {
     assert_eq!(s.stored(&id).0, "");
     serve.close();
 }
+
+/// A project move carries the tag conditions that name the old key, so the
+/// tags of the moved project still end them.
+#[test]
+fn a_project_move_carries_its_tag_conditions() {
+    let s = Store::new();
+    let global = s.record(&[
+        "--until-tag",
+        "v2.0.0",
+        "--until-project",
+        "github.com/example/old",
+    ])["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let out = s.value(&[
+        "record",
+        "--category",
+        "workflow",
+        "--scope",
+        "project",
+        "--project",
+        "github.com/example/old",
+        "--title",
+        "Pin the parser at 2.3",
+        "--content",
+        "Pin the parser at 2.3.",
+        "--until-tag",
+        "v1.0.0",
+    ]);
+    let own = out["id"].as_str().unwrap().to_owned();
+    let out = s.run(&[
+        "project",
+        "move",
+        "github.com/example/old",
+        "github.com/example/new",
+    ]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(s.stored(&global).2, "github.com/example/new");
+    assert_eq!(s.stored(&own).2, "github.com/example/new");
+}
+
+/// A memory out of force, by an end record or by a date that has passed,
+/// is absent from every channel that shows memories in force, and still
+/// readable by asking for every status.
+#[test]
+fn a_memory_out_of_force_is_shown_nowhere_in_force() {
+    let s = Store::new();
+    let shown = s.record(&[])["id"].as_str().unwrap().to_owned();
+    let ended = s.value(&[
+        "record",
+        "--category",
+        "workflow",
+        "--scope",
+        "global",
+        "--title",
+        "Skip the slow tests until the parser ships",
+        "--content",
+        "Skip the slow tests until the parser ships.",
+        "--until-text",
+        "the parser ships",
+    ])["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let dated = s.value(&[
+        "record",
+        "--category",
+        "workflow",
+        "--scope",
+        "global",
+        "--title",
+        "Merge without review this week",
+        "--content",
+        "Merge without review this week.",
+        "--until-date",
+        "2099-01-01",
+    ])["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // Ends come through the store's own paths in a later step; here the
+    // rows are written as those paths will write them.
+    let conn = Connection::open(&s.db).unwrap();
+    conn.execute(
+        "INSERT INTO memory_ended (memory_id,how,evidence) VALUES (?1,'evidence','ran the release recipe: v2.0.0 tagged')",
+        [&ended],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE memories SET until_value='2001-01-01T00:00:00Z' WHERE id=?1",
+        [&dated],
+    )
+    .unwrap();
+    drop(conn);
+    let out_of_force = [
+        ("ended", "Skip the slow tests", &ended),
+        ("dated", "Merge without review", &dated),
+    ];
+    let text = |args: &[&str]| {
+        let out = s.command(args).current_dir(s.root.path()).output().unwrap();
+        assert!(out.status.success(), "{args:?}: {out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    for (channel, output) in [
+        ("index", text(&["index"])),
+        ("read", text(&["read", "--category", "workflow"])),
+        (
+            "search",
+            text(&["search", "merge skip slow tests review push"]),
+        ),
+        ("session start", text(&["session-start"])),
+    ] {
+        assert!(
+            output.contains("Push the release branch"),
+            "{channel}: {output}"
+        );
+        for (what, title, id) in out_of_force {
+            assert!(
+                !output.contains(title),
+                "{channel} shows the {what} memory: {output}"
+            );
+            assert!(
+                !output.contains(&id[..8]),
+                "{channel} names the {what} memory: {output}"
+            );
+        }
+    }
+    // Asked for by id with every status, each is still there.
+    for (_, title, id) in out_of_force {
+        let title_read = s.read(id)["title"].as_str().unwrap().to_owned();
+        assert!(title_read.starts_with(title), "{title_read}");
+    }
+    assert_eq!(s.read(&shown)["status"], "confirmed");
+    // A memory out of force is no target for a restatement.
+    let out = s.value(&[
+        "record",
+        "--category",
+        "workflow",
+        "--scope",
+        "global",
+        "--title",
+        "Skip the slow tests until the parser ships",
+        "--content",
+        "Skip the slow tests until the parser ships.",
+        "--confirms",
+        &ended,
+    ]);
+    assert_eq!(out["stored"], false, "{out}");
+    assert_eq!(
+        out["reason"],
+        "That memory's condition has ended; to put it in force again, update it with the user's yes, giving a new until or clearing it"
+    );
+}

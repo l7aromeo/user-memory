@@ -977,6 +977,11 @@ pub(super) fn refusal(
     })
 }
 
+/// The one test of "in force" for a statement over `memories` (or a table
+/// aliased so): the memory is in `live_memories`, whose definition is the
+/// only place the statuses, a passed date and an end record are written
+/// out. SQLite reads the uncorrelated `IN` once per statement.
+pub(super) const LIVE: &str = "memories.id IN (SELECT id FROM live_memories)";
 pub(super) const SELECT: &str = "SELECT id,created_at,updated_at,memory_type,category,context,content,reason,source,status,scope,project,evidence,evidence_ids,rowid,(SELECT json_group_array(origin) FROM (SELECT origin FROM memory_origins WHERE memory_id=memories.id ORDER BY origin)),superseded_by,last_confirmed_at,title,until_kind,until_value,until_project FROM memories";
 pub(super) fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Memory> {
     let evidence: String = r.get(13)?;
