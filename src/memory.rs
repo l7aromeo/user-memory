@@ -41,6 +41,7 @@ mod stamps;
 mod titles;
 mod transfer;
 mod undo;
+mod usage;
 mod words;
 mod write;
 
@@ -74,6 +75,8 @@ pub use transfer::{
     export_document, export_named, export_next, import_document, import_named, import_next,
     write_export,
 };
+pub(crate) use usage::{USE_REQUEST_BYTES, USES_PER_REQUEST};
+pub use usage::{Use, Uses, Written, write_uses};
 pub use write::{COPY_ON_SERVER, Forget, Record, Update, forget, record, update};
 
 #[derive(

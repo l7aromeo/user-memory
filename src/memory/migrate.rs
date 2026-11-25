@@ -97,7 +97,34 @@ const STEPS: &[Step] = &[
         check: always,
         apply: to_v11,
     },
+    Step {
+        check: always,
+        apply: to_v12,
+    },
 ];
+
+/// Version 12 records which memories each session used (#123): the
+/// `memory_use` table and its index. No row is written: a migrated store
+/// has no use yet, and the index keeps its order until sessions write
+/// some. The SQL is written out as it was at version 12.
+fn to_v12(conn: &Connection, _: Option<&Titles>) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE memory_use (
+    memory TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 240),
+    origin TEXT NOT NULL CHECK(length(origin) BETWEEN 1 AND 240),
+    at TEXT NOT NULL,
+    read INTEGER NOT NULL CHECK(read IN (0,1)),
+    recorded INTEGER NOT NULL CHECK(recorded IN (0,1)),
+    shown INTEGER NOT NULL CHECK(shown IN (0,1)),
+    held INTEGER CHECK(held IN (0,1)),
+    overridden INTEGER CHECK(overridden IN (0,1)),
+    PRIMARY KEY(memory, project, origin)
+) WITHOUT ROWID;
+CREATE INDEX memory_use_by_project ON memory_use(project, origin);",
+    )?;
+    Ok(())
+}
 
 /// Version 11 queues a changed memory for the keyword index by an upsert,
 /// which an update's own conflict clause (`UPDATE OR ABORT`) cannot turn

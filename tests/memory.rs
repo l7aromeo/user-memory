@@ -110,6 +110,7 @@ fn database_contains_only_the_generic_memory_schema() {
             "memory_distinct",
             "memory_events",
             "memory_origins",
+            "memory_use",
             "memory_writer",
             "store_changes"
         ]
@@ -2198,9 +2199,9 @@ fn user_version(db: &std::path::Path) -> i64 {
 fn a_new_store_is_stamped_with_the_schema_version() {
     let s = Store::new();
     s.value(&["search"]);
-    assert_eq!(user_version(&s.db), 11);
+    assert_eq!(user_version(&s.db), 12);
     s.add("preference", "Prefer Rust");
-    assert_eq!(user_version(&s.db), 11);
+    assert_eq!(user_version(&s.db), 12);
 }
 
 #[test]
@@ -2225,7 +2226,7 @@ fn a_store_from_before_versioning_is_refused_and_left_untouched() {
         let error = String::from_utf8_lossy(&out.stderr);
         for part in [
             s.db.to_str().unwrap(),
-            "has an unversioned schema but this user-memory needs schema version 11",
+            "has an unversioned schema but this user-memory needs schema version 12",
             "it holds 1 memories and was left unchanged",
             "Move it aside",
             "existing memories are not copied automatically",
@@ -2273,7 +2274,7 @@ fn stores_from_another_version_or_program_are_refused() {
     let error = String::from_utf8_lossy(&s.run(&["search"]).stderr).into_owned();
     assert!(
         error.contains(
-            "has schema version 1 but this user-memory needs schema version 11; it holds 1 memories"
+            "has schema version 1 but this user-memory needs schema version 12; it holds 1 memories"
         ),
         "{error}"
     );
@@ -2284,7 +2285,7 @@ fn stores_from_another_version_or_program_are_refused() {
     drop(conn);
     let error = String::from_utf8_lossy(&other.run(&["search"]).stderr).into_owned();
     assert!(
-        error.contains("has an unversioned schema but this user-memory needs schema version 11; it has no user-memory table"),
+        error.contains("has an unversioned schema but this user-memory needs schema version 12; it has no user-memory table"),
         "{error}"
     );
 }

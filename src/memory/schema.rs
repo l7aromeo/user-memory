@@ -13,7 +13,7 @@ use uuid::Uuid;
 /// previous version in `migrate.rs`: `IF NOT EXISTS` keeps an older table or
 /// trigger as it was, so connecting refuses a store from another version
 /// instead of half upgrading it.
-pub(super) const SCHEMA_VERSION: i64 = 11;
+pub(super) const SCHEMA_VERSION: i64 = 12;
 
 /// The tables and the triggers that stale inferred patterns when their
 /// support weakens: a supporting memory deleted; one changed in what it
@@ -192,6 +192,7 @@ pub fn connect(db: &Path) -> Result<Connection> {
             tx.execute_batch(LINKS)?;
             tx.execute_batch(CUTOFFS)?;
             tx.execute_batch(super::history::EVENTS)?;
+            tx.execute_batch(super::usage::TABLE)?;
             super::index::create(&tx)?;
             super::index::start(&tx)?;
             tx.execute_batch(&super::changes::schema())?;
@@ -226,6 +227,7 @@ pub fn connect(db: &Path) -> Result<Connection> {
     conn.execute_batch(LINKS)?;
     conn.execute_batch(CUTOFFS)?;
     conn.execute_batch(super::history::EVENTS)?;
+    conn.execute_batch(super::usage::TABLE)?;
     super::index::create(&conn)?;
     conn.execute_batch(&super::changes::schema())?;
     Ok(conn)

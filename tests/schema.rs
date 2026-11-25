@@ -220,19 +220,36 @@ fn rows(conn: &Connection, sql: &str) -> Vec<String> {
     found
 }
 
-/// What a migration must keep. A step that renames or reshapes one of these
-/// columns updates the query here along with it.
-fn data(db: &Path) -> Vec<Vec<String>> {
+/// What a migration must keep of a store from schema version `version`.
+/// A step that renames or reshapes one of these columns updates the query
+/// here along with it.
+fn data(db: &Path, version: i64) -> Vec<Vec<String>> {
     let conn = Connection::open(db).unwrap();
-    [
+    let mut queries = vec![
         "SELECT id,created_at,updated_at,memory_type,category,context,content,reason,scope,project,source,status,evidence,evidence_ids,superseded_by,last_confirmed_at FROM memories ORDER BY id",
         "SELECT memory_id,origin,first_seen FROM memory_origins ORDER BY 1,2",
         "SELECT a,b FROM memory_distinct ORDER BY 1,2",
         "SELECT id,model,dimensions,source,hex(vector) FROM memory_vectors ORDER BY id",
-    ]
-    .iter()
-    .map(|sql| rows(&conn, sql))
-    .collect()
+    ];
+    if version >= USE_VERSION {
+        queries.push(
+            "SELECT memory,project,origin,at,read,recorded,shown,held,overridden FROM memory_use ORDER BY 1,2,3",
+        );
+    }
+    queries.iter().map(|sql| rows(&conn, sql)).collect()
+}
+
+/// The first schema version that records which memories sessions used.
+const USE_VERSION: i64 = 12;
+/// The schema version this binary writes, which a migration reaches.
+const LATEST: i64 = 12;
+
+/// How many use rows the store at `db` holds.
+fn use_rows(db: &Path) -> i64 {
+    Connection::open(db)
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM memory_use", [], |r| r.get(0))
+        .unwrap()
 }
 
 /// The first schema version that keeps each memory's history.
@@ -433,7 +450,7 @@ fn every_snapshot_migrates_to_the_current_schema_and_keeps_its_data() {
     for n in versions {
         let dir = tempdir().unwrap();
         let db = store_from_snapshot(dir.path(), n);
-        let before = data(&db);
+        let before = data(&db, n);
         assert!(
             before.iter().all(|rows| !rows.is_empty()),
             "v{n}.seed.sql must seed every table: {before:?}"
@@ -459,7 +476,11 @@ fn every_snapshot_migrates_to_the_current_schema_and_keeps_its_data() {
         }
         assert_eq!(version(&db), current);
         assert_eq!(normalized(&statements(&db)), target, "v{n}");
-        assert_eq!(data(&db), before, "v{n} lost data");
+        assert_eq!(data(&db, n), before, "v{n} lost data");
+        // A store from before use was recorded gains none.
+        if n < USE_VERSION {
+            assert_eq!(use_rows(&db), 0, "v{n} gained use");
+        }
         // The migration writes no memory: a store reaching the counter's
         // version has counted no change yet.
         if n < CHANGES_VERSION {
@@ -913,6 +934,7 @@ fn trigger(db: &Path, name: &str) -> String {
 /// replaced `search_changed`, so its version 10 text and number are all
 /// that differ.
 fn back_to_v10(db: &Path) {
+    back_to_v11(db);
     let snapshot = fs::read_to_string(snapshots().join("v10.sql")).unwrap();
     let old = parse(&snapshot)
         .into_iter()
@@ -980,15 +1002,70 @@ fn migrating_to_version_11_writes_no_row() {
         let out = migrate(dir.path(), &db, 10);
         assert!(out.status.success(), "{}", stderr(&out));
         assert!(
-            stdout(&out).contains("from schema version 10 to 11"),
+            stdout(&out).contains(&format!("from schema version 10 to {LATEST}")),
             "{}",
             stdout(&out)
         );
         assert_eq!(backups(dir.path()).len(), 1, "the backup is taken first");
-        assert_eq!(version(&db), 11);
+        assert_eq!(version(&db), LATEST);
         assert_eq!(trigger(&db, "search_changed"), new_trigger);
-        assert_eq!(every_row(&db), before, "queued {queued}");
+        let mut after = every_row(&db);
+        after.retain(|(table, _)| table != "memory_use");
+        assert_eq!(after, before, "queued {queued}");
     }
+}
+
+/// Turns a store this binary made back to schema version 11: version 12
+/// only added `memory_use`.
+fn back_to_v11(db: &Path) {
+    let conn = Connection::open(db).unwrap();
+    conn.execute_batch("DROP TABLE memory_use;").unwrap();
+    conn.pragma_update(None, "user_version", 11).unwrap();
+}
+
+// Version 12 adds `memory_use` and writes no row: every table as before,
+// the store id included, and no use. The store is made by this binary and
+// turned back to version 11, which differs only by the table.
+#[test]
+fn migrating_to_version_12_writes_no_row() {
+    let (dir, db) = fresh();
+    for title in ["Indent with tabs", "Wrap at 100"] {
+        let out = user_memory(
+            dir.path(),
+            &db,
+            &[
+                "record",
+                "--scope",
+                "global",
+                "--type",
+                "preference",
+                "--category",
+                "style",
+                "--title",
+                title,
+                "--content",
+                title,
+                "--origin",
+                "chat/1",
+            ],
+        );
+        assert!(out.status.success(), "{}", stderr(&out));
+    }
+    back_to_v11(&db);
+    let before = every_row(&db);
+    let out = migrate(dir.path(), &db, 11);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("from schema version 11 to 12"),
+        "{}",
+        stdout(&out)
+    );
+    assert_eq!(backups(dir.path()).len(), 1, "the backup is taken first");
+    assert_eq!(version(&db), 12);
+    let mut after = every_row(&db);
+    after.retain(|(table, _)| table != "memory_use");
+    assert_eq!(after, before);
+    assert_eq!(use_rows(&db), 0);
 }
 
 // A migration that fails after version 11's step has run, as one that
@@ -1038,7 +1115,7 @@ fn a_migration_rolled_back_after_version_11_runs_again() {
     // backup takes a name of its own and the first stays as it was.
     let out = migrate(dir.path(), &db, 10);
     assert!(out.status.success(), "{}", stderr(&out));
-    assert_eq!(version(&db), 11);
+    assert_eq!(version(&db), LATEST);
     assert_ne!(trigger(&db, "search_changed"), old_trigger);
     let printed = stdout(&out);
     let second = PathBuf::from(
