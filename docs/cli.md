@@ -78,6 +78,22 @@ user-memory record --type constraint --category programming --scope project --pr
 | `--content` | The memory in full, at most 4,000 characters. |
 | `--reason`, `--context` | Why, and when it applies. Optional. |
 | `--scope global` or `--scope project --project KEY` | Where it applies. `--project` takes a key, a git remote URL, or a folder such as `.`, which is stored as that folder's key. |
+| `--until-date`, `--until-tag` (with `--until-project`) or `--until-text` | Until when it holds, one kind at most ([conditions](memory-model.md#conditions)). Without one, it holds until changed. |
+
+A memory that holds only for a while says until when. A day ends at the end
+of that day in your time zone; a tag, when a checkout of the project has
+it; a text, when an agent reports, with evidence, that it happened:
+
+```bash
+user-memory record --type preference --category workflow --scope global \
+  --title 'Merge without review during the freeze' --content 'Merge without review during the freeze' \
+  --until-date 2027-01-31
+```
+
+```bash
+user-memory record --type constraint --category programming --scope project --project github.com/you/app \
+  --title 'Pin the parser at 2.3' --content 'Pin the parser at 2.3' --until-tag v2.4.0
+```
 
 When similar memories exist, nothing is stored and the reply lists them. Run
 `record` again with one of:
@@ -123,6 +139,16 @@ change keeps no replaced values.
 
 ```bash
 user-memory update e0000001-0000-4000-8000-000000000001 --content 'The deploy key is in the vault' --drop-history
+```
+
+`--until-date`, `--until-tag` and `--until-text` replace a memory's
+condition and `--no-until` clears it, so it holds until changed; either
+reopens a memory whose condition had ended. `--ended EVIDENCE` reports
+that a text condition happened, with what was done and seen; it goes
+alone:
+
+```bash
+user-memory update e0000001-0000-4000-8000-000000000001 --ended 'ran the release recipe: parser 2.4 published'
 ```
 
 To tell review that two memories are different, so it stops grouping them:

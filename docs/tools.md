@@ -278,7 +278,17 @@ says where the origin comes from.
 - **overlap** — memories on one topic that may conflict, refine each other, or
   simply share a category (merge them into one rule when a missing condition
   or scope reconciles them and the user agrees; otherwise leave as is);
-- **stale** — patterns whose supporting memories changed or were forgotten.
+- **stale** — patterns whose supporting memories changed or were forgotten;
+- **ended** — second, after recent: the memories whose
+  [condition](memory-model.md#conditions) ended in the last 30 days, each
+  with `ended` (when, how, the evidence and the conversation), so the user
+  sees every end an agent made and can reopen it with `update` or forget it;
+- **ended_support** — patterns citing a memory whose date has passed;
+- **open_condition** — tag or text conditions unchanged for over 60 days,
+  asking whether each still holds.
+
+A memory out of force by its condition is compared with nothing: it is in
+no duplicate or overlap group.
 
 In an overlap group every member is related to every other, so a chain of
 memories each related only to the next is never one group: a memory related
