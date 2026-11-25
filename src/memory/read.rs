@@ -33,7 +33,7 @@ use super::{
 };
 use anyhow::{Result, bail};
 use clap::Args;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -630,6 +630,7 @@ pub fn search(db: &Path, input: &Search) -> Result<Value> {
         hit["passages"] = json!(count);
     }
     let mut result = json!({ "memories": shown });
+    add_ended(&conn, &mut result)?;
     if let Some(next) = next {
         result["next_cursor"] = json!(next);
     }
@@ -685,6 +686,7 @@ pub fn read(db: &Path, input: &Read) -> Result<Value> {
             found.sort_by(group_order);
             let mut result = paged(found, &input.paging)?;
             add_observations(&conn, &mut result)?;
+            add_ended(&conn, &mut result)?;
             if input.history {
                 add_history(&conn, &mut result)?;
             }
@@ -723,7 +725,12 @@ pub fn read(db: &Path, input: &Read) -> Result<Value> {
                     unknown.push(wanted.trim().to_owned());
                     continue;
                 };
-                if selection.status.covers(&memory.status) {
+                let ended: bool = conn.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM out_of_force WHERE id=?1)",
+                    [memory.id.to_string()],
+                    |r| r.get(0),
+                )?;
+                if selection.status.covers(&memory.status, ended) {
                     memories.push(memory);
                 } else {
                     excluded.push(json!({"id": memory.id, "status": memory.status}));
@@ -733,6 +740,7 @@ pub fn read(db: &Path, input: &Read) -> Result<Value> {
     }
     let mut result = json!({ "memories": compact(&memories)? });
     add_observations(&conn, &mut result)?;
+    add_ended(&conn, &mut result)?;
     if input.history {
         add_history(&conn, &mut result)?;
         // A forgotten memory's tombstones say when it went, and by whom.
@@ -792,6 +800,45 @@ fn add_observations(conn: &Connection, result: &mut Value) -> Result<()> {
         memory["observations"] = json!(observations);
         if more > 0 {
             memory["observations_more"] = json!(more);
+        }
+    }
+    Ok(())
+}
+
+/// Marks each memory of `result` whose condition ended with `ended`: its
+/// end record (when, how, the evidence and the conversation), or for a
+/// date that has passed, that date with how `date`. Only a read that asks
+/// for memories out of force, or names them by id, shows any.
+fn add_ended(conn: &Connection, result: &mut Value) -> Result<()> {
+    let mut statement =
+        conn.prepare("SELECT ended_at,how,evidence,origin FROM memory_ended WHERE memory_id=?1")?;
+    let now: String = conn.query_row("SELECT strftime('%Y-%m-%dT%H:%M:%SZ','now')", [], |r| {
+        r.get(0)
+    })?;
+    for memory in result["memories"].as_array_mut().into_iter().flatten() {
+        let Some(id) = memory["id"].as_str().map(str::to_owned) else {
+            continue;
+        };
+        let end = statement
+            .query_row([&id], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })
+            .optional()?;
+        if let Some((at, how, evidence, origin)) = end {
+            let mut ended = json!({"at": at, "how": how, "evidence": evidence});
+            if !origin.is_empty() {
+                ended["origin"] = json!(origin);
+            }
+            memory["ended"] = ended;
+        } else if let Some(date) = memory["until"]["date"].as_str()
+            && date <= now.as_str()
+        {
+            memory["ended"] = json!({"at": date, "how": "date"});
         }
     }
     Ok(())

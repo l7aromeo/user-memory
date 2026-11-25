@@ -1,6 +1,14 @@
 //! The one test of "in force", as an SQL fragment: in a module of its own
 //! so the delivery benchmark's mirror of `src/memory` compiles it too.
 
+/// The statuses a memory in force may have, over a row named `$table`.
+macro_rules! held {
+    ($table:literal) => {
+        concat!($table, ".status IN ('confirmed','tentative')")
+    };
+}
+pub(crate) use held;
+
 /// The test of "in force" over a row of `memories` named `$table` (the
 /// table, or an alias of it or of `search_keys`, which carry `status` and
 /// `id`): confirmed or tentative, and not in `out_of_force`. The status is a
@@ -13,8 +21,8 @@
 macro_rules! live {
     ($table:literal) => {
         concat!(
-            $table,
-            ".status IN ('confirmed','tentative') AND ",
+            $crate::memory::in_force::held!($table),
+            " AND ",
             $table,
             ".id NOT IN (SELECT id FROM out_of_force)"
         )

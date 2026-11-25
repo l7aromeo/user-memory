@@ -755,6 +755,93 @@ fn export_and_import_carry_conditions_and_ends() {
     assert_eq!(ends(&other), [(parser.clone(), own.to_owned())]);
 }
 
+/// Read by id shows an ended memory marked `ended`, as a category read and
+/// search do when asked for status ended or all; ended lists only those,
+/// and a memory in force read by id under ended is excluded.
+#[test]
+fn read_and_search_show_what_ended() {
+    let s = Store::new();
+    let shown = s.record(&[])["id"].as_str().unwrap().to_owned();
+    let record = |title: &str, until: &[&str]| {
+        let mut args = vec![
+            "record",
+            "--category",
+            "workflow",
+            "--scope",
+            "global",
+            "--title",
+            title,
+            "--content",
+            title,
+        ];
+        args.extend_from_slice(until);
+        s.value(&args)["id"].as_str().unwrap().to_owned()
+    };
+    let ended = record(
+        "Skip the slow release tests",
+        &["--until-text", "the parser ships"],
+    );
+    let dated = record(
+        "Merge release branches without review",
+        &["--until-date", "2099-01-01T00:00:00Z"],
+    );
+    let evidence = "ran the release recipe: parser 2.0 published";
+    s.value(&[
+        "update", &ended, "--ended", evidence, "--origin", "chat/end",
+    ]);
+    Connection::open(&s.db)
+        .unwrap()
+        .execute(
+            "UPDATE memories SET until_value='2001-01-01T00:00:00Z' WHERE id=?1",
+            [&dated],
+        )
+        .unwrap();
+    let ends = |out: &Value| -> Vec<(String, Value)> {
+        let mut found: Vec<(String, Value)> = out["memories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| (m["id"].as_str().unwrap().to_owned(), m["ended"].clone()))
+            .collect();
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+        found
+    };
+    let mut expected = vec![
+        (
+            ended.clone(),
+            json!({"at": ends(&s.value(&["read", &ended]))[0].1["at"], "how":"evidence","evidence":evidence,"origin":"chat/end"}),
+        ),
+        (
+            dated.clone(),
+            json!({"at":"2001-01-01T00:00:00Z","how":"date"}),
+        ),
+    ];
+    expected.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut with_shown = expected.clone();
+    with_shown.push((shown.clone(), Value::Null));
+    with_shown.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // By id, under the default filter, each is shown and marked.
+    assert_eq!(
+        ends(&s.value(&["read", &ended, &dated, &shown])),
+        with_shown
+    );
+    let read =
+        |status: &str| ends(&s.value(&["read", "--category", "workflow", "--status", status]));
+    assert_eq!(read("ended"), expected);
+    assert_eq!(read("all"), with_shown);
+    assert_eq!(read("active"), [(shown.clone(), Value::Null)]);
+    let search =
+        |status: &str| ends(&s.value(&["search", "release push branch tests", "--status", status]));
+    assert_eq!(search("ended"), expected);
+    assert_eq!(search("all"), with_shown);
+    let out = s.value(&["read", &shown, "--status", "ended"]);
+    assert_eq!(
+        out["excluded"],
+        json!([{"id": shown, "status": "confirmed"}])
+    );
+}
+
 /// A project move carries the tag conditions that name the old key, so the
 /// tags of the moved project still end them.
 #[test]

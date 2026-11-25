@@ -25,7 +25,7 @@ Every command has `--help`.
 | `user-memory index --project .` | The same, plus the current folder's project. |
 | `user-memory index --topic 'publish a release'` | Memories about that topic first in their groups. |
 | `user-memory index --instructions` | The rules text the instruction files hold. |
-| `user-memory read e0000001 e0000005` | Whole memories, by up to 20 ids (full, or the 8 characters the index shows). `--status all` includes stale and superseded ones. |
+| `user-memory read e0000001 e0000005` | Whole memories, by up to 20 ids (full, or the 8 characters the index shows). `--status all` includes stale and superseded ones. A memory whose condition ended is shown, marked `ended`. |
 | `user-memory read --category workflow` | Every memory in one category. |
 | `user-memory history e0000001` | A memory's history, oldest first: each change with its operation, time, client and the values it replaced. For a forgotten memory, its tombstones. `read --history` adds the same to each memory it reads. |
 | `user-memory search 'language choice'` | Memories that match a topic, best first. |
@@ -47,7 +47,7 @@ the projects you list. They take:
 | `--scope global`, `project` or `all` | Global only; only the listed projects; or every project. |
 | `--type T`, `--category C` | One type or category. |
 | `--source explicit`, `observed` or `inferred` | One source. |
-| `--status active`, `stale`, `superseded` or `all` | Active (the default) means confirmed and tentative. |
+| `--status active`, `ended`, `stale`, `superseded` or `all` | Active (the default) means confirmed and tentative memories in force; `ended`, those whose condition ended or whose date passed, each marked `ended`. `all` includes both. |
 | `--origin O` | Memories from one conversation, such as `claude:session/<id>`. |
 
 ## Record and correct
