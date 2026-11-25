@@ -148,17 +148,7 @@ impl State {
     /// Opens the state file at `path`, creating it private when missing.
     /// Waiting for another hook's write ends at `deadline`.
     pub(super) fn open(path: &Path, deadline: Instant) -> Result<Self> {
-        let dir = path.parent().context("a state file has a folder")?;
-        private::create_dir(dir)?;
-        drop(private::create_file(
-            fs::OpenOptions::new().write(true).create(true),
-            path,
-        )?);
-        let mut conn = Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
-        conn.busy_timeout(deadline.saturating_duration_since(Instant::now()))?;
+        let mut conn = connect(path, deadline)?;
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if version == 0 {
             conn.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get::<_, String>(0))?;
@@ -175,27 +165,21 @@ impl State {
 
     /// Opens the session's own context as `source` says, with `whole` the
     /// memories session start printed in full this time, which count as
-    /// shown from now. A `startup` begins a new file; `clear` empties the
-    /// window and opens an epoch; `compact` opens one and keeps the window,
-    /// as the work goes on; `resume` keeps the epoch and what it showed.
+    /// shown from now. A `startup` begins anew (see [`State::reset`]);
+    /// `clear` empties the window and opens an epoch; `compact` opens one
+    /// and keeps the window, as the work goes on; `resume` keeps the epoch
+    /// and what it showed.
     pub(super) fn start(
         path: &Path,
         source: Source,
         whole: &[&str],
         deadline: Instant,
     ) -> Result<Self> {
-        if source == Source::Startup {
-            for file in [path.to_owned(), wal(path), shm(path)] {
-                match fs::remove_file(&file) {
-                    Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
-                        return Err(err)
-                            .with_context(|| format!("Cannot remove {}", file.display()));
-                    }
-                    _ => {}
-                }
-            }
-        }
-        let mut state = Self::open(path, deadline)?;
+        let mut state = if source == Source::Startup {
+            Self::reset(path, deadline)?
+        } else {
+            Self::open(path, deadline)?
+        };
         let tx = state
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -218,6 +202,52 @@ impl State {
         }
         tx.commit()?;
         Ok(state)
+    }
+
+    /// The state of a session starting anew: every table dropped and made
+    /// again in one `IMMEDIATE` transaction, whatever layout the file had,
+    /// so it works while another hook of the session holds the file open,
+    /// which Windows would not let a delete do. Only a file that is not a
+    /// database at all, which no hook can be using, is deleted and made
+    /// again.
+    fn reset(path: &Path, deadline: Instant) -> Result<Self> {
+        match Self::rebuild(path, deadline) {
+            Err(err) if not_a_database(&err) => {
+                for file in [path.to_owned(), wal(path), shm(path)] {
+                    match fs::remove_file(&file) {
+                        Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
+                            return Err(err)
+                                .with_context(|| format!("Cannot remove {}", file.display()));
+                        }
+                        _ => {}
+                    }
+                }
+                Self::rebuild(path, deadline)
+            }
+            rebuilt => rebuilt,
+        }
+    }
+
+    /// Drops every table of the file at `path` and makes [`SCHEMA`] in one
+    /// transaction.
+    fn rebuild(path: &Path, deadline: Instant) -> Result<Self> {
+        let mut conn = connect(path, deadline)?;
+        conn.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get::<_, String>(0))?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tables = tx
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+            )?
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for table in tables {
+            tx.execute_batch(&format!("DROP TABLE \"{}\"", table.replace('"', "\"\"")))?;
+        }
+        tx.execute_batch(SCHEMA)?;
+        tx.pragma_update(None, "user_version", VERSION)?;
+        tx.commit()?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        Ok(Self { conn })
     }
 
     /// The window of `agent`'s context, oldest action first.
@@ -367,6 +397,35 @@ impl State {
 
 /// `agent`'s context row, made when missing: its epoch, the actions it has
 /// taken and the characters pushed to it in this epoch.
+/// A connection to the state file at `path`, made private when missing,
+/// that waits for another hook's write until `deadline`.
+fn connect(path: &Path, deadline: Instant) -> Result<Connection> {
+    let dir = path.parent().context("a state file has a folder")?;
+    private::create_dir(dir)?;
+    drop(private::create_file(
+        fs::OpenOptions::new().write(true).create(true),
+        path,
+    )?);
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    conn.busy_timeout(deadline.saturating_duration_since(Instant::now()))?;
+    Ok(conn)
+}
+
+/// Whether `err` says the file is not a SQLite database, or a damaged one.
+fn not_a_database(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<rusqlite::Error>()
+        .and_then(rusqlite::Error::sqlite_error_code)
+        .is_some_and(|code| {
+            matches!(
+                code,
+                rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt
+            )
+        })
+}
+
 fn context(conn: &Connection, agent: &str) -> Result<(i64, i64, usize)> {
     conn.execute(
         "INSERT OR IGNORE INTO contexts(agent, epoch, actions, chars) VALUES (?1, 1, 0, 0)",
@@ -734,6 +793,7 @@ mod tests {
             .unwrap();
 
         // resume: nothing shown before is pushed again.
+        drop(state);
         let mut state = State::start(&path, Source::Resume, &[], soon()).unwrap();
         assert_eq!(
             state.record(MAIN, &command(), &both, ROOM_CHARS).unwrap(),
@@ -743,6 +803,7 @@ mod tests {
 
         // compact: the window goes on; only what session start restored
         // counts as shown.
+        drop(state);
         let mut state = State::start(&path, Source::Compact, &["e0000001"], soon()).unwrap();
         assert_eq!(state.window(MAIN).unwrap().len(), 4);
         assert_eq!(
@@ -758,6 +819,7 @@ mod tests {
         );
 
         // clear: an empty window, and every passage can be pushed again.
+        drop(state);
         let mut state = State::start(&path, Source::Clear, &[], soon()).unwrap();
         assert_eq!(state.window(MAIN).unwrap(), []);
         assert_eq!(
@@ -766,6 +828,7 @@ mod tests {
         );
 
         // A new session, or a startup that reuses an id: no rows.
+        drop(state);
         let mut state = State::start(&path, Source::Startup, &[], soon()).unwrap();
         assert_eq!(state.window(MAIN).unwrap(), []);
         assert_eq!(state.window("agent-1").unwrap(), []);
@@ -774,10 +837,56 @@ mod tests {
             [0, 1]
         );
         let other = path.with_file_name("claude-s2-key.recall");
+        drop(state);
         let mut state = State::start(&other, Source::Startup, &[], soon()).unwrap();
         assert_eq!(
             state.record(MAIN, &command(), &both, ROOM_CHARS).unwrap(),
             [0, 1]
+        );
+    }
+
+    #[test]
+    fn a_startup_resets_the_file_another_hook_holds_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = file(&dir);
+        let mut first = State::start(&path, Source::Startup, &[], soon()).unwrap();
+        let note = [offer("e0000001", 0)];
+        assert_eq!(
+            first.record(MAIN, &command(), &note, ROOM_CHARS).unwrap(),
+            [0]
+        );
+        drop(first);
+        // Another hook of the session, its connection open across a startup
+        // that reuses the session's id. Windows refuses to delete the file.
+        let mut hook = State::open(&path, soon()).unwrap();
+        let started = State::start(&path, Source::Startup, &[], soon()).unwrap();
+        assert_eq!(started.window(MAIN).unwrap(), []);
+        // The hook writes to the file the startup began anew, not to a
+        // deleted one: the passage is shown again, and the step is there.
+        assert_eq!(
+            hook.record(MAIN, &command(), &note, ROOM_CHARS).unwrap(),
+            [0]
+        );
+        assert_eq!(started.window(MAIN).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_startup_replaces_a_file_that_is_no_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = file(&dir);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            "not a database, and long enough to have a header of sorts",
+        )
+        .unwrap();
+        assert!(State::start(&path, Source::Resume, &[], soon()).is_err());
+        let mut state = State::start(&path, Source::Startup, &[], soon()).unwrap();
+        assert_eq!(
+            state
+                .record(MAIN, &command(), &[offer("e0000001", 0)], ROOM_CHARS)
+                .unwrap(),
+            [0]
         );
     }
 

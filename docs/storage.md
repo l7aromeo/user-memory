@@ -329,8 +329,9 @@ on Windows), each private to you:
   plain text and anchors as written, lowercased, never a sentence, a
   tool's result or a file's contents), the tasks of subagents not yet
   started, and which passages of which memories were pushed at which step.
-  A session's `startup` replaces it; a `/clear` or a compaction starts a
-  new count in it; a resume keeps it. It goes with the 30-day clean-up.
+  A session's `startup` empties it in place, so another hook of the
+  session may hold it open; a `/clear` or a compaction starts a new count
+  in it; a resume keeps it. It goes with the 30-day clean-up.
   Deleting it loses only the session's recent steps and what its agents
   were pushed, so a passage may reach them again. `seen-<store key>.json` holds, per
   store, the ids and fingerprints of the rules session start last listed,

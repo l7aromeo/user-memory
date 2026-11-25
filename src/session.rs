@@ -319,7 +319,7 @@ pub async fn start(
         let until = (tokio::time::Instant::now() + hook_time(RECONCILE_GRACE)).min(deadline);
         let _ = tokio::time::timeout_at(until, reconcile).await;
     }
-    // Recall's state (#117): a new file, or a new epoch, as the start's
+    // Recall's state (#117): emptied, or a new epoch, as the start's
     // source says, with the rules it prints in full counted as shown.
     if let Some((client, payload)) = client.zip(payload.as_deref())
         && let Some(snapshot) = session_file(client, payload)
