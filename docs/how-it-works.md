@@ -339,9 +339,9 @@ From user-memory, matching this step (read one for the rest before applying it):
   `The user's decision`, any other stated memory by its type, or an
   agent's note. An agent's note of a rule's type (a preference,
   constraint or value) could be read as the user's wish, so it reads
-  `An agent's note, learned in N sessions, not the user's rule`; one on
-  the work names its type, as in
-  `An agent's note from an earlier session (fact)`. An inference is never
+  `An agent's note, learned in N sessions, not the user's rule`; one of
+  any other type, a type of its own included, is about the work and names
+  its type, as in `An agent's note from an earlier session (fact)`. An inference is never
   pushed. A passage that is part of its memory ends
   with ` …`, and the agent reads the memory for the rest.
 - **After a failure:** the header says `matching this failed step`. Claude

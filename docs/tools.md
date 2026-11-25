@@ -81,9 +81,11 @@ A tentative memory, an agent's observation or inference, also carries a
 constraints, values, behavior or patterns, which could be taken for what the
 user wants, carries ``An agent's observation or inference, not the user's
 rule: don't apply it unasked; you may mention it or ask the user, and only
-their word makes it a rule.`` An agent's observed fact, decision, goal or
-lesson is about the work and carries ``An agent's note from an earlier
-session: check it against the project before relying on it.`` `review` and
+their word makes it a rule.`` An agent's observation of any other type,
+such as a fact, decision, goal, lesson or a type of its own like `style`, is
+about the work, as only a preference, constraint or value becomes a rule,
+and carries ``An agent's note from an earlier session: check it against the
+project before relying on it.`` `review` and
 the `similar` list of a refused `record` carry the note too. It is not
 stored, so exports leave it out.
 
