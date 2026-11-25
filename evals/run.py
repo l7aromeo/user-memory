@@ -261,21 +261,22 @@ def path_slug(path):
     return re.sub(r"[^A-Za-z0-9]", "-", str(path))
 
 
-def clear_claude_tmp(trial_dir, base=None, trials=None):
+def clear_claude_tmp(trial_dir, base=None):
     """Removes the folders Claude Code made under `base` (CLAUDE_TMP_BASE)
     for sessions whose cwd is in `trial_dir`, and no other; returns those
-    left there that name a path in `trials` (TRIALS), which no trial
-    should leave."""
+    left there named after another trial of its batch, the folder holding
+    `trial_dir`. A batch runs its trials one at a time, so each of those has
+    finished; another batch, which may be running, is not looked at."""
     base = CLAUDE_TMP_BASE if base is None else base
-    trials = TRIALS if trials is None else trials
     if base is None or not base.is_dir():
         return []
-    own = path_slug(Path(trial_dir).resolve())
+    trial_dir = Path(trial_dir).resolve()
+    own = path_slug(trial_dir)
     for entry in base.iterdir():
         if (entry.name == own or entry.name.startswith(own + "-")) and entry.is_dir() and not entry.is_symlink():
             shutil.rmtree(entry)
-    named = path_slug(Path(trials).resolve()).strip("-")
-    return sorted(str(entry) for entry in base.iterdir() if named in entry.name)
+    batch = path_slug(trial_dir.parent) + "-"
+    return sorted(str(entry) for entry in base.iterdir() if entry.name.startswith(batch))
 
 
 def fingerprint():
