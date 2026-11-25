@@ -186,3 +186,39 @@ pub fn write_uses(db: &Path, uses: &Uses) -> Result<Written> {
         json!({"written": written, "skipped": skipped}),
     ))
 }
+
+/// How much a project's recent sessions used a memory: in how many of
+/// them, then in how many it was read or recorded. Greater means used
+/// more; ordering by it puts a read or a record before a delivery.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct Used {
+    pub(super) sessions: i64,
+    pub(super) worked: i64,
+}
+
+/// The use of each memory in `projects`' kept sessions (each project's
+/// newest [`USE_WINDOW`], as the write prunes them). A session that
+/// counts for two of the projects counts once. Empty without projects, or
+/// before any session wrote use.
+pub(super) fn used(
+    conn: &rusqlite::Connection,
+    projects: &[String],
+) -> Result<std::collections::HashMap<Uuid, Used>> {
+    let mut found = std::collections::HashMap::new();
+    if projects.is_empty() {
+        return Ok(found);
+    }
+    let mut statement = conn.prepare(
+        "SELECT memory,count(DISTINCT origin),count(DISTINCT CASE WHEN read OR recorded THEN origin END) FROM memory_use WHERE project IN (SELECT value FROM json_each(?1)) GROUP BY memory",
+    )?;
+    let rows = statement.query_map([serde_json::to_string(projects)?], |r| {
+        Ok((r.get::<_, String>(0)?, r.get(1)?, r.get(2)?))
+    })?;
+    for row in rows {
+        let (memory, sessions, worked) = row?;
+        if let Ok(memory) = Uuid::parse_str(&memory) {
+            found.insert(memory, Used { sessions, worked });
+        }
+    }
+    Ok(found)
+}
