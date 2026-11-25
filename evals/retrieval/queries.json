@@ -1,5 +1,5 @@
 {
- "note": "Graded queries for the retrieval benchmark, run in the session's project github.com/example/ledger. Each names its target (grade 2) and may name related memories (grade 1). direct shares words with the target; task is how an agent asks in the middle of work; paraphrase says the same with little or no shared wording.",
+ "note": "Graded queries for the retrieval benchmark, run in the session's project github.com/example/ledger. Each names its target (grade 2) and may name related memories (grade 1). direct shares words with the target; task is how an agent asks in the middle of work; paraphrase says the same with little or no shared wording. A query of a case counts a win apart: superseded, when none of its excluded memories (each replaced by its target) is returned; exception, when its target, a project's exception to the global rule it names as related, is within the default page; near-duplicate, when its target ranks above its rival, a memory sharing most of its words but meaning something else.",
  "project": "github.com/example/ledger",
  "queries": [
   {"style": "direct", "query": "pull request size limit", "target": "pr-size"},
@@ -66,6 +66,17 @@
   {"style": "paraphrase", "query": "getting into the staging kubernetes cluster", "target": "onboarding-notes", "passage": "kube-login"},
   {"style": "direct", "query": "incident status update interval", "target": "incident-runbook", "passage": "every thirty minutes"},
   {"style": "task", "query": "roll back or fix forward after a bad deploy", "target": "incident-runbook", "passage": "rolling back"},
-  {"style": "paraphrase", "query": "when to wake up the database person on call", "target": "incident-runbook", "passage": "database on-call"}
+  {"style": "paraphrase", "query": "when to wake up the database person on call", "target": "incident-runbook", "passage": "database on-call"},
+  {"style": "direct", "case": "superseded", "query": "daily standup time", "target": "standup-1015", "excluded": ["standup-930"]},
+  {"style": "task", "case": "superseded", "query": "Creating a new JavaScript service; which Node version should it use?", "target": "node-22", "excluded": ["node-18"]},
+  {"style": "paraphrase", "case": "superseded", "query": "where changes go to be looked at by a colleague", "target": "review-github", "excluded": ["review-gerrit"]},
+  {"style": "task", "case": "exception", "query": "Squash-merging this pull request into main", "target": "ledger-merge-commits", "related": ["squash-merge"]},
+  {"style": "direct", "case": "exception", "query": "how long to keep application logs", "target": "ledger-log-retention", "related": ["log-retention"]},
+  {"style": "direct", "case": "near-duplicate", "query": "may I push without asking", "target": "push-go-ahead", "rival": "pull-before-push"},
+  {"style": "task", "case": "near-duplicate", "query": "About to push; should I fetch the latest commits from the remote first?", "target": "pull-before-push", "rival": "push-go-ahead"},
+  {"style": "task", "case": "near-duplicate", "query": "The feature pull request just merged; what about its branch?", "target": "delete-merged", "rival": "keep-release-branches"},
+  {"style": "direct", "case": "near-duplicate", "query": "delete a release branch after merging", "target": "keep-release-branches", "rival": "delete-merged"},
+  {"style": "direct", "case": "near-duplicate", "query": "tests to run before a commit", "target": "tests-before-commit", "rival": "slow-tests-in-ci"},
+  {"style": "paraphrase", "case": "near-duplicate", "query": "where the long end-to-end suites belong", "target": "slow-tests-in-ci", "rival": "tests-before-commit"}
  ]
 }

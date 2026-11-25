@@ -48,6 +48,12 @@ mutants *args:
 sql-mutants *args:
     scripts/sql-mutants {{ args }}
 
+# The eval harnesses' own checks, which run no session: the agent eval's, and the retrieval benchmark's metrics and cases.
+eval-tests:
+    cargo build --locked
+    python3 -I evals/test_run.py
+    python3 -I evals/retrieval/test_run.py
+
 # Search quality on synthetic memories, keyword-only unless given an endpoint: `just retrieval-bench --embed-url http://127.0.0.1:11434/v1/embeddings`.
 retrieval-bench *args:
     cargo build --locked
