@@ -136,7 +136,10 @@ Each trial gets its own `HOME`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
 `XDG_STATE_HOME`, store and copy of the binary, and a minimal environment
 (those, `USER`, `LANG`, `TMPDIR` and a `PATH` holding the system tools first,
 then the trial's binary and the client CLI, so `git` is always the system
-one; the harness itself runs git and user-memory by absolute path). Seeds are recorded first; then
+one; the harness itself runs git and user-memory by absolute path). Its
+`XDG_STATE_HOME` is `~/.local/state` in the trial's home, the folder a
+client falls back to without it: Claude Code gives hooks no XDG variable,
+so this keeps every process's state in one place. Seeds are recorded first; then
 `user-memory setup --client <client>` installs the trial exactly as a user
 would: instruction files with the user's rules, every hook (or none, with
 `"hooks": false`), the skill and the MCP registration. For Codex the trial's
@@ -181,8 +184,10 @@ current hashes are recorded as trusted in the trial's `config.toml`.
   allowlist: `status --short/-s/--porcelain/-b`, `diff
   --stat/--cached/--staged/--name-only/--check`, `log --oneline/--stat/-N/-n
   N/--format=`, `show --stat/--name-only/--oneline/--format=` with a
-  revision, `add -A/-u` with paths inside the trial, and `commit` with only
-  `-m`/`--message`; at least one step adds or commits. A command holding
+  revision, `add -A/-u` with paths inside the trial, `commit` with only
+  `-m`/`--message` and `-s`/`--signoff`, and `tag` making or listing one
+  release tag (`v1.4.0` or `1.4.0`, with `-l`/`--list`, or `--points-at
+  HEAD`) and no other option; at least one step adds, commits or tags. A command holding
   anything the shell would expand (`$`, a backtick, `~ { } * ? [ ] !`, or a
   word starting with `=`), a pipe, a redirection or any other option is
   declined, and so is everything else. `python3 evals/test_run.py` checks
@@ -257,7 +262,11 @@ whose remote is the project in `projects` named by the path's last part, so
 `project:workspace/notebooks` is a checkout of notebooks inside the folder
 `workspace`). `folders` lists such folders to create before the first session,
 so a session in a parent folder finds its repositories there. `repeat` and
-`clients` set how many trials a batch runs. `turn_timeout` gives each of the
+`clients` set how many trials a batch runs. `allow` lists the commands a
+`shell` scenario's prompt and notes name, as Claude Code permission patterns
+such as `git tag *` or `python3 tools/*`; Claude Code may run them beside
+the git shapes the harness allows, and its deny rules still apply. Codex
+runs them in its sandbox. `turn_timeout` gives each of the
 scenario's turns that many seconds instead of 600, for a turn of a hundred
 calls or more; a turn past it is cut off and the trial is an error. `shell` gives the agent git and
 file edits (Claude: no push; Codex: workspace-write sandbox);

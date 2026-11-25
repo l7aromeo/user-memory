@@ -429,7 +429,10 @@ class Sandbox:
         self.home = self.dir / "home"
         self.claude_dir = self.home / ".claude"
         self.codex_home = self.home / ".codex"
-        self.state = self.dir / "state"
+        # The default state folder under HOME, which XDG_STATE_HOME also
+        # names: Claude Code gives hooks no XDG variable (2.1.325, measured),
+        # so they fall back to it, and every process writes in one place.
+        self.state = self.home / ".local" / "state"
         self.install = self.dir / "bin"
         self.tools = self.dir / "tools"
         self.db = self.dir / "memory.sqlite3"
@@ -712,6 +715,41 @@ def drain(lines):
     return "".join(text)[-4000:]
 
 
+def claude_permissions(sandbox, cwd, options):
+    """(tools, allowed, denied) for a trial's Claude Code session in `cwd`:
+    its built-in tools, and the allow and deny rules for its calls."""
+    tools, allowed, denied = "", ["mcp__user-memory"], []
+    if options.get("commands") and not options.get("shell"):
+        # Only the user-memory commands a scenario names, by name or by
+        # the trial's installed path.
+        tools = "Bash"
+        for command in options["commands"]:
+            rest = command.removeprefix("user-memory ")
+            allowed += [f"Bash({command} *)", f"Bash({sandbox.binary} {rest} *)"]
+    if options.get("shell"):
+        files = subprocess.run([GIT, "ls-files"], cwd=cwd, capture_output=True,
+                               text=True).stdout.split()
+        allow, denied = claude_shell_rules(sandbox.dir, Path(cwd).resolve(), files)
+        # And the commands the scenario's prompt and notes name, such as
+        # `git tag *` or `python3 tools/*`, which the shape rules leave out;
+        # the deny rules still apply to them.
+        tools = CLAUDE_SHELL_TOOLS
+        allowed = allowed + allow + [f"Bash({pattern})" for pattern in options.get("allow", [])]
+    elif options.get("claude_file_tools"):
+        tools = CLAUDE_FILE_TOOLS
+    if options.get("subagents"):
+        # The subagent tool; what a subagent may do is what the session's
+        # other rules allow.
+        tools = ",".join([t for t in tools.split(",") if t] + ["Agent"])
+        allowed = allowed + ["Agent"]
+    if options.get("asks"):
+        # The question tool, answered by the harness as the user would:
+        # with a host for prompts, every call no rule allows comes to
+        # the harness, which declines all but the questions.
+        tools = ",".join([t for t in tools.split(",") if t] + ["AskUserQuestion"])
+    return tools, allowed, denied
+
+
 class ClaudeSession:
     """A Claude Code session that stays open between turns: each turn is a
     user message on stdin, answered by a `result` event."""
@@ -721,32 +759,8 @@ class ClaudeSession:
 
     def __init__(self, sandbox, cwd, options, resume=None):
         self.turn_timeout = options.get("turn_timeout", TURN_TIMEOUT)
-        tools, allowed, denied = "", ["mcp__user-memory"], []
-        if options.get("commands") and not options.get("shell"):
-            # Only the user-memory commands a scenario names, by name or by
-            # the trial's installed path.
-            tools = "Bash"
-            for command in options["commands"]:
-                rest = command.removeprefix("user-memory ")
-                allowed += [f"Bash({command} *)", f"Bash({sandbox.binary} {rest} *)"]
-        if options.get("shell"):
-            files = subprocess.run([GIT, "ls-files"], cwd=cwd, capture_output=True,
-                                   text=True).stdout.split()
-            allow, denied = claude_shell_rules(sandbox.dir, Path(cwd).resolve(), files)
-            tools, allowed = CLAUDE_SHELL_TOOLS, allowed + allow
-        elif options.get("claude_file_tools"):
-            tools = CLAUDE_FILE_TOOLS
-        if options.get("subagents"):
-            # The subagent tool; what a subagent may do is what the session's
-            # other rules allow.
-            tools = ",".join([t for t in tools.split(",") if t] + ["Agent"])
-            allowed = allowed + ["Agent"]
+        tools, allowed, denied = claude_permissions(sandbox, cwd, options)
         asks = options.get("asks")
-        if asks:
-            # The question tool, answered by the harness as the user would:
-            # with a host for prompts, every call no rule allows comes to
-            # the harness, which declines all but the questions.
-            tools = ",".join([t for t in tools.split(",") if t] + ["AskUserQuestion"])
         self.command = [
             "claude", "-p", "--input-format", "stream-json",
             "--output-format", "stream-json", "--verbose",
@@ -1106,10 +1120,13 @@ STEP_OPTIONS = {
     "log": {"--oneline", "--stat"},
     "show": {"--stat", "--name-only", "--oneline"},
     "add": {"-A", "--all", "-u", "--update"},
-    "commit": set(),
+    "commit": {"-s", "--signoff"},
+    "tag": set(),
 }
 # Steps that change the repository; an approved command holds at least one.
-WRITES = {"add", "commit"}
+WRITES = {"add", "commit", "tag"}
+# A tag name an approved command may make or list: a release version.
+TAG_NAME = r"v?\d+(\.\d+){1,3}"
 SHELLS = {"sh", "bash", "zsh"}
 OPERATORS = set("();<>|&")
 
@@ -1163,10 +1180,16 @@ def git_step(tokens, cwd, trial):
             if arg in ("-m", "--message") and i + 1 < len(args):
                 i += 2
                 continue
-            if arg.startswith("--message="):
+            if arg.startswith("--message=") or arg in allowed:
                 i += 1
                 continue
             return False
+        if sub == "tag":
+            # One release tag made, or listed; no option that deletes,
+            # moves or signs one.
+            return (re.fullmatch(TAG_NAME, " ".join(args)) is not None
+                    or (len(args) == 2 and args[0] in ("-l", "--list") and re.fullmatch(TAG_NAME, args[1]) is not None)
+                    or args == ["--points-at", "HEAD"])
         if arg in allowed or arg == "--":
             pass
         elif sub in ("log", "show") and arg.startswith("--format="):
@@ -2026,7 +2049,7 @@ def watched(scenario, sandbox):
 def trial(scenario, client, base, source, projects, guard):
     sandbox = prepare(scenario, client, base, source, projects)
     options = {k: scenario[k] for k in ("shell", "claude_file_tools", "codex_escalations",
-                                        "commands", "subagents", "turn_timeout")
+                                        "commands", "subagents", "turn_timeout", "allow")
                if k in scenario}
     options["resumes"] = any(step.get("resume") for step in steps(scenario))
     options["compacts"] = any(step.get("compact") for step in steps(scenario))

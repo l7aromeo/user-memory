@@ -87,6 +87,31 @@ class Escalation(unittest.TestCase):
         ]:
             self.assertFalse(self.allowed(command), command)
 
+    def test_a_release_tag_and_a_signed_off_commit_are_approved(self):
+        for command in [
+            # As the agents of #117's A1 ran it.
+            "/bin/zsh -lc 'git tag v1.4.0 && git tag --list v1.4.0'",
+            "git tag v1.4.0 && git tag --points-at HEAD",
+            "git tag 1.4.0; git tag -l 1.4.0",
+            "git add notes.txt && git commit -s -m 'Add one'",
+            "git commit --signoff --message='Add one'",
+        ]:
+            self.assertTrue(self.allowed(command), command)
+        for command in [
+            # A tag deleted, moved, signed, annotated from a file or pushed;
+            # one that is no release; a listing that writes nothing.
+            "git tag -d v1.4.0",
+            "git tag -f v1.4.0",
+            "git tag -s v1.4.0",
+            "git tag -a v1.4.0 -F /Users/x/.codex/auth.json",
+            "git tag v1.4.0 HEAD~1",
+            "git tag latest",
+            "git tag v1.4.0 && git push --tags",
+            "git tag --list 'v*'",
+            "git commit -s -F /Users/x/.codex/auth.json",
+        ]:
+            self.assertFalse(self.allowed(command), command)
+
     def test_only_inside_the_trial(self):
         self.assertFalse(self.allowed("git commit -m x", cwd=Path.home()))
         self.assertFalse(run.escalation("git commit -m x", None, self.trial))
@@ -1710,6 +1735,68 @@ class ReadOnlyTokenAskedToRecord(unittest.TestCase):
         self.assertEqual(self.failed([peeked]), ["commands_not"])
         untried = {**told, "tool_calls": []}
         self.assertEqual(self.failed([untried]), ["called"])
+
+
+class Discoverable(unittest.TestCase):
+    @staticmethod
+    def leaks(scenario):
+        """The `commands` checks of a scenario whose pattern a note's text
+        matches but which the checkout or prompt would let an agent match
+        without the note: its files' names and text, its prompts, or a
+        note's title, which session start's index may list."""
+        notes = " ".join(s["args"][s["args"].index("--content") + 1] for s in scenario.get("seed", []))
+        visible = " ".join([json.dumps(scenario.get("files", {})),
+                            *[st.get("prompt", "") for st in scenario.get("sessions") or scenario.get("steps") or []],
+                            *[s["args"][s["args"].index("--title") + 1] for s in scenario.get("seed", [])]])
+        return [c["commands"]["matches"] for c in scenario["checks"]
+                if "commands" in c and re.search(c["commands"]["matches"], notes, re.IGNORECASE)
+                and re.search(c["commands"]["matches"], visible, re.IGNORECASE)]
+
+    def test_a_note_s_command_cannot_be_found_in_the_checkout(self):
+        scenarios = json.loads((HERE / "scenarios.json").read_text())["scenarios"]
+        recall = [s for s in scenarios if any("pushed" in c for c in s["checks"])]
+        self.assertGreaterEqual(len(recall), 10)
+        for scenario in recall:
+            self.assertEqual(self.leaks(scenario), [], scenario["name"])
+        # #117's A1 as first written: main's Codex agent found the script.
+        a1 = next(s for s in recall if s["name"].startswith("a_note_the_prompt_names"))
+        old = {**a1, "checks": [{"commands": {"matches": "check_version\\.py"}}]}
+        self.assertEqual(self.leaks(old), ["check_version\\.py"])
+
+
+class ClaudePermissions(unittest.TestCase):
+    def test_a_scenario_s_own_commands_are_allowed_and_its_denials_stay(self):
+        trial = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, trial)
+        repo = trial / "compiler"
+        repo.mkdir()
+        run.subprocess.run([run.GIT, "init", "-q"], cwd=repo, check=True)
+        sandbox = types.SimpleNamespace(dir=trial, binary=trial / "bin/user-memory")
+        _, allowed, denied = run.claude_permissions(
+            sandbox, repo, {"shell": True, "allow": ["git tag *", "python3 tools/*"]})
+        rules = lambda command, rules: any(  # noqa: E731
+            bash_rule_matches(r, command) for r in rules if r.startswith("Bash("))
+        for command in ["git tag v1.4.0", "python3 tools/check_version.py --release-key k", "git status"]:
+            self.assertTrue(rules(command, allowed), command)
+        self.assertTrue(rules("git push origin main", denied))
+        _, allowed, _ = run.claude_permissions(sandbox, repo, {"shell": True})
+        self.assertFalse(rules("git tag v1.4.0", allowed), "only what the scenario names")
+        _, allowed, _ = run.claude_permissions(sandbox, repo, {"allow": ["git tag *"]})
+        self.assertFalse(rules("git tag v1.4.0", allowed), "no shell, no commands")
+
+    def test_a_trial_keeps_its_state_where_a_client_without_xdg_writes_it(self):
+        # Claude Code gives hooks no XDG variable, so they write under HOME.
+        base = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, base)
+        original = run.claude_binary
+        run.claude_binary = lambda: Path("/usr/bin/true")
+        try:
+            sandbox = run.Sandbox(base, Path("/usr/bin/true"), "claude")
+        finally:
+            run.claude_binary = original
+        self.assertEqual(sandbox.state, sandbox.home / ".local" / "state")
+        self.assertEqual(sandbox.env["XDG_STATE_HOME"], str(sandbox.state))
+        self.assertTrue(sandbox.state.is_dir())
 
 
 class ClaudeTemporaryFolder(unittest.TestCase):
