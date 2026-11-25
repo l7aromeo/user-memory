@@ -977,7 +977,7 @@ pub(super) fn refusal(
     })
 }
 
-pub(super) const SELECT: &str = "SELECT id,created_at,updated_at,memory_type,category,context,content,reason,source,status,scope,project,evidence,evidence_ids,rowid,(SELECT json_group_array(origin) FROM (SELECT origin FROM memory_origins WHERE memory_id=memories.id ORDER BY origin)),superseded_by,last_confirmed_at,title FROM memories";
+pub(super) const SELECT: &str = "SELECT id,created_at,updated_at,memory_type,category,context,content,reason,source,status,scope,project,evidence,evidence_ids,rowid,(SELECT json_group_array(origin) FROM (SELECT origin FROM memory_origins WHERE memory_id=memories.id ORDER BY origin)),superseded_by,last_confirmed_at,title,until_kind,until_value,until_project FROM memories";
 pub(super) fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Memory> {
     let evidence: String = r.get(13)?;
     let origins: Vec<String> = serde_json::from_str(&r.get::<_, String>(15)?).map_err(|e| {
@@ -1020,6 +1020,12 @@ pub(super) fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Memory> {
                 })
             })
             .transpose()?,
+        until: super::until::Condition::from_columns(
+            &r.get::<_, String>(19)?,
+            &r.get::<_, String>(20)?,
+            &r.get::<_, String>(21)?,
+        )
+        .map(|condition| condition.to_input()),
     })
 }
 pub(super) fn get(conn: &Connection, id: Uuid) -> Result<Option<Memory>> {

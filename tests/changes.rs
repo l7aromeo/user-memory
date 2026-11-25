@@ -436,8 +436,8 @@ type Case = fn(&Store);
 /// Every function in src/ that opens a write on the store, with its case.
 const PATHS: &[(&str, Case)] = &[
     ("schema::connect", connect),
-    ("write::record", record),
-    ("write::update", update),
+    ("write::record_in", record),
+    ("write::update_in", update),
     ("write::mark_distinct", mark_distinct),
     ("write::forget", forget),
     ("review::keep", keep),

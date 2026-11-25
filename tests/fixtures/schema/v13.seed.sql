@@ -26,9 +26,9 @@ INSERT INTO memories (id,created_at,updated_at,memory_type,category,context,titl
 INSERT INTO memories (id,created_at,updated_at,memory_type,category,context,title,content,reason,scope,project,source,status,evidence,evidence_ids,superseded_by,last_confirmed_at,until_kind,until_value,until_project) VALUES
 ('1a2b3c4d-8888-4aaa-8aaa-000000000008','2026-10-11 08:00:00','2026-10-11 08:00:00','preference','workflow','','Skip the slow tests for today','Skip the slow tests','','global','','explicit','confirmed','','[]',NULL,NULL,'date','2026-10-11T22:00:00Z',''),
 ('1a2b3c4d-9999-4aaa-8aaa-000000000009','2026-10-12 08:00:00','2026-10-12 08:00:00','preference','workflow','','Push this release without asking','Push without asking','','project','github.com/x/y','explicit','confirmed','','[]',NULL,NULL,'tag','v1.2.0','github.com/x/y'),
-('1a2b3c4d-aaaa-4aaa-8aaa-00000000000a','2026-10-13 08:00:00','2026-10-13 08:00:00','fact','tooling','','Pin the parser at 2.3','Pin the parser at 2.3','','global','','observed','confirmed','Empty rows break 2.4','[]',NULL,NULL,'text','the parser''s fix for empty rows ships','');
+('1a2b3c4d-1010-4aaa-8aaa-000000000010','2026-10-13 08:00:00','2026-10-13 08:00:00','fact','tooling','','Pin the parser at 2.3','Pin the parser at 2.3','','global','','observed','confirmed','Empty rows break 2.4','[]',NULL,NULL,'text','the parser''s fix for empty rows ships','');
 INSERT INTO memory_ended (memory_id,ended_at,how,evidence,origin) VALUES
-('1a2b3c4d-aaaa-4aaa-8aaa-00000000000a','2026-10-14 08:00:00','evidence','ran cargo update -p parser: 2.4.1 installed, the empty-rows test passes without the pin','claude:session/x');
+('1a2b3c4d-1010-4aaa-8aaa-000000000010','2026-10-14 08:00:00','evidence','ran cargo update -p parser: 2.4.1 installed, the empty-rows test passes without the pin','claude:session/x');
 INSERT INTO memory_origins (memory_id,origin,first_seen) VALUES
 ('1a2b3c4d-1111-4aaa-8aaa-000000000001','chat/a','2026-10-01 10:00:00'),
 ('1a2b3c4d-1111-4aaa-8aaa-000000000001','chat/b','2026-10-02 09:00:00'),

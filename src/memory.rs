@@ -42,6 +42,7 @@ mod stamps;
 mod titles;
 mod transfer;
 mod undo;
+pub mod until;
 mod usage;
 mod words;
 mod write;
@@ -78,7 +79,9 @@ pub use transfer::{
 };
 pub(crate) use usage::{USE_REQUEST_BYTES, USES_PER_REQUEST};
 pub use usage::{Use, Uses, Written, write_uses};
-pub use write::{COPY_ON_SERVER, Forget, Record, Update, forget, record, update};
+pub use write::{
+    COPY_ON_SERVER, Forget, Record, Update, forget, record, record_in, update, update_in,
+};
 
 #[derive(
     Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, ValueEnum, PartialEq, Eq,
@@ -179,6 +182,10 @@ pub struct Memory {
     pub last_confirmed_at: Option<String>,
     /// The memory that replaced this one, when its status is `superseded`.
     pub superseded_by: Option<Uuid>,
+    /// What ends this memory, in `record`'s shape, with a date as its UTC
+    /// instant; absent for a memory that holds until changed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub until: Option<until::Until>,
     #[serde(skip)]
     sequence: i64,
 }
