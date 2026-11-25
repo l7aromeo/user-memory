@@ -77,6 +77,8 @@
   {"style": "task", "case": "near-duplicate", "query": "The feature pull request just merged; what about its branch?", "target": "delete-merged", "rival": "keep-release-branches"},
   {"style": "direct", "case": "near-duplicate", "query": "delete a release branch after merging", "target": "keep-release-branches", "rival": "delete-merged"},
   {"style": "direct", "case": "near-duplicate", "query": "tests to run before a commit", "target": "tests-before-commit", "rival": "slow-tests-in-ci"},
-  {"style": "paraphrase", "case": "near-duplicate", "query": "where the long end-to-end suites belong", "target": "slow-tests-in-ci", "rival": "tests-before-commit"}
+  {"style": "paraphrase", "case": "near-duplicate", "query": "where the long end-to-end suites belong", "target": "slow-tests-in-ci", "rival": "tests-before-commit"},
+  {"style": "task", "case": "near-duplicate", "query": "Which tests should not run before a commit?", "target": "slow-tests-in-ci", "rival": "tests-before-commit"},
+  {"style": "direct", "case": "near-duplicate", "query": "branches that must never be deleted", "target": "keep-release-branches", "rival": "delete-merged"}
  ]
 }
