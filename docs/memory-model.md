@@ -285,7 +285,8 @@ passages are worked out again whenever the memory is indexed.
   place in the text and its stems and anchors, never its text.
 - During a task, the hooks push the passage that matches a step, with
   whose word it is: the user's rule or decision, another stated memory by
-  its type, or an agent's note with the sessions it was learned in. An
+  its type, or an agent's note with the sessions it was learned in, which
+  says it is not the user's rule when it has a rule's type. An
   inference is never pushed, and a passage needs an anchor of the step,
   so a memory without one comes by search or the index alone
   ([recall during the task](how-it-works.md#recall-during-the-task)).

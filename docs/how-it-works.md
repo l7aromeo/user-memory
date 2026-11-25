@@ -336,9 +336,13 @@ From user-memory, matching this step (read one for the rest before applying it):
   command with its next word, a path, a code span) and matches the work of
   the last 30 steps well enough. Words alone never push one. Each line
   names the memory's id and whose word it is: `The user's rule`,
-  `The user's decision`, any other stated memory by its type, or
-  `An agent's note, learned in N sessions, not the user's rule`. An
-  inference is never pushed. A passage that is part of its memory ends
+  `The user's decision`, any other stated memory by its type, or an
+  agent's note. An agent's note of a rule's type (a preference,
+  constraint or value) could be read as the user's wish, so it reads
+  `An agent's note, learned in N sessions, not the user's rule`; one on
+  the work names its type, as in
+  `An agent's note from an earlier session (fact)`. An inference is never
+  pushed. A passage that is part of its memory ends
   with ` …`, and the agent reads the memory for the rest.
 - **After a failure:** the header says `matching this failed step`. Claude
   Code says a call failed with `PostToolUseFailure`, unless you interrupted

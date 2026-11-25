@@ -373,6 +373,7 @@ fn observed_behavior_requires_concrete_evidence_and_stays_tentative() {
 #[test]
 fn an_observation_says_what_it_is_wherever_its_text_is_given() {
     const NOTE: &str = "An agent's observation or inference, not the user's rule: don't apply it unasked; you may mention it or ask the user, and only their word makes it a rule.";
+    const WORK: &str = "An agent's note from an earlier session: check it against the project before relying on it.";
     let s = Store::new();
     let rule = s.add("preference", "Write commit subjects in the imperative");
     let observed = s.value(&[
@@ -389,6 +390,21 @@ fn an_observation_says_what_it_is_wherever_its_text_is_given() {
         "Committed 'Fix the lexer [cmp]' on 2026-10-17",
     ]);
     let observed = observed["id"].as_str().unwrap();
+    // An agent's fact is about the work: no one takes it for the user's rule.
+    let fact = s.value(&[
+        "record",
+        "--type",
+        "fact",
+        "--category",
+        "workflow",
+        "--content",
+        "The changelog script builds its entries from commit subjects",
+        "--source",
+        "observed",
+        "--evidence",
+        "The changelog listed each commit subject of the release",
+    ]);
+    let fact = fact["id"].as_str().unwrap();
     let note = |memories: &Value, id: &str| {
         let memory = memories
             .as_array()
@@ -399,11 +415,12 @@ fn an_observation_says_what_it_is_wherever_its_text_is_given() {
         memory.get("note").cloned()
     };
     for reply in [
-        s.value(&["read", observed, &rule])["memories"].clone(),
+        s.value(&["read", observed, &rule, fact])["memories"].clone(),
         s.value(&["search", "commit subjects"]),
     ] {
         assert_eq!(note(&reply, observed), Some(json!(NOTE)), "{reply}");
         assert_eq!(note(&reply, &rule), None, "{reply}");
+        assert_eq!(note(&reply, fact), Some(json!(WORK)), "{reply}");
     }
     let refused = s.value(&[
         "record",

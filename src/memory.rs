@@ -115,12 +115,35 @@ impl Scope {
 /// user's rule. It is context until the user says otherwise.
 const TENTATIVE_NOTE: &str = "An agent's observation or inference, not the user's rule: don't apply it unasked; you may mention it or ask the user, and only their word makes it a rule.";
 
-/// Adds [`TENTATIVE_NOTE`] as `note` to a memory in a reply when it is tentative.
+/// What an agent's note about the work is, given beside its full text: a
+/// fact, decision, goal or lesson an agent observed, which no one could
+/// take for the user's rule, but which may have changed since.
+const WORK_NOTE: &str =
+    "An agent's note from an earlier session: check it against the project before relying on it.";
+
+/// Whether an agent's memory of `memory_type` could be read as the user's
+/// wish: a rule's types, and what an agent saw the user do. Its note and
+/// its push say it is not the user's rule; an agent's fact, decision, goal
+/// or lesson is about the work. The one place both decide it.
+fn reads_as_wish(memory_type: &str) -> bool {
+    read::RULE_TYPES.contains(&memory_type) || matches!(memory_type, "behavior" | "pattern")
+}
+
+/// Adds a `note` to a memory in a reply when it is tentative: [`WORK_NOTE`]
+/// for an agent's observation about the work, [`TENTATIVE_NOTE`] for an
+/// inference or one that [`reads_as_wish`].
 fn note_tentative(memory: &mut serde_json::Value) {
-    if memory.get("status").and_then(serde_json::Value::as_str) == Some("tentative")
-        && let Some(fields) = memory.as_object_mut()
-    {
-        fields.insert("note".into(), TENTATIVE_NOTE.into());
+    let text = |key: &str| memory.get(key).and_then(serde_json::Value::as_str);
+    if text("status") != Some("tentative") {
+        return;
+    }
+    let note = if text("source") == Some("observed") && !text("type").is_some_and(reads_as_wish) {
+        WORK_NOTE
+    } else {
+        TENTATIVE_NOTE
+    };
+    if let Some(fields) = memory.as_object_mut() {
+        fields.insert("note".into(), note.into());
     }
 }
 

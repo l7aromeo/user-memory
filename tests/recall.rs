@@ -365,12 +365,36 @@ fn an_agents_note_is_labelled_as_one() {
             "claude:session/e0000005",
         ],
     );
+    // An agent's note of a rule's type could be read as the user's wish.
+    let habit = home.record(
+        "Deploys run verbosely",
+        "Run `./scripts/deploy.sh` with `--verbose`, so a failure shows its step.",
+        &[
+            "--type",
+            "preference",
+            "--source",
+            "observed",
+            "--evidence",
+            "the user reran the deploy script with --verbose after it failed",
+            "--origin",
+            "claude:session/e0000006",
+        ],
+    );
     home.start("s1", "startup");
+    // A note about the work names its type and no rule.
     let pushed = home.run("s1", "./scripts/release.sh");
     assert!(
         pushed.contains(&format!(
-            "- {} An agent's note, learned in 1 session, not the user's rule: `./scripts/release.sh` fails",
+            "- {} An agent's note from an earlier session (lesson): `./scripts/release.sh` fails",
             short(&note)
+        )),
+        "{pushed}"
+    );
+    let pushed = home.run("s1", "./scripts/deploy.sh");
+    assert!(
+        pushed.contains(&format!(
+            "- {} An agent's note, learned in 1 session, not the user's rule: Run `./scripts/deploy.sh`",
+            short(&habit)
         )),
         "{pushed}"
     );
