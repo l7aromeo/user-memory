@@ -221,6 +221,12 @@ trial's session appears under the real `~/.local/state/user-memory/sessions`,
 or a folder named after a trial path appears under the real
 `~/.claude/projects`. A trial that fails partway still closes every session
 it opened, and removes the Codex login link.
+Claude Code keeps each session's background task output under
+`/tmp/claude-<uid>/<the session's folder as a slug>/`, whatever `TMPDIR`
+says, a folder the user's own sessions share. After each Claude Code trial
+and probe the harness removes the folders named after that trial's paths
+there, and no other; any folder there still named after a trial path is
+reported as a harness error.
 Only the MCP entries of `~/.claude.json` are compared because running Claude
 Code sessions rewrite its caches and counters continuously. Recording a
 memory in a real session during a batch rewrites the real instruction files
