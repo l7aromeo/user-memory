@@ -3942,6 +3942,29 @@ impl Machine {
             String::from_utf8(out.stderr).unwrap(),
         )
     }
+    /// The stdout of hook `subcommand` for session `session`, its payload
+    /// `extra` added to the session's.
+    fn hook_with(&self, subcommand: &str, session: &str, extra: Value) -> String {
+        let mut child = self
+            .command(&[subcommand, "--client", "claude"])
+            .spawn()
+            .unwrap();
+        let mut payload =
+            json!({"session_id":session,"cwd":self.home.path(),"hook_event_name":subcommand});
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload.to_string().as_bytes())
+            .unwrap();
+        let out = time::finish(child, "the hook");
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    }
     /// The server's marker, once the connector wrote it.
     fn marker(&self) -> std::path::PathBuf {
         let mut found = None;
@@ -5001,6 +5024,109 @@ fn the_prompt_hook_downloads_a_server_s_base_the_scope_lacks() {
     let (_, said) = machine.hook("prompt-submit");
     assert_eq!(errors(&said), Vec::<&str>::new());
     assert_eq!(holding(home, "quokka-deploy").len(), 1);
+}
+
+/// Polls after which a running connector's marker no longer counts for the
+/// hooks: src/remote/marker.rs's `QUIET_POLLS` (12) times
+/// `SERVED_AFTER_POLLS` (3).
+const SERVED_POLLS: u32 = 36;
+
+/// The text a hook added to the context, from its stdout; empty for none.
+fn added(stdout: &str) -> String {
+    if stdout.is_empty() {
+        return String::new();
+    }
+    let reply: Value = serde_json::from_str(stdout).unwrap();
+    reply["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+// On a server's store the hooks match against the files its connector
+// keeps here (#117, #180), and read them only while a connector holds its
+// lock, its marker is recent and the newest file is at or past the
+// marker's position, so a removal the connector has heard of is never
+// matched. A push names the id alone: whose word a memory is, and its
+// text, are on the server, which a tool hook never asks.
+#[test]
+fn a_server_s_files_are_matched_only_while_a_connector_keeps_them_current() {
+    let poll = std::time::Duration::from_millis(300);
+    let host = Host::start(root());
+    let id = record_tool(&host, 1, "quokka-deploy", "chat/deploy");
+    let machine = Machine {
+        home: tempdir().unwrap(),
+        url: format!("http://{}/mcp", host.address),
+        token: host.root.path().join("token"),
+        env: vec![("USER_MEMORY_MARKER_POLL_MS", poll.as_millis().to_string())],
+    };
+    let home = machine.home.path();
+    let sessions = ["held", "unheld", "old", "behind", "prompted"];
+    {
+        let _connector = machine.connector();
+        for session in sessions {
+            machine.hook_with("session-start", session, json!({"source": "startup"}));
+        }
+        machine.marker();
+        assert_eq!(
+            holding(home, "quokka-deploy").len(),
+            1,
+            "session start downloaded the base"
+        );
+    }
+    // The connector has stopped: its lock is free, its marker still recent.
+    let marker = machine.marker();
+    let connected = find(home, "connected").expect("the connector's lock file");
+    let call = |session: &str| {
+        added(&machine.hook_with(
+            "post-tool-use",
+            session,
+            json!({"tool_name":"Bash","tool_input":{"command":"quokka-deploy --now"},"tool_response":"done"}),
+        ))
+    };
+    let pointer = format!(
+        "From user-memory, matching this step (read one for the rest before applying it):\n- {} matches this step; read it before applying it",
+        &id[..8]
+    );
+    assert_eq!(call("unheld"), "", "no connector runs");
+    // The lock a running connector shares, held here so the marker stays
+    // as the test sets it.
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&connected)
+        .unwrap();
+    lock.lock_shared().unwrap();
+    assert_eq!(call("held"), pointer, "a connector runs, its marker recent");
+    let prompted = added(&machine.hook_with(
+        "prompt-submit",
+        "prompted",
+        json!({"prompt": "Run `quokka-deploy` for the release"}),
+    ));
+    assert!(prompted.contains(&pointer), "{prompted}");
+    assert!(
+        !prompted.contains("before the step"),
+        "no text from the server: {prompted}"
+    );
+    let position = fs::read_to_string(&marker).unwrap();
+    // A position is FORMAT.STORE.CHANGE.SEQ; one change past the files'.
+    let mut parts: Vec<&str> = position.trim_end().rsplitn(3, '.').collect();
+    let change = (parts[1].parse::<u64>().unwrap() + 1).to_string();
+    parts[1] = &change;
+    parts.reverse();
+    fs::write(&marker, format!("{}\n", parts.join("."))).unwrap();
+    assert_eq!(call("behind"), "", "the newest file is behind the marker");
+    fs::write(&marker, &position).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&marker)
+        .unwrap()
+        .set_modified(
+            std::time::SystemTime::now() - poll * SERVED_POLLS - std::time::Duration::from_secs(1),
+        )
+        .unwrap();
+    assert_eq!(call("old"), "", "the marker is past its age");
+    drop(lock);
 }
 
 // A server released before the route answers 404: the client keeps no

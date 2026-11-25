@@ -451,19 +451,6 @@ pub(crate) fn at_session_start(
     )
 }
 
-/// The scope's base and overlay a hook matches on, for the session's
-/// `projects`: the store at `db` on this machine when `remote` is none, as
-/// they stand at the store's latest change; none when the files are
-/// missing, voided, damaged or behind it.
-pub(crate) fn open(remote: Option<&str>, db: &Path, projects: &[String]) -> Option<View> {
-    match remote {
-        None => Files::of(&paths::store_identity(None, db))?
-            .open(&scope(projects), &super::changes::position(db)?),
-        // A server's files are kept by its connector (#180).
-        Some(_) => None,
-    }
-}
-
 /// The prompt hook's part (#175), for the local store at `db` and the
 /// session's `projects`: refreshes the scope's overlay, waiting for the lock
 /// until `deadline`, and builds the scope's base when there is none it can
@@ -1700,9 +1687,7 @@ impl Files {
 /// of its store, only while a connector runs here, its marker is recent
 /// ([`crate::remote::marker::served`]), and the newest file is at or past
 /// the marker's position, so a removal the connector has heard of is never
-/// read. Until a hook reads it (#117), only tests call it.
-#[cfg(test)]
-#[expect(dead_code, reason = "the hooks of #117 part 4 call it")]
+/// read.
 pub(crate) fn open(remote: Option<&str>, db: &Path, projects: &[String]) -> Option<View> {
     match remote {
         None => Files::of(&paths::store_identity(None, db))?
@@ -1714,7 +1699,6 @@ pub(crate) fn open(remote: Option<&str>, db: &Path, projects: &[String]) -> Opti
     }
 }
 
-#[cfg(test)]
 impl Files {
     /// The remote arm of [`open`], with the position `marker` gives: none
     /// without one, or when the newest file is behind it.
