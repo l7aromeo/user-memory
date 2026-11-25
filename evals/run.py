@@ -757,7 +757,7 @@ class ClaudeSession:
         once the agent's first tool call shows, as a user types while the
         agent works; Claude Code adds it to the running turn. Its question
         tool is answered from `answers`."""
-        events, error = [], None
+        events, error, background = [], None, []
         self.questions, self.declined, self.steered = [], [], False
         try:
             self.say(prompt)
@@ -783,7 +783,12 @@ class ClaudeSession:
             elif while_working and not self.steered and tool_uses([event]):
                 self.say(while_working)
                 self.steered = True
-            if event.get("type") == "result":
+            if event.get("type") == "system" and event.get("subtype") == "background_tasks_changed":
+                background = event.get("tasks") or []
+            # A background subagent's result comes back as a turn of its
+            # own, a `<task-notification>` prompt, so the step lasts until
+            # a result with no background task left.
+            if event.get("type") == "result" and not background:
                 break
         return events, error
 
@@ -2250,12 +2255,14 @@ def rehearse(scenarios, clients, base, source, projects, guard):
                 notes = rehearsal_notes(scenario, client, sandbox, projects)
                 planted, shown = planted_notes(scenario, client, sandbox)
                 notes += planted
+                counts = planted_counts(scenario, client, sandbox)
             finally:
                 stop_servers(sandbox)
             guard.check(f"rehearsal {scenario['name']}/{client}")
             failures += bool(notes)
             print(f"{'ok  ' if not notes else 'FAIL'} {scenario['name']}/{client}"
-                  + (f" ({shown[0]} of {shown[1]} checks shown able to fail)" if shown else "")
+                  + (f" ({shown[0]} of {shown[1]} checks shown able to fail; planted transcripts "
+                     f"fail {', '.join(map(str, counts))})" if shown else "")
                   + "".join(f"\n      {n}" for n in notes), flush=True)
     return failures
 
@@ -2363,6 +2370,20 @@ def planted_notes(scenario, client, sandbox):
         shown = [was or not passed for was, (passed, _) in zip(shown, grades)]
     notes += [f"no planted transcript fails {check}" for check, was in zip(checks, shown) if not was]
     return notes, (sum(shown), len(checks))
+
+
+def planted_counts(scenario, client, sandbox):
+    """How many of the scenario's checks each planted transcript fails, in
+    order, so a rehearsal shows which transcript tests which check: one
+    that fails none tests nothing, and one that fails several cannot tell
+    them apart."""
+    memories = sandbox.memories()
+    checks = [resolve({k: v for k, v in check.items() if k not in ("client", "informational")},
+                      sandbox, memories)
+              for check in scenario["checks"]
+              if check.get("client", client) == client]
+    return [sum(not passed for passed, _ in planted_grades(scenario, transcript, checks, sandbox, memories))
+            for transcript in scenario.get("planted", [])]
 
 
 def rehearsal_notes(scenario, client, sandbox, projects):

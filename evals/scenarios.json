@@ -978,6 +978,17 @@
      "steps": [
       {
        "commands": [
+        "python3 tools/check_version.py",
+        "git tag v1.4.0"
+       ],
+       "pushed": []
+      }
+     ]
+    },
+    {
+     "steps": [
+      {
+       "commands": [
         "git tag v1.4.0"
        ],
        "pushed": [
@@ -993,8 +1004,13 @@
      "steps": [
       {
        "commands": [
-        "python3 tools/check_version.py",
-        "git tag v1.4.0"
+        "python3 tools/check_version.py"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:note}",
+         "agent": "main"
+        }
        ]
       }
      ]
@@ -1121,12 +1137,54 @@
    "planted": [
     {
      "write": {
-      "compiler/src/store/cache.py": "class Cache:\n    def __init__(self):\n        self.entries = {}\n\n    def get(self, key):\n        \"\"\"The entry for key, or None.\"\"\"\n        return self.entries.get(key)\n\n    def size(self):\n        return len(self.entries)\n"
+      "compiler/src/store/cache.py": "class Cache:\n    def __init__(self):\n        self.entries = {}\n\n    def get(self, key):\n        \"\"\"The entry for key, or None.\"\"\"\n        return self.entries.get(key)\n\n    def size(self):\n        \"\"\"How many entries the cache holds.\"\"\"\n        return len(self.entries)\n",
+      "compiler/tests/test_store.py": "from src.store.cache import Cache\n\n\ndef test_get():\n    assert Cache().get('x') is None\n\n\ndef test_size():\n    assert Cache().size() == 0\n"
      },
      "steps": [
       {
        "commands": [
-        "python3 tools/publish.py"
+        "python3 tools/publish.py",
+        "python3 tools/publish.py --dry-run"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:publish}",
+         "agent": "main"
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "write": {
+      "compiler/src/store/cache.py": "class Cache:\n    def __init__(self):\n        self.entries = {}\n\n    def get(self, key):\n        \"\"\"The entry for key, or None.\"\"\"\n        return self.entries.get(key)\n\n    def size(self):\n        \"\"\"How many entries the cache holds.\"\"\"\n        return len(self.entries)\n",
+      "compiler/tests/test_store.py": "from src.store.cache import Cache\n\n\ndef test_get():\n    assert Cache().get('x') is None\n\n\ndef test_size():\n    assert Cache().size() == 0\n"
+     },
+     "steps": [
+      {
+       "commands": [
+        "python3 tools/publish.py",
+        "python3 tools/publish.py --dry-run"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:store}",
+         "agent": "main"
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "write": {
+      "compiler/src/store/cache.py": "class Cache:\n    def __init__(self):\n        self.entries = {}\n\n    def get(self, key):\n        \"\"\"The entry for key, or None.\"\"\"\n        return self.entries.get(key)\n\n    def size(self):\n        \"\"\"How many entries the cache holds.\"\"\"\n        return len(self.entries)\n",
+      "compiler/tests/test_store.py": "from src.store.cache import Cache\n\n\ndef test_get():\n    assert Cache().get('x') is None\n"
+     },
+     "steps": [
+      {
+       "commands": [
+        "python3 tools/publish.py",
+        "python3 tools/publish.py --dry-run"
        ],
        "pushed": [
         {
@@ -1143,13 +1201,47 @@
     },
     {
      "write": {
-      "compiler/src/store/cache.py": "class Cache:\n    def size(self):\n        \"\"\"n\"\"\"\n        return 0\n",
-      "compiler/tests/test_store.py": "def test_size():\n    assert Cache().size() == 0\n"
+      "compiler/src/store/cache.py": "class Cache:\n    def __init__(self):\n        self.entries = {}\n\n    def get(self, key):\n        \"\"\"The entry for key, or None.\"\"\"\n        return self.entries.get(key)\n\n    def size(self):\n        return len(self.entries)\n",
+      "compiler/tests/test_store.py": "from src.store.cache import Cache\n\n\ndef test_get():\n    assert Cache().get('x') is None\n\n\ndef test_size():\n    assert Cache().size() == 0\n"
      },
      "steps": [
       {
        "commands": [
+        "python3 tools/publish.py",
         "python3 tools/publish.py --dry-run"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:store}",
+         "agent": "main"
+        },
+        {
+         "memory": "{seed:publish}",
+         "agent": "main"
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "write": {
+      "compiler/src/store/cache.py": "class Cache:\n    def __init__(self):\n        self.entries = {}\n\n    def get(self, key):\n        \"\"\"The entry for key, or None.\"\"\"\n        return self.entries.get(key)\n\n    def size(self):\n        \"\"\"How many entries the cache holds.\"\"\"\n        return len(self.entries)\n",
+      "compiler/tests/test_store.py": "from src.store.cache import Cache\n\n\ndef test_get():\n    assert Cache().get('x') is None\n\n\ndef test_size():\n    assert Cache().size() == 0\n"
+     },
+     "steps": [
+      {
+       "commands": [
+        "python3 tools/publish.py"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:store}",
+         "agent": "main"
+        },
+        {
+         "memory": "{seed:publish}",
+         "agent": "main"
+        }
        ]
       }
      ]
@@ -1280,6 +1372,7 @@
     },
     {
      "commits": {
+      "cwd": "project:compiler",
       "matches": "."
      }
     }
@@ -1353,6 +1446,290 @@
         "python3 tools/lint.py",
         "git commit -am one"
        ],
+       "pushed": []
+      },
+      {},
+      {
+       "commands": [
+        "python3 tools/lint.py",
+        "git commit -am two"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      },
+      {},
+      {
+       "commands": [
+        "python3 tools/lint.py",
+        "git commit -am three"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      },
+      {},
+      {
+       "commands": [
+        "python3 tools/lint.py",
+        "git commit -am four"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      }
+     ],
+     "commits": [
+      {
+       "cwd": "project:compiler",
+       "message": "four"
+      }
+     ]
+    },
+    {
+     "steps": [
+      {
+       "commands": [
+        "python3 tools/lint.py",
+        "git commit -am one"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      },
+      {},
+      {
+       "commands": [
+        "python3 tools/lint.py",
+        "git commit -am two"
+       ],
+       "pushed": []
+      },
+      {},
+      {
+       "commands": [
+        "python3 tools/lint.py",
+        "git commit -am three"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      },
+      {},
+      {
+       "commands": [
+        "python3 tools/lint.py",
+        "git commit -am four"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      }
+     ],
+     "commits": [
+      {
+       "cwd": "project:compiler",
+       "message": "four"
+      }
+     ]
+    },
+    {
+     "steps": [
+      {
+       "commands": [
+        "python3 tools/lint.py",
+        "git commit -am one"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      },
+      {},
+      {
+       "commands": [
+        "python3 tools/lint.py",
+        "git commit -am two"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      },
+      {},
+      {
+       "commands": [
+        "python3 tools/lint.py",
+        "git commit -am three"
+       ],
+       "pushed": []
+      },
+      {},
+      {
+       "commands": [
+        "python3 tools/lint.py",
+        "git commit -am four"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      }
+     ],
+     "commits": [
+      {
+       "cwd": "project:compiler",
+       "message": "four"
+      }
+     ]
+    },
+    {
+     "steps": [
+      {
+       "commands": [
+        "python3 tools/lint.py",
+        "git commit -am one"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      },
+      {},
+      {
+       "commands": [
+        "python3 tools/lint.py",
+        "git commit -am two"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      },
+      {},
+      {
+       "commands": [
+        "python3 tools/lint.py",
+        "git commit -am three"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      },
+      {},
+      {
+       "commands": [
+        "python3 tools/lint.py",
+        "git commit -am four"
+       ],
+       "pushed": []
+      }
+     ],
+     "commits": [
+      {
+       "cwd": "project:compiler",
+       "message": "four"
+      }
+     ]
+    },
+    {
+     "steps": [
+      {
+       "commands": [
+        "git commit -am one"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      },
+      {},
+      {
+       "commands": [
+        "python3 tools/lint.py",
+        "git commit -am two"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      },
+      {},
+      {
+       "commands": [
+        "python3 tools/lint.py",
+        "git commit -am three"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      },
+      {},
+      {
+       "commands": [
+        "python3 tools/lint.py",
+        "git commit -am four"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      }
+     ],
+     "commits": [
+      {
+       "cwd": "project:compiler",
+       "message": "four"
+      }
+     ]
+    },
+    {
+     "steps": [
+      {
+       "commands": [
+        "python3 tools/lint.py",
+        "git commit -am one"
+       ],
        "pushed": [
         {
          "memory": "{seed:lint}",
@@ -1364,18 +1741,219 @@
       {
        "commands": [
         "git commit -am two"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      },
+      {},
+      {
+       "commands": [
+        "python3 tools/lint.py",
+        "git commit -am three"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      },
+      {},
+      {
+       "commands": [
+        "python3 tools/lint.py",
+        "git commit -am four"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      }
+     ],
+     "commits": [
+      {
+       "cwd": "project:compiler",
+       "message": "four"
+      }
+     ]
+    },
+    {
+     "steps": [
+      {
+       "commands": [
+        "python3 tools/lint.py",
+        "git commit -am one"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      },
+      {},
+      {
+       "commands": [
+        "python3 tools/lint.py",
+        "git commit -am two"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
        ]
       },
       {},
       {
        "commands": [
         "git commit -am three"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      },
+      {},
+      {
+       "commands": [
+        "python3 tools/lint.py",
+        "git commit -am four"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      }
+     ],
+     "commits": [
+      {
+       "cwd": "project:compiler",
+       "message": "four"
+      }
+     ]
+    },
+    {
+     "steps": [
+      {
+       "commands": [
+        "python3 tools/lint.py",
+        "git commit -am one"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      },
+      {},
+      {
+       "commands": [
+        "python3 tools/lint.py",
+        "git commit -am two"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      },
+      {},
+      {
+       "commands": [
+        "python3 tools/lint.py",
+        "git commit -am three"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
        ]
       },
       {},
       {
        "commands": [
         "git commit -am four"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      }
+     ],
+     "commits": [
+      {
+       "cwd": "project:compiler",
+       "message": "four"
+      }
+     ]
+    },
+    {
+     "steps": [
+      {
+       "commands": [
+        "python3 tools/lint.py",
+        "git commit -am one"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      },
+      {},
+      {
+       "commands": [
+        "python3 tools/lint.py",
+        "git commit -am two"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      },
+      {},
+      {
+       "commands": [
+        "python3 tools/lint.py",
+        "git commit -am three"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      },
+      {},
+      {
+       "commands": [
+        "python3 tools/lint.py",
+        "git commit -am four"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
        ]
       }
      ]
@@ -1478,6 +2056,17 @@
     ]
    },
    "planted": [
+    {
+     "steps": [
+      {
+       "commands": [
+        "python3 tools/build.py",
+        "python3 tools/build.py --clean"
+       ],
+       "pushed": []
+      }
+     ]
+    },
     {
      "steps": [
       {
@@ -1609,6 +2198,15 @@
        ]
       }
      ]
+    },
+    {
+     "steps": [
+      {
+       "commands": [
+        "git commit -am one"
+       ]
+      }
+     ]
     }
    ],
    "repeat": 2
@@ -1710,6 +2308,10 @@
       {},
       {},
       {
+       "commands": [
+        "python3 tools/check_version.py",
+        "git tag v1.4.0"
+       ],
        "pushed": [
         {
          "memory": "{seed:note}",
@@ -1718,6 +2320,23 @@
        ],
        "recall_chars": {
         "main": 8200
+       }
+      }
+     ]
+    },
+    {
+     "steps": [
+      {},
+      {},
+      {},
+      {
+       "commands": [
+        "python3 tools/check_version.py",
+        "git tag v1.4.0"
+       ],
+       "pushed": [],
+       "recall_chars": {
+        "main": 300
        }
       }
      ]
@@ -1814,7 +2433,6 @@
      "steps": [
       {
        "commands": [
-        "python3 tools/check_version.py",
         "git tag v1.4.0"
        ],
        "pushed": [
@@ -1822,6 +2440,16 @@
          "memory": "{seed:note}",
          "agent": "main"
         }
+       ]
+      }
+     ]
+    },
+    {
+     "steps": [
+      {
+       "commands": [
+        "python3 tools/check_version.py",
+        "git tag v1.4.0"
        ]
       }
      ]
@@ -1879,6 +2507,22 @@
       {
        "commands": [
         "cat RELEASING.md",
+        "git tag v1.4.0"
+       ],
+       "pushed": [
+        {
+         "memory": "e0000009",
+         "agent": "main"
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "steps": [
+      {
+       "commands": [
+        "cat RELEASING.md",
         "python3 tools/upload_keys.py --all",
         "git tag v1.4.0"
        ]
@@ -1889,14 +2533,7 @@
      "steps": [
       {
        "commands": [
-        "cat RELEASING.md",
-        "git tag v1.4.0"
-       ],
-       "pushed": [
-        {
-         "memory": "e0000009",
-         "agent": "main"
-        }
+        "cat RELEASING.md"
        ]
       }
      ]
@@ -2044,6 +2681,38 @@
        ],
        "pushed": [
         {
+         "memory": "{seed:signoff}",
+         "agent": "main"
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "steps": [
+      {
+       "commands": [
+        "python3 tools/lint.py",
+        "git commit -s -am 'Add one'"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "steps": [
+      {
+       "commands": [
+        "python3 tools/lint.py",
+        "git commit -s -am 'Add one'"
+       ],
+       "pushed": [
+        {
          "memory": "{seed:lint}",
          "agent": "main"
         },
@@ -2063,6 +2732,26 @@
      "steps": [
       {
        "commands": [
+        "git commit -s -am 'Add one'"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        },
+        {
+         "memory": "{seed:signoff}",
+         "agent": "main"
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "steps": [
+      {
+       "commands": [
+        "python3 tools/lint.py",
         "git commit -am 'Add one'"
        ],
        "pushed": [
@@ -2152,14 +2841,10 @@
      "steps": [
       {
        "commands": [
-        "python3 tools/clean.py"
+        "python3 tools/clean.py",
+        "git status --ignored"
        ],
-       "pushed": [
-        {
-         "memory": "{seed:clean}",
-         "agent": "main"
-        }
-       ]
+       "pushed": []
       }
      ]
     },
@@ -2167,8 +2852,13 @@
      "steps": [
       {
        "commands": [
-        "python3 tools/clean.py",
-        "git status --ignored"
+        "python3 tools/clean.py"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:clean}",
+         "agent": "main"
+        }
        ]
       }
      ]
@@ -2266,7 +2956,19 @@
      "steps": [
       {
        "commands": [
-        "python3 tools/step4.py --profile p4"
+        "python3 tools/step4.py",
+        "python3 tools/step4.py --profile p4 > logs/step4.log"
+       ],
+       "pushed": []
+      }
+     ]
+    },
+    {
+     "steps": [
+      {
+       "commands": [
+        "python3 tools/step4.py",
+        "python3 tools/step4.py --profile p4 > logs/step4.log"
        ],
        "pushed": [
         {
@@ -2379,6 +3081,12 @@
     {
      "steps": [
       {
+       "subagents": [
+        {
+         "tool": "Agent",
+         "prompt": "Name the script that changes the database."
+        }
+       ],
        "answer": "`python3 tools/migrate.py`",
        "pushed": [
         {
@@ -2386,6 +3094,30 @@
          "agent": "main"
         }
        ]
+      }
+     ]
+    },
+    {
+     "steps": [
+      {
+       "subagents": [
+        {
+         "tool": "Agent",
+         "prompt": "Name the script that changes the database."
+        }
+       ],
+       "answer": "`python3 tools/migrate.py`",
+       "commands": [
+        "python3 tools/migrate.py"
+       ]
+      }
+     ]
+    },
+    {
+     "steps": [
+      {
+       "subagents": [],
+       "answer": "`python3 tools/migrate.py`"
       }
      ]
     }
@@ -2480,10 +3212,37 @@
    "planted": [
     {
      "write": {
-      "compiler/docs/guide.md": "# Guide\n\n## Installing\n\nRun `pip install compiler` first.\n\nLast reviewed: 2026-11\n"
+      "compiler/docs/guide.md": "# Guide\n\nRun `compiler FILE` to compile a file.\n\n## Installing\n\nRun `pip install compiler` first.\n\nLast reviewed: 2027-03\n"
      },
      "steps": [
       {
+       "subagents": [
+        {
+         "tool": "Agent",
+         "prompt": "Add an 'Installing' section to docs/guide.md."
+        }
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:reviewed}",
+         "agent": "main"
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "write": {
+      "compiler/docs/guide.md": "# Guide\n\nRun `compiler FILE` to compile a file.\n\n## Installing\n\nRun `pip install compiler` first.\n\nLast reviewed: 2026-11\n"
+     },
+     "steps": [
+      {
+       "subagents": [
+        {
+         "tool": "Agent",
+         "prompt": "Add an 'Installing' section to docs/guide.md."
+        }
+       ],
        "pushed": [
         {
          "memory": "{seed:reviewed}",
@@ -2495,14 +3254,36 @@
     },
     {
      "write": {
-      "compiler/docs/guide.md": "# Guide\n\n## Installing\n\nRun `pip install compiler` first.\n\nLast reviewed: 2027-03\n"
+      "compiler/docs/guide.md": "# Guide\n\nRun `compiler FILE` to compile a file.\n\n## Installing\n\nInstall it first.\n\nLast reviewed: 2027-03\n"
      },
      "steps": [
       {
+       "subagents": [
+        {
+         "tool": "Agent",
+         "prompt": "Add an 'Installing' section to docs/guide.md."
+        }
+       ],
        "pushed": [
         {
          "memory": "{seed:reviewed}",
-         "agent": "main"
+         "agent": "subagent"
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "write": {
+      "compiler/docs/guide.md": "# Guide\n\nRun `compiler FILE` to compile a file.\n\n## Installing\n\nRun `pip install compiler` first.\n\nLast reviewed: 2027-03\n"
+     },
+     "steps": [
+      {
+       "subagents": [],
+       "pushed": [
+        {
+         "memory": "{seed:reviewed}",
+         "agent": "subagent"
         }
        ]
       }
@@ -2738,6 +3519,400 @@
         "python3 tools/lint.py",
         "git commit -am one"
        ],
+       "pushed": []
+      },
+      {
+       "commands": [
+        "python3 tools/step.py 19",
+        "python3 tools/step.py 20",
+        "python3 tools/step.py 21",
+        "python3 tools/step.py 22",
+        "python3 tools/step.py 23",
+        "python3 tools/step.py 24",
+        "python3 tools/step.py 25",
+        "python3 tools/step.py 26",
+        "python3 tools/step.py 27",
+        "python3 tools/step.py 28",
+        "python3 tools/step.py 29",
+        "python3 tools/step.py 30",
+        "python3 tools/step.py 31",
+        "python3 tools/step.py 32",
+        "python3 tools/step.py 33",
+        "python3 tools/step.py 34",
+        "python3 tools/step.py 35",
+        "python3 tools/step.py 36",
+        "python3 tools/step.py 37",
+        "python3 tools/step.py 38",
+        "python3 tools/step.py 39",
+        "python3 tools/step.py 40",
+        "python3 tools/step.py 41",
+        "python3 tools/step.py 42",
+        "python3 tools/step.py 43",
+        "python3 tools/step.py 44",
+        "python3 tools/step.py 45",
+        "python3 tools/step.py 46",
+        "python3 tools/step.py 47",
+        "python3 tools/step.py 48",
+        "python3 tools/step.py 49",
+        "python3 tools/step.py 50",
+        "python3 tools/step.py 51",
+        "python3 tools/step.py 52",
+        "python3 tools/step.py 53",
+        "python3 tools/step.py 54",
+        "python3 tools/step.py 55",
+        "python3 tools/step.py 56",
+        "python3 tools/step.py 57",
+        "python3 tools/step.py 58",
+        "python3 tools/step.py 59",
+        "python3 tools/step.py 60",
+        "python3 tools/step.py 61",
+        "python3 tools/step.py 62",
+        "python3 tools/step.py 63",
+        "python3 tools/step.py 64",
+        "python3 tools/step.py 65",
+        "python3 tools/step.py 66",
+        "python3 tools/step.py 67",
+        "python3 tools/step.py 68",
+        "python3 tools/step.py 69",
+        "python3 tools/step.py 70",
+        "python3 tools/step.py 71",
+        "python3 tools/step.py 72",
+        "python3 tools/step.py 73",
+        "python3 tools/step.py 74",
+        "python3 tools/step.py 75",
+        "python3 tools/step.py 76",
+        "python3 tools/step.py 77",
+        "python3 tools/step.py 78",
+        "python3 tools/step.py 79",
+        "python3 tools/step.py 80",
+        "python3 tools/step.py 81",
+        "python3 tools/step.py 82",
+        "python3 tools/step.py 83",
+        "python3 tools/step.py 84",
+        "python3 tools/step.py 85",
+        "python3 tools/step.py 86",
+        "python3 tools/step.py 87",
+        "python3 tools/step.py 88",
+        "python3 tools/step.py 89",
+        "python3 tools/step.py 90",
+        "python3 tools/step.py 91",
+        "python3 tools/step.py 92",
+        "python3 tools/step.py 93",
+        "python3 tools/step.py 94",
+        "python3 tools/step.py 95",
+        "python3 tools/step.py 96",
+        "python3 tools/step.py 97",
+        "python3 tools/step.py 98",
+        "python3 tools/step.py 99",
+        "python3 tools/step.py 100",
+        "python3 tools/step.py 101",
+        "python3 tools/step.py 102",
+        "python3 tools/step.py 103",
+        "python3 tools/step.py 104",
+        "python3 tools/step.py 105",
+        "python3 tools/step.py 106",
+        "python3 tools/step.py 107",
+        "python3 tools/step.py 108",
+        "python3 tools/step.py 109",
+        "python3 tools/step.py 110",
+        "python3 tools/step.py 111",
+        "python3 tools/step.py 112",
+        "python3 tools/step.py 113",
+        "python3 tools/step.py 114",
+        "python3 tools/step.py 115",
+        "python3 tools/step.py 116",
+        "python3 tools/step.py 117",
+        "python3 tools/step.py 118",
+        "python3 tools/step.py 119",
+        "python3 tools/step.py 120",
+        "python3 tools/step.py 121",
+        "python3 tools/step.py 122",
+        "python3 tools/step.py 123",
+        "python3 tools/step.py 124",
+        "python3 tools/step.py 125",
+        "python3 tools/lint.py",
+        "git commit -am two"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "steps": [
+      {
+       "commands": [
+        "python3 tools/lint.py",
+        "git commit -am one"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      },
+      {
+       "commands": [
+        "python3 tools/step.py 19",
+        "python3 tools/step.py 20",
+        "python3 tools/step.py 21",
+        "python3 tools/step.py 22",
+        "python3 tools/step.py 23",
+        "python3 tools/step.py 24",
+        "python3 tools/step.py 25",
+        "python3 tools/step.py 26",
+        "python3 tools/step.py 27",
+        "python3 tools/step.py 28",
+        "python3 tools/step.py 29",
+        "python3 tools/step.py 30",
+        "python3 tools/step.py 31",
+        "python3 tools/step.py 32",
+        "python3 tools/step.py 33",
+        "python3 tools/step.py 34",
+        "python3 tools/step.py 35",
+        "python3 tools/step.py 36",
+        "python3 tools/step.py 37",
+        "python3 tools/step.py 38",
+        "python3 tools/step.py 39",
+        "python3 tools/step.py 40",
+        "python3 tools/step.py 41",
+        "python3 tools/step.py 42",
+        "python3 tools/step.py 43",
+        "python3 tools/step.py 44",
+        "python3 tools/step.py 45",
+        "python3 tools/step.py 46",
+        "python3 tools/step.py 47",
+        "python3 tools/step.py 48",
+        "python3 tools/step.py 49",
+        "python3 tools/step.py 50",
+        "python3 tools/step.py 51",
+        "python3 tools/step.py 52",
+        "python3 tools/step.py 53",
+        "python3 tools/step.py 54",
+        "python3 tools/step.py 55",
+        "python3 tools/step.py 56",
+        "python3 tools/step.py 57",
+        "python3 tools/step.py 58",
+        "python3 tools/step.py 59",
+        "python3 tools/step.py 60",
+        "python3 tools/step.py 61",
+        "python3 tools/step.py 62",
+        "python3 tools/step.py 63",
+        "python3 tools/step.py 64",
+        "python3 tools/step.py 65",
+        "python3 tools/step.py 66",
+        "python3 tools/step.py 67",
+        "python3 tools/step.py 68",
+        "python3 tools/step.py 69",
+        "python3 tools/step.py 70",
+        "python3 tools/step.py 71",
+        "python3 tools/step.py 72",
+        "python3 tools/step.py 73",
+        "python3 tools/step.py 74",
+        "python3 tools/step.py 75",
+        "python3 tools/step.py 76",
+        "python3 tools/step.py 77",
+        "python3 tools/step.py 78",
+        "python3 tools/step.py 79",
+        "python3 tools/step.py 80",
+        "python3 tools/step.py 81",
+        "python3 tools/step.py 82",
+        "python3 tools/step.py 83",
+        "python3 tools/step.py 84",
+        "python3 tools/step.py 85",
+        "python3 tools/step.py 86",
+        "python3 tools/step.py 87",
+        "python3 tools/step.py 88",
+        "python3 tools/step.py 89",
+        "python3 tools/step.py 90",
+        "python3 tools/step.py 91",
+        "python3 tools/step.py 92",
+        "python3 tools/step.py 93",
+        "python3 tools/step.py 94",
+        "python3 tools/step.py 95",
+        "python3 tools/step.py 96",
+        "python3 tools/step.py 97",
+        "python3 tools/step.py 98",
+        "python3 tools/step.py 99",
+        "python3 tools/step.py 100",
+        "python3 tools/step.py 101",
+        "python3 tools/step.py 102",
+        "python3 tools/step.py 103",
+        "python3 tools/step.py 104",
+        "python3 tools/step.py 105",
+        "python3 tools/step.py 106",
+        "python3 tools/step.py 107",
+        "python3 tools/step.py 108",
+        "python3 tools/step.py 109",
+        "python3 tools/step.py 110",
+        "python3 tools/step.py 111",
+        "python3 tools/step.py 112",
+        "python3 tools/step.py 113",
+        "python3 tools/step.py 114",
+        "python3 tools/step.py 115",
+        "python3 tools/step.py 116",
+        "python3 tools/step.py 117",
+        "python3 tools/step.py 118",
+        "python3 tools/step.py 119",
+        "python3 tools/step.py 120",
+        "python3 tools/step.py 121",
+        "python3 tools/step.py 122",
+        "python3 tools/step.py 123",
+        "python3 tools/step.py 124",
+        "python3 tools/step.py 125",
+        "python3 tools/lint.py",
+        "git commit -am two"
+       ],
+       "pushed": []
+      }
+     ]
+    },
+    {
+     "steps": [
+      {
+       "commands": [
+        "git commit -am one"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      },
+      {
+       "commands": [
+        "python3 tools/step.py 19",
+        "python3 tools/step.py 20",
+        "python3 tools/step.py 21",
+        "python3 tools/step.py 22",
+        "python3 tools/step.py 23",
+        "python3 tools/step.py 24",
+        "python3 tools/step.py 25",
+        "python3 tools/step.py 26",
+        "python3 tools/step.py 27",
+        "python3 tools/step.py 28",
+        "python3 tools/step.py 29",
+        "python3 tools/step.py 30",
+        "python3 tools/step.py 31",
+        "python3 tools/step.py 32",
+        "python3 tools/step.py 33",
+        "python3 tools/step.py 34",
+        "python3 tools/step.py 35",
+        "python3 tools/step.py 36",
+        "python3 tools/step.py 37",
+        "python3 tools/step.py 38",
+        "python3 tools/step.py 39",
+        "python3 tools/step.py 40",
+        "python3 tools/step.py 41",
+        "python3 tools/step.py 42",
+        "python3 tools/step.py 43",
+        "python3 tools/step.py 44",
+        "python3 tools/step.py 45",
+        "python3 tools/step.py 46",
+        "python3 tools/step.py 47",
+        "python3 tools/step.py 48",
+        "python3 tools/step.py 49",
+        "python3 tools/step.py 50",
+        "python3 tools/step.py 51",
+        "python3 tools/step.py 52",
+        "python3 tools/step.py 53",
+        "python3 tools/step.py 54",
+        "python3 tools/step.py 55",
+        "python3 tools/step.py 56",
+        "python3 tools/step.py 57",
+        "python3 tools/step.py 58",
+        "python3 tools/step.py 59",
+        "python3 tools/step.py 60",
+        "python3 tools/step.py 61",
+        "python3 tools/step.py 62",
+        "python3 tools/step.py 63",
+        "python3 tools/step.py 64",
+        "python3 tools/step.py 65",
+        "python3 tools/step.py 66",
+        "python3 tools/step.py 67",
+        "python3 tools/step.py 68",
+        "python3 tools/step.py 69",
+        "python3 tools/step.py 70",
+        "python3 tools/step.py 71",
+        "python3 tools/step.py 72",
+        "python3 tools/step.py 73",
+        "python3 tools/step.py 74",
+        "python3 tools/step.py 75",
+        "python3 tools/step.py 76",
+        "python3 tools/step.py 77",
+        "python3 tools/step.py 78",
+        "python3 tools/step.py 79",
+        "python3 tools/step.py 80",
+        "python3 tools/step.py 81",
+        "python3 tools/step.py 82",
+        "python3 tools/step.py 83",
+        "python3 tools/step.py 84",
+        "python3 tools/step.py 85",
+        "python3 tools/step.py 86",
+        "python3 tools/step.py 87",
+        "python3 tools/step.py 88",
+        "python3 tools/step.py 89",
+        "python3 tools/step.py 90",
+        "python3 tools/step.py 91",
+        "python3 tools/step.py 92",
+        "python3 tools/step.py 93",
+        "python3 tools/step.py 94",
+        "python3 tools/step.py 95",
+        "python3 tools/step.py 96",
+        "python3 tools/step.py 97",
+        "python3 tools/step.py 98",
+        "python3 tools/step.py 99",
+        "python3 tools/step.py 100",
+        "python3 tools/step.py 101",
+        "python3 tools/step.py 102",
+        "python3 tools/step.py 103",
+        "python3 tools/step.py 104",
+        "python3 tools/step.py 105",
+        "python3 tools/step.py 106",
+        "python3 tools/step.py 107",
+        "python3 tools/step.py 108",
+        "python3 tools/step.py 109",
+        "python3 tools/step.py 110",
+        "python3 tools/step.py 111",
+        "python3 tools/step.py 112",
+        "python3 tools/step.py 113",
+        "python3 tools/step.py 114",
+        "python3 tools/step.py 115",
+        "python3 tools/step.py 116",
+        "python3 tools/step.py 117",
+        "python3 tools/step.py 118",
+        "python3 tools/step.py 119",
+        "python3 tools/step.py 120",
+        "python3 tools/step.py 121",
+        "python3 tools/step.py 122",
+        "python3 tools/step.py 123",
+        "python3 tools/step.py 124",
+        "python3 tools/step.py 125",
+        "python3 tools/lint.py",
+        "git commit -am two"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "steps": [
+      {
+       "commands": [
+        "python3 tools/lint.py",
+        "git commit -am one"
+       ],
        "pushed": [
         {
          "memory": "{seed:lint}",
@@ -2855,6 +4030,12 @@
         "python3 tools/step.py 124",
         "python3 tools/step.py 125",
         "git commit -am two"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
        ]
       }
      ]
@@ -2948,6 +4129,19 @@
         {
          "memory": "{seed:named}",
          "agent": "subagent"
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "steps": [
+      {
+       "subagents": [],
+       "pushed": [
+        {
+         "memory": "{seed:named}",
+         "agent": "main"
         }
        ]
       }

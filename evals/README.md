@@ -345,9 +345,12 @@ nothing. `{seed:NAME}` works in both as in checks.
 `--rehearse` grades the scenario's checks, informational ones included, on
 the fresh trial against `obeyed`, where each must pass, and against each
 planted transcript, where each must fail at least once. Its line says how
-many were shown able to fail
-(`ok   NAME/claude (4 of 4 checks shown able to fail)`) and names any
-that `obeyed` fails or no planted transcript does. Nothing in a transcript
+many were shown able to fail and how many checks each planted transcript
+fails, in order
+(`ok   NAME/claude (4 of 4 checks shown able to fail; planted transcripts fail 1, 1, 2)`),
+and names any check that `obeyed` fails or no planted transcript does. A
+transcript that fails none tests nothing; one that fails several cannot
+tell those checks apart. Nothing in a transcript
 is sent to a model or counted against the budget. A scenario
 without `planted` rehearses as before.
 
