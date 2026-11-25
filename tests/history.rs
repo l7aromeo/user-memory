@@ -370,6 +370,52 @@ fn origin_removed(s: &Store) -> &'static str {
     "origin_removed"
 }
 
+fn ended(s: &Store) -> &'static str {
+    let id = s.record(
+        "builds",
+        "Skips the slow tests",
+        &["--until-text", "the parser ships"],
+    );
+    s.value(&[
+        "update",
+        &id,
+        "--ended",
+        "ran the release recipe: parser 2.0 published",
+        "--origin",
+        "chat/end",
+    ]);
+    let event = last(s, &id);
+    assert_eq!(event["op"], "ended", "{event}");
+    assert_eq!(event["origin"], "chat/end", "{event}");
+    assert_eq!(
+        event["before"],
+        json!({"until":{"kind":"text","value":"the parser ships","project":""},"how":"evidence","evidence":"ran the release recipe: parser 2.0 published"})
+    );
+    "ended"
+}
+
+fn reopened(s: &Store) -> &'static str {
+    let id = s.record(
+        "builds",
+        "Skips the lint step",
+        &["--until-text", "the linter ships"],
+    );
+    s.value(&["update", &id, "--ended", "ran the linter: 1.0 installed"]);
+    s.value(&["update", &id, "--no-until", "--origin", "chat/reopen"]);
+    let events = s.history(&id);
+    let reopened = &events[events.len() - 2];
+    assert_eq!(reopened["op"], "reopened", "{events:?}");
+    assert_eq!(reopened["origin"], "chat/reopen", "{reopened}");
+    let before = &reopened["before"];
+    assert_eq!(before["until"]["value"], "the linter ships", "{reopened}");
+    assert_eq!(
+        before["evidence"], "ran the linter: 1.0 installed",
+        "{reopened}"
+    );
+    assert_eq!(events.last().unwrap()["op"], "update", "{events:?}");
+    "reopened"
+}
+
 const CASES: &[Case] = &[
     record,
     confirm,
@@ -383,6 +429,8 @@ const CASES: &[Case] = &[
     stale,
     moved,
     origin_removed,
+    ended,
+    reopened,
 ];
 
 // Each operation writes its event, and every operation the store knows has

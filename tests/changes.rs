@@ -205,6 +205,19 @@ fn mark_distinct(s: &Store) {
     });
 }
 
+fn end_condition(s: &Store) {
+    let id = s.record(
+        "Skips the slow tests",
+        &["--until-text", "the parser ships"],
+    );
+    s.expect("an end", true, || {
+        s.value(&["update", &id, "--ended", "ran the release: parser 2.0 out"]);
+    });
+    s.expect("a reopening", true, || {
+        s.value(&["update", &id, "--no-until"]);
+    });
+}
+
 fn forget(s: &Store) {
     let id = s.record("Eats vegetarian", &["--origin", "chat/a"]);
     s.value(&["update", &id, "--origin", "chat/b"]);
@@ -439,6 +452,7 @@ const PATHS: &[(&str, Case)] = &[
     ("write::record_in", record),
     ("write::update_in", update),
     ("write::mark_distinct", mark_distinct),
+    ("write::end_condition", end_condition),
     ("write::forget", forget),
     ("review::keep", keep),
     ("links::link", link),

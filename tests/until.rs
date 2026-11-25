@@ -462,6 +462,162 @@ fn the_tools_take_until_as_an_object_and_null_clears_it() {
     serve.close();
 }
 
+/// An agent ends a text condition on its own evidence through update's
+/// `ended`: alone in the call, only on a text condition, once. A rule's
+/// needs the user's yes. The end stales the patterns that cite the memory,
+/// takes it out of force, and goes with the memory when it is forgotten;
+/// the user's update reopens it.
+#[test]
+fn an_agent_ends_a_text_condition_on_its_evidence() {
+    let s = Store::new();
+    let mut serve = s.serve();
+    let mut record = |title: &str, extra: Value| {
+        let mut args = json!({"category":"builds","scope":"global","title":title,"content":format!("{title}."),"user_confirmed":true});
+        args.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let out = serve.call("record", args);
+        assert_eq!(out["stored"], true, "{out}");
+        out["id"].as_str().unwrap().to_owned()
+    };
+    let fact = record(
+        "The slow tests are skipped",
+        json!({"type":"fact","until":{"text":"the parser ships"}}),
+    );
+    let rule = record(
+        "Pin the parser at 2.3",
+        json!({"type":"preference","until":{"text":"the parser's fix ships"}}),
+    );
+    let dated = record(
+        "Merge without review",
+        json!({"type":"fact","until":{"date":"2099-01-01T00:00:00Z"}}),
+    );
+    let tagged = record(
+        "Hold the release notes",
+        json!({"type":"fact","until":{"tag":"v2.0.0","project":"github.com/example/app"}}),
+    );
+    let plain = record("Build with make", json!({"type":"fact"}));
+    let other = record("Tests run on Linux", json!({"type":"fact"}));
+    let pattern = serve.call(
+        "record",
+        json!({"category":"builds","scope":"global","title":"Keeps the build fast","content":"Keeps the build fast.","source":"inferred","evidence_ids":[fact, other],"user_confirmed":true}),
+    );
+    assert_eq!(pattern["stored"], true, "{pattern}");
+    let pattern = pattern["id"].as_str().unwrap().to_owned();
+    let evidence = "ran `cargo update -p parser`: 2.4.1 installed, the empty-rows test passes";
+    let end = |serve: &mut Serve, id: &str, extra: Value| {
+        let mut args = json!({"memory_id":id,"ended":evidence});
+        args.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        serve.call("update", args)
+    };
+
+    for (id, extra, reason) in [
+        (
+            &fact,
+            json!({"title":"Slow tests skipped"}),
+            "ended goes alone, with only the memory and origin; make other changes in their own update",
+        ),
+        (
+            &fact,
+            json!({"until":null}),
+            "ended goes alone, with only the memory and origin; make other changes in their own update",
+        ),
+        (
+            &fact,
+            json!({"ended":"  "}),
+            "ended needs the evidence: what you did and saw that shows the condition happened",
+        ),
+        (
+            &plain,
+            json!({}),
+            "That memory has no condition; it holds until the user changes or forgets it",
+        ),
+        (
+            &dated,
+            json!({}),
+            "That memory's condition is a date, which ends on its own; to end it sooner, update its until with the user's yes",
+        ),
+        (
+            &tagged,
+            json!({}),
+            "That memory's condition is a tag, which ends when a checkout of its project has the tag; to end it sooner, update its until with the user's yes",
+        ),
+        (
+            &rule,
+            json!({}),
+            "A rule's condition ends only with the user's yes: ask the user once whether it is met, then pass user_confirmed",
+        ),
+    ] {
+        let out = end(&mut serve, id, extra.clone());
+        assert_eq!(out["updated"], false, "{extra}: {out}");
+        assert_eq!(out["reason"], reason, "{extra}: {out}");
+    }
+    let out = end(&mut serve, &fact, json!({"ended":"x".repeat(2001)}));
+    assert_eq!(
+        out["reason"],
+        "ended has 2001 characters; the limit is 2000; shorten it"
+    );
+    let ends = || -> i64 {
+        Connection::open(&s.db)
+            .unwrap()
+            .query_row("SELECT count(*) FROM memory_ended", [], |r| r.get(0))
+            .unwrap()
+    };
+    assert_eq!(ends(), 0, "a refused end wrote a record");
+
+    // A non-rule ends on the agent's evidence alone, with no yes.
+    let out = end(&mut serve, &fact, json!({"origin":"chat/agent"}));
+    assert_eq!(out, json!({"updated":true,"id":fact,"ended":true}));
+    let stored: (String, String, String) = Connection::open(&s.db)
+        .unwrap()
+        .query_row(
+            "SELECT how,evidence,origin FROM memory_ended WHERE memory_id=?1",
+            [&fact],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        stored,
+        ("evidence".into(), evidence.into(), "chat/agent".into())
+    );
+    assert_eq!(s.read(&pattern)["status"], "stale");
+    let index = |serve: &mut Serve| {
+        serve.ask("tools/call", json!({"name":"index","arguments":{}}))["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let shown = index(&mut serve);
+    assert!(!shown.contains(&fact[..8]), "{shown}");
+    // The first end stands.
+    let out = end(&mut serve, &fact, json!({}));
+    assert_eq!(
+        out["reason"],
+        "That memory's condition has already ended; the first end stands"
+    );
+    // A rule ends with the user's yes.
+    let out = end(&mut serve, &rule, json!({"user_confirmed":true}));
+    assert_eq!(out["updated"], true, "{out}");
+    assert_eq!(ends(), 2);
+
+    // The user's update reopens it: the end record goes and it is in force.
+    let out = serve.call(
+        "update",
+        json!({"memory_id":fact,"until":null,"user_confirmed":true}),
+    );
+    assert_eq!(out["updated"], true, "{out}");
+    let shown = index(&mut serve);
+    assert!(shown.contains(&fact[..8]), "{shown}");
+    assert_eq!(ends(), 1);
+    // Forgetting the memory removes its end record with it.
+    let out = serve.call("forget", json!({"memory_id":rule,"user_confirmed":true}));
+    assert_eq!(out["deleted"], true, "{out}");
+    assert_eq!(ends(), 0);
+    serve.close();
+}
+
 /// A project move carries the tag conditions that name the old key, so the
 /// tags of the moved project still end them.
 #[test]
@@ -542,14 +698,15 @@ fn a_memory_out_of_force_is_shown_nowhere_in_force() {
         .as_str()
         .unwrap()
         .to_owned();
-    // Ends come through the store's own paths in a later step; here the
-    // rows are written as those paths will write them.
+    let out = s.value(&[
+        "update",
+        &ended,
+        "--ended",
+        "ran the release recipe: v2.0.0 tagged",
+    ]);
+    assert_eq!(out["ended"], true, "{out}");
+    // A date passes with no write; here it is moved into the past.
     let conn = Connection::open(&s.db).unwrap();
-    conn.execute(
-        "INSERT INTO memory_ended (memory_id,how,evidence) VALUES (?1,'evidence','ran the release recipe: v2.0.0 tagged')",
-        [&ended],
-    )
-    .unwrap();
     conn.execute(
         "UPDATE memories SET until_value='2001-01-01T00:00:00Z' WHERE id=?1",
         [&dated],
@@ -716,7 +873,7 @@ const READS_EVERY_STATUS: &[(&str, &str)] = &[
 /// reads `memories`, and whether it names the test of "in force".
 fn memory_readers() -> std::collections::BTreeMap<String, bool> {
     let reads = ["FROM memories", "JOIN memories", "{SELECT}"];
-    let live = ["LIVE", "live_memories", "ACTIVE", "condition("];
+    let live = ["LIVE", "live!(", "live_memories", "ACTIVE", "condition("];
     let mut reading = std::collections::BTreeSet::new();
     let mut marked = std::collections::BTreeSet::new();
     let mut files = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
