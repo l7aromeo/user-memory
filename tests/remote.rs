@@ -19,6 +19,8 @@ use tempfile::{TempDir, tempdir};
 
 #[path = "support/fake.rs"]
 mod fake;
+#[path = "support/replace.rs"]
+mod replace;
 #[path = "support/time.rs"]
 mod time;
 use time::STUCK;
@@ -2034,10 +2036,7 @@ fn a_bridges_serve_hands_over_and_re_handshakes_with_the_server() {
         fs::create_dir_all(&fakes).unwrap();
         let staged = bin.join(format!(".new{}", std::env::consts::EXE_SUFFIX));
         fs::copy(fake::fake(&fakes, "user-memory"), &staged).unwrap();
-        if cfg!(windows) {
-            fs::rename(&exe, bin.join("old.exe")).unwrap();
-        }
-        fs::rename(&staged, &exe).unwrap();
+        replace::replace_running(&exe, &staged, &bin.join("old.exe"));
 
         writeln!(input, "{}", call(3, "index", json!({}))).unwrap();
         input.flush().unwrap();
@@ -2389,10 +2388,7 @@ fn a_risen_minimum_is_said_in_the_next_tool_reply_after_a_re_handshake() {
             fs::create_dir_all(&fakes).unwrap();
             let staged = bin.join(format!(".new{}", std::env::consts::EXE_SUFFIX));
             fs::copy(fake::fake(&fakes, "user-memory"), &staged).unwrap();
-            if cfg!(windows) {
-                fs::rename(&exe, bin.join("old.exe")).unwrap();
-            }
-            fs::rename(&staged, &exe).unwrap();
+            replace::replace_running(&exe, &staged, &bin.join("old.exe"));
         } else {
             state.lock().unwrap().fail_next = true;
             let failed = ask(call(3, "index", json!({})));
