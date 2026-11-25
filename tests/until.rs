@@ -615,3 +615,195 @@ fn a_memory_out_of_force_is_shown_nowhere_in_force() {
         "That memory's condition has ended; to put it in force again, update it with the user's yes, giving a new until or clearing it"
     );
 }
+
+/// The functions and constants in src/ that read `memories` without the
+/// test of "in force", each with why it reads every status. Every other
+/// reader must name `LIVE`, `ACTIVE`, `live_memories` or the selection's
+/// `condition`, so a new reader that shows memories can't forget the view.
+const READS_EVERY_STATUS: &[(&str, &str)] = &[
+    (
+        "changes::schema",
+        "the change counter's triggers, on every write",
+    ),
+    (
+        "history::EVENTS",
+        "the history's table and triggers, on every write",
+    ),
+    ("history::forgotten", "the history of forgotten memories"),
+    (
+        "ids::matching",
+        "resolves an id or its first characters, which update and forget take for any memory",
+    ),
+    (
+        "index::drain",
+        "keeps the search keys in line with every memory; a search filters them",
+    ),
+    (
+        "index::problems",
+        "checks the search keys against every memory",
+    ),
+    (
+        "index::rebuild",
+        "rebuilds the search keys for every memory",
+    ),
+    ("index::reindex_with", "reindexes every memory"),
+    (
+        "index::similarities",
+        "embeds the text of candidates a search already chose",
+    ),
+    (
+        "matcher::text",
+        "the text of a match a delivery query already chose",
+    ),
+    ("migrate::memory_rows", "copies every memory for a backup"),
+    ("migrate::titled", "a migration step"),
+    ("migrate::V3_REBUILD", "a migration step"),
+    ("migrate::to_v6", "a migration step"),
+    ("migrate::to_v7", "a migration step"),
+    (
+        "overview::render_listed",
+        "whether the store holds any memory at all",
+    ),
+    (
+        "rekey::PROJECT_MEMORIES",
+        "counts every memory of a project for a move",
+    ),
+    (
+        "review::review_with",
+        "review lists stale memories beside active ones, in groups of its own",
+    ),
+    ("schema::compact_waiting", "store maintenance"),
+    ("schema::get", "one memory by id, whatever its status"),
+    (
+        "schema::refusal",
+        "counts the store's memories for a refusal's text",
+    ),
+    (
+        "schema::SELECT",
+        "the column list; each reader puts its own filter after it",
+    ),
+    (
+        "similar::save_vector",
+        "saves a vector for a memory that exists",
+    ),
+    ("transfer::entries", "exports every memory"),
+    (
+        "vectors::CURRENT",
+        "the vectors of every memory, which a search narrows to its candidates",
+    ),
+    ("vectors::STORED", "every stored vector, for its upkeep"),
+    (
+        "undo::forget_import",
+        "undoes an import's memories, whatever their status",
+    ),
+    ("undo::plan", "plans an import's undo over its memories"),
+    ("undo::touched", "an import's memories changed since"),
+    (
+        "usage::write_uses",
+        "a session's use of any stored memory; what reads use goes through the view",
+    ),
+    (
+        "write::ids_where",
+        "the ids matching a condition its caller gives, such as ACTIVE",
+    ),
+    (
+        "write::ORPHANED",
+        "superseded memories whose replacement is gone, which forget revives",
+    ),
+];
+
+/// Each function or top-level constant in src/, outside its tests, that
+/// reads `memories`, and whether it names the test of "in force".
+fn memory_readers() -> std::collections::BTreeMap<String, bool> {
+    let reads = ["FROM memories", "JOIN memories", "{SELECT}"];
+    let live = ["LIVE", "live_memories", "ACTIVE", "condition("];
+    let mut reading = std::collections::BTreeSet::new();
+    let mut marked = std::collections::BTreeSet::new();
+    let mut files = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
+    while let Some(next) = files.pop() {
+        if next.is_dir() {
+            files.extend(std::fs::read_dir(next).unwrap().map(|e| e.unwrap().path()));
+            continue;
+        }
+        if next.extension().is_none_or(|ext| ext != "rs") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&next).unwrap();
+        let code = text.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let stem = next.file_stem().unwrap().to_str().unwrap().to_owned();
+        let mut item: Option<String> = None;
+        for line in code.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            // A top-level constant is its own item; a function starts one.
+            let top = !line.starts_with(' ');
+            let name_after = |word: &str| -> Option<String> {
+                let at = trimmed.find(word)?;
+                (at == 0 || trimmed[..at].ends_with(' ')).then(|| {
+                    trimmed[at + word.len()..]
+                        .chars()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                        .collect()
+                })
+            };
+            if top && let Some(name) = name_after("const ") {
+                item = Some(name);
+            } else if let Some(name) = name_after("fn ") {
+                item = Some(name);
+            }
+            let Some(name) = &item else { continue };
+            let key = format!("{stem}::{name}");
+            if reads.iter().any(|read| line.contains(read)) {
+                reading.insert(key.clone());
+            }
+            if live.iter().any(|mark| line.contains(mark)) {
+                marked.insert(key);
+            }
+        }
+    }
+    reading
+        .into_iter()
+        .map(|key| {
+            let live = marked.contains(&key);
+            (key, live)
+        })
+        .collect()
+}
+
+/// Every reader of `memories` either goes through the test of "in force"
+/// or is listed with why it reads every status, and every listed one still
+/// reads `memories` without it.
+#[test]
+fn every_reader_of_memories_goes_through_the_view_or_says_why_not() {
+    let readers = memory_readers();
+    let listed: std::collections::BTreeSet<&str> =
+        READS_EVERY_STATUS.iter().map(|(name, _)| *name).collect();
+    let unlisted: Vec<&String> = readers
+        .iter()
+        .filter(|(name, live)| !**live && !listed.contains(name.as_str()))
+        .map(|(name, _)| name)
+        .collect();
+    assert!(
+        unlisted.is_empty(),
+        "these read memories without live_memories and aren't listed in READS_EVERY_STATUS: {unlisted:?}"
+    );
+    let stale: Vec<&&str> = listed
+        .iter()
+        .filter(|name| readers.get(**name) != Some(&false))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "READS_EVERY_STATUS lists what no longer reads memories without the view: {stale:?}"
+    );
+    for reader in [
+        "selection::candidates",
+        "similar::similar",
+        "delivery::CANDIDATES",
+        "delivery::CHANGED_CANDIDATES",
+        "stamps::stamps_since",
+    ] {
+        assert_eq!(readers.get(reader), Some(&true), "{reader}: {readers:?}");
+    }
+}
