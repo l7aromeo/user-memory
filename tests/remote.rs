@@ -3594,11 +3594,40 @@ const MARKER_POLL: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// A TCP relay to a host that counts the connections it takes and keeps
 /// what clients send, so a test sees from the server's side whether a
-/// client asked it anything, and what.
+/// client asked it anything, and what, and when each marker poll ran.
 struct Counting {
     address: String,
     taken: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     sent: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    polls: std::sync::Arc<std::sync::Mutex<Vec<PollSpan>>>,
+}
+
+/// One MCP session as the server's side sees it, a marker poll when it asks
+/// for `stamps_since`: when its `initialize` request came in (just after
+/// the connector took the claim), and when the `stamps_since` reply went
+/// out (just before it writes the marker); none while it is on the way.
+#[derive(Clone, Debug)]
+struct PollSpan {
+    session: String,
+    began: std::time::Instant,
+    /// Whether the session asked for `stamps_since`: a hook's session asks
+    /// other things and is no poll.
+    polled: bool,
+    answered: Option<std::time::Instant>,
+}
+
+/// The bytes of a request a relay keeps to tell what it was: its headers
+/// and the start of its JSON-RPC body.
+const REQUEST_KEPT: usize = 4096;
+
+/// The value of the HTTP header `name` in `text`, matched without case.
+fn header(text: &str, name: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        key.trim()
+            .eq_ignore_ascii_case(name)
+            .then(|| value.trim().to_owned())
+    })
 }
 
 impl Counting {
@@ -3619,6 +3648,8 @@ impl Counting {
         let count = taken.clone();
         let sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let kept = sent.clone();
+        let polls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let spans = polls.clone();
         let host = host.to_owned();
         std::thread::spawn(move || {
             for client in listener.incoming() {
@@ -3628,6 +3659,12 @@ impl Counting {
                     continue;
                 };
                 let slow = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                // The connection's first request: when it began, and its
+                // first bytes.
+                let asked = std::sync::Arc::new(std::sync::Mutex::new((
+                    None::<std::time::Instant>,
+                    Vec::new(),
+                )));
                 for (mut from, mut to, keep, mut wait, asks) in [
                     (
                         client.try_clone().unwrap(),
@@ -3639,12 +3676,21 @@ impl Counting {
                     (server, client, None, delay, false),
                 ] {
                     let slow = slow.clone();
+                    let asked = asked.clone();
+                    let spans = spans.clone();
                     std::thread::spawn(move || {
                         let mut buffer = [0; 8192];
                         let mut first = true;
                         while let Ok(n) = from.read(&mut buffer)
                             && n > 0
                         {
+                            if asks {
+                                let (began, bytes) = &mut *asked.lock().unwrap();
+                                began.get_or_insert_with(std::time::Instant::now);
+                                let room = REQUEST_KEPT.saturating_sub(bytes.len());
+                                bytes.extend_from_slice(&buffer[..n.min(room)]);
+                                note_ask(&spans, bytes);
+                            }
                             if asks && std::mem::take(&mut first) {
                                 slow.store(
                                     buffer[..n].starts_with(request),
@@ -3661,6 +3707,9 @@ impl Counting {
                             if to.write_all(&buffer[..n]).is_err() {
                                 break;
                             }
+                            if !asks && std::mem::take(&mut first) {
+                                note_poll(&spans, &asked, &buffer[..n]);
+                            }
                         }
                         let _ = to.shutdown(std::net::Shutdown::Write);
                     });
@@ -3671,6 +3720,7 @@ impl Counting {
             address,
             taken,
             sent,
+            polls,
         }
     }
     fn taken(&self) -> usize {
@@ -3679,6 +3729,59 @@ impl Counting {
     /// What clients sent so far, as text.
     fn sent(&self) -> String {
         String::from_utf8_lossy(&self.sent.lock().unwrap()).into_owned()
+    }
+    /// The marker polls so far, in the order they began.
+    fn poll_spans(&self) -> Vec<PollSpan> {
+        let mut spans = self.polls.lock().unwrap().clone();
+        spans.retain(|span| span.polled);
+        spans.sort_by_key(|span| span.began);
+        spans
+    }
+}
+
+/// Marks the session of `request`, the start of a request, as a marker
+/// poll once it asks for `stamps_since`.
+fn note_ask(spans: &std::sync::Mutex<Vec<PollSpan>>, request: &[u8]) {
+    let asked = String::from_utf8_lossy(request);
+    if asked.contains("\"stamps_since\"")
+        && let Some(session) = header(&asked, "mcp-session-id")
+        && let Some(span) = spans
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|span| span.session == session)
+    {
+        span.polled = true;
+    }
+}
+
+/// Notes what a connection's first reply, `reply`, tells of a marker poll:
+/// an `initialize` answered with a session begins one, at the time its
+/// request came in, and a `stamps_since` call in that session is its
+/// answer, at the time the reply went out.
+fn note_poll(
+    spans: &std::sync::Mutex<Vec<PollSpan>>,
+    request: &std::sync::Mutex<(Option<std::time::Instant>, Vec<u8>)>,
+    reply: &[u8],
+) {
+    let (began, bytes) = &*request.lock().unwrap();
+    let asked = String::from_utf8_lossy(bytes);
+    let mut spans = spans.lock().unwrap();
+    if asked.contains("\"initialize\"")
+        && let Some(began) = *began
+        && let Some(session) = header(&String::from_utf8_lossy(reply), "mcp-session-id")
+    {
+        spans.push(PollSpan {
+            session,
+            began,
+            polled: false,
+            answered: None,
+        });
+    } else if asked.contains("\"stamps_since\"")
+        && let Some(session) = header(&asked, "mcp-session-id")
+        && let Some(span) = spans.iter_mut().find(|span| span.session == session)
+    {
+        span.answered = Some(std::time::Instant::now());
     }
 }
 
@@ -3900,8 +4003,10 @@ fn connectors_on_one_machine_share_their_polls() {
     );
 }
 
-// A poll still waiting for a slow server's answer holds the claim: the
-// other connectors wait for it instead of each asking the server again.
+// A poll still waiting for a slow server's answer holds the claim, however
+// long past the stale age: the other connectors wait for it instead of each
+// asking the server again, and no poll starts before the one under way is
+// answered.
 #[test]
 fn connectors_wait_for_a_poll_a_slow_server_has_not_answered() {
     let poll = std::time::Duration::from_millis(500);
@@ -3915,12 +4020,44 @@ fn connectors_wait_for_a_poll_a_slow_server_has_not_answered() {
         env: vec![("USER_MEMORY_MARKER_POLL_MS", poll.as_millis().to_string())],
     };
     machine.hook("session-start");
+    // A poll opens two connections the relay holds back, one for its
+    // session's handshake and one for its call, so it takes twice `slow`:
+    // past the three polls after which a claim's connector counts as gone.
     // One poll at a time: each waits for its answer, then a poll's interval.
     let window = poll * 12;
     let five = polls(&machine, &proxy, 5, poll, window);
+    let spans = proxy.poll_spans();
+    let first = spans.first().map(|span| span.began);
+    let told = || {
+        spans
+            .iter()
+            .map(|span| {
+                let at = |time: std::time::Instant| {
+                    time.duration_since(first.unwrap_or(time)).as_millis()
+                };
+                format!(
+                    "{}..{}",
+                    at(span.began),
+                    span.answered
+                        .map_or("?".to_owned(), |end| at(end).to_string())
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    assert!(spans.len() > 1, "polls (ms): {}", told());
+    for pair in spans.windows(2) {
+        assert!(
+            pair[0]
+                .answered
+                .is_some_and(|answered| answered <= pair[1].began),
+            "a poll began while another was on the way (ms): {}",
+            told()
+        );
+    }
     assert!(five > 0);
     assert!(
-        five <= window.as_millis() / (slow + poll).as_millis() + POLL_SLACK,
+        five <= window.as_millis() / (slow * 2 + poll).as_millis() + POLL_SLACK,
         "five connectors in {window:?}, answers taking {slow:?}: {five}"
     );
 }
