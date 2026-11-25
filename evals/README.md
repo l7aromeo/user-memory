@@ -257,7 +257,9 @@ whose remote is the project in `projects` named by the path's last part, so
 `project:workspace/notebooks` is a checkout of notebooks inside the folder
 `workspace`). `folders` lists such folders to create before the first session,
 so a session in a parent folder finds its repositories there. `repeat` and
-`clients` set how many trials a batch runs. `shell` gives the agent git and
+`clients` set how many trials a batch runs. `turn_timeout` gives each of the
+scenario's turns that many seconds instead of 600, for a turn of a hundred
+calls or more; a turn past it is cut off and the trial is an error. `shell` gives the agent git and
 file edits (Claude: no push; Codex: workspace-write sandbox);
 `claude_file_tools` gives Claude Read, Write and Edit and turns its auto
 memory on, so its own memory files compete with user-memory. Writes stay

@@ -768,6 +768,38 @@ class UserInput(unittest.TestCase):
         events, _ = session.turn("one in the foreground")
         self.assertEqual([e.get("result") for e in events if e["type"] == "result"], ["done"])
 
+    def test_a_turn_is_cut_off_at_its_scenario_s_timeout(self):
+        session = self.claude()
+        self.assertEqual(session.turn_timeout, run.TURN_TIMEOUT)
+        session.turn_timeout = 0.2
+        started = time.time()
+        _, error = session.turn("a long task")
+        self.assertEqual(error, "timed out after 0.2s")
+        self.assertLess(time.time() - started, 5)
+        opened = []
+
+        class Session:
+            def turn(self, *a):
+                return [], None
+
+            def close(self):
+                return ""
+        home = Path(tempfile.mkdtemp())
+        sandbox = types.SimpleNamespace(dir=home, codex_home=home, state=home / "state",
+                                        memories=lambda: [], setup_output="",
+                                        workdir=lambda spec, projects: home)
+        originals = run.prepare, run.open_session, run.CLAUDE_TMP_BASE
+        run.prepare = lambda *a: sandbox
+        run.open_session = lambda client, sandbox, cwd, options, resume=None: opened.append(options) or Session()
+        run.CLAUDE_TMP_BASE = home / "tmp"
+        try:
+            for scenario in ({"name": "s", "checks": [], "turn_timeout": 2400}, {"name": "s", "checks": []}):
+                run.trial({**scenario, "steps": [{"session": "a", "prompt": "x"}]}, "claude", home, home, {},
+                          types.SimpleNamespace(check=lambda *a: None))
+        finally:
+            run.prepare, run.open_session, run.CLAUDE_TMP_BASE = originals
+        self.assertEqual([o.get("turn_timeout") for o in opened], [2400, None])
+
     def test_claude_questions_are_answered_and_other_tools_declined(self):
         asked = {"type": "control_request", "request_id": "r1", "request": {
             "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "requires_user_interaction": True,
