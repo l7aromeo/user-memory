@@ -322,7 +322,17 @@ on Windows), each private to you:
   until a prompt gives it the index. A `.scope` file beside each snapshot
   repeats the session's project keys, one per line, written with every
   snapshot, so the tool hooks find the session's delivery index without
-  reading the snapshot. `seen-<store key>.json` holds, per
+  reading the snapshot. A `.recall` file beside it, an SQLite database
+  with its `-wal` and `-shm` files, holds what
+  [recall during the task](how-it-works.md#recall-during-the-task) needs:
+  for each agent of the session, its last 30 steps as terms (stems in
+  plain text and anchors as written, lowercased, never a sentence, a
+  tool's result or a file's contents), the tasks of subagents not yet
+  started, and which passages of which memories were pushed at which step.
+  A session's `startup` replaces it; a `/clear` or a compaction starts a
+  new count in it; a resume keeps it. It goes with the 30-day clean-up.
+  Deleting it loses only the session's recent steps and what its agents
+  were pushed, so a passage may reach them again. `seen-<store key>.json` holds, per
   store, the ids and fingerprints of the rules session start last listed,
   and the ids of the memories agents had recorded when you were last told,
   by project key: no memory text or origin. Session start compares against

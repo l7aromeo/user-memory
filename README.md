@@ -33,6 +33,10 @@ apart.
   git remote, so every clone on every machine shares it.
 - **Changes reach running sessions.** When another session or machine
   changes memory, the next prompt carries a short notice of what changed.
+- **Memories reach the step they name.** When the agent runs a command,
+  opens a file or starts a subagent that a memory names, the part of it
+  that matches is added after that step, with whose word it is. For
+  now this needs the store on the same machine.
 - **Saying it again counts, changing your mind replaces.** Before storing,
   the server looks for memories that may say the same thing, by their words
   and, with semantic search, by their meaning; a restatement then confirms

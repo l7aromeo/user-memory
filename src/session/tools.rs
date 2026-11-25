@@ -79,10 +79,10 @@ pub(crate) fn acts_on(client: HookClient, tool: &str) -> bool {
     }
 }
 
-/// What `client`'s pre-tool hook prints for the call on stdin, within its
-/// `context_limit` (the client's default room when `None`): nothing for a
-/// tool it does not act on, and nothing yet for one it does. A call that
-/// starts a subagent keeps its task for the subagent's start (#117).
+/// What `client`'s pre-tool hook prints for the call on stdin: nothing. For
+/// a tool it acts on, it keeps the session's delivery index current, and a
+/// call that starts a subagent keeps its task for the subagent's start
+/// (#117).
 pub fn pre_tool_use(client: HookClient, _context_limit: Option<usize>) -> String {
     let started = Instant::now();
     let payload = payload();
