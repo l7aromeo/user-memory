@@ -2059,6 +2059,14 @@ def watched(scenario, sandbox):
 
 def trial(scenario, client, base, source, projects, guard):
     sandbox = prepare(scenario, client, base, source, projects)
+    listed = listed_at_start(scenario, client, sandbox, projects)
+    if listed:
+        # Decided before any session opens, so the trial costs nothing.
+        return {"scenario": scenario["name"], "client": client, "sandbox": str(sandbox.dir),
+                "model": CLAUDE_MODEL if client == "claude" else CODEX_MODEL, "usage": {},
+                "passed": False, "void": f"session start lists {', '.join(listed)}",
+                "errors": [], "checks": [], "steps": [], "stderr": {}, "memories": sandbox.memories(),
+                "setup": sandbox.setup_output}
     options = {k: scenario[k] for k in ("shell", "claude_file_tools", "codex_escalations",
                                         "commands", "subagents", "turn_timeout", "allow")
                if k in scenario}
@@ -2178,6 +2186,50 @@ def trial(scenario, client, base, source, projects, guard):
             + [f"harness: Claude Code's temporary folder still has {path}, named after a trial" for path in left],
             "checks": results, "steps": records, "stderr": closed, "memories": memories,
             "setup": sandbox.setup_output}
+
+
+# How many characters of a memory's id session start's index names it by.
+SHORT_ID = 8
+
+
+def session_start_text(client, sandbox, cwd):
+    """What the trial's session start would show in `cwd`, run on copies of
+    its home, store and checkouts: session start syncs the instruction
+    files and keeps a session's state, and the trial must start from what
+    it was given."""
+    with tempfile.TemporaryDirectory(dir=sandbox.dir.parent) as tmp:
+        copy = Path(tmp)
+        for path in sandbox.dir.iterdir():
+            # The binary and tools are run, never written; copied, a binary
+            # would be a new executable to the system's checks.
+            if path in (sandbox.install, sandbox.tools):
+                continue
+            if path.is_dir():
+                shutil.copytree(path, copy / path.name, symlinks=True)
+            else:
+                shutil.copy2(path, copy / path.name)
+        here, there = str(sandbox.dir), str(copy)
+        env = {k: v if k == "PATH" else v.replace(here, there) for k, v in sandbox.client_env().items()}
+        where = copy / Path(cwd).relative_to(sandbox.dir)
+        payload = {"session_id": "unlisted-check", "hook_event_name": "SessionStart",
+                   "source": "startup", "cwd": str(where)}
+        out = subprocess.run([str(sandbox.binary), "session-start", "--client", client],
+                             cwd=where, env=env, input=json.dumps(payload),
+                             capture_output=True, text=True, timeout=60)
+        return out.stdout
+
+
+def listed_at_start(scenario, client, sandbox, projects):
+    """The scenario's `unlisted` seeds that the trial's session start lists
+    anyway, by their ids' first SHORT_ID characters: an agent that reads
+    them from the index needs no push, so the trial cannot tell a push
+    from the index."""
+    names = scenario.get("unlisted", [])
+    if not names:
+        return []
+    cwd = sandbox.workdir(scenario.get("cwd", "plain"), projects)
+    text = session_start_text(client, sandbox, cwd)
+    return [name for name in names if sandbox.ids[name][:SHORT_ID] in text]
 
 
 def header_notes(scenario, client, sandbox, projects):
@@ -2500,6 +2552,8 @@ def rehearsal_notes(scenario, client, sandbox, projects):
         if "user-memory" not in (config_file.read_text() if config_file.exists() else ""):
             notes.append("no user-memory MCP server in the trial's config.toml")
     notes += header_notes(scenario, client, sandbox, projects)
+    notes += [f"session start lists unlisted seed {name}"
+              for name in listed_at_start(scenario, client, sandbox, projects)]
     return notes
 
 
