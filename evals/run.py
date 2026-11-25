@@ -716,7 +716,11 @@ class ClaudeSession:
     """A Claude Code session that stays open between turns: each turn is a
     user message on stdin, answered by a `result` event."""
 
+    # How long one turn may take: TURN_TIMEOUT, or the scenario's own.
+    turn_timeout = TURN_TIMEOUT
+
     def __init__(self, sandbox, cwd, options, resume=None):
+        self.turn_timeout = options.get("turn_timeout", TURN_TIMEOUT)
         tools, allowed, denied = "", ["mcp__user-memory"], []
         if options.get("commands") and not options.get("shell"):
             # Only the user-memory commands a scenario names, by name or by
@@ -795,12 +799,12 @@ class ClaudeSession:
             self.say(prompt)
         except BrokenPipeError:
             return events, "the session had ended"
-        deadline = time.time() + TURN_TIMEOUT
+        deadline = time.time() + self.turn_timeout
         while True:
             try:
                 line = self.lines.get(timeout=max(0.1, deadline - time.time()))
             except queue.Empty:
-                error = f"timed out after {TURN_TIMEOUT}s"
+                error = f"timed out after {self.turn_timeout}s"
                 break
             if line is None:
                 error = "the session ended"
@@ -896,7 +900,11 @@ class CodexSession:
     """A Codex session through `codex app-server`: one thread, one turn per
     prompt. Its configuration is the trial's CODEX_HOME, as setup wrote it."""
 
+    # How long one turn may take: TURN_TIMEOUT, or the scenario's own.
+    turn_timeout = TURN_TIMEOUT
+
     def __init__(self, sandbox, cwd, options, resume=None):
+        self.turn_timeout = options.get("turn_timeout", TURN_TIMEOUT)
         self.sandbox = sandbox
         self.resume = resume
         self.child = None
@@ -1027,12 +1035,12 @@ class CodexSession:
         reply = self.request("thread/compact/start", {"threadId": self.thread}, events)
         if "error" in reply:
             return events, f"thread/compact/start failed: {reply['error']}"
-        deadline = time.time() + TURN_TIMEOUT
+        deadline = time.time() + self.turn_timeout
         while True:
             try:
                 line = self.lines.get(timeout=max(0.1, deadline - time.time()))
             except queue.Empty:
-                return events, f"timed out after {TURN_TIMEOUT}s"
+                return events, f"timed out after {self.turn_timeout}s"
             if line is None:
                 return events, "codex app-server ended"
             message = json.loads(line)
@@ -1053,12 +1061,12 @@ class CodexSession:
         if "error" in reply:
             return events, f"turn/start failed: {reply['error']}"
         turn_id = ((reply.get("result") or {}).get("turn") or {}).get("id")
-        deadline = time.time() + TURN_TIMEOUT
+        deadline = time.time() + self.turn_timeout
         while True:
             try:
                 line = self.lines.get(timeout=max(0.1, deadline - time.time()))
             except queue.Empty:
-                error = f"timed out after {TURN_TIMEOUT}s"
+                error = f"timed out after {self.turn_timeout}s"
                 break
             if line is None:
                 error = "codex app-server ended"
@@ -2018,7 +2026,7 @@ def watched(scenario, sandbox):
 def trial(scenario, client, base, source, projects, guard):
     sandbox = prepare(scenario, client, base, source, projects)
     options = {k: scenario[k] for k in ("shell", "claude_file_tools", "codex_escalations",
-                                        "commands", "subagents")
+                                        "commands", "subagents", "turn_timeout")
                if k in scenario}
     options["resumes"] = any(step.get("resume") for step in steps(scenario))
     options["compacts"] = any(step.get("compact") for step in steps(scenario))
