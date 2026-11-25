@@ -13,7 +13,11 @@ memory never returned, a project's exception to a global rule within the
 default page, and a memory ranked above a near-duplicate that means
 something else.
 
-Nothing here touches the user's own store or settings: the store, home and state live in a
+`--memories` and `--queries` replace the fixtures with files of your own,
+such as the export of a private copy of your store. Then nothing it prints
+or writes holds a query's or a memory's text, only numbers and ids, and an
+embeddings endpoint must be on this machine. Nothing here touches the
+user's own store or settings: the store, home and state live in a
 temporary folder.
 
     just retrieval-bench
@@ -21,15 +25,18 @@ temporary folder.
 """
 
 import argparse
+import ipaddress
 import json
 import math
 import os
 import shutil
+import socket
 import statistics
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from urllib.parse import urlsplit
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
@@ -54,6 +61,12 @@ EMBED_SETTINGS = (
 # Enough to see every match the search returns, past the default page.
 PAGE = "200"
 
+# The `format` an export file names (src/memory/transfer.rs), by which
+# `--memories` tells one from the benchmark's own format.
+EXPORT_FORMAT = "user-memory-export"
+# The characters of a memory id the index shows, which a query file aimed
+# at an export may use instead of the whole id.
+SHORT_ID = 8
 # The rank recall counts the target within: the first screen of results.
 RECALL_DEPTH = 5
 # The ranks NDCG counts: half the default page, what an agent reads first.
@@ -79,10 +92,12 @@ SEARCH_PAGE = rust_usize("src/memory/read.rs", "SEARCH_PAGE")
 
 
 class Store:
-    """A store of its own in `root`, reached through the binary."""
+    """A store of its own in `root`, reached through the binary. A private
+    store's errors leave out what the binary said, which may quote it."""
 
-    def __init__(self, binary, root):
+    def __init__(self, binary, root, private=False):
         self.binary = binary
+        self.private = private
         home = root / "home"
         home.mkdir()
         self.base = {
@@ -94,7 +109,8 @@ class Store:
             "USER_MEMORY_DB": str(root / "memories.sqlite3"),
             "USER_MEMORY_NO_UPDATE_CHECK": "1",
         }
-        # Each stored id to the name the benchmark gives it, and back.
+        # Each stored id to the name the benchmark gives it, and back. An
+        # export keeps its ids, so neither holds its memories.
         self.ids = {}
         self.stored = {}
 
@@ -108,7 +124,8 @@ class Store:
         out = subprocess.run([str(self.binary), *args], env=self.env(embed),
                              capture_output=True, text=True, timeout=120)
         if out.returncode != 0:
-            raise RuntimeError(f"user-memory {args[0]} failed: {out.stderr.strip()}")
+            said = f"exit {out.returncode}" if self.private else out.stderr.strip()
+            raise RuntimeError(f"user-memory {args[0]} failed: {said}")
         return out.stdout
 
     def record_args(self, memory):
@@ -130,9 +147,15 @@ class Store:
                 args += ["--distinct-from", similar["id"]]
             reply = json.loads(self.run(args, {}))
         if not reply.get("stored"):
-            raise RuntimeError(f"{memory['id']} was not stored: {reply}")
+            said = "" if self.private else f": {reply}"
+            raise RuntimeError(f"{memory['id']} was not stored{said}")
         self.ids[reply["id"]] = memory["id"]
         self.stored[memory["id"]] = reply["id"]
+
+    def load_export(self, path):
+        """Imports the export at `path`, which keeps its ids, statuses,
+        evidence, supports and supersessions as they are."""
+        self.run(["import", str(path), "--apply"], {})
 
     def search(self, query, project, embed):
         """The ids `query` finds in `project`, best first, whether it was
@@ -240,26 +263,73 @@ def parse(argv):
     parser.add_argument("--embed-model", default=QWEN_MODEL)
     parser.add_argument("--embed-dimensions", default=QWEN_DIMENSIONS)
     parser.add_argument("--query-instruction", default=QWEN_INSTRUCTION)
+    parser.add_argument("--memories", type=Path,
+                        help="memories in the benchmark's format, or a `user-memory export` "
+                             "file, instead of memories.json")
+    parser.add_argument("--queries", type=Path,
+                        help="queries in the benchmark's format instead of queries.json")
     parser.add_argument("--out", type=Path, help="write every query's ranks here as JSON")
     parser.add_argument("--keep", type=Path,
                         help="copy the benchmark's store (with its vectors) here when done")
     return parser.parse_args(argv)
 
 
-def load(memories_file=HERE / "memories.json", queries_file=HERE / "queries.json"):
-    """The memories and the queries, each memory a query names checked, and
-    each memory a fixture supersedes checked to come before it."""
-    memories = json.loads(memories_file.read_text())["memories"]
-    spec = json.loads(queries_file.read_text())
+def refused_path(args):
+    """The first option naming a path inside the repository, which holds no
+    private memories nor what is made from them, or None."""
+    for name in ("memories", "queries", "out", "keep"):
+        path = getattr(args, name)
+        if path is not None and path.resolve().is_relative_to(ROOT):
+            return name
+    return None
+
+
+def on_this_machine(url):
+    """Whether every address `url`'s host resolves to is a loopback
+    address, so what is sent to it stays on this machine. A name that does
+    not resolve is not."""
+    host = urlsplit(url).hostname
+    if not host:
+        return False
+    try:
+        addresses = {info[4][0] for info in socket.getaddrinfo(host, None)}
+    except (OSError, UnicodeError):
+        return False
+    return bool(addresses) and all(
+        ipaddress.ip_address(address.split("%")[0]).is_loopback for address in addresses)
+
+
+def resolve(name, known, short):
+    """The id in `known` that `name` names: itself, or with `short`, the
+    one id it begins, of at least SHORT_ID characters. None otherwise."""
+    if name in known:
+        return name
+    if short and len(name) >= SHORT_ID:
+        matches = [k for k in known if k.startswith(name)]
+        if len(matches) == 1:
+            return matches[0]
+    return None
+
+
+def load(args):
+    """The memories (id, scope, project, as the benchmark or an export holds
+    them), the export to import if `--memories` is one, and the queries,
+    each id checked and resolved. Exits naming a query by number, never by
+    its text, when the files are your own."""
+    private = args.memories is not None or args.queries is not None
+    document = json.loads((args.memories or HERE / "memories.json").read_text())
+    export = args.memories if document.get("format") == EXPORT_FORMAT else None
+    memories = document["memories"]
+    spec = json.loads((args.queries or HERE / "queries.json").read_text())
     before = set()
     for memory in memories:
         for old in memory.get("supersedes", []):
-            if old not in before:
+            if export is None and old not in before:
                 sys.exit(f"memory {memory['id']} supersedes {old}, which is not before it")
         before.add(memory["id"])
     known = {m["id"] for m in memories}
-    for q in spec["queries"]:
-        named = repr(q["query"])
+    for number, q in enumerate(spec["queries"], 1):
+        named = f"query {number}" if private else repr(q["query"])
         case = q.get("case")
         if case is not None and case not in CASES:
             sys.exit(f"{named} has unknown case {case!r}")
@@ -267,16 +337,32 @@ def load(memories_file=HERE / "memories.json", queries_file=HERE / "queries.json
             sys.exit(f"{named} is a near-duplicate case without a rival")
         if case == "superseded" and not q.get("excluded"):
             sys.exit(f"{named} is a superseded case without excluded memories")
-        for wanted in [q["target"], *q.get("related", []), *q.get("excluded", []),
-                       *([q["rival"]] if "rival" in q else [])]:
-            if wanted not in known:
-                sys.exit(f"{named} names unknown memory {wanted}")
-    return memories, spec
+        for field in ("target", "rival"):
+            if field in q:
+                q[field] = check(q[field], known, export, named)
+        for field in ("related", "excluded"):
+            q[field] = [check(m, known, export, named) for m in q.get(field, [])]
+    return memories, export, spec, private
+
+
+def check(name, known, export, named):
+    """`name` resolved against `known`, or exit naming the query."""
+    found = resolve(name, known, export is not None)
+    if found is None:
+        sys.exit(f"{named} names unknown or ambiguous memory {name}")
+    return found
 
 
 def main(argv=None):
     args = parse(argv)
-    memories, spec = load()
+    if (name := refused_path(args)) is not None:
+        sys.exit(f"refusing: --{name} {getattr(args, name)} is inside the repository; "
+                 "private memories and what is made from them stay outside it")
+    memories, export, spec, private = load(args)
+    if private and args.embed_url and not on_this_machine(args.embed_url):
+        sys.exit(f"refusing: the embeddings endpoint {urlsplit(args.embed_url).hostname} is not on "
+                 "this machine, and semantic search sends it memory text (docs/privacy.md); with "
+                 "--memories or --queries, give an endpoint on a loopback address or none")
 
     def in_project(m):
         return m.get("scope", "global") == "project"
@@ -294,16 +380,19 @@ def main(argv=None):
         }
 
     with tempfile.TemporaryDirectory(prefix="user-memory-retrieval-") as tmp:
-        store = Store(args.binary, Path(tmp))
-        for memory in memories:
-            store.record(memory)
+        store = Store(args.binary, Path(tmp), private)
+        if export is not None:
+            store.load_export(export)
+        else:
+            for memory in memories:
+                store.record(memory)
         if "fused" in modes:
             store.run(["reindex"], modes["fused"])
         results = {}
         for mode, embed in modes.items():
             rows = []
-            for q in spec["queries"]:
-                named = repr(q["query"])
+            for number, q in enumerate(spec["queries"], 1):
+                named = f"query {number}" if private else repr(q["query"])
                 found, semantic, passages, size = store.search(q["query"], spec["project"], embed)
                 if mode == "fused" and not semantic:
                     sys.exit(f"the endpoint did not rank {named}; is it running?")
@@ -313,6 +402,9 @@ def main(argv=None):
                 row = {"style": q["style"], "query": q["query"], "target": q["target"],
                        "rank": rank_of(found, q["target"]), "ndcg": ndcg(found, grades(q)),
                        "matched": len(found), "bytes": size, "found": found}
+                if private:
+                    row = {"number": number, **row}
+                    del row["query"]
                 for field in ("case", "rival", "excluded"):
                     if field in q:
                         row[field] = q[field]

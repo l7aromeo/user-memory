@@ -48,7 +48,7 @@ mutants *args:
 sql-mutants *args:
     scripts/sql-mutants {{ args }}
 
-# The eval harnesses' own checks, which run no session: the agent eval's, and the retrieval benchmark's metrics and cases.
+# The eval harnesses' own checks, which run no session: the agent eval's, and the retrieval benchmark's metrics, cases and private mode.
 eval-tests:
     cargo build --locked
     python3 -I evals/test_run.py

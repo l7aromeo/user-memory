@@ -588,8 +588,41 @@ Some queries test a case, and the report counts their wins apart:
 
 Run it before and after a change to ranking, and report both. It needs no
 CI and runs no agent. `--out FILE` writes every query's ranks as JSON, and
-`--keep DIR` keeps the built store with its vectors. `just eval-tests` runs the checks of the benchmark's own
-metrics and cases, which CI runs too.
+`--keep DIR` keeps the built store with its vectors; both are refused inside
+the repository. `just eval-tests` runs the checks of the benchmark's own
+metrics, cases and private mode, which CI runs too.
+
+### On a private query set
+
+`--memories FILE` and `--queries FILE` replace the fixtures, to measure
+search on memories of your own. `--memories` takes a `user-memory export`
+file, which loads with `import` so ids, statuses, evidence and
+supersessions stay as they are, or a file in the benchmark's own format.
+The queries use the benchmark's format; their `target`, `related`, `rival`
+and `excluded` name memory ids, whole or as the 8 characters the index
+shows.
+
+1. Make a private copy of your store and a throwaway home, as
+   [measure on a copy](#measure-on-a-copy-of-your-store) shows, and export
+   the copy from a subshell pointed at it:
+   `./target/debug/user-memory export "$dev/memories.json"`.
+2. Write your queries to `$dev/queries.json`, outside the repository.
+3. Run the benchmark on them:
+
+   ```bash
+   just retrieval-bench --memories "$dev/memories.json" --queries "$dev/queries.json" --out "$dev/report.json"
+   ```
+
+4. [Delete](#clean-up) `$dev` when you are done.
+
+With either file given, nothing the benchmark prints or writes holds a
+query's or a memory's text: it names queries by number and memories by id,
+in the report, in `--out` and in its errors, so the report can be shared.
+Every one of these paths is refused inside the repository. An embeddings
+endpoint is accepted only when every address its host resolves to is a
+loopback address, since semantic search sends it memory text
+([privacy](../privacy.md#what-leaves-your-machine)); any other is refused
+before anything is sent.
 
 ## Search budget
 

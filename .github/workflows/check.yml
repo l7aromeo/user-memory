@@ -65,7 +65,8 @@ jobs:
       # (justfile `check-release`).
       - run: just check-release
       - run: python3 -I evals/test_run.py
-      # The retrieval benchmark's metrics and cases (justfile `eval-tests`).
+      # The retrieval benchmark's metrics, cases and private mode (justfile
+      # `eval-tests`); its binary is the one `just check` built.
       - run: python3 -I evals/retrieval/test_run.py
       # The delivery index's costs at 10,000 memories, on this runner: a
       # lookup (#125); session start's build, a tool hook, a forget and the
