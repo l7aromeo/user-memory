@@ -10,7 +10,7 @@
    - `overlap`: memories on one topic, each related to every other in the group. They may overlap, one may be an exception to the other, or they may simply be unrelated memories in the same category. A memory related to two that are not related to each other appears in two groups.
    - `stale`: patterns whose supporting memories changed or were forgotten.
    - `ended_support`: patterns citing a memory whose date has passed.
-   - `open_condition`: memories whose tag or text condition has stood unchanged for over 60 days.
+   - `open_condition`: memories whose tag or text condition has stood unchanged for over 60 days, counted from the memory's last change, since nothing records when the condition was set.
 
    A group that lists only some of its members gives the number left out as `left_out`: say so, and review again once its listed members are handled.
 3. Propose one action per group and let the user choose:
