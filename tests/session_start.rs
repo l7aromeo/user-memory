@@ -1961,11 +1961,11 @@ fn a_tool_the_hook_does_not_act_on_is_passed_over_at_once() {
     }
 }
 
-// The tools the hook acts on, and every tool's result, print nothing yet
-// and exit 0. A result far larger than a pipe holds is read whole, so the
-// client never writes to a hook that has gone.
+// With no memory to match, the tools the hook acts on, and every tool's
+// result, print nothing and exit 0. A result far larger than a pipe holds
+// is read whole, so the client never writes to a hook that has gone.
 #[test]
-fn the_tool_hooks_read_their_whole_payload_and_print_nothing_yet() {
+fn the_tool_hooks_read_their_whole_payload_and_exit_0() {
     let tmp = tempdir().unwrap();
     for (client, tool) in [
         ("claude", "Bash"),

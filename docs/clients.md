@@ -131,10 +131,10 @@ them once:
 |---|---|---|
 | `SessionStart` (startup, resume, clear, compact) | `session-start` | the index, below |
 | `SessionStart` (compact) | `working-set` | nothing at present |
-| `UserPromptSubmit` | `prompt-submit` | a notice when something changed, [below](#changes-during-a-session) |
-| `SubagentStart` | `subagent-start` | the project rules, [below](#rules-for-subagents) |
-| `PreToolUse` | `pre-tool-use` | nothing at present |
-| `PostToolUse`, and Claude Code's `PostToolUseFailure` | `post-tool-use` | nothing at present |
+| `UserPromptSubmit` | `prompt-submit` | a notice when something changed, [below](#changes-during-a-session), then what the prompt matches ([recall](how-it-works.md#recall-during-the-task)) |
+| `SubagentStart` | `subagent-start` | the project rules, [below](#rules-for-subagents), then what the subagent's task matches |
+| `PreToolUse` | `pre-tool-use` | nothing; it keeps the task of a call that starts a subagent for that subagent's start |
+| `PostToolUse`, and Claude Code's `PostToolUseFailure` | `post-tool-use` | what the call matches ([recall](how-it-works.md#recall-during-the-task)) |
 
 Claude Code's `PreToolUse` hook runs for the tools it acts on:
 `Bash|PowerShell|Monitor|Agent|Task|SendMessage`. Codex's runs before every
@@ -163,7 +163,9 @@ Neither client gives a subagent session start's text, apart from a Codex
 sub-agent forked from its parent. So `subagent-start` prints the project
 rules as session start shows them (the folder's projects and the ones the
 conversation linked, up to 6,000 characters, with the line counting those
-left out). It prints nothing when the projects have no rules.
+left out), then what the subagent's task matches
+([recall during the task](how-it-works.md#recall-during-the-task)). With
+no rules and nothing matched, it prints nothing.
 
 A Codex sub-agent forked with its parent's history (`fork_turns` all, the
 default) already carries session start's text. Its hook reads the first

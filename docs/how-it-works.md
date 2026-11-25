@@ -315,6 +315,76 @@ poll, and the hooks read them only while a connector runs
 ([privacy](privacy.md#what-a-forgotten-memory-leaves)). The tool hooks
 never ask the server.
 
+## Recall during the task
+
+Session start gives the agent the index; the hooks then bring it the part
+of a memory that matches the step it just took, so a rule about a file
+reaches the agent when it opens that file, without a search first. After
+the agent reads `pyproject.toml`:
+
+```output
+From user-memory, matching this step (read one for the rest before applying it):
+- e0000002 The user's rule: Use Python 3.13 in this repository: `pyproject.toml` and `.python-version` say so.
+```
+
+- **What a step is:** a shell command; a file the agent reads or edits, by
+  its path in the session's folder; the files a patch names; the topic of a
+  memory search; the words a parent gives a subagent or sends a running
+  one; and your prompt. A tool's result, a file's contents and the text an
+  edit writes never count.
+- **What is pushed:** a passage that holds an anchor the step names (a
+  command with its next word, a path, a code span) and matches the work of
+  the last 30 steps well enough. Words alone never push one. Each line
+  names the memory's id and whose word it is: `The user's rule`,
+  `The user's decision`, any other stated memory by its type, or
+  `An agent's note, learned in N sessions, not the user's rule`. An
+  inference is never pushed. A passage that is part of its memory ends
+  with ` …`, and the agent reads the memory for the rest.
+- **After a failure:** the header says `matching this failed step`. Claude
+  Code says a call failed with `PostToolUseFailure`, unless you interrupted
+  it; for Codex the hook reads the call's result from the session's
+  transcript.
+- **The prompt:** after the change notice, what the prompt's words name.
+  A subagent's result that Claude Code delivers as a prompt
+  (`<task-notification>`) is not your words and pushes nothing.
+- **Subagents:** a subagent starts with none of its parent's steps, so its
+  start hook pushes what its task names, after the project rules.
+- **How much:** at most three lines after a step, within 1,500
+  characters, and within 8,000 characters for each agent between a start,
+  a `/clear` and a compaction. A passage is pushed once to each agent, and
+  again only after 100 more steps when the work matches it again. A
+  project rule session start printed in full counts as pushed to the
+  session's agent.
+- **Compaction and clear:** after a compaction the passages already pushed
+  may be pushed again when the work matches them, as the earlier copies
+  are gone; a `/clear` also forgets the steps; a resumed session keeps
+  both.
+- **Time:** a tool hook has 100 ms. A memory whose text it could not read
+  in that time is named by its id alone, with no label, since whose word
+  it is comes from the store:
+  `- e0000005 matches this step; read it before applying it`.
+
+Each session's steps and what was pushed are kept beside its snapshot
+([storage](storage.md#the-state-folder)). Recall needs a local store for
+now: on a memory server's store the hooks record each step and push
+nothing.
+
+Limits of what the clients tell a hook:
+
+- **Codex sub-agents:** a sub-agent's start shares no key with the call
+  that spawned it (Codex 0.163.0), so each start takes the session's
+  oldest task not yet taken, and two spawned at once may get each other's
+  memories. Claude Code pairs a subagent with its call by the turn and
+  the subagent's type.
+- **A forked Codex sub-agent** starts with nothing pushed to it, though
+  its copy of the parent's history holds what was pushed there, so a
+  passage may reach it twice: a duplicate, never a loss. The start's
+  payload does not say whether the sub-agent was forked.
+- **Codex failures** are read from the line Codex 0.163.0 writes to the
+  session's transcript before the hook runs: the call's status and exit
+  code, never its output. A session with no transcript, such as an
+  ephemeral one, reads every call as a success.
+
 ## How search finds a memory
 
 Search looks at the words of your question and, with semantic search on, at

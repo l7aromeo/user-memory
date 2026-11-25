@@ -23,8 +23,8 @@
 ## Understand it
 
 - [How it works](how-it-works.md): the pieces, memories, scope, titles, your
-  rules in instruction files, the index at session start, change notices and
-  search.
+  rules in instruction files, the index at session start, change notices,
+  recall during the task and search.
 - [Privacy](privacy.md): what is stored, where the token lives and what
   leaves your machine.
 
