@@ -97,13 +97,32 @@ const PROJECT_RULES_PART: Part = Part {
     floor: PROJECT_RULE_FLOOR,
     ceiling: PROJECT_RULE_CHARS,
 };
+/// The least room the project's most-used knowledge gets when it has any
+/// (#123), out of the project rules' when the room is short: the smallest
+/// ceiling #125 tried, at which 0.92 of the benchmark's essentials print at
+/// 10,000 memories.
+const MOST_USED_FLOOR: usize = 1_500;
+/// The most room the most-used knowledge takes (#125): 1,500, 3,000 and
+/// 4,500 print 0.92, 1.00 and 1.00 of the essentials, so 3,000 is the
+/// least that prints them all.
+const MOST_USED_CHARS: usize = 3_000;
+/// The project's most-used knowledge, from the store with the index.
+const MOST_USED_PART: Part = Part {
+    floor: MOST_USED_FLOOR,
+    ceiling: MOST_USED_CHARS,
+};
 /// The index: its header and its map at least, then what remains.
 const INDEX_PART: Part = Part {
     floor: memory::INDEX_FLOOR,
     ceiling: usize::MAX,
 };
 /// Session start's parts, in the order it prints them.
-const PARTS: [Part; 3] = [NEW_RULES_PART, PROJECT_RULES_PART, INDEX_PART];
+const PARTS: [Part; 4] = [
+    NEW_RULES_PART,
+    PROJECT_RULES_PART,
+    MOST_USED_PART,
+    INDEX_PART,
+];
 
 /// The room the parts share in a client's `limit` in `unit`, after the
 /// projects `lines`: the conversation origin and version line take
@@ -131,6 +150,26 @@ fn rooms(total: usize, wants: [usize; PARTS.len()]) -> [usize; PARTS.len()] {
         left -= more;
     }
     rooms
+}
+/// The rooms session start asks the store for out of `total`, after a list
+/// of new rules that would fill `new_rules`: the project rules', the
+/// most-used part's and the index's. The rules' room is theirs unless a
+/// most-used part prints, which the store alone knows: it then takes the
+/// part's room out of the rules' first, and that is only the part's floor
+/// when the room is short. A room too short for every part's floor asks for
+/// no most-used part, so the rules and the index keep theirs.
+fn store_rooms(total: usize, new_rules: usize) -> (usize, usize, usize) {
+    let [_, rules, _, index] = rooms(total, [new_rules, PROJECT_RULE_CHARS, 0, usize::MAX]);
+    let [_, _, most, beside] = rooms(
+        total,
+        [new_rules, PROJECT_RULE_CHARS, MOST_USED_CHARS, usize::MAX],
+    );
+    let most = if beside >= memory::INDEX_FLOOR {
+        most
+    } else {
+        0
+    };
+    (rules, most, index)
 }
 /// Said where [`capped`] cut session start's index.
 const INDEX_CUT: &str = "(index cut to fit; index lists every line)";
@@ -371,11 +410,18 @@ pub async fn start(
                 // when they no longer fit.
                 Some(full) => {
                     let total = parts_room(limit, unit, &lines);
-                    let [block_room, rules_room, index_room] =
-                        rooms(total, [unit.len(&full) + 1, PROJECT_RULE_CHARS, usize::MAX]);
+                    let [block_room, rules_room, most_room, index_room] = rooms(
+                        total,
+                        [
+                            unit.len(&full) + 1,
+                            PROJECT_RULE_CHARS,
+                            MOST_USED_CHARS,
+                            usize::MAX,
+                        ],
+                    );
                     // Both count the list with its line break.
                     let listed = block(block_room).unwrap_or(full);
-                    let room = rules_room + index_room;
+                    let room = rules_room + most_room + index_room;
                     let index = if unit.len(&index) <= room {
                         index
                     } else {
@@ -1241,10 +1287,8 @@ async fn index(
     };
     let line = projects_lines(&seen, &repositories);
     let (limit, unit) = hook_limit(client, context_limit);
-    let [_, rules_room, index_room] = rooms(
-        parts_room(limit, unit, &line),
-        [new_rules, PROJECT_RULE_CHARS, usize::MAX],
-    );
+    let (rules_room, most_room, index_room) =
+        store_rooms(parts_room(limit, unit, &line), new_rules);
     let remote = remote.as_ref();
     let mut fetch = async |input: Value| -> anyhow::Result<String> {
         let page = match remote {
@@ -1262,9 +1306,10 @@ async fn index(
             None => Ok(page),
         }
     };
-    // The rules alone are asked with a room no larger than theirs.
+    // The rules and the most-used part alone are asked with a room no
+    // larger than theirs.
     let room = if rules_only {
-        rules_room
+        rules_room + most_room
     } else {
         rules_room + index_room
     };
@@ -1273,7 +1318,7 @@ async fn index(
         &seen,
         origin,
         rules_elsewhere,
-        (room, rules_room),
+        (room, rules_room, most_room),
         unit,
     )
     .await?;
@@ -1290,7 +1335,7 @@ async fn fitted(
     seen: &Seen,
     origin: Option<&str>,
     rules_elsewhere: bool,
-    (room, rules_room): (usize, usize),
+    (room, rules_room, most_room): (usize, usize, usize),
     unit: FitUnit,
 ) -> anyhow::Result<String> {
     let input = json!({
@@ -1303,6 +1348,7 @@ async fn fitted(
     asked["fit_whole_projects"] = json!(seen.core);
     asked["fit_unit"] = json!(unit);
     asked["fit_rules_room"] = json!(rules_room);
+    asked["fit_most_used_room"] = json!(most_room);
     let reply = fetch(asked).await?;
     if memory::next_cursor(&reply).is_none() && unit.len(&reply) <= room {
         return Ok(reply);
@@ -1847,26 +1893,72 @@ mod tests {
     // index taking what remains; a part with nothing takes no room, and one
     // wanting less than its floor takes only that; short of room, every
     // part keeps its floor and the ceilings give way in order.
+    // The rules keep the room they had before the most-used part, which
+    // gets its floor beside them when the room is short and its ceiling
+    // when it is not, and none when the index would lose its floor.
+    #[test]
+    fn the_store_s_rooms_leave_the_rules_theirs_and_the_index_its_floor() {
+        let floors = PROJECT_RULE_FLOOR + MOST_USED_FLOOR + memory::INDEX_FLOOR;
+        let short = PROJECT_RULE_CHARS + MOST_USED_FLOOR + memory::INDEX_FLOOR;
+        assert_eq!(
+            store_rooms(short, 0),
+            (
+                PROJECT_RULE_CHARS,
+                MOST_USED_FLOOR,
+                short - PROJECT_RULE_CHARS
+            )
+        );
+        let wide = PROJECT_RULE_CHARS + MOST_USED_CHARS + 5_000;
+        assert_eq!(
+            store_rooms(wide, 0),
+            (
+                PROJECT_RULE_CHARS,
+                MOST_USED_CHARS,
+                wide - PROJECT_RULE_CHARS
+            )
+        );
+        let (rules, most, index) = store_rooms(floors, 0);
+        assert_eq!((most, rules + index), (MOST_USED_FLOOR, floors));
+        let (rules, most, index) = store_rooms(floors - 1, 0);
+        assert_eq!((most, rules + index), (0, floors - 1));
+        assert_eq!(rules, floors - 1 - memory::INDEX_FLOOR);
+    }
+
     #[test]
     fn the_parts_get_their_floors_then_their_ceilings_in_order() {
         let all = usize::MAX;
-        let total = 10_000;
+        let total = 20_000;
         assert_eq!(
-            rooms(total, [NEW_RULES_CHARS, PROJECT_RULE_CHARS, all]),
-            [NEW_RULES_CHARS, PROJECT_RULE_CHARS, 3_000]
+            rooms(
+                total,
+                [NEW_RULES_CHARS, PROJECT_RULE_CHARS, MOST_USED_CHARS, all]
+            ),
+            [
+                NEW_RULES_CHARS,
+                PROJECT_RULE_CHARS,
+                MOST_USED_CHARS,
+                total - NEW_RULES_CHARS - PROJECT_RULE_CHARS - MOST_USED_CHARS
+            ]
         );
         assert_eq!(
-            rooms(total, [0, PROJECT_RULE_CHARS, all]),
-            [0, 6_000, 4_000]
+            rooms(total, [0, PROJECT_RULE_CHARS, 0, all]),
+            [0, PROJECT_RULE_CHARS, 0, total - PROJECT_RULE_CHARS]
         );
-        assert_eq!(rooms(total, [0, 0, all]), [0, 0, total]);
-        assert_eq!(rooms(total, [50, 300, all]), [50, 300, 9_650]);
-        let floors = NEW_RULES_FLOOR + PROJECT_RULE_FLOOR + memory::INDEX_FLOOR;
+        assert_eq!(rooms(total, [0, 0, 0, all]), [0, 0, 0, total]);
         assert_eq!(
-            rooms(floors + 100, [NEW_RULES_CHARS, PROJECT_RULE_CHARS, all]),
+            rooms(total, [50, 300, 200, all]),
+            [50, 300, 200, total - 550]
+        );
+        let floors = NEW_RULES_FLOOR + PROJECT_RULE_FLOOR + MOST_USED_FLOOR + memory::INDEX_FLOOR;
+        assert_eq!(
+            rooms(
+                floors + 100,
+                [NEW_RULES_CHARS, PROJECT_RULE_CHARS, MOST_USED_CHARS, all]
+            ),
             [
                 NEW_RULES_FLOOR + 100,
                 PROJECT_RULE_FLOOR,
+                MOST_USED_FLOOR,
                 memory::INDEX_FLOOR
             ]
         );
@@ -1958,7 +2050,7 @@ mod tests {
                 &seen,
                 None,
                 false,
-                (room, PROJECT_RULE_CHARS),
+                (room, PROJECT_RULE_CHARS, 0),
                 unit,
             )
             .await
@@ -1977,7 +2069,7 @@ mod tests {
                 &seen,
                 None,
                 false,
-                (room, PROJECT_RULE_CHARS),
+                (room, PROJECT_RULE_CHARS, 0),
                 unit,
             )
             .await

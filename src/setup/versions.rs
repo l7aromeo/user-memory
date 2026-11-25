@@ -588,6 +588,11 @@ mod tests {
         ),
         (
             "index",
+            "fit_most_used_room",
+            "it comes with fit_rules_room, asking for the project's most-used memories after the rules; a server from before it prints no such part and gives its room to the index, and the hooks print the rules alone, as they did before",
+        ),
+        (
+            "index",
             "stamps_since",
             "only user-memory's own session hook sends it, with the position from its last stamps reply; a server from before it sends the v1 stamps reply, which the hook reads as a full list, as it did before",
         ),

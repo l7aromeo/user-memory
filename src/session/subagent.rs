@@ -1,9 +1,10 @@
-//! The subagent hook: a starting subagent gets the session's project rules,
-//! which neither client gives it from session start. Claude Code's subagents
-//! never carry session start's text. A Codex sub-agent forked from its parent
+//! The subagent hook: a starting subagent gets the session's project rules
+//! and the project's most-used knowledge, which neither client gives it
+//! from session start. Claude Code's subagents never carry session start's
+//! text. A Codex sub-agent forked from its parent
 //! (`fork_turns` all, the default) carries the parent's current history,
 //! session start's text included, so the hook prints nothing for one whose
-//! transcript holds it; every doubt prints the rules, so the cost of a wrong
+//! transcript holds it; every doubt prints them, so the cost of a wrong
 //! guess is a duplicate, never a missing rule.
 
 use super::{
@@ -29,9 +30,9 @@ const FORK_SCAN_BYTES: u64 = 512 * 1024;
 
 /// What the hook prints for a subagent starting in the current folder:
 /// the project rules part of session start, with the line counting those
-/// it leaves out, as both clients' JSON; nothing when the projects have no
-/// rules, the store does not answer, or a forked Codex sub-agent already
-/// carries them.
+/// it leaves out, and the most-used part, as both clients' JSON; nothing
+/// when the projects have neither, the store does not answer, or a forked
+/// Codex sub-agent already carries them.
 pub async fn subagent_start(client: HookClient, context_limit: Option<usize>) -> String {
     let deadline = tokio::time::Instant::now() + hook_time(LIMIT);
     let payload = tokio::time::timeout_at(deadline, payload())
@@ -86,22 +87,22 @@ struct SubagentContext {
     additional_context: String,
 }
 
-/// The project rules a starting subagent gets, and those it then holds in
-/// full.
+/// The project knowledge a starting subagent gets, and the rules it then
+/// holds in full.
 #[derive(Default)]
 pub struct Rules {
-    /// What the hook prints: empty when there are none or a forked Codex
-    /// sub-agent already carries them.
+    /// What the hook prints: empty when there is none or a forked Codex
+    /// sub-agent already carries it.
     pub text: String,
     /// The ids, as printed, of the rules the subagent holds in full, printed
     /// now or carried from its parent's session start.
     pub whole: Vec<String>,
 }
 
-/// The project rules a subagent starting with `payload` gets, within
-/// `client`'s room for them: the rules part session start would print, and
-/// its line counting the rules left out. `None` when the store does not
-/// answer.
+/// What a subagent starting with `payload` gets, within `client`'s room:
+/// the rules part session start would print, with its line counting the
+/// rules left out, then the most-used part. `None` when the store does
+/// not answer.
 pub async fn subagent_rules(
     client: HookClient,
     context_limit: Option<usize>,
@@ -119,10 +120,12 @@ pub async fn subagent_rules(
         .await
         .ok()?;
     let part = memory::rules_part(&text);
-    if part.is_empty() {
+    let most = memory::most_used_part(&text);
+    if part.is_empty() && most.is_empty() {
         return Some(Rules::default());
     }
-    let headings = memory::rules_headings(part);
+    let mut headings = memory::rules_headings(part);
+    headings.extend(most.lines().next());
     if client == HookClient::Codex
         && let Some(transcript) = payload.and_then(transcript_path)
         && carried(&transcript, &headings)
@@ -134,10 +137,15 @@ pub async fn subagent_rules(
     }
     let (limit, unit) = hook_limit(Some(client), context_limit);
     let overflow = super::overflow_line(&memory::rules_left_out(part));
-    let text = super::capped(format!("{part}{overflow}"), limit, unit, super::NOTICE_CUT);
+    let rules = format!("{part}{overflow}");
+    let printed: Vec<&str> = [rules.as_str(), most]
+        .into_iter()
+        .filter(|text| !text.is_empty())
+        .collect();
+    let text = super::capped(printed.join("\n"), limit, unit, super::NOTICE_CUT);
     // A rule is one line, and the cap keeps whole lines: those still
-    // printed are the rules the subagent holds in full.
-    let whole = owned(memory::rules_in_full(&text));
+    // printed in the rules part are the rules the subagent holds in full.
+    let whole = owned(memory::rules_in_full(memory::rules_part(&text)));
     Some(Rules { text, whole })
 }
 

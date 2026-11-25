@@ -222,3 +222,127 @@ pub(super) fn used(
     }
     Ok(found)
 }
+
+/// Least share of a project's kept sessions that used a memory for it to be
+/// printed as most-used knowledge, as #125 set it: the benchmark's
+/// essentials are needed by 0.7 of tasks; at a window of 40 and 10,000
+/// memories, 0.25 and 0.5 print all of them and 0.75 prints 0.54, and 0.25
+/// also prints memories used less often, leaving the index less room.
+const ESSENTIAL_SHARE: f64 = 0.5;
+/// Most memories the part prints (#125): 2, 5 and 15 print 0.44, 0.92 and
+/// 1.00 of the essentials at 10,000 memories, and 15 costs the index 0.01
+/// of needs listed.
+const ESSENTIALS_MAX: usize = 15;
+/// A memory this short is printed whole; a longer one as its title and one
+/// passage (#125, where 150, 300 and 600 measured alike).
+const ESSENTIAL_WHOLE_CHARS: usize = 300;
+/// The part's first line.
+pub(super) const MOST_USED_HEADER: &str =
+    "Most used in this project's recent sessions (read one for the rest before applying it):";
+/// Types read as a wish about how to work: an observation of one is about
+/// the user, so the part never prints it (push.rs `reads_as_wish`).
+const WISH_TYPES: [&str; 5] = ["preference", "constraint", "value", "behavior", "pattern"];
+
+/// Whether `m` may be printed as most-used knowledge: the user's decisions
+/// and facts and agents' notes, never a rule, an inference, or an
+/// observation about the user.
+fn printable(m: &super::Memory) -> bool {
+    !super::read::standing_rule(m)
+        && match m.source.as_str() {
+            "explicit" => !matches!(m.memory_type.as_str(), "behavior" | "pattern"),
+            "observed" => !WISH_TYPES.contains(&m.memory_type.as_str()),
+            _ => false,
+        }
+}
+
+/// Who `m` comes from, as #117's pushes say it (push.rs `label`).
+fn label(m: &super::Memory) -> String {
+    if m.source == "explicit" {
+        return format!("The user's {}", m.memory_type);
+    }
+    match m.confirmations.max(1) {
+        1 => format!(
+            "An agent's note from an earlier session ({})",
+            m.memory_type
+        ),
+        n => format!(
+            "An agent's note from {n} earlier sessions ({})",
+            m.memory_type
+        ),
+    }
+}
+
+/// `m` as the part prints it: whole up to [`ESSENTIAL_WHOLE_CHARS`], else
+/// its title and its first passage, marked when that is part of its text.
+fn printed(m: &super::Memory) -> String {
+    let short = &m.id.to_string()[..super::read::SHORT_ID];
+    let text = super::clean(&m.content, usize::MAX);
+    if text.chars().count() <= ESSENTIAL_WHOLE_CHARS {
+        return format!("- {short} {}: {text}", label(m));
+    }
+    let passage = super::index::passages::split(&m.content)
+        .into_iter()
+        .next()
+        .map(|place| super::clean(&m.content[place], usize::MAX))
+        .unwrap_or_default();
+    format!("- {short} {}: {} — {passage} …", label(m), m.title)
+}
+
+/// The project's most-used knowledge within `room` in `unit`: the memories
+/// `filter` covers that are used in at least [`ESSENTIAL_SHARE`] of its
+/// projects' kept sessions, the [`ESSENTIALS_MAX`] most used first, as
+/// many as fit. Empty without projects, without use, or with none that
+/// qualifies.
+pub(super) fn most_used(
+    conn: &rusqlite::Connection,
+    filter: &super::selection::Filter,
+    room: usize,
+    unit: super::FitUnit,
+) -> Result<String> {
+    if filter.projects.is_empty() {
+        return Ok(String::new());
+    }
+    let sessions: i64 = conn.query_row(
+        "SELECT count(DISTINCT origin) FROM memory_use WHERE project IN (SELECT value FROM json_each(?1))",
+        [serde_json::to_string(&filter.projects)?],
+        |r| r.get(0),
+    )?;
+    if sessions == 0 {
+        return Ok(String::new());
+    }
+    let use_of = used(conn, &filter.projects)?;
+    let share = |m: &super::Memory| {
+        let used = use_of.get(&m.id).map_or(0, |used| used.sessions);
+        // Both counts are at most a few hundred sessions: exact as floats.
+        #[allow(clippy::cast_precision_loss, reason = "counts of sessions are small")]
+        let share = used as f64 / sessions as f64;
+        share
+    };
+    let mut chosen: Vec<super::Memory> = super::selection::candidates(conn, filter)?
+        .into_iter()
+        .filter(|m| printable(m) && share(m) >= ESSENTIAL_SHARE)
+        .collect();
+    chosen.sort_by(|a, b| {
+        use_of
+            .get(&b.id)
+            .cmp(&use_of.get(&a.id))
+            .then_with(|| super::read::group_order(a, b))
+    });
+    chosen.truncate(ESSENTIALS_MAX);
+    let mut lines = vec![MOST_USED_HEADER.to_owned()];
+    let mut used_room = unit.len(MOST_USED_HEADER) + 1;
+    for m in &chosen {
+        let line = printed(m);
+        let size = unit.len(&line) + 1;
+        if used_room + size > room {
+            break;
+        }
+        used_room += size;
+        lines.push(line);
+    }
+    Ok(if lines.len() == 1 {
+        String::new()
+    } else {
+        lines.join("\n")
+    })
+}

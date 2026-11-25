@@ -88,6 +88,11 @@ pub struct Index {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(skip)]
     pub fit_rules_room: Option<usize>,
+    /// Used by user-memory's own session hook with fit_rules_room; leave unset. The part of fit_room, in fit_unit, for the project's most-used knowledge (#123), printed after the project rules: the memories its recent sessions used most, whole when short. When the part prints and fit_room is short, it takes its room out of fit_rules_room, so the rules give up nothing to a part with nothing to print. An older server ignores it and prints no such part.
+    #[arg(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    pub fit_most_used_room: Option<usize>,
 }
 
 /// What a client counts its hook text in, so the session start's index fits
@@ -158,6 +163,11 @@ const TEST_NO_POSITIONS: &str = "USER_MEMORY_TEST_NO_POSITIONS";
 /// ignoring `fit_rules_room`, for tests of the hooks against such a server.
 #[cfg(debug_assertions)]
 const TEST_NO_RULES_PART: &str = "USER_MEMORY_TEST_NO_RULES_PART";
+/// Names, in debug builds only, the variable that has the store answer an
+/// index request as a server from before the most-used part did, ignoring
+/// `fit_most_used_room`, for tests of the hooks against such a server.
+#[cfg(debug_assertions)]
+const TEST_NO_MOST_USED_PART: &str = "USER_MEMORY_TEST_NO_MOST_USED_PART";
 
 /// The index of the memories `input.selection` covers: by default every
 /// active global memory and those of the requested projects.
@@ -192,18 +202,26 @@ pub fn index(db: &Path, input: &Index) -> Result<String> {
             None => super::stamps::stamps(&conn, &filter),
         };
     }
-    // A debug build told so answers as a server from before the rules part.
+    // A debug build told so answers as a server from before the rules
+    // part, or from before the most-used part.
     #[cfg(debug_assertions)]
     let older;
     #[cfg(debug_assertions)]
-    let input = if std::env::var_os(TEST_NO_RULES_PART).is_some() {
-        older = Index {
-            fit_rules_room: None,
-            ..input.clone()
-        };
-        &older
-    } else {
-        input
+    let input = {
+        let no_rules = std::env::var_os(TEST_NO_RULES_PART).is_some();
+        let no_most_used = std::env::var_os(TEST_NO_MOST_USED_PART).is_some();
+        if no_rules || no_most_used {
+            older = Index {
+                fit_rules_room: input.fit_rules_room.filter(|_| !no_rules),
+                fit_most_used_room: input
+                    .fit_most_used_room
+                    .filter(|_| !no_rules && !no_most_used),
+                ..input.clone()
+            };
+            &older
+        } else {
+            input
+        }
     };
     match input.fit_room {
         Some(room) => fitted(&conn, input, &selection, &filter, room),
@@ -228,14 +246,38 @@ fn fitted(
     let Some(rules_room) = input.fit_rules_room else {
         return fitted_index(conn, input, selection, filter, room);
     };
+    // The most-used knowledge follows the rules, in its own room (#123).
+    let most_room = input.fit_most_used_room.unwrap_or(0);
+    let most = if most_room > 0 {
+        super::usage::most_used(conn, filter, most_room, unit)?
+    } else {
+        String::new()
+    };
+    // A room no larger than the rules' and the most-used part's asks for
+    // them alone, as the subagent hook does: it shows no index, so none is
+    // built. A rules room of 0, which session start gives when its lines
+    // take the whole room, still asks for the index, shortened to its
+    // counts.
+    let alone = rules_room > 0 && room <= rules_room + most_room;
+    // Beside the index, a most-used part that prints takes what the index's
+    // floor leaves out of the rules' room, which is theirs when there is no
+    // such part. The hook gives the part a room that, when short, is only
+    // its floor, so the rules give up at most that.
+    let rules_room = if alone || most.is_empty() {
+        rules_room
+    } else {
+        rules_room.min(room.saturating_sub(INDEX_FLOOR + unit.len(&most) + 1))
+    };
     let rules = project_rules(conn, selection, filter, rules_room.min(room), unit)?;
-    // A room no larger than the rules' asks for them alone, as the subagent
-    // hook does: it shows no index, so none is built. A rules room of 0, which
-    // session start gives when its lines take the whole room, still asks
-    // for the index, shortened to its counts.
-    if rules_room > 0 && room <= rules_room {
-        return Ok(rules);
+    let before: String = [rules.as_str(), most.as_str()]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if alone {
+        return Ok(before);
     }
+    let rules = before;
     let left = if rules.is_empty() {
         room
     } else {
@@ -852,11 +894,23 @@ pub fn rules_part(text: &str) -> &str {
     if !text.starts_with(PROJECT_RULES) {
         return "";
     }
-    match text.find(HEADER[0]) {
-        Some(at) => &text[..at],
-        None => text,
-    }
-    .trim_end_matches('\n')
+    let end = [HEADER[0], super::usage::MOST_USED_HEADER]
+        .iter()
+        .filter_map(|next| text.find(next))
+        .min()
+        .unwrap_or(text.len());
+    text[..end].trim_end_matches('\n')
+}
+
+/// The most-used part of the session hook's fitted text (#123): from its
+/// heading to the index, or empty when the text has none.
+pub fn most_used_part(text: &str) -> &str {
+    let Some(start) = text.find(super::usage::MOST_USED_HEADER) else {
+        return "";
+    };
+    let rest = &text[start..];
+    let end = rest.find(HEADER[0]).unwrap_or(rest.len());
+    rest[..end].trim_end_matches('\n')
 }
 
 /// The ids, as [`full_rule`] prints them, of the rules a rules part shows

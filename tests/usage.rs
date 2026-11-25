@@ -4,15 +4,16 @@
 )]
 
 //! A session's use of memories (#123), through the real binary: what
-//! `POST /use` writes to a memory server's store, what it refuses, and how
-//! the rows are merged, pruned and forgotten.
+//! `POST /use` writes to a memory server's store, what it refuses, how the
+//! rows are merged, pruned and forgotten, and what the hooks show from
+//! them.
 
 #[path = "support/sandbox.rs"]
 mod sandbox;
 use sandbox::Sandboxed;
 #[path = "support/time.rs"]
 mod time;
-use time::STUCK;
+use time::{HOOK_ROOM, STUCK};
 
 use rusqlite::Connection;
 use serde_json::{Value, json};
@@ -20,7 +21,7 @@ use std::{
     fs,
     io::{BufRead, BufReader, Read, Write},
     net::TcpStream,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
 };
 use tempfile::{TempDir, tempdir};
@@ -119,6 +120,146 @@ impl Host {
             .unwrap();
         assert!(out.status.success(), "{args:?}: {out:?}");
         String::from_utf8(out.stdout).unwrap()
+    }
+
+    /// A memory of `project` recorded with `args` after its title and
+    /// content: its short id.
+    fn noted(&self, project: &str, title: &str, content: &str, args: &[&str]) -> String {
+        let mut all = vec![
+            "record",
+            "--category",
+            "build",
+            "--scope",
+            "project",
+            "--project",
+            project,
+            "--title",
+            title,
+            "--content",
+            content,
+        ];
+        all.extend_from_slice(args);
+        let reply = self.cli(&all);
+        let id = reply["id"].as_str();
+        id.unwrap_or_else(|| panic!("{title}: {reply}"))[..8].to_owned()
+    }
+
+    /// A git repository in the server's folder whose remote is `remote`.
+    fn repository(&self, name: &str, remote: &str) -> PathBuf {
+        let repo = self.root.path().join(name);
+        fs::create_dir(&repo).unwrap();
+        for args in [&["init", "-q"][..], &["remote", "add", "origin", remote]] {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", self.git_config())
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+        repo
+    }
+
+    /// An empty git config, so the user's own never reaches a test.
+    fn git_config(&self) -> PathBuf {
+        let file = self.root.path().join(".gitconfig-empty");
+        if !file.exists() {
+            fs::write(&file, "").unwrap();
+        }
+        file
+    }
+
+    /// The text the `hook` (session-start or subagent-start) of `client`
+    /// gives the agent for `payload` in `folder`, over the server's store,
+    /// with the variables `vars`; "" when it prints nothing.
+    fn hook(
+        &self,
+        hook: &str,
+        client: &str,
+        folder: &Path,
+        vars: &[(&str, &str)],
+        payload: &Value,
+    ) -> String {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_user-memory"))
+            .args([hook, "--client", client])
+            .current_dir(folder)
+            .sandboxed(self.root.path())
+            .env("USER_MEMORY_DB", self.db())
+            .env("XDG_STATE_HOME", self.root.path().join("state"))
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", self.git_config())
+            .env("GIT_CEILING_DIRECTORIES", self.root.path())
+            .env_remove("USER_MEMORY_URL")
+            .env_remove("USER_MEMORY_TOKEN_FILE")
+            .env(HOOK_ROOM.0, HOOK_ROOM.1)
+            .envs(vars.iter().copied())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload.to_string().as_bytes())
+            .unwrap();
+        let out = time::finish(child, "the hook");
+        assert!(out.status.success(), "{out:?}");
+        let out = String::from_utf8(out.stdout).unwrap();
+        if !out.starts_with('{') {
+            return out;
+        }
+        let out: Value = serde_json::from_str(&out).unwrap();
+        out["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    /// What Claude Code's session start shows in `folder`, with `vars`.
+    fn started(&self, folder: &Path, vars: &[(&str, &str)]) -> String {
+        let payload = json!({"session_id":"s","hook_event_name":"SessionStart","source":"startup"});
+        self.hook("session-start", "claude", folder, vars, &payload)
+    }
+
+    /// What `client`'s subagent hook gives a subagent starting in `folder`,
+    /// with `vars` and the payload's `transcript`.
+    fn subagent(
+        &self,
+        client: &str,
+        folder: &Path,
+        vars: &[(&str, &str)],
+        transcript: Option<&Path>,
+    ) -> String {
+        let mut payload = json!({"session_id":"s","agent_id":"a1","hook_event_name":"SubagentStart","cwd":folder});
+        if let Some(path) = transcript {
+            payload["transcript_path"] = json!(path);
+        }
+        self.hook("subagent-start", client, folder, vars, &payload)
+    }
+
+    /// Each of `sessions` used each of `memories` (short ids) for `project`:
+    /// read when `read`, else shown.
+    fn sessions_used(&self, project: &str, sessions: &[&str], memories: &[&str], read: bool) {
+        for session in sessions {
+            let uses: Vec<Value> = memories
+                .iter()
+                .map(|id| used(&self.full(id), project, read, false, !read))
+                .collect();
+            let body = json!({"origin": format!("claude:session/{session}"), "uses": uses});
+            let (status, reply) = self.post(SHARED, &body.to_string());
+            assert_eq!(status, 200, "{reply}");
+        }
+    }
+
+    /// The full id of the memory whose short id is `id`.
+    fn full(&self, id: &str) -> String {
+        self.cli(&["read", id])["memories"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
     }
 
     /// A memory recorded in `project`, or global without one; its id.
@@ -491,4 +632,317 @@ fn the_index_lists_what_the_project_s_sessions_used_first() {
 /// A use row of the tests' project, read or shown.
 fn used_row(memory: &str, read: bool, shown: bool) -> Value {
     used(memory, PROJECT, read, false, shown)
+}
+
+/// The most-used part's first line.
+const MOST_USED: &str =
+    "Most used in this project's recent sessions (read one for the rest before applying it):";
+/// Opens the tests' project's rules.
+const RULES_OF_PROJECT: &str =
+    "Project rules of github.com/example/app, strongest first; the user stated them, follow them:";
+/// Opens the index after the parts before it.
+const INDEX_HEADER: &str = "USER MEMORY INDEX";
+/// The room the most-used part takes at most, as session start gives it.
+const MOST_USED_CHARS: usize = 3_000;
+/// Hides the most-used part, as a server from before it (debug builds).
+const OLDER_SERVER: (&str, &str) = ("USER_MEMORY_TEST_NO_MOST_USED_PART", "1");
+
+/// The most-used part of a hook's text, from its first line to the index:
+/// its lines, or none.
+fn most_used(text: &str) -> Vec<&str> {
+    let mut lines = text.lines().skip_while(|line| *line != MOST_USED);
+    if lines.next().is_none() {
+        return Vec::new();
+    }
+    lines.take_while(|line| line.starts_with("- ")).collect()
+}
+
+/// The short ids of a most-used part's lines.
+fn ids<'a>(part: &[&'a str]) -> Vec<&'a str> {
+    part.iter()
+        .map(|line| line.split_whitespace().nth(1).unwrap())
+        .collect()
+}
+
+/// Distinct one-word titles, which the similarity check never holds alike.
+const WORDS: [&str; 20] = [
+    "Alpaca", "Bramble", "Cobalt", "Dune", "Ember", "Fjord", "Garnet", "Harbor", "Indigo",
+    "Juniper", "Kestrel", "Lantern", "Mosaic", "Nebula", "Orchid", "Pylon", "Quartz", "Rivet",
+    "Saffron", "Tundra",
+];
+
+/// The sessions s1 to s`n`.
+fn sessions(n: usize) -> Vec<String> {
+    (1..=n).map(|i| format!("s{i}")).collect()
+}
+
+// Session start shows, after the project rules and before the index, what
+// at least half the project's recent sessions used, the most used first:
+// the user's facts and decisions and agents' notes, labelled as pushes
+// label them, whole when short and as title and first passage when long;
+// never a rule, an inference, an observation about the user, or what
+// fewer sessions used. A project with no use, another project, or a
+// plain index call shows no part.
+#[test]
+fn session_start_shows_what_most_of_the_project_s_sessions_used() {
+    let host = Host::start(&[]);
+    let app = host.repository("app", "git@github.com:example/app.git");
+    let site = host.repository("site", "git@github.com:example/site.git");
+    let explicit = |title: &str, kind: &str| host.noted(PROJECT, title, title, &["--type", kind]);
+    let observed = |title: &str, kind: &str| {
+        host.noted(
+            PROJECT,
+            title,
+            title,
+            &[
+                "--type",
+                kind,
+                "--source",
+                "observed",
+                "--evidence",
+                "The user ran it so in the session",
+            ],
+        )
+    };
+    let often = explicit("Integration tests need the mock server", "fact");
+    let half = explicit("The cache stays in SQLite", "decision");
+    let once = explicit("The docs build with mdBook", "fact");
+    let first = "The release script signs every archive with the project's key, then uploads them in the order the manifest lists, so a mirror that syncs halfway never serves an unsigned file. ".repeat(2);
+    let long = host.noted(
+        PROJECT,
+        "Releases are signed before upload",
+        &format!("{}\n\nA second paragraph says how the key is rotated and who holds the spare copy, which a session rarely needs. It runs long on purpose.", first.trim_end()),
+        &["--type", "fact"],
+    );
+    let note = observed("The fixtures regenerate with just fixtures", "fact");
+    let wish = observed("The user reruns failing tests alone first", "preference");
+    let habit = explicit("The user reviews diffs before committing", "behavior");
+    let rule = explicit("Run the linter before every commit", "preference");
+    let inferred = host.noted(
+        PROJECT,
+        "Tests depend on generated fixtures",
+        "Tests depend on generated fixtures",
+        &[
+            "--source",
+            "inferred",
+            "--evidence-id",
+            &host.full(&often),
+            "--evidence-id",
+            &host.full(&note),
+            "--reason",
+            "Both say the tests need generated inputs",
+        ],
+    );
+    assert!(most_used(&host.started(&app, &[])).is_empty(), "no use yet");
+    let all = sessions(4);
+    let all: Vec<&str> = all.iter().map(String::as_str).collect();
+    host.sessions_used(
+        PROJECT,
+        &all,
+        &[&often, &habit, &rule, &inferred, &wish],
+        true,
+    );
+    host.sessions_used(PROJECT, &all, &[&note], false);
+    host.sessions_used(PROJECT, &all[..3], &[&long], true);
+    host.sessions_used(PROJECT, &all[..2], &[&half], true);
+    host.sessions_used(PROJECT, &all[..1], &[&once], true);
+    let text = host.started(&app, &[]);
+    let part = most_used(&text);
+    assert_eq!(ids(&part), [&often, &note, &long, &half], "{text}");
+    assert_eq!(
+        part[0],
+        format!("- {often} The user's fact: Integration tests need the mock server")
+    );
+    assert_eq!(
+        part[1],
+        format!(
+            "- {note} An agent's note from an earlier session (fact): The fixtures regenerate with just fixtures"
+        )
+    );
+    assert_eq!(
+        part[2],
+        format!(
+            "- {long} The user's fact: Releases are signed before upload — {} …",
+            first.trim_end()
+        )
+    );
+    assert_eq!(
+        part[3],
+        format!("- {half} The user's decision: The cache stays in SQLite")
+    );
+    let at = |line: &str| text.find(line).unwrap_or_else(|| panic!("{line}: {text}"));
+    assert!(at(RULES_OF_PROJECT) < at(MOST_USED), "{text}");
+    assert!(at(MOST_USED) < at(INDEX_HEADER), "{text}");
+    assert!(text[at(RULES_OF_PROJECT)..at(MOST_USED)].contains(&rule));
+    assert!(
+        most_used(&host.started(&site, &[])).is_empty(),
+        "another project"
+    );
+    // Only the hooks ask for the part: a plain index call is as before.
+    for args in [&["index", "--project", PROJECT][..], &["index"]] {
+        let index = host.text(args);
+        assert!(!index.contains(MOST_USED), "{args:?}: {index}");
+    }
+}
+
+// The part prints at most fifteen memories, and no more than its room.
+#[test]
+fn the_most_used_part_keeps_to_fifteen_memories_and_its_room() {
+    let host = Host::start(&[]);
+    let app = host.repository("app", "git@github.com:example/app.git");
+    let site = host.repository("site", "git@github.com:example/site.git");
+    let few: Vec<String> = WORDS
+        .iter()
+        .map(|word| host.noted(PROJECT, word, word, &[]))
+        .collect();
+    assert_eq!(few.len(), 20);
+    let few: Vec<&str> = few.iter().map(String::as_str).collect();
+    host.sessions_used(PROJECT, &["s1", "s2"], &few, true);
+    assert_eq!(most_used(&host.started(&app, &[])).len(), 15);
+    let wide = "github.com/example/site";
+    let many: Vec<String> = WORDS[..15]
+        .iter()
+        .map(|word| {
+            // Whole, as it is no longer than 300 characters.
+            let content = format!("{word} ").repeat(32);
+            assert!(content.len() <= 300, "{}", content.len());
+            host.noted(wide, word, content.trim_end(), &[])
+        })
+        .collect();
+    let many: Vec<&str> = many.iter().map(String::as_str).collect();
+    host.sessions_used(wide, &["s1", "s2"], &many, true);
+    let text = host.started(&site, &[]);
+    let part = most_used(&text);
+    let printed = [MOST_USED]
+        .iter()
+        .chain(&part)
+        .map(|line| line.chars().count() + 1)
+        .sum::<usize>();
+    assert!(!part.is_empty() && part.len() < 15, "{text}");
+    assert!(printed <= MOST_USED_CHARS, "{printed}: {text}");
+}
+
+// A subagent gets the most-used part after the project rules, as session
+// start shows them, and the part alone in a project with no rules; a
+// server from before the part shows none, and a subagent then gets the
+// rules alone, or nothing. A forked Codex sub-agent is skipped only when
+// its transcript holds both headings.
+#[test]
+fn a_subagent_gets_the_most_used_part_after_the_rules() {
+    let host = Host::start(&[]);
+    let app = host.repository("app", "git@github.com:example/app.git");
+    let site = host.repository("site", "git@github.com:example/site.git");
+    let rule = host.noted(
+        PROJECT,
+        "Run the linter before every commit",
+        "Run the linter before every commit",
+        &["--type", "preference"],
+    );
+    let fact = host.noted(
+        PROJECT,
+        "Integration tests need the mock server",
+        "Integration tests need the mock server",
+        &[],
+    );
+    let site_fact = host.noted(
+        "github.com/example/site",
+        "Pages build with Zola",
+        "Pages build with Zola",
+        &[],
+    );
+    host.sessions_used(PROJECT, &["s1"], &[&fact, &rule], true);
+    host.sessions_used("github.com/example/site", &["s1"], &[&site_fact], true);
+    let start = host.started(&app, &[]);
+    let shown =
+        start[start.find(RULES_OF_PROJECT).unwrap()..start.find(INDEX_HEADER).unwrap()].trim_end();
+    assert!(
+        shown.contains(MOST_USED) && shown.contains(&fact),
+        "{start}"
+    );
+    for client in ["claude", "codex"] {
+        assert_eq!(host.subagent(client, &app, &[], None), shown, "{client}");
+        let alone = host.subagent(client, &site, &[], None);
+        assert!(
+            alone.starts_with(MOST_USED) && alone.contains(&site_fact),
+            "{client}: {alone}"
+        );
+        let rules = host.subagent(client, &app, &[OLDER_SERVER], None);
+        assert!(
+            rules.starts_with(RULES_OF_PROJECT) && !rules.contains(MOST_USED),
+            "{client}: {rules}"
+        );
+        assert_eq!(
+            host.subagent(client, &site, &[OLDER_SERVER], None),
+            "",
+            "{client}"
+        );
+    }
+    assert!(!host.started(&app, &[OLDER_SERVER]).contains(MOST_USED));
+    let transcript = |name: &str, text: &str| {
+        let line = json!({"timestamp":"2026-11-01T00:00:00.000Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":text}]}});
+        let path = host.root.path().join(name);
+        fs::write(&path, format!("{line}\n")).unwrap();
+        path
+    };
+    let both = transcript("both.jsonl", &start);
+    let rules_only = transcript(
+        "rules.jsonl",
+        &start.replace(MOST_USED, "Most used elsewhere"),
+    );
+    assert_eq!(host.subagent("codex", &app, &[], Some(&both)), "");
+    assert_eq!(host.subagent("codex", &app, &[], Some(&rules_only)), shown);
+}
+
+/// The least room the most-used part gets, out of the rules' when short.
+const MOST_USED_FLOOR: usize = 1_500;
+/// The most room the project rules take.
+const PROJECT_RULE_CHARS: usize = 6_000;
+
+/// The characters a hook's project rules take, line breaks included.
+fn rules_chars(text: &str) -> usize {
+    text.lines()
+        .skip_while(|line| *line != RULES_OF_PROJECT)
+        .take_while(|line| *line != MOST_USED && !line.starts_with(INDEX_HEADER))
+        .map(|line| line.chars().count() + 1)
+        .sum()
+}
+
+// Beside the index, a most-used part that prints takes at most its floor
+// out of the project rules' room; without one, the rules keep all of it.
+#[test]
+fn a_most_used_part_takes_at_most_its_floor_from_the_rules() {
+    let host = Host::start(&[]);
+    let app = host.repository("app", "git@github.com:example/app.git");
+    for i in 0..40 {
+        // Words of their own, so no rule is held similar to another.
+        let words: Vec<String> = (0..30).map(|j| format!("r{i}w{j}")).collect();
+        let title = format!("Rule r{i}t{}", i * 37);
+        host.noted(PROJECT, &title, &words.join(" "), &["--type", "preference"]);
+    }
+    let alone = host.started(&app, &[]);
+    let whole = rules_chars(&alone);
+    assert!(whole > PROJECT_RULE_CHARS - 300, "{whole}: {alone}");
+    let facts: Vec<String> = WORDS[..15]
+        .iter()
+        .map(|word| {
+            let content = format!("{word} ").repeat(32);
+            host.noted(PROJECT, word, content.trim_end(), &[])
+        })
+        .collect();
+    let facts: Vec<&str> = facts.iter().map(String::as_str).collect();
+    host.sessions_used(PROJECT, &["s1", "s2"], &facts, true);
+    let text = host.started(&app, &[]);
+    let part: usize = [MOST_USED]
+        .iter()
+        .chain(&most_used(&text))
+        .map(|line| line.chars().count() + 1)
+        .sum();
+    let rules = rules_chars(&text);
+    // One rule or one memory's line is the most either can fall short by.
+    assert!(part > MOST_USED_FLOOR - 320, "{part}: {text}");
+    assert!(
+        whole - rules < MOST_USED_FLOOR + 320,
+        "{whole} {rules}: {text}"
+    );
+    assert!(text.contains(INDEX_HEADER), "{text}");
 }
