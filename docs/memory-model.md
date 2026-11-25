@@ -26,6 +26,7 @@ plain words, see [how it works](how-it-works.md).
 | `origins`, `confirmations` | Conversations that stated it, such as `claude:session/<id>` (empty when unknown), and how many; `last_confirmed_at` records the latest restatement |
 | `status` | Confirmed, tentative, stale after supporting evidence changes, or superseded after the user replaced it; a reply gives a tentative memory a `note` saying not to apply it unasked |
 | `superseded_by` | ID of the replacing memory when superseded, otherwise null |
+| `until`, `ended` | The [condition](#conditions) it holds until, if any: a `date`, a `tag` with its `project`, or a `text`; and, once that has ended, when, how and on what evidence |
 | `id`, timestamps | Stable UUID v4 identity and creation/update time |
 
 `content` holds at most 4,000 characters and `context`, `reason` and
@@ -186,6 +187,41 @@ Details:
 
 CLI: `user-memory record … --confirms ID`, `--supersedes ID` (repeatable, add
 `--merge` to consolidate), `--distinct-from ID` (repeatable).
+
+## Conditions
+
+A memory may hold until a condition, one kind per memory: `record` and
+`update` take `until` (CLI `--until-date`, `--until-tag` with
+`--until-project`, `--until-text`). A memory out of force by its condition
+is shown nowhere a memory in force is: not in the index, the instruction
+files, a read or search by default, delivery or review's comparisons. Its
+history, export and `read` with status `ended` or `all` still show it.
+
+- **A date** is a day, `YYYY-MM-DD`, which ends at the end of that day in
+  the user's time zone, or an RFC 3339 time with its offset. It is stored
+  as a UTC instant, and the reply echoes it. The user's machine resolves a
+  bare day: the local server, or, for a remote store, the local connector
+  before forwarding; a hosted server refuses one. A date already passed is
+  refused. A date ends when it passes, with no write.
+- **A tag** ends when a checkout of the project has the tag: the literal
+  name, such as `v0.10.0`. A project memory's tag counts in its own
+  project; a global memory's names the project whose tags count.
+- **A text**, at most 120 characters, ends when an agent reports, with
+  evidence, that it happened: `update` with `ended`, alone, with what the
+  agent itself did and saw, never text from a file or page. A memory that
+  isn't a rule needs no `user_confirmed`; a rule's condition ends only with
+  the user's yes, since the store can't tell a permission from a
+  prohibition, and ending a prohibition loosens what an agent may do.
+
+An end is recorded once, with when, how, the evidence and the conversation,
+and never reopens on its own: a wrong end is visible, a wrong reopening
+would be silent. The user reopens a memory with `update`, giving a new
+`until` or clearing it (`until: null`, CLI `--no-until`). `forget` removes
+the end with the memory. The history keeps an `ended` and a `reopened`
+event, each with the condition. An end stales the patterns that cite the
+memory; for a date that passes, review's `ended_support` group lists them.
+A restatement (`confirms`) with another condition is refused: changing a
+condition is an `update`.
 
 ## History
 
