@@ -365,9 +365,15 @@ From user-memory, matching this step (read one for the rest before applying it):
   `- e0000005 matches this step; read it before applying it`.
 
 Each session's steps and what was pushed are kept beside its snapshot
-([storage](storage.md#the-state-folder)). Recall needs a local store for
-now: on a memory server's store the hooks record each step and push
-nothing.
+([storage](storage.md#the-state-folder)).
+
+On a memory server's store, the hooks match against the index its
+connector keeps on this machine, and only while it keeps it current: a
+connector runs, its last poll is recent, and the files are at or past the
+position that poll found, so a memory forgotten on the server is never
+matched. Every line then names the memory by its id alone, as above:
+whose word a memory is, and its text, are on the server, which a tool
+hook never asks.
 
 Limits of what the clients tell a hook:
 

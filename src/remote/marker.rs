@@ -309,7 +309,6 @@ impl Files {
 
     /// Whether a connector runs: the lock it shares is held. The exclusive
     /// lock tried without waiting, and let go at once when had.
-    #[cfg(test)]
     fn connected(&self) -> bool {
         let Ok(file) = fs::OpenOptions::new()
             .read(true)
@@ -346,13 +345,10 @@ pub fn position(url: &str) -> Option<Position> {
 /// else none, and the hook reads none of its files, since no one would
 /// take a removal on the server out of them. Says a hook ran, as
 /// [`position`] does.
-#[cfg(test)]
-#[expect(dead_code, reason = "the hooks of #117 part 4 call it, through `open`")]
 pub(crate) fn served(url: &str) -> Option<Position> {
     Files::of(url)?.served()
 }
 
-#[cfg(test)]
 impl Files {
     /// [`served`] for these files.
     fn served(&self) -> Option<Position> {
@@ -409,7 +405,6 @@ pub(crate) mod testing {
 /// learns of no removal there. A quiet connector polls once in
 /// [`QUIET_POLLS`] polls, so it never misses this many while it reaches
 /// the server.
-#[cfg(test)]
 const SERVED_AFTER_POLLS: u32 = STALE_AFTER_POLLS;
 
 /// Wakes this process's poller after a write the relay passed on.
