@@ -6,7 +6,7 @@ use super::{
     history,
     ids::{MemoryRef, full_id, resolve_all, uuids},
     project_key,
-    schema::{connect, get, write},
+    schema::{LIVE, connect, get, write},
     selection::refuse_local_paths,
     similar::{self, Candidate, Draft, Pool, Signal},
     until::{self, Until, Zone},
@@ -257,7 +257,7 @@ const RENAME_PROJECT: &str =
 const SHORTEN_OR_SPLIT: &str = "shorten it or split the memory";
 /// Longest accepted origin reference; longer ones are refused, never truncated.
 const ORIGIN_LIMIT: usize = 240;
-const ACTIVE: &str = "status IN ('confirmed','tentative')";
+const ACTIVE: &str = LIVE;
 /// Superseded memories whose replacement no longer exists.
 const ORPHANED: &str = "status='superseded' AND NOT EXISTS (SELECT 1 FROM memories m WHERE m.id=memories.superseded_by)";
 
@@ -690,6 +690,19 @@ const CONFIRM_SOURCE: &str = "Only an explicit or observed record can confirm a 
 /// Why a `confirms` names a memory this record cannot confirm.
 const CONFIRM_TARGET: &str = "confirms must name an active explicit memory, or an observed memory when the record is observed, with the same scope and project; to make an observation the user's own statement, call update on it with user_confirmed";
 
+/// Why a `confirms` names a memory whose condition has ended: putting it in
+/// force again is the user's reopening, through update.
+const CONFIRM_ENDED: &str = "That memory's condition has ended; to put it in force again, update it with the user's yes, giving a new until or clearing it";
+
+/// Whether memory `id` is in force: in `live_memories`.
+fn is_live(conn: &Connection, id: Uuid) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM live_memories WHERE id=?1)",
+        [id.to_string()],
+        |r| r.get(0),
+    )?)
+}
+
 /// Records a memory said or seen again: adds this conversation to it
 /// instead of storing a copy. The user's restatement confirms an active
 /// explicit memory; an agent's observation confirms an observation, its
@@ -711,6 +724,9 @@ fn confirm(conn: &Connection, input: &Record, target: Uuid) -> Result<Value> {
     }) else {
         return refused(CONFIRM_TARGET);
     };
+    if !is_live(conn, target)? {
+        return refused(CONFIRM_ENDED);
+    }
     // A confirmation in the same second as the last changes nothing, and
     // still counts in the history.
     history::note(conn, Some("confirm"), Some(target), &input.origin)?;

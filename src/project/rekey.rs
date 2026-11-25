@@ -118,6 +118,12 @@ pub fn move_project(db: &Path, old: &str, new: &str) -> Result<Moved> {
                 params![old, new],
             )?;
         }
+        // A tag condition names the project whose tags count, which is the
+        // same project under its new key.
+        tx.execute(
+            "UPDATE memories SET until_project = ?2, updated_at = CURRENT_TIMESTAMP WHERE until_kind = 'tag' AND until_project = ?1",
+            params![old, new],
+        )?;
         // A conversation linked to both keys keeps one link, to the new one.
         let links = tx.execute(
             "UPDATE OR IGNORE conversation_projects SET project = ?2 WHERE project = ?1",
