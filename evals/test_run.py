@@ -9,6 +9,7 @@ import io
 import json
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import tempfile
@@ -144,23 +145,64 @@ class Cleanup(unittest.TestCase):
                 closed.append(self.name)
                 return ""
         home = Path(tempfile.mkdtemp())
-        sandbox = types.SimpleNamespace(codex_home=home, state=home / "state",
+        sandbox = types.SimpleNamespace(dir=home, codex_home=home, state=home / "state",
                                         workdir=lambda spec, projects: home)
         names = iter(["a", "b"])
         scenario = {"name": "s", "checks": [], "steps": [
             {"session": "a", "prompt": "first"},
             {"session": "b", "prompt": "fails"},
             {"session": "a", "prompt": "never"}]}
-        originals = run.prepare, run.open_session
+        originals = run.prepare, run.open_session, run.CLAUDE_TMP_BASE
         run.prepare = lambda *a: sandbox
         run.open_session = lambda *a: Session(next(names))
+        run.CLAUDE_TMP_BASE = home / "tmp"
         try:
             with self.assertRaises(RuntimeError):
                 run.trial(scenario, "claude", home, home, {},
                           types.SimpleNamespace(check=lambda *a: None))
         finally:
-            run.prepare, run.open_session = originals
+            run.prepare, run.open_session, run.CLAUDE_TMP_BASE = originals
         self.assertEqual(sorted(closed), ["a", "b"])
+
+    def test_a_claude_trial_clears_its_temporary_folders_and_names_another_trial_s(self):
+        top = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, top)
+        trials, base = top / "trials", top / "tmp"
+        home = trials / "1" / "trial-claude-x"
+        home.mkdir(parents=True)
+        own = base / f"{run.path_slug(home)}-work" / "s1" / "tasks"
+        other = base / run.path_slug(trials / "1" / "trial-claude-y" / "work")
+        for path in (own, other):
+            path.mkdir(parents=True)
+        sandbox = types.SimpleNamespace(dir=home, codex_home=home, state=home / "state",
+                                        memories=lambda: [], setup_output="",
+                                        workdir=lambda spec, projects: home)
+
+        class Failing:
+            def turn(self, *a):
+                raise RuntimeError("turn failed")
+
+            def close(self):
+                return ""
+        originals = run.prepare, run.open_session, run.CLAUDE_TMP_BASE, run.TRIALS
+        run.prepare = lambda *a: sandbox
+        run.open_session = lambda *a: Failing()
+        run.CLAUDE_TMP_BASE, run.TRIALS = base, trials
+        guard = types.SimpleNamespace(check=lambda *a: None)
+        try:
+            result = run.trial({"name": "s", "checks": [], "steps": []}, "claude", home, home, {}, guard)
+            self.assertEqual(result["errors"], [
+                f"harness: Claude Code's temporary folder still has {other}, named after a trial"])
+            other_codex = run.trial({"name": "s", "checks": [], "steps": []}, "codex", home, home, {}, guard)
+            self.assertEqual(other_codex["errors"], [], "Codex keeps nothing there")
+            own.mkdir(parents=True)
+            with self.assertRaises(RuntimeError):
+                run.trial({"name": "s", "checks": [], "steps": [{"session": "a", "prompt": "fails"}]}, "claude",
+                          home, home, {}, guard)
+        finally:
+            run.prepare, run.open_session, run.CLAUDE_TMP_BASE, run.TRIALS = originals
+        self.assertFalse(own.parent.parent.exists(), "cleared after a failed turn too")
+        self.assertTrue(other.is_dir())
 
 
 def bash_rule_matches(rule, command):
@@ -288,14 +330,15 @@ class ResumeAndCompact(unittest.TestCase):
         def open_session(client, sandbox, cwd, options, resume=None):
             opened.append((resume, options["resumes"], options["compacts"]))
             return Session(resume)
-        originals = run.prepare, run.open_session
+        originals = run.prepare, run.open_session, run.CLAUDE_TMP_BASE
         run.prepare = lambda *a: sandbox
         run.open_session = open_session
+        run.CLAUDE_TMP_BASE = home / "tmp"
         try:
             result = run.trial(scenario, "claude", home, home, {},
                                types.SimpleNamespace(check=lambda *a: None))
         finally:
-            run.prepare, run.open_session = originals
+            run.prepare, run.open_session, run.CLAUDE_TMP_BASE = originals
         self.assertEqual(opened, [(None, True, True), ("conv-1", True, True)])
         self.assertEqual(compacted, [None])
         self.assertEqual(closed, [None, "conv-1"])
@@ -1633,6 +1676,39 @@ class ReadOnlyTokenAskedToRecord(unittest.TestCase):
         self.assertEqual(self.failed([peeked]), ["commands_not"])
         untried = {**told, "tool_calls": []}
         self.assertEqual(self.failed([untried]), ["called"])
+
+
+class ClaudeTemporaryFolder(unittest.TestCase):
+    def test_a_trial_s_own_folders_go_and_any_other_trial_s_is_reported(self):
+        top = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, top)
+        trials, base = top / "trials", top / "tmp"
+        trial = trials / "20261125-000000" / "trial-claude-ab_cd"
+        (trial / "work").mkdir(parents=True)
+        own = run.path_slug(trial)
+        made = {
+            "own": base / own / "s1" / "tasks",
+            "own cwd": base / f"{own}-compiler" / "s2" / "tasks",
+            "another trial": base / run.path_slug(trials / "20261125-000000" / "trial-claude-zz") / "s3",
+            "a session of the user's": base / run.path_slug(top / "project") / "s4",
+            "a longer name": base / f"{own}x" / "s5",
+        }
+        for path in made.values():
+            path.mkdir(parents=True)
+        (made["own"] / "a.output").write_text("")
+        left = run.clear_claude_tmp(trial, base, trials)
+        self.assertFalse((base / own).exists())
+        self.assertFalse((base / f"{own}-compiler").exists())
+        for name in ("another trial", "a session of the user's", "a longer name"):
+            self.assertTrue(made[name].is_dir(), name)
+        self.assertEqual(left, sorted(str(base / p.relative_to(base).parts[0])
+                                      for p in (made["another trial"], made["a longer name"])))
+        self.assertEqual(run.clear_claude_tmp(trial, top / "none", trials), [])
+
+    def test_the_slug_is_claude_code_s(self):
+        # As Claude Code names a work folder's: the `_` of a mkdtemp name too.
+        self.assertEqual(run.path_slug(Path("/Users/u/Library/Caches/x-eval/trials/1/trial-claude-tqte_hbn/work")),
+                         "-Users-u-Library-Caches-x-eval-trials-1-trial-claude-tqte-hbn-work")
 
 
 if __name__ == "__main__":

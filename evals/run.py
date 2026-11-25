@@ -247,6 +247,37 @@ def trial_projects():
     return {p.name for p in REAL_CLAUDE_PROJECTS.iterdir() if slug in p.name}
 
 
+# Where Claude Code keeps each session's task output files, as
+# `<base>/<slug of the session's cwd>/<session id>/tasks/`: the user's
+# fixed temporary folder, whatever TMPDIR says (Claude Code 2.1.325,
+# measured), so a trial's files land outside its sandbox. Other Claude Code
+# sessions, the user's own among them, keep theirs there too.
+CLAUDE_TMP_BASE = Path(f"/tmp/claude-{os.getuid()}") if hasattr(os, "getuid") else None
+
+
+def path_slug(path):
+    """A path as Claude Code names a folder after it: every character but
+    a letter or digit as `-`."""
+    return re.sub(r"[^A-Za-z0-9]", "-", str(path))
+
+
+def clear_claude_tmp(trial_dir, base=None, trials=None):
+    """Removes the folders Claude Code made under `base` (CLAUDE_TMP_BASE)
+    for sessions whose cwd is in `trial_dir`, and no other; returns those
+    left there that name a path in `trials` (TRIALS), which no trial
+    should leave."""
+    base = CLAUDE_TMP_BASE if base is None else base
+    trials = TRIALS if trials is None else trials
+    if base is None or not base.is_dir():
+        return []
+    own = path_slug(Path(trial_dir).resolve())
+    for entry in base.iterdir():
+        if (entry.name == own or entry.name.startswith(own + "-")) and entry.is_dir() and not entry.is_symlink():
+            shutil.rmtree(entry)
+    named = path_slug(Path(trials).resolve()).strip("-")
+    return sorted(str(entry) for entry in base.iterdir() if named in entry.name)
+
+
 def fingerprint():
     state = {}
     # The Codex the trials run lives in the user's real ~/.codex; an update
@@ -2064,6 +2095,8 @@ def trial(scenario, client, base, source, projects, guard):
             closed[name] = sessions.pop(name).close()
         for server in getattr(sandbox, "servers", {}).values():
             server.stop()
+        # Even after a failed turn: the client's task files of this trial.
+        left = clear_claude_tmp(sandbox.dir) if client == "claude" else []
     memories = sandbox.memories()
     results = []
     for check in scenario["checks"]:
@@ -2098,7 +2131,8 @@ def trial(scenario, client, base, source, projects, guard):
             # of the agent's, so the trial is an error, not a scenario result.
             "errors": [f"step {r['step']}: {r['error']}" for r in records if r["error"]]
             + [f"step {r['step']}: harness: the .recall file records a push of {p['memory'][:8]} "
-               f"to {p['agent_id']} that no hook output shows" for r in records for p in unseen_pushes(r)],
+               f"to {p['agent_id']} that no hook output shows" for r in records for p in unseen_pushes(r)]
+            + [f"harness: Claude Code's temporary folder still has {path}, named after a trial" for path in left],
             "checks": results, "steps": records, "stderr": closed, "memories": memories,
             "setup": sandbox.setup_output}
 
@@ -2196,6 +2230,9 @@ def probe(client, base, source):
         finally:
             refused.close()
     failure = turn_failure(client, failed) or ""
+    left = clear_claude_tmp(sandbox.dir) if client == "claude" else []
+    if left:
+        error = "; ".join(filter(None, [error, f"Claude Code's temporary folder still has {', '.join(left)}"]))
     answered = [q for q in session.questions if q["answers"]]
     usage = claude_totals(events) if client == "claude" else codex_totals(events, CODEX_MODEL)
     return {
