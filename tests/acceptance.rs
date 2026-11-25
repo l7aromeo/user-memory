@@ -1200,6 +1200,46 @@ fn a_near_paraphrase_with_a_different_meaning_is_kept_with_distinct_from() {
     assert_eq!(s.search(&["tests", "--page-size", "20"]).len(), 2);
 }
 
+/// Most main-thread stack a command may take, in KiB. Windows gives the main
+/// thread 1 MiB and a debug build's frames differ between platforms, so a
+/// quarter of it stays spare. `the_command_line_parses_within_the_main_stack_budget`
+/// in src/main.rs holds the parse to the same budget on every platform.
+#[cfg(unix)]
+const MAIN_STACK_KIB: u32 = 768;
+
+/// Every command runs on a main thread the size Windows gives it, which is an
+/// eighth of what Linux and macOS give: in a debug build, clap's builders
+/// and the command's own frames each take hundreds of KiB.
+#[cfg(unix)]
+#[test]
+fn commands_run_on_a_main_thread_the_size_windows_gives() {
+    let s = Store::new();
+    for args in [
+        &["--version"][..],
+        &["record", "--category", "workflow", "--content", "Use tabs"],
+        &["index"],
+        &["search", "tabs"],
+    ] {
+        let out = Command::new("sh")
+            .arg("-c")
+            .arg(format!("ulimit -s {MAIN_STACK_KIB} && exec \"$0\" \"$@\""))
+            .arg(env!("CARGO_BIN_EXE_user-memory"))
+            .args(titled(args))
+            .sandboxed(s.root.path())
+            .env("USER_MEMORY_DB", &s.db)
+            .env_remove("USER_MEMORY_URL")
+            .env_remove("USER_MEMORY_TOKEN_FILE")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {:?} {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
 /// `args` with `--title` set to the content and `--scope` to global when a
 /// record gives none: most tests here are about other fields. A test about
 /// the title or scope passes its own.
