@@ -127,6 +127,7 @@ mod tests {
             &[
                 "category",
                 "cursor",
+                "fit_most_used_room",
                 "fit_room",
                 "fit_rules_room",
                 "fit_unit",
