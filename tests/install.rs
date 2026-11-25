@@ -16,6 +16,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
     sync::{Arc, Mutex},
+    time::Duration,
 };
 #[path = "support/fake.rs"]
 mod fake;
@@ -543,19 +544,38 @@ fn the_installer_refuses_missing_or_insecure_addresses_and_bad_downloads() {
     );
 }
 
+/// How long the installer may print nothing before [`on_terminal`] takes
+/// it for one waiting at a prompt nobody answers. The longest silence of a
+/// live installer in these tests is 2.6 s on macOS at a load of 4 to 6.
+/// At a load of 30 to 45 the same tests took about 35 times as long: one
+/// test took 4.2 s at a load of 4 to 6 and 135 to 144 s at that load. That
+/// would stretch the silence to about 90 s; 120 s leaves room above it and
+/// still ends a stuck prompt within two minutes.
+const TERMINAL_IDLE: Duration = Duration::from_secs(120);
+
 /// Runs `command` on a new pseudo-terminal, answering each prompt in turn
-/// (the prompt is marked with brackets in the returned screen). `None`
-/// without python3.
+/// (the prompt is marked with brackets in the returned screen), and ends it
+/// once it prints nothing for [`TERMINAL_IDLE`]. `None` without python3.
 fn on_terminal(command: &Command, answers: &[(&str, &str)]) -> Option<(i32, String)> {
+    on_terminal_idle(command, answers, TERMINAL_IDLE)
+}
+
+/// [`on_terminal`], ending the run once it prints nothing for `idle`.
+fn on_terminal_idle(
+    command: &Command,
+    answers: &[(&str, &str)],
+    idle: Duration,
+) -> Option<(i32, String)> {
     const DRIVER: &str = r#"
 import os, pty, select, signal, sys, time
-answers = [(a.encode(), b.encode()) for a, b in zip(sys.argv[1:-1:2], sys.argv[2:-1:2])]
+idle = float(sys.argv[1])
+answers = [(a.encode(), b.encode()) for a, b in zip(sys.argv[2:-1:2], sys.argv[3:-1:2])]
 argv = sys.argv[-1].split("\x1f")
 pid, fd = pty.fork()
 if pid == 0:
     os.execv(argv[0], argv)
-out, seen, deadline = b"", 0, time.time() + 120
-while time.time() < deadline:
+out, seen, deadline = b"", 0, time.monotonic() + idle
+while time.monotonic() < deadline:
     ready, _, _ = select.select([fd], [], [], 1)
     if not ready:
         continue
@@ -565,14 +585,15 @@ while time.time() < deadline:
         break
     if not data:
         break
+    deadline = time.monotonic() + idle
     out += data
     if seen < len(answers) and answers[seen][0] in out:
         out = out.replace(answers[seen][0], b"[" + answers[seen][0] + b"]", 1)
         os.write(fd, answers[seen][1] + b"\n")
         seen += 1
 else:
-    # A prompt nobody answers: end the run so the test fails with the
-    # screen instead of waiting forever.
+    # Nothing printed for `idle`: a prompt nobody answers. End the run so
+    # the test fails with the screen instead of waiting forever.
     os.kill(pid, signal.SIGKILL)
     out += b"\n[no answer for the prompt above]\n"
 _, status = os.waitpid(pid, 0)
@@ -587,6 +608,7 @@ sys.exit(os.waitstatus_to_exitcode(status))
     driver
         .arg("-c")
         .arg(DRIVER)
+        .arg(idle.as_secs_f64().to_string())
         .args(
             answers
                 .iter()
@@ -603,6 +625,40 @@ sys.exit(os.waitstatus_to_exitcode(status))
         out.status.code().unwrap_or(-1),
         String::from_utf8_lossy(&out.stdout).into_owned(),
     ))
+}
+
+/// A shell running `script` with the system's tools on its PATH.
+fn shell(script: &str) -> Command {
+    let mut command = Command::new("/bin/sh");
+    command.args(["-c", script]).env("PATH", "/usr/bin:/bin");
+    command
+}
+
+#[test]
+fn the_terminal_driver_waits_for_a_slow_printer_past_its_idle_limit() {
+    let printer = shell("i=0; while [ $i -lt 8 ]; do echo tick $i; sleep 1; i=$((i+1)); done");
+    let Some((status, screen)) = on_terminal_idle(&printer, &[], Duration::from_secs(4)) else {
+        eprintln!("python3 not found; the terminal driver is not exercised");
+        return;
+    };
+    assert_eq!(status, 0, "{screen}");
+    assert!(screen.contains("tick 7"), "{screen}");
+    assert!(!screen.contains("[no answer"), "{screen}");
+}
+
+#[test]
+fn the_terminal_driver_ends_a_prompt_nobody_answers() {
+    let asking = shell("printf 'Name? '; read name; echo \"got $name\"");
+    let Some((status, screen)) = on_terminal_idle(&asking, &[], Duration::from_secs(3)) else {
+        eprintln!("python3 not found; the terminal driver is not exercised");
+        return;
+    };
+    assert_ne!(status, 0, "{screen}");
+    assert!(
+        screen.ends_with("Name? \n[no answer for the prompt above]\n"),
+        "{screen:?}"
+    );
+    assert!(!screen.contains("got"), "{screen}");
 }
 
 #[test]
