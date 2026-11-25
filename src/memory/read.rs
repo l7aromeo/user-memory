@@ -11,7 +11,12 @@
 //! embedding endpoint configured it is fused with semantic similarity by reciprocal rank. A
 //! project memory's fused score counts [`PROJECT_BONUS`] more, so it wins an
 //! equal match but not a clearly stronger one; without a topic, project
-//! memories come first.
+//! memories come first. Equal keyword scores are ordered by whether their
+//! negations agree with the topic's ([`negation`]), then by recency; equal
+//! fused scores by the keyword order, which sees negation where similarity
+//! does not, then by recency.
+
+mod negation;
 
 pub(super) use super::ids::SHORT_ID;
 use super::{
@@ -55,6 +60,13 @@ const FUSION: f64 = 5.0;
 /// nomic-embed-text and embeddinggemma alike; 0.2 loses one of the ten on
 /// two of them, and 0.4 lowers fused MRR by 0.02 to 0.03.
 const PROJECT_BONUS: f64 = 0.3;
+
+/// How far down the keyword order ties are ordered by their negations
+/// ([`negation`]): the first two pages of a search. Each tied memory in
+/// reach is read in full, so a one-word topic tying thousands of memories
+/// on a large store reads at most this many; ties further down keep
+/// recency, and every page of a search sees the same order.
+const NEGATION_TIES: usize = 2 * SEARCH_PAGE;
 
 /// Memories a topic may match by meaning alone, on top of every keyword
 /// match: beyond the closest few, similarity rarely means relevance.
@@ -312,6 +324,7 @@ fn rank_with(
         matched,
         fused,
         by_keyword,
+        keyword_place,
         by_meaning,
         order,
         similar,
@@ -358,6 +371,20 @@ fn rank_with(
             .total_cmp(&scores[a])
             .then_with(|| covered.recency(b).cmp(&covered.recency(a)))
     });
+    order_negations(
+        conn,
+        topic,
+        &query,
+        scores,
+        &covered.ids,
+        by_keyword,
+        &mut stems,
+    )?;
+    keyword_place.clear();
+    keyword_place.resize(count, usize::MAX);
+    for (place, &i) in by_keyword.iter().enumerate() {
+        keyword_place[i] = place;
+    }
     add_ranking(by_keyword, fused);
     if let Some(config) = &semantic {
         match index::similarities(conn, config, topic, covered, similar) {
@@ -397,6 +424,7 @@ fn rank_with(
         score(b)
             .total_cmp(&score(a))
             .then_with(|| local(b).cmp(&local(a)))
+            .then_with(|| keyword_place[a].cmp(&keyword_place[b]))
             .then_with(|| covered.recency(b).cmp(&covered.recency(a)))
     });
     Ok(Ranked {
@@ -404,6 +432,47 @@ fn rank_with(
         passages: order.iter().map(|&i| scoring.best[i]).collect(),
         semantic: semantic_ranked,
     })
+}
+
+/// Reorders each run of equal scores within the first [`NEGATION_TIES`]
+/// places of `by_keyword`, recency-ordered, so a memory whose negations
+/// disagree with the topic's comes after one whose agree; the sort is
+/// stable, so recency still orders equal disagreements.
+fn order_negations(
+    conn: &Connection,
+    topic: &str,
+    query: &[String],
+    scores: &[f64],
+    ids: &[Uuid],
+    by_keyword: &mut [usize],
+    stems: &mut Stems,
+) -> Result<()> {
+    let reach = by_keyword.len().min(NEGATION_TIES);
+    let mut stance = None;
+    let mut start = 0;
+    while start < reach {
+        let score = scores[by_keyword[start]];
+        let end = start
+            + by_keyword[start..reach]
+                .iter()
+                .take_while(|&&i| scores[i].total_cmp(&score).is_eq())
+                .count();
+        if end - start > 1 {
+            let topic = stance.get_or_insert_with(|| negation::Stance::of([topic], stems));
+            let mut tied = Vec::with_capacity(end - start);
+            for &i in &by_keyword[start..end] {
+                let off = get(conn, ids[i])?
+                    .map_or(0, |m| negation::disagreements(&m, topic, query, stems));
+                tied.push((off, i));
+            }
+            tied.sort_by_key(|&(off, _)| off);
+            for (place, (_, i)) in by_keyword[start..end].iter_mut().zip(tied) {
+                *place = i;
+            }
+        }
+        start = end;
+    }
+    Ok(())
 }
 
 /// The arrays one search ranks with, kept for the next: see
@@ -418,6 +487,9 @@ struct Buffers {
     matched: Vec<bool>,
     fused: Vec<f64>,
     by_keyword: Vec<usize>,
+    /// Each candidate's place in `by_keyword`, `usize::MAX` for one the
+    /// topic's words do not match.
+    keyword_place: Vec<usize>,
     by_meaning: Vec<usize>,
     order: Vec<usize>,
     similar: Vec<Option<f32>>,
@@ -780,6 +852,39 @@ mod tests {
     }
 
     #[test]
+    fn negations_order_ties_only_within_the_first_two_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = connect(&dir.path().join("memories.sqlite3")).unwrap();
+        let insert = |title: &str| {
+            let id = Uuid::new_v4();
+            conn.execute(
+                "INSERT INTO memories (id,memory_type,category,title,content) VALUES (?1,'fact','tools',?2,?2)",
+                rusqlite::params![id.to_string(), title],
+            )
+            .unwrap();
+            id
+        };
+        // Every memory matches "release" in its title alike. The oldest and
+        // the newest negate it; recency alone puts the newest first and the
+        // oldest last.
+        let oldest = insert("Not release the build");
+        // The documented reach: two pages of a search.
+        let reach = 2 * SEARCH_PAGE;
+        for _ in 0..reach {
+            insert("Release the build");
+        }
+        let newest = insert("Not release the build");
+        let filter = Selection::default().filter().unwrap();
+        let ranked = rank(&conn, &filter, "release", 20).unwrap();
+        let place = |id| ranked.ids.iter().position(|&i| i == id).unwrap();
+        assert_eq!(ranked.ids.len(), reach + 2);
+        // Within reach, the negation moves the newest behind the plain ties.
+        assert_eq!(place(newest), reach - 1);
+        // Out of reach, the oldest keeps its place by recency.
+        assert_eq!(place(oldest), reach + 1);
+    }
+
+    #[test]
     fn a_search_reuses_the_buffers_of_the_one_before() {
         let dir = tempfile::tempdir().unwrap();
         let conn = connect(&dir.path().join("memories.sqlite3")).unwrap();
@@ -808,6 +913,7 @@ mod tests {
         buffers.matched.reserve(spare);
         buffers.fused.reserve(spare);
         buffers.by_keyword.reserve(spare);
+        buffers.keyword_place.reserve(spare);
         buffers.order.reserve(spare);
         let room = |b: &Buffers| {
             [
@@ -818,6 +924,7 @@ mod tests {
                 b.matched.capacity(),
                 b.fused.capacity(),
                 b.by_keyword.capacity(),
+                b.keyword_place.capacity(),
                 b.order.capacity(),
             ]
         };

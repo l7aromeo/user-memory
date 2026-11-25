@@ -1743,3 +1743,83 @@ fn a_word_counts_once_at_its_strongest_field() {
     ]);
     assert_eq!(s.contents(&[], &["deploy"])[0], "Ship on weekdays only");
 }
+
+/// Records the two near-duplicates of the negation tests, `first` then
+/// `second`, so recency alone would rank `second` first.
+fn tests_pair(s: &Store, first: [&str; 2], second: [&str; 2]) {
+    for [title, content] in [first, second] {
+        s.stored(&[
+            "--type",
+            "preference",
+            "--category",
+            "testing",
+            "--title",
+            title,
+            "--content",
+            content,
+        ]);
+    }
+}
+
+const PLAIN: [&str; 2] = [
+    "Run the fast tests before every commit",
+    "Run them before every commit.",
+];
+const NEGATED: [&str; 2] = [
+    "Run the slow tests in CI, not before every commit",
+    "Leave them to CI, not before every commit.",
+];
+
+#[test]
+fn an_equal_keyword_match_that_negates_the_topic_ranks_below_one_that_does_not() {
+    let s = Store::new();
+    tests_pair(&s, PLAIN, NEGATED);
+    let found = s.contents(&[], &["tests to run before a commit"]);
+    assert_eq!(found, [PLAIN[1], NEGATED[1]]);
+}
+
+#[test]
+fn a_topic_that_negates_ranks_the_equal_match_that_negates_too_first() {
+    let s = Store::new();
+    tests_pair(&s, NEGATED, PLAIN);
+    // "never", which neither memory holds, so their keyword scores tie.
+    let found = s.contents(&[], &["tests never to run before a commit"]);
+    assert_eq!(found, [NEGATED[1], PLAIN[1]]);
+}
+
+#[test]
+fn equal_fused_scores_follow_the_keyword_order() {
+    let s = Store::new();
+    let fake = Embedder::start(200);
+    let env = [("USER_MEMORY_EMBED_URL", fake.url.as_str())];
+    // Keyword search ranks the first above the second, which matches fewer
+    // words; similarity ranks the second first, whose concept the topic
+    // shares alone. Fused, they tie, and recency would pick the second.
+    let keyword_first = "Rust cli flags use long names, with dinner recipes";
+    let meaning_first = "Notes on the rust language and its compiler cli";
+    for content in [keyword_first, meaning_first] {
+        s.stored(&["--category", "programming", "--content", content]);
+    }
+    assert_eq!(
+        s.contents(&[], &["rust cli flags"]),
+        [keyword_first, meaning_first]
+    );
+    let fused = s.value(&env, &["search", "rust cli flags"]);
+    let fused: Vec<&str> = fused
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["content"].as_str().unwrap())
+        .collect();
+    assert_eq!(fused, [keyword_first, meaning_first]);
+}
+
+#[test]
+fn a_negation_never_lowers_a_stronger_keyword_match() {
+    let s = Store::new();
+    // The negated memory holds four of the topic's words, the plain one two:
+    // a negation orders equal scores only.
+    tests_pair(&s, ["Run before lunch", "Run it before lunch."], NEGATED);
+    let found = s.contents(&[], &["tests to run before a commit"]);
+    assert_eq!(found, [NEGATED[1], "Run it before lunch."]);
+}

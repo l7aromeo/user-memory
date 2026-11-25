@@ -329,6 +329,17 @@ its meaning:
 - **Your project first, when as good:** a memory of the session's project
   wins over a global one that matches as well, not over one that clearly
   matches better.
+- **Negation, between equal matches:** a word after "not", "never", "no" or
+  "without" in the same clause counts as negated. When two memories match a
+  question equally, the one whose negations agree with the question's comes
+  first: "tests to run before a commit" ranks "Run the fast tests before
+  every commit" above "Run the slow tests in CI, not before every commit",
+  and "tests never to run before a commit" the other way round. A negation
+  never lowers a match, so a rule that forbids something still answers a
+  question about it. The meaning of a question doesn't capture negation, so
+  where the two rankings merge to a tie, the words decide. The negating words
+  are English ones, so a memory in another language gets no negation
+  reading: its ties keep their order by recency.
 
 [Search](tools.md#search) has the details. Semantic search is optional
 ([semantic search](server.md#semantic-search)).

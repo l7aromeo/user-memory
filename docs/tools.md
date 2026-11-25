@@ -136,7 +136,17 @@ topic as `topic`, or `query`.
   The text is read in [passages](memory-model.md#passages): a memory scores
   its category, title, type, reason and evidence plus its best passage, so
   a long memory doesn't outrank a short one by matching in several places.
-  Ties go to the newest. A [keyword index](storage.md#the-keyword-index) of
+  Among equal scores, a memory whose negations agree with the question's
+  comes first: a word after "not", "no", "never", "without", "nor",
+  "cannot" or "n't" in the same clause is negated, and the title decides
+  for a word it holds, else the text. "Run the slow tests in CI, not
+  before every commit" holds `before` and `commit` negated, so it follows
+  an equal match that holds them plainly for "tests to run before a
+  commit" and leads for "tests never to run before a commit". A negation
+  never changes a score. The negators are English words, so in another
+  language ties keep their order by recency; and a lone `t`, as in
+  "AT&T", reads as the end of "n't", which can only reorder a tie. Remaining ties, and ties past the first two pages,
+  go to the newest. A [keyword index](storage.md#the-keyword-index) of
   every passage's stems finds the matching memories without reading the
   others, with the same result. Category synonyms match at query time:
   programming/coding/software development/development,
@@ -146,7 +156,8 @@ topic as `topic`, or `query`.
   near the best match join every keyword match. "Near" means within three
   quarters of the gap between the best and the median similarity of this
   question's candidates, so a far memory is never listed just to fill the
-  count. Both rankings are fused by reciprocal rank.
+  count. Both rankings are fused by reciprocal rank; equal fused scores
+  follow the keyword order, which sees negation where similarity doesn't.
 - A memory of the listed projects counts 30% more in the fused score: it
   wins over a global memory that matches as well, but not over one that
   clearly matches better. Without a topic, project memories come first, then
