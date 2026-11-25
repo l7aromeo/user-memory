@@ -835,25 +835,47 @@ async fn serve_here(
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// The command line is parsed before the runtime starts, and the command runs
+/// from the heap: in a debug build clap's generated builders and the
+/// command's poll frame each take hundreds of KiB of stack, and nested on
+/// one main thread they overran Windows' 1 MiB.
+fn main() -> Result<()> {
+    let cli = parsed(env::args_os().collect());
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(boxed(cli))
+}
+
+/// The command `cli` names, built on the heap in a frame of its own, so
+/// neither `main` nor clap's frames hold it.
+fn boxed(cli: Cli) -> std::pin::Pin<Box<impl Future<Output = Result<()>>>> {
+    Box::pin(run(cli))
+}
+
+/// The command line `args` asks for, or clap's own error and exit.
+fn parsed(args: Vec<std::ffi::OsString>) -> Cli {
     // The version a debug build is told to report is the one --version says.
-    let mut cli = Cli::command()
+    Cli::command()
         .version(setup::versions::running())
-        .try_get_matches()
+        .try_get_matches_from(&args)
         .and_then(|matches| Cli::from_arg_matches(&matches))
         .unwrap_or_else(|err| {
             // `update` corrects a memory; someone who typed it for a newer
             // release is told the command, with update's own error and code.
             if err.kind() == clap::error::ErrorKind::MissingRequiredArgument
-                && env::args().nth(1).as_deref() == Some("update")
+                && args.get(1).is_some_and(|arg| arg == "update")
             {
                 let _ = err.print();
                 eprintln!("\nTo move user-memory to a newer release, run user-memory upgrade.");
                 std::process::exit(err.exit_code());
             }
             err.exit()
-        });
+        })
+}
+
+/// The command `cli` names.
+async fn run(mut cli: Cli) -> Result<()> {
     // The hooks that run on every tool call or subagent go first, past
     // everything else this program does before a command.
     let quiet = match &cli.command {
@@ -1394,6 +1416,38 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Most stack parsing the command line may take, in bytes: Windows gives
+    /// the main thread 1 MiB and a debug build's frames differ between
+    /// platforms, so a quarter of it stays spare. tests/acceptance.rs runs
+    /// whole commands within the same budget where the platform can set it.
+    const MAIN_STACK_BUDGET: usize = 768 * 1024;
+
+    /// clap's generated builders take hundreds of KiB of stack in a debug
+    /// build; a thread of the budget's size overflows, and the test process
+    /// aborts, when they outgrow it on any platform.
+    #[test]
+    fn the_command_line_parses_within_the_main_stack_budget() {
+        let args = [
+            "user-memory",
+            "record",
+            "--category",
+            "workflow",
+            "--title",
+            "Use tabs",
+            "--content",
+            "Use tabs",
+            "--scope",
+            "global",
+        ];
+        let cli = std::thread::Builder::new()
+            .stack_size(MAIN_STACK_BUDGET)
+            .spawn(move || parsed(args.map(Into::into).to_vec()))
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(matches!(cli.command, Command::Record(_)));
+    }
 
     #[test]
     fn the_server_instructions_stay_within_their_limit() {
