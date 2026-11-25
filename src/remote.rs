@@ -663,6 +663,41 @@ fn with_folder_projects<M: serde::Serialize + serde::de::DeserializeOwned>(messa
     serde_json::from_value(value).unwrap_or(message)
 }
 
+/// `message` with a bare day in a `record` or `update` call's `until`
+/// replaced by its end in this machine's zone, so the server, whose zone
+/// isn't the user's, stores the user's end. Anything else, or a day this
+/// machine can't resolve, goes on as it came, for the server to judge.
+fn with_local_day<M: serde::Serialize + serde::de::DeserializeOwned>(message: M) -> M {
+    let Ok(mut value) = serde_json::to_value(&message) else {
+        return message;
+    };
+    let writes = value.get("method").and_then(|m| m.as_str()) == Some("tools/call")
+        && matches!(
+            value.pointer("/params/name").and_then(|n| n.as_str()),
+            Some("record" | "update")
+        );
+    let Some(until) = value
+        .pointer_mut("/params/arguments/until")
+        .filter(|_| writes)
+    else {
+        return message;
+    };
+    let Ok(mut given) = serde_json::from_value::<crate::memory::until::Until>(until.clone()) else {
+        return message;
+    };
+    if given
+        .resolve_day(crate::memory::until::Zone::Local)
+        .is_err()
+    {
+        return message;
+    }
+    let Ok(resolved) = serde_json::to_value(given) else {
+        return message;
+    };
+    *until = resolved;
+    serde_json::from_value(value).unwrap_or(message)
+}
+
 /// The tool reply `reply` with `notices` added as text items after its own
 /// content, which they leave as it was; `None`, keeping the notices for a
 /// later reply, when it is not a tool result.
@@ -944,7 +979,7 @@ async fn forward<R: Transport<RoleClient>>(
         tokio::select! {
             message = Transport::<RoleServer>::receive(&mut local) => {
                 let Some(message) = message else { break; };
-                let message = with_folder_projects(message);
+                let message = with_local_day(with_folder_projects(message));
                 let value = serde_json::to_value(&message)?;
                 let method = value.get("method").and_then(|v| v.as_str()).unwrap_or("");
                 if method == "initialize" || method == "server/discover" {

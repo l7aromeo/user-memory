@@ -308,6 +308,16 @@ impl UserMemoryServer {
     fn hosted(&self) -> bool {
         !self.in_client_folder
     }
+
+    /// Where a bare day in a condition is resolved: a `serve` runs on the
+    /// user's machine, in their zone; a hosted server's zone isn't theirs.
+    fn zone(&self) -> memory::until::Zone {
+        if self.hosted() {
+            memory::until::Zone::Hosted
+        } else {
+            memory::until::Zone::Local
+        }
+    }
 }
 
 #[tool_router]
@@ -328,9 +338,12 @@ impl UserMemoryServer {
     ) -> Reply {
         let db = self.db.clone();
         let client = self.caller(&peer);
+        let zone = self.zone();
         synced(
             blocking(Some("stored"), move || {
-                memory::acting_as(&client, || output(memory::record(&db, input), "stored"))
+                memory::acting_as(&client, || {
+                    output(memory::record_in(&db, input, zone), "stored")
+                })
             })
             .await,
         )
@@ -499,9 +512,12 @@ impl UserMemoryServer {
     ) -> Reply {
         let db = self.db.clone();
         let client = self.caller(&peer);
+        let zone = self.zone();
         synced(
             blocking(Some("updated"), move || {
-                memory::acting_as(&client, || output(memory::update(&db, input), "updated"))
+                memory::acting_as(&client, || {
+                    output(memory::update_in(&db, input, zone), "updated")
+                })
             })
             .await,
         )
@@ -922,8 +938,25 @@ async fn run(mut cli: Cli) -> Result<()> {
         Command::Read(input) => resolve_projects(&mut input.selection.projects)?,
         Command::Search(input) => resolve_projects(&mut input.selection.projects)?,
         Command::Review(input) => resolve_projects(&mut input.projects)?,
-        Command::Record(input) => resolve_projects(std::slice::from_mut(&mut input.project))?,
-        Command::Update(input) => resolve_projects(input.project.as_mut_slice())?,
+        Command::Record(input) => {
+            resolve_projects(std::slice::from_mut(&mut input.project))?;
+            // A bare day ends in this machine's zone, also when the call
+            // goes on to a server elsewhere.
+            if let Some(until) = &mut input.until {
+                until
+                    .resolve_day(memory::until::Zone::Local)
+                    .map_err(anyhow::Error::msg)?;
+            }
+        }
+        Command::Update(input) => {
+            resolve_projects(input.project.as_mut_slice())?;
+            input.take_flags();
+            if let Some(Some(until)) = &mut input.until {
+                until
+                    .resolve_day(memory::until::Zone::Local)
+                    .map_err(anyhow::Error::msg)?;
+            }
+        }
         Command::Export { subset, .. } | Command::Import { subset, .. } => {
             resolve_projects(&mut subset.projects)?
         }

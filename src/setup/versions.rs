@@ -207,6 +207,39 @@ pub(crate) const OPTION_FLOORS: &[OptionFloor] = &[
         lacks: "cannot undo an import",
         for_agent: "Nothing was forgotten. Tell the user this memory server is too old to undo an import; until it is upgraded, what the import added can only be forgotten one memory at a time.",
     },
+    OptionFloor {
+        tool: "record",
+        field: "until",
+        since: Version {
+            major: 0,
+            minor: 10,
+            patch: 0,
+        },
+        lacks: "cannot end a memory on a date, tag or event",
+        for_agent: "Nothing was stored. Tell the user this memory server is too old to end a memory on a date, tag or event; recorded without its condition, the memory would stay in force until someone forgets it.",
+    },
+    OptionFloor {
+        tool: "update",
+        field: "until",
+        since: Version {
+            major: 0,
+            minor: 10,
+            patch: 0,
+        },
+        lacks: "cannot end a memory on a date, tag or event",
+        for_agent: "Nothing was changed. Tell the user this memory server is too old to end a memory on a date, tag or event.",
+    },
+    OptionFloor {
+        tool: "update",
+        field: "ended",
+        since: Version {
+            major: 0,
+            minor: 10,
+            patch: 0,
+        },
+        lacks: "cannot end a memory on a date, tag or event",
+        for_agent: "Nothing was changed. Tell the user this memory server is too old to end a memory's condition.",
+    },
 ];
 
 /// The floor this build applies for an input from release `since`: that

@@ -45,6 +45,10 @@ aws-lc-rs = { version = "1", default-features = false, features = ["aws-lc-sys"]
 # The delivery index's build hashes its terms with it (src/memory/delivery.rs);
 # serde_json and rusqlite already build it.
 foldhash = { version = "0.2", default-features = false }
+# A condition's date resolves in the user's local zone, with that zone's
+# rules at the date (src/memory/until.rs). The system zone database on
+# Unix; the bundled one on Windows, which has no IANA database of its own.
+jiff = { version = "1.0.3", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo", "tzdb-bundle-platform"] }
 
 # serve's stdin reader, which waits for input with poll before each read,
 # so no read is under way when serve hands over by exec (src/handover.rs).

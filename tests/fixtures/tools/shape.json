@@ -650,6 +650,36 @@
             "observed",
             "inferred"
           ]
+        },
+        "Until": {
+          "type": "object",
+          "properties": {
+            "date": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "tag": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "project": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "text": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": false
         }
       },
       "type": "object",
@@ -729,6 +759,16 @@
             "format": "uuid"
           },
           "default": []
+        },
+        "until": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Until"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "user_confirmed": {
           "type": "boolean",
@@ -935,6 +975,36 @@
             "global",
             "project"
           ]
+        },
+        "Until": {
+          "type": "object",
+          "properties": {
+            "date": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "tag": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "project": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "text": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": false
         }
       },
       "type": "object",
@@ -1032,6 +1102,22 @@
         "drop_history": {
           "type": "boolean",
           "default": false
+        },
+        "until": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Until"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ended": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "user_confirmed": {
           "type": "boolean",
