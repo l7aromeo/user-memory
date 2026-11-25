@@ -17,6 +17,13 @@ On the server, or in the native store on your machine:
   such as `claude:session/<id>`. Raw transcripts are never stored.
 - **Conversation links:** which projects each conversation linked, by its
   origin ([links](projects.md#another-repository-for-one-conversation-links)).
+- **Which memories each conversation used:** for each project's newest 40
+  conversations, by origin, the ids of the memories it read, recorded or
+  was shown, whether it held to or set aside one, and when; no text. They
+  order the index and choose session start's
+  [most-used part](how-it-works.md#the-index-at-session-start). Forgetting
+  a memory deletes its rows with it. A client with a read-only token
+  sends none, so its conversations never count.
 - **Pairs you called different**, so review does not group them again.
 - **Search data** derived from the memories: a keyword index and, with
   semantic search on, embedding vectors.
@@ -143,8 +150,8 @@ revoke one or replace the shared one, see
 The client connects to two places you choose:
 
 1. **Your memory server**, when you use one. It receives the requests your
-   agents make: memories to record, searches, links, and the keys of the
-   projects a session loads.
+   agents make: memories to record, searches, links, the keys of the
+   projects a session loads, and which memories each session used.
 2. **Your embeddings endpoint**, when semantic search is on. It receives the
    text of memories and searches. Keep it on your machine or a server you
    control. When it isn't on this machine (a loopback address, or the host
