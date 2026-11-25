@@ -900,16 +900,17 @@
    ]
   },
   {
-   "name": "a_note_the_prompt_names_is_pushed_at_a_thousand_memories",
-   "summary": "At 1,000 memories, an agent's note on `git tag` that the index cannot list is pushed when the prompt names that command, and the agent follows it (#117's A1).",
+   "name": "a_note_on_a_command_the_task_runs_is_pushed_at_a_thousand_memories",
+   "summary": "At 1,000 memories, an agent's note stating a fact about tools/package.py, which the index cannot list and the prompt doesn't name, is pushed when the agent runs that script to cut a release, and the agent acts on it (#117's A1).",
    "shell": true,
    "cwd": "project:compiler",
    "seed_many": {
     "count": 1000
    },
    "files": {
-    "compiler/tools/check_version.py": "import sys\nprint('version ok' if '--release-key' in sys.argv else 'version ok (patch number only)')\n",
-    "compiler/VERSION": "1.4.0\n"
+    "compiler/tools/package.py": "import sys\nprint('packaged dist/compiler-' + open('VERSION').read().strip() + '.tar.gz (signed)')\n",
+    "compiler/VERSION": "1.4.0\n",
+    "compiler/RELEASING.md": "# Releasing\n\nTo cut a release: set VERSION, run `python3 tools/package.py`, then tag the commit with `git tag vX.Y.Z`.\n"
    },
    "seed": [
     {
@@ -920,9 +921,9 @@
       "--category",
       "workflow",
       "--title",
-      "Run tools/check_version.py before tagging a compiler release",
+      "tools/package.py signs with the test key unless given a signing key",
       "--content",
-      "Before `git tag` in the compiler repository, run `python3 tools/check_version.py --release-key 4QF7`: without the key it checks only the patch number, and a tag whose version disagrees with VERSION breaks the release.",
+      "`python3 tools/package.py` signs the archive with the test key unless given `--signing-key 4QF7`, and the download mirror rejects archives signed with the test key.",
       "--scope",
       "project",
       "--project",
@@ -930,13 +931,13 @@
       "--source",
       "observed",
       "--evidence",
-      "In each release session the user ran tools/check_version.py before git tag"
+      "The download mirror rejected an archive signed with the test key, and the user re-signed it"
      ]
     }
    ],
    "sessions": [
     {
-     "prompt": "Tag the current commit as the 1.4.0 release: run `git tag v1.4.0` in the compiler repository."
+     "prompt": "Cut the 1.4.0 release."
     }
    ],
    "checks": [
@@ -948,7 +949,7 @@
     },
     {
      "commands": {
-      "matches": "check_version\\.py --release-key 4QF7"
+      "matches": "package\\.py[^\\n]*--signing-key 4QF7"
      }
     },
     {
@@ -961,7 +962,8 @@
     "steps": [
      {
       "commands": [
-       "python3 tools/check_version.py --release-key 4QF7",
+       "python3 tools/package.py",
+       "python3 tools/package.py --signing-key 4QF7",
        "git tag v1.4.0"
       ],
       "pushed": [
@@ -978,7 +980,8 @@
      "steps": [
       {
        "commands": [
-        "python3 tools/check_version.py --release-key 4QF7",
+        "python3 tools/package.py",
+        "python3 tools/package.py --signing-key 4QF7",
         "git tag v1.4.0"
        ],
        "pushed": []
@@ -989,7 +992,7 @@
      "steps": [
       {
        "commands": [
-        "python3 tools/check_version.py",
+        "python3 tools/package.py",
         "git tag v1.4.0"
        ],
        "pushed": [
@@ -1005,7 +1008,8 @@
      "steps": [
       {
        "commands": [
-        "python3 tools/check_version.py --release-key 4QF7"
+        "python3 tools/package.py",
+        "python3 tools/package.py --signing-key 4QF7"
        ],
        "pushed": [
         {
@@ -1026,7 +1030,7 @@
   },
   {
    "name": "a_whole_milestone_gets_each_note_at_its_first_step",
-   "summary": "Asked only to implement the next milestone, the agent gets a note about src/store/ (no context) at its first step there, and a global note on tools/publish.py after its first run of it, then follows both (#117's W1).",
+   "summary": "Asked only to implement the next milestone, the agent gets a fact about src/store/ (no context) at its first step there, and a global fact about tools/publish.py after its first run of it, then acts on both (#117's W1).",
    "shell": true,
    "cwd": "project:compiler",
    "seed_many": {
@@ -1036,7 +1040,7 @@
     "compiler/MILESTONES.md": "# Milestones\n\nNext: add a `size()` method to src/store/cache.py that returns how many entries the cache holds, then publish with `python3 tools/publish.py`.\n",
     "compiler/src/store/cache.py": "class Cache:\n    def __init__(self):\n        self.entries = {}\n\n    def get(self, key):\n        \"\"\"The entry for key, or None.\"\"\"\n        return self.entries.get(key)\n",
     "compiler/tests/test_store.py": "from src.store.cache import Cache\n\n\ndef test_get():\n    assert Cache().get('x') is None\n",
-    "compiler/tools/publish.py": "import sys\nprint('dry run: would publish' if '--dry-run' in sys.argv else 'published')\n"
+    "compiler/tools/publish.py": "import sys\nargs = sys.argv[1:]\nchannel = args[args.index('--channel') + 1] if '--channel' in args else 'stable'\nprint('published to ' + channel)\n"
    },
    "seed": [
     {
@@ -1047,9 +1051,9 @@
       "--category",
       "workflow",
       "--title",
-      "Every public method in src/store/ gets a docstring and its own test",
+      "CI runs only the contract tests of src/store/",
       "--content",
-      "Every public method in `src/store/` gets a docstring and a test named `test_<method>_contract` in `tests/test_store.py`.",
+      "CI runs a test of `src/store/` code only when it is named `test_<method>_contract` in `tests/test_store.py`; it collects nothing else from that file.",
       "--scope",
       "project",
       "--project",
@@ -1057,7 +1061,7 @@
       "--source",
       "observed",
       "--evidence",
-      "The user asked for a docstring and a test on each store method in review"
+      "A store test the user added never ran in CI until it was renamed"
      ]
     },
     {
@@ -1068,15 +1072,15 @@
       "--category",
       "workflow",
       "--title",
-      "Dry-run tools/publish.py before any real publish",
+      "tools/publish.py goes to the stable channel by default",
       "--content",
-      "Run `python3 tools/publish.py --dry-run --channel beta-2` before any real `python3 tools/publish.py`, and read its output first.",
+      "`python3 tools/publish.py` with no `--channel` publishes to the stable channel, which every user installs from; unreleased work goes to `--channel beta-2` until the beta testers sign off.",
       "--scope",
       "global",
       "--source",
       "observed",
       "--evidence",
-      "The user stopped a real publish and asked for the dry run first, in two projects"
+      "The user pulled an unreleased build from the stable channel and republished it to beta-2, in two projects"
      ]
     }
    ],
@@ -1112,7 +1116,7 @@
     },
     {
      "commands": {
-      "matches": "publish\\.py --dry-run --channel beta-2"
+      "matches": "publish\\.py[^\\n]*--channel beta-2"
      }
     }
    ],
@@ -1124,8 +1128,8 @@
     "steps": [
      {
       "commands": [
-       "python3 tools/publish.py --dry-run --channel beta-2",
-       "python3 tools/publish.py"
+       "python3 tools/publish.py",
+       "python3 tools/publish.py --channel beta-2"
       ],
       "pushed": [
        {
@@ -1149,8 +1153,8 @@
      "steps": [
       {
        "commands": [
-        "python3 tools/publish.py --dry-run --channel beta-2",
-        "python3 tools/publish.py"
+        "python3 tools/publish.py",
+        "python3 tools/publish.py --channel beta-2"
        ],
        "pushed": [
         {
@@ -1169,8 +1173,8 @@
      "steps": [
       {
        "commands": [
-        "python3 tools/publish.py --dry-run --channel beta-2",
-        "python3 tools/publish.py"
+        "python3 tools/publish.py",
+        "python3 tools/publish.py --channel beta-2"
        ],
        "pushed": [
         {
@@ -1189,8 +1193,8 @@
      "steps": [
       {
        "commands": [
-        "python3 tools/publish.py --dry-run --channel beta-2",
-        "python3 tools/publish.py"
+        "python3 tools/publish.py",
+        "python3 tools/publish.py --channel beta-2"
        ],
        "pushed": [
         {
@@ -1213,8 +1217,8 @@
      "steps": [
       {
        "commands": [
-        "python3 tools/publish.py --dry-run --channel beta-2",
-        "python3 tools/publish.py"
+        "python3 tools/publish.py",
+        "python3 tools/publish.py --channel beta-2"
        ],
        "pushed": [
         {
@@ -1237,7 +1241,6 @@
      "steps": [
       {
        "commands": [
-        "python3 tools/publish.py --dry-run",
         "python3 tools/publish.py"
        ],
        "pushed": [
@@ -1982,14 +1985,15 @@
   },
   {
    "name": "after_a_failed_command_only_the_note_naming_it_comes",
-   "summary": "A build command fails; the note naming it in a code span is pushed after the failure and the next step uses it, and a note sharing only its words is not pushed (#117's E1).",
+   "summary": "A build command fails; the fact naming it in a code span is pushed after the failure and the next step acts on it, and a fact sharing only its words is not pushed (#117's E1).",
    "shell": true,
    "cwd": "project:compiler",
    "seed_many": {
     "count": 1000
    },
    "files": {
-    "compiler/tools/build.py": "import sys\nif any(a.startswith('--clean') for a in sys.argv[1:]):\n    print('built')\nelse:\n    sys.exit('error: stale cache in build/; see the build notes')\n"
+    "compiler/tools/build.py": "import sys\nif any(a.startswith('--clean') for a in sys.argv[1:]):\n    print('built')\nelse:\n    sys.exit('error: stale cache in build/')\n",
+    "compiler/README.md": "# Compiler\n\nRun `python3 tools/build.py` to produce the binary.\n"
    },
    "seed": [
     {
@@ -2000,9 +2004,9 @@
       "--category",
       "workflow",
       "--title",
-      "When tools/build.py reports a stale cache, rebuild with --clean",
+      "tools/build.py keeps other branches' objects with plain --clean",
       "--content",
-      "When `python3 tools/build.py` fails with 'stale cache', run `python3 tools/build.py --clean=deep`.",
+      "`python3 tools/build.py` fails with 'stale cache' when build/ holds objects from another branch; `python3 tools/build.py --clean=deep` clears them, while plain `--clean` keeps them.",
       "--scope",
       "project",
       "--project",
@@ -2010,7 +2014,7 @@
       "--source",
       "observed",
       "--evidence",
-      "Twice the user fixed a stale-cache build failure with --clean"
+      "Twice a stale-cache failure came back after --clean and went away with --clean=deep"
      ]
     },
     {
@@ -2021,9 +2025,9 @@
       "--category",
       "workflow",
       "--title",
-      "A failing build in the compiler usually means a stale cache",
+      "A stale cache error in a build comes from the cache folder",
       "--content",
-      "When the compiler build fails with a stale cache error, delete the cache folder by hand and build again.",
+      "A stale cache error in a build comes from the cache folder, which is safe to delete by hand.",
       "--scope",
       "project",
       "--project",
@@ -2031,13 +2035,13 @@
       "--source",
       "observed",
       "--evidence",
-      "The user deleted the cache folder after one failed build"
+      "The user deleted the cache folder after one stale cache error"
      ]
     }
    ],
    "sessions": [
     {
-     "prompt": "Build the compiler with `python3 tools/build.py` and get it to build."
+     "prompt": "Produce the binary from this checkout."
     }
    ],
    "checks": [
@@ -2239,15 +2243,16 @@
   },
   {
    "name": "a_session_at_ten_thousand_memories_stays_within_its_budgets",
-   "summary": "A1's note at 10,000 memories, over several prompts: the session's pushes stay within SESSION_PUSH_CHARS, and Codex reports each prompt hook within its 1 s (#117's C2).",
+   "summary": "A1's note at 10,000 memories, over several prompts that don't touch tools/package.py until the last: the session's pushes stay within SESSION_PUSH_CHARS, the note comes at the last, and Codex reports each prompt hook within its 1 s (#117's C2).",
    "shell": true,
    "cwd": "project:compiler",
    "seed_many": {
     "count": 10000
    },
    "files": {
-    "compiler/tools/check_version.py": "import sys\nprint('version ok' if '--release-key' in sys.argv else 'version ok (patch number only)')\n",
-    "compiler/VERSION": "1.4.0\n"
+    "compiler/tools/package.py": "import sys\nprint('packaged dist/compiler-' + open('VERSION').read().strip() + '.tar.gz (signed)')\n",
+    "compiler/VERSION": "1.4.0\n",
+    "compiler/RELEASING.md": "# Releasing\n\nTo cut a release: set VERSION, run `python3 tools/package.py`, then tag the commit with `git tag vX.Y.Z`.\n"
    },
    "seed": [
     {
@@ -2258,9 +2263,9 @@
       "--category",
       "workflow",
       "--title",
-      "Run tools/check_version.py before tagging a compiler release",
+      "tools/package.py signs with the test key unless given a signing key",
       "--content",
-      "Before `git tag` in the compiler repository, run `python3 tools/check_version.py --release-key 4QF7`: without the key it checks only the patch number, and a tag whose version disagrees with VERSION breaks the release.",
+      "`python3 tools/package.py` signs the archive with the test key unless given `--signing-key 4QF7`, and the download mirror rejects archives signed with the test key.",
       "--scope",
       "project",
       "--project",
@@ -2268,15 +2273,11 @@
       "--source",
       "observed",
       "--evidence",
-      "In each release session the user ran tools/check_version.py before git tag"
+      "The download mirror rejected an archive signed with the test key, and the user re-signed it"
      ]
     }
    ],
    "steps": [
-    {
-     "session": "a",
-     "prompt": "List the files in tools/ and say what each does in one line."
-    },
     {
      "session": "a",
      "prompt": "Show the version in VERSION."
@@ -2287,7 +2288,11 @@
     },
     {
      "session": "a",
-     "prompt": "Tag the current commit as the 1.4.0 release: run `git tag v1.4.0`."
+     "prompt": "Say how many files git tracks here."
+    },
+    {
+     "session": "a",
+     "prompt": "Cut the 1.4.0 release."
     }
    ],
    "checks": [
@@ -2312,7 +2317,8 @@
      {},
      {
       "commands": [
-       "python3 tools/check_version.py --release-key 4QF7",
+       "python3 tools/package.py",
+       "python3 tools/package.py --signing-key 4QF7",
        "git tag v1.4.0"
       ],
       "pushed": [
@@ -2335,7 +2341,8 @@
       {},
       {
        "commands": [
-        "python3 tools/check_version.py --release-key 4QF7",
+        "python3 tools/package.py",
+        "python3 tools/package.py --signing-key 4QF7",
         "git tag v1.4.0"
        ],
        "pushed": [
@@ -2357,7 +2364,8 @@
       {},
       {
        "commands": [
-        "python3 tools/check_version.py --release-key 4QF7",
+        "python3 tools/package.py",
+        "python3 tools/package.py --signing-key 4QF7",
         "git tag v1.4.0"
        ],
        "pushed": [],
@@ -2377,14 +2385,16 @@
   },
   {
    "name": "a_superseded_note_is_not_pushed",
-   "summary": "A1 with its note superseded by one saying the check is gone: the old note is never pushed and not followed (#117's F1; 'stale' read as superseded, since only an inference goes stale and none is pushed).",
+   "summary": "A1 with its note superseded by one saying the signing option is gone: the old note is never pushed and not acted on (#117's F1; 'stale' read as superseded, since only an inference goes stale and none is pushed).",
    "shell": true,
    "cwd": "project:compiler",
    "seed_many": {
     "count": 1000
    },
    "files": {
-    "compiler/VERSION": "1.4.0\n"
+    "compiler/tools/package.py": "import sys\nprint('packaged dist/compiler-' + open('VERSION').read().strip() + '.tar.gz (signed)')\n",
+    "compiler/VERSION": "1.4.0\n",
+    "compiler/RELEASING.md": "# Releasing\n\nTo cut a release: set VERSION, run `python3 tools/package.py`, then tag the commit with `git tag vX.Y.Z`.\n"
    },
    "seed": [
     {
@@ -2395,9 +2405,9 @@
       "--category",
       "workflow",
       "--title",
-      "Run tools/check_version.py before tagging a compiler release",
+      "tools/package.py signs with the test key unless given a signing key",
       "--content",
-      "Before `git tag` in the compiler repository, run `python3 tools/check_version.py --release-key 4QF7`: without the key it checks only the patch number, and a tag whose version disagrees with VERSION breaks the release.",
+      "`python3 tools/package.py` signs the archive with the test key unless given `--signing-key 4QF7`, and the download mirror rejects archives signed with the test key.",
       "--scope",
       "project",
       "--project",
@@ -2405,7 +2415,7 @@
       "--source",
       "observed",
       "--evidence",
-      "In each release session the user ran tools/check_version.py before git tag"
+      "The download mirror rejected an archive signed with the test key, and the user re-signed it"
      ]
     },
     {
@@ -2416,9 +2426,9 @@
       "--category",
       "workflow",
       "--title",
-      "Tag compiler releases directly; tools/check_version.py was removed",
+      "tools/package.py has no signing option any more",
       "--content",
-      "`tools/check_version.py` was removed from the compiler; `git tag` needs no check before it now.",
+      "`python3 tools/package.py` signs every archive with the real key now; its `--signing-key` option was removed.",
       "--scope",
       "project",
       "--project",
@@ -2426,7 +2436,7 @@
       "--source",
       "observed",
       "--evidence",
-      "The user deleted tools/check_version.py and tagged without it",
+      "The user removed --signing-key from tools/package.py",
       "--supersedes",
       "{seed:note}"
      ]
@@ -2434,7 +2444,7 @@
    ],
    "sessions": [
     {
-     "prompt": "Tag the current commit as the 1.4.0 release: run `git tag v1.4.0` in the compiler repository."
+     "prompt": "Cut the 1.4.0 release."
     }
    ],
    "checks": [
@@ -2446,7 +2456,7 @@
     },
     {
      "commands_not": {
-      "matches": "check_version"
+      "matches": "--signing-key"
      }
     }
    ],
@@ -2454,6 +2464,7 @@
     "steps": [
      {
       "commands": [
+       "python3 tools/package.py",
        "git tag v1.4.0"
       ]
      }
@@ -2464,6 +2475,7 @@
      "steps": [
       {
        "commands": [
+        "python3 tools/package.py",
         "git tag v1.4.0"
        ],
        "pushed": [
@@ -2479,7 +2491,8 @@
      "steps": [
       {
        "commands": [
-        "python3 tools/check_version.py",
+        "python3 tools/package.py",
+        "python3 tools/package.py --signing-key 4QF7",
         "git tag v1.4.0"
        ]
       }
@@ -2819,14 +2832,15 @@
   },
   {
    "name": "a_global_note_on_a_command_reaches_another_project",
-   "summary": "A global agent's note on a cleanup script, learned elsewhere, arrives when the agent runs that script in the notebooks repository, and the next step follows it (#117's T1).",
+   "summary": "A global agent's fact about a cleanup script, learned elsewhere, arrives when the agent runs that script in the notebooks repository, and the next step acts on it (#117's T1).",
    "shell": true,
    "cwd": "project:notebooks",
    "seed_many": {
     "count": 1000
    },
    "files": {
-    "notebooks/tools/clean.py": "print('cleaned')\n"
+    "notebooks/tools/clean.py": "print('cleaned')\n",
+    "notebooks/README.md": "# Notebooks\n\nTidy up with `python3 tools/clean.py`.\n"
    },
    "seed": [
     {
@@ -2837,21 +2851,21 @@
       "--category",
       "workflow",
       "--title",
-      "Check what tools/clean.py removed after running it",
+      "tools/clean.py puts what it deletes in .trash/",
       "--content",
-      "After `python3 tools/clean.py`, run `git status --ignored` and report anything tracked it removed.",
+      "`python3 tools/clean.py` moves the files it deletes into `.trash/`, which git ignores, so plain `git status` doesn't list them; `git status --ignored` does.",
       "--scope",
       "global",
       "--source",
       "observed",
       "--evidence",
-      "In two repositories the user checked git status --ignored after the cleanup script"
+      "In two repositories the user found the cleanup script's deletions under .trash/ with git status --ignored"
      ]
     }
    ],
    "sessions": [
     {
-     "prompt": "Run `python3 tools/clean.py` to clean the repository, then tell me it's done."
+     "prompt": "Run the repository's tidy-up script and tell me what it removed."
     }
    ],
    "checks": [
@@ -2919,7 +2933,7 @@
   },
   {
    "name": "a_long_merged_memory_pushes_only_the_point_the_work_touches",
-   "summary": "A merged memory of ten points on ten scripts: running one pushes only its point, within RECALL_CHARS, and the agent follows that point (#117's L1).",
+   "summary": "A merged memory of ten facts on ten scripts: running one pushes only its point, within RECALL_CHARS, and the agent acts on that point (#117's L1).",
    "shell": true,
    "cwd": "project:compiler",
    "seed_many": {
@@ -2935,7 +2949,8 @@
     "compiler/tools/step7.py": "print('ok')\n",
     "compiler/tools/step8.py": "print('ok')\n",
     "compiler/tools/step9.py": "print('ok')\n",
-    "compiler/tools/step10.py": "print('ok')\n"
+    "compiler/tools/step10.py": "print('ok')\n",
+    "compiler/README.md": "# Compiler\n\nThe pipeline has ten stages, `python3 tools/step1.py` to `python3 tools/step10.py`, run in order.\n"
    },
    "seed": [
     {
@@ -2946,9 +2961,9 @@
       "--category",
       "workflow",
       "--title",
-      "How to run each of the compiler's ten tools/step scripts",
+      "What each of the ten tools/step scripts checks by default",
       "--content",
-      "1. For `python3 tools/step1.py`, pass `--profile p1` and keep its log in logs/step1.log, which the release review reads.\n2. For `python3 tools/step2.py`, pass `--profile p2` and keep its log in logs/step2.log, which the release review reads.\n3. For `python3 tools/step3.py`, pass `--profile p3` and keep its log in logs/step3.log, which the release review reads.\n4. For `python3 tools/step4.py`, pass `--profile p4` and keep its log in logs/step4.log, which the release review reads.\n5. For `python3 tools/step5.py`, pass `--profile p5` and keep its log in logs/step5.log, which the release review reads.\n6. For `python3 tools/step6.py`, pass `--profile p6` and keep its log in logs/step6.log, which the release review reads.\n7. For `python3 tools/step7.py`, pass `--profile p7` and keep its log in logs/step7.log, which the release review reads.\n8. For `python3 tools/step8.py`, pass `--profile p8` and keep its log in logs/step8.log, which the release review reads.\n9. For `python3 tools/step9.py`, pass `--profile p9` and keep its log in logs/step9.log, which the release review reads.\n10. For `python3 tools/step10.py`, pass `--profile p10` and keep its log in logs/step10.log, which the release review reads.",
+      "1. `python3 tools/step1.py` uses an empty default profile, so it checks nothing, unless given `--profile p1`.\n2. `python3 tools/step2.py` uses an empty default profile, so it checks nothing, unless given `--profile p2`.\n3. `python3 tools/step3.py` uses an empty default profile, so it checks nothing, unless given `--profile p3`.\n4. `python3 tools/step4.py` uses an empty default profile, so it checks nothing, unless given `--profile p4`.\n5. `python3 tools/step5.py` uses an empty default profile, so it checks nothing, unless given `--profile p5`.\n6. `python3 tools/step6.py` uses an empty default profile, so it checks nothing, unless given `--profile p6`.\n7. `python3 tools/step7.py` uses an empty default profile, so it checks nothing, unless given `--profile p7`.\n8. `python3 tools/step8.py` uses an empty default profile, so it checks nothing, unless given `--profile p8`.\n9. `python3 tools/step9.py` uses an empty default profile, so it checks nothing, unless given `--profile p9`.\n10. `python3 tools/step10.py` uses an empty default profile, so it checks nothing, unless given `--profile p10`.",
       "--scope",
       "project",
       "--project",
@@ -2956,13 +2971,13 @@
       "--source",
       "observed",
       "--evidence",
-      "The user corrected the profile and log of each step script over several sessions"
+      "The user found each step script checking nothing without its profile, over several sessions"
      ]
     }
    ],
    "sessions": [
     {
-     "prompt": "Run `python3 tools/step4.py` the way this project runs it."
+     "prompt": "Run the fourth stage of the pipeline."
     }
    ],
    "checks": [
@@ -2990,7 +3005,7 @@
      {
       "commands": [
        "python3 tools/step4.py",
-       "python3 tools/step4.py --profile p4 > logs/step4.log"
+       "python3 tools/step4.py --profile p4"
       ],
       "pushed": [
        {
@@ -3008,7 +3023,7 @@
       {
        "commands": [
         "python3 tools/step4.py",
-        "python3 tools/step4.py --profile p4 > logs/step4.log"
+        "python3 tools/step4.py --profile p4"
        ],
        "pushed": []
       }
@@ -3019,7 +3034,7 @@
       {
        "commands": [
         "python3 tools/step4.py",
-        "python3 tools/step4.py --profile p4 > logs/step4.log"
+        "python3 tools/step4.py --profile p4"
        ],
        "pushed": [
         {
@@ -3054,8 +3069,7 @@
     }
    ],
    "allow": [
-    "python3 tools/*",
-    "mkdir -p logs"
+    "python3 tools/*"
    ],
    "repeat": 2
   },
@@ -3083,9 +3097,9 @@
       "--category",
       "workflow",
       "--title",
-      "Back up the database before tools/migrate.py",
+      "tools/migrate.py rewrites db.sqlite in place",
       "--content",
-      "Before `python3 tools/migrate.py`, copy db.sqlite to db.sqlite.bak.",
+      "`python3 tools/migrate.py` rewrites db.sqlite in place and keeps no copy of it.",
       "--scope",
       "project",
       "--project",
@@ -3184,7 +3198,7 @@
   },
   {
    "name": "a_subagent_gets_the_docs_note_at_its_first_step_there",
-   "summary": "A subagent asked to edit a docs page gets the agent's note about docs/ on its first step there, in its own context, and follows it (#117's S2).",
+   "summary": "A subagent asked to edit the user guide gets the agent's fact about docs/ on its first step there, in its own context, and acts on it (#117's S2).",
    "shell": true,
    "subagents": true,
    "cwd": "project:compiler",
@@ -3203,9 +3217,9 @@
       "--category",
       "workflow",
       "--title",
-      "End every compiler docs page with a Last reviewed line",
+      "The docs site build rejects a page without its review month",
       "--content",
-      "Every page under `docs/` ends with the line 'Last reviewed: YYYY-MM', the month of its last change; update it on every edit.",
+      "The docs site build rejects any page under `docs/` whose last line is not 'Last reviewed: YYYY-MM', with the month of its last change.",
       "--scope",
       "project",
       "--project",
@@ -3213,13 +3227,13 @@
       "--source",
       "observed",
       "--evidence",
-      "The user fixed the Last reviewed line after two docs edits"
+      "The docs site build failed twice on a page whose Last reviewed line was stale"
      ]
     }
    ],
    "sessions": [
     {
-     "prompt": "Today is 2027-03-03. Hand this to a subagent and don't edit the file yourself: add a short 'Installing' section to docs/guide.md saying to run `pip install compiler` first."
+     "prompt": "Today is 2027-03-03. Hand this to a subagent and don't edit any file yourself: the user guide needs a short 'Installing' section saying to run `pip install compiler` first."
     }
    ],
    "checks": [
@@ -4120,7 +4134,8 @@
     "count": 1000
    },
    "files": {
-    "compiler/tools/build.py": "import sys\nif any(a.startswith('--clean') for a in sys.argv[1:]):\n    print('built')\nelse:\n    sys.exit('error: stale cache in build/; see the build notes')\n"
+    "compiler/tools/build.py": "import sys\nif any(a.startswith('--clean') for a in sys.argv[1:]):\n    print('built')\nelse:\n    sys.exit('error: stale cache in build/')\n",
+    "compiler/README.md": "# Compiler\n\nRun `python3 tools/build.py` to produce the binary.\n"
    },
    "seed": [
     {
@@ -4131,9 +4146,9 @@
       "--category",
       "workflow",
       "--title",
-      "When tools/build.py reports a stale cache, rebuild with --clean",
+      "tools/build.py keeps other branches' objects with plain --clean",
       "--content",
-      "When `python3 tools/build.py` fails with 'stale cache', run `python3 tools/build.py --clean=deep`.",
+      "`python3 tools/build.py` fails with 'stale cache' when build/ holds objects from another branch; `python3 tools/build.py --clean=deep` clears them, while plain `--clean` keeps them.",
       "--scope",
       "project",
       "--project",
@@ -4141,13 +4156,13 @@
       "--source",
       "observed",
       "--evidence",
-      "Twice the user fixed a stale-cache build failure with --clean"
+      "Twice a stale-cache failure came back after --clean and went away with --clean=deep"
      ]
     }
    ],
    "sessions": [
     {
-     "prompt": "Spawn a sub-agent to look around tools/ and wait for instructions. Then send it this message: 'Run `python3 tools/build.py` and report the result.' Report what it says."
+     "prompt": "Spawn a sub-agent and have it wait for instructions. Then read README.md and send the sub-agent the command it gives, asking it to run that command and report the result. Report what it says."
     }
    ],
    "checks": [
@@ -4168,7 +4183,7 @@
       "subagents": [
        {
         "tool": "spawnAgent",
-        "prompt": "Look around tools/."
+        "prompt": "Wait for instructions."
        }
       ],
       "pushed": [
@@ -4187,7 +4202,7 @@
        "subagents": [
         {
          "tool": "spawnAgent",
-         "prompt": "Look around tools/."
+         "prompt": "Wait for instructions."
         }
        ],
        "pushed": [

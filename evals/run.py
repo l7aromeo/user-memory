@@ -1122,6 +1122,8 @@ STEP_OPTIONS = {
     "add": {"-A", "--all", "-u", "--update"},
     "commit": {"-s", "--signoff"},
     "tag": set(),
+    "show-ref": set(),
+    "rev-parse": set(),
 }
 # Steps that change the repository; an approved command holds at least one.
 WRITES = {"add", "commit", "tag"}
@@ -1134,8 +1136,9 @@ OPERATORS = set("();<>|&")
 def escalation(command, cwd, trial):
     """Whether to let Codex run `command` outside its sandbox: git steps
     joined by && or ;, each with only the options STEP_OPTIONS allows, file
-    paths inside the trial, at least one add or commit, and a commit message
-    given only with -m or --message; run in a directory of the trial."""
+    paths inside the trial, at least one add, commit or tag, and a commit
+    message given only with -m or --message; run in a directory of the
+    trial."""
     trial = Path(trial).resolve()
     if cwd is None or not Path(str(cwd)).resolve().is_relative_to(trial):
         return False
@@ -1173,6 +1176,20 @@ def git_step(tokens, cwd, trial):
         return False
     sub, args = tokens[1], tokens[2:]
     allowed = STEP_OPTIONS[sub]
+    # Whole-command shapes, checked before the loop so that no arguments
+    # is a shape too.
+    if sub == "tag":
+        # One release tag made, or listed; no option that deletes, moves or
+        # signs one.
+        return (re.fullmatch(TAG_NAME, " ".join(args)) is not None
+                or (len(args) == 2 and args[0] in ("-l", "--list") and re.fullmatch(TAG_NAME, args[1]) is not None)
+                or args == ["--points-at", "HEAD"])
+    if sub == "show-ref":
+        # Where one release tag points, read only.
+        return len(args) == 2 and args[0] == "--tags" and re.fullmatch(TAG_NAME, args[1]) is not None
+    if sub == "rev-parse":
+        # The commit HEAD names, read only.
+        return args == ["HEAD"]
     i = 0
     while i < len(args):
         arg = args[i]
@@ -1184,12 +1201,6 @@ def git_step(tokens, cwd, trial):
                 i += 1
                 continue
             return False
-        if sub == "tag":
-            # One release tag made, or listed; no option that deletes,
-            # moves or signs one.
-            return (re.fullmatch(TAG_NAME, " ".join(args)) is not None
-                    or (len(args) == 2 and args[0] in ("-l", "--list") and re.fullmatch(TAG_NAME, args[1]) is not None)
-                    or args == ["--points-at", "HEAD"])
         if arg in allowed or arg == "--":
             pass
         elif sub in ("log", "show") and arg.startswith("--format="):
