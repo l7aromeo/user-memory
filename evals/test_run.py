@@ -108,7 +108,24 @@ class Escalation(unittest.TestCase):
             "git tag latest",
             "git tag v1.4.0 && git push --tags",
             "git tag --list 'v*'",
+            "git tag",
             "git commit -s -F /Users/x/.codex/auth.json",
+        ]:
+            self.assertFalse(self.allowed(command), command)
+
+    def test_a_new_tag_may_be_checked_by_where_it_points(self):
+        # As main's Codex agent ran it in #117's A1.
+        self.assertTrue(self.allowed(
+            "/bin/zsh -lc 'git tag v1.4.0 && git show-ref --tags v1.4.0 && git rev-parse HEAD'"))
+        for command in [
+            # Read-only steps alone need no escalation; other refs and
+            # revisions stay out.
+            "git show-ref --tags v1.4.0 && git rev-parse HEAD",
+            "git tag v1.4.0 && git show-ref",
+            "git tag v1.4.0 && git show-ref --tags",
+            "git tag v1.4.0 && git show-ref --heads main",
+            "git tag v1.4.0 && git rev-parse --show-toplevel",
+            "git tag v1.4.0 && git rev-parse HEAD~1",
         ]:
             self.assertFalse(self.allowed(command), command)
 
@@ -1758,10 +1775,48 @@ class Discoverable(unittest.TestCase):
         self.assertGreaterEqual(len(recall), 10)
         for scenario in recall:
             self.assertEqual(self.leaks(scenario), [], scenario["name"])
-        # #117's A1 as first written: main's Codex agent found the script.
-        a1 = next(s for s in recall if s["name"].startswith("a_note_the_prompt_names"))
-        old = {**a1, "checks": [{"commands": {"matches": "check_version\\.py"}}]}
-        self.assertEqual(self.leaks(old), ["check_version\\.py"])
+        # A check on the script alone, which RELEASING.md names.
+        a1 = next(s for s in recall if s["name"].startswith("a_note_on_a_command_the_task_runs"))
+        old = {**a1, "checks": [{"commands": {"matches": "package\\.py"}}]}
+        self.assertEqual(self.leaks(old), ["package\\.py"])
+
+    # Words too common to lead a memory search anywhere.
+    COMMON = {"with", "that", "this", "from", "when", "then", "them", "they", "their", "into",
+              "only", "each", "what", "have", "does", "which", "while", "there", "here", "your",
+              "will", "also", "than", "every"}
+
+    @classmethod
+    def words(cls, text):
+        """The search terms of `text`, roughly as the keyword index stems
+        them: words of four letters or more, cut to their first five."""
+        return {w[:5] for w in re.findall(r"[a-z]{4,}", text.lower())} - {w[:5] for w in cls.COMMON}
+
+    @classmethod
+    def prompt_leaks(cls, scenario):
+        """The terms a scenario's prompts share with an agent's note it
+        pushes: a word that could lead an agent on main, with no push, to
+        search memory for the note."""
+        prompts = " ".join(st.get("prompt", "") for st in scenario.get("sessions") or scenario.get("steps") or [])
+        notes = " ".join(" ".join([s["args"][s["args"].index("--title") + 1],
+                                   s["args"][s["args"].index("--content") + 1]])
+                         for s in scenario.get("seed", []) if "observed" in s["args"])
+        return sorted(cls.words(prompts) & cls.words(notes))
+
+    def test_a_prompt_gives_no_word_to_search_memory_for_its_note(self):
+        scenarios = json.loads((HERE / "scenarios.json").read_text())["scenarios"]
+        recall = [s for s in scenarios if any("pushed" in c for c in s["checks"])
+                  and any("observed" in seed["args"] for seed in s.get("seed", []))]
+        self.assertGreaterEqual(len(recall), 8)
+        for scenario in recall:
+            # H1 keeps the user's rule and an agent's note on the command its
+            # prompt names, as the user decided for the rule scenarios.
+            if scenario["name"] == "a_rule_left_out_and_a_note_both_come_at_their_command":
+                continue
+            self.assertEqual(self.prompt_leaks(scenario), [], scenario["name"])
+        # #117's A1 as first written named the command the note is about.
+        a1 = next(s for s in recall if s["name"].startswith("a_note_on_a_command_the_task_runs"))
+        old = {**a1, "sessions": [{"prompt": "Run `python3 tools/package.py` to cut the 1.4.0 release."}]}
+        self.assertEqual(self.prompt_leaks(old), ["packa", "pytho", "tools"])
 
 
 class ClaudePermissions(unittest.TestCase):

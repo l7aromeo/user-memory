@@ -187,7 +187,8 @@ current hashes are recorded as trusted in the trial's `config.toml`.
   revision, `add -A/-u` with paths inside the trial, `commit` with only
   `-m`/`--message` and `-s`/`--signoff`, and `tag` making or listing one
   release tag (`v1.4.0` or `1.4.0`, with `-l`/`--list`, or `--points-at
-  HEAD`) and no other option; at least one step adds, commits or tags. A command holding
+  HEAD`) and no other option, `show-ref --tags` with such a tag and
+  `rev-parse HEAD`; at least one step adds, commits or tags. A command holding
   anything the shell would expand (`$`, a backtick, `~ { } * ? [ ] !`, or a
   word starting with `=`), a pipe, a redirection or any other option is
   declined, and so is everything else. `python3 evals/test_run.py` checks
