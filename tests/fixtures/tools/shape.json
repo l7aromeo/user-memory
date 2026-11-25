@@ -36,6 +36,10 @@
             },
             {
               "type": "string",
+              "const": "ended"
+            },
+            {
+              "type": "string",
               "const": "stale"
             },
             {
@@ -218,6 +222,10 @@
             },
             {
               "type": "string",
+              "const": "ended"
+            },
+            {
+              "type": "string",
               "const": "stale"
             },
             {
@@ -358,6 +366,10 @@
             {
               "type": "string",
               "const": "active"
+            },
+            {
+              "type": "string",
+              "const": "ended"
             },
             {
               "type": "string",
@@ -523,6 +535,10 @@
             {
               "type": "string",
               "const": "active"
+            },
+            {
+              "type": "string",
+              "const": "ended"
             },
             {
               "type": "string",
@@ -863,6 +879,10 @@
             {
               "type": "string",
               "const": "active"
+            },
+            {
+              "type": "string",
+              "const": "ended"
             },
             {
               "type": "string",

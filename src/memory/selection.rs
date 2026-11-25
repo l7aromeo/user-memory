@@ -3,6 +3,7 @@
 //! search share. Filters apply before pagination, so a cursor pages through
 //! the filtered result.
 
+use super::in_force::held;
 use super::{
     Memory, Source, clean, project_key,
     read::rule_condition,
@@ -27,15 +28,24 @@ pub enum ScopeFilter {
     All,
 }
 
+/// Memories that would be in force but whose condition ended: an end
+/// record or a passed date.
+const ENDED: &str = concat!(
+    held!("memories"),
+    " AND memories.id IN (SELECT id FROM out_of_force)"
+);
+
 /// Which statuses a request covers.
 #[derive(
     Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, ValueEnum, PartialEq, Eq,
 )]
 #[serde(rename_all = "lowercase")]
 pub enum StatusFilter {
-    /// Confirmed and tentative memories.
+    /// Confirmed and tentative memories in force.
     #[default]
     Active,
+    /// Memories whose condition ended or whose date passed.
+    Ended,
     /// Patterns whose supporting memories changed or were forgotten.
     Stale,
     /// Memories the user replaced.
@@ -47,14 +57,17 @@ pub enum StatusFilter {
 impl StatusFilter {
     fn statuses(self) -> &'static [&'static str] {
         match self {
-            Self::Active => &["confirmed", "tentative"],
+            Self::Active | Self::Ended => &["confirmed", "tentative"],
             Self::Stale => &["stale"],
             Self::Superseded => &["superseded"],
             Self::All => &["confirmed", "tentative", "stale", "superseded"],
         }
     }
-    pub(super) fn covers(self, status: &str) -> bool {
-        self.statuses().contains(&status)
+    /// Whether a memory read by id, with `status` and `ended` (its
+    /// condition ended), is covered. Active covers an ended one: asked for
+    /// by id, it is shown, marked `ended`.
+    pub(super) fn covers(self, status: &str, ended: bool) -> bool {
+        self.statuses().contains(&status) && (ended || self != Self::Ended)
     }
 }
 
@@ -298,6 +311,8 @@ pub(super) fn condition(filter: &Filter) -> Result<(String, Vec<Sql>)> {
     }
     if filter.status == StatusFilter::Active {
         clauses.push(LIVE.to_owned());
+    } else if filter.status == StatusFilter::Ended {
+        clauses.push(ENDED.to_owned());
     } else {
         let statuses: Vec<String> = filter
             .status
