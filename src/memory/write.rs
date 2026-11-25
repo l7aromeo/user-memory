@@ -764,6 +764,9 @@ pub fn update(db: &Path, input: Update) -> Result<Value> {
 /// [`record_in`] does.
 pub fn update_in(db: &Path, mut input: Update, zone: Zone) -> Result<Value> {
     input.take_flags();
+    if input.ended.is_some() {
+        return end_condition(db, input);
+    }
     if let Some(Some(until)) = &mut input.until
         && let Err(reason) = until.resolve_day(zone)
     {
@@ -974,6 +977,104 @@ fn source_named(name: &str) -> Source {
 /// `distinct_from`. Only the pairs are written: no memory changes source,
 /// status, origins or timestamps, so nothing becomes stale. Superseded and
 /// stale memories may be named; a pair outlives neither memory.
+/// Why an `ended` comes with other changes: an end reports what happened
+/// and is checked on its own, so no change to the memory rides on it.
+const ENDED_ALONE: &str =
+    "ended goes alone, with only the memory and origin; make other changes in their own update";
+/// Why an `ended` carries no evidence.
+const ENDED_EMPTY: &str =
+    "ended needs the evidence: what you did and saw that shows the condition happened";
+/// Why an `ended` names a memory with no condition.
+const ENDED_NO_CONDITION: &str =
+    "That memory has no condition; it holds until the user changes or forgets it";
+/// Why an `ended` names a date: a date ends with no write.
+const ENDED_DATE: &str = "That memory's condition is a date, which ends on its own; to end it sooner, update its until with the user's yes";
+/// Why an `ended` names a tag: the hook ends it when the tag appears.
+const ENDED_TAG: &str = "That memory's condition is a tag, which ends when a checkout of its project has the tag; to end it sooner, update its until with the user's yes";
+/// Why an `ended` names a memory already ended: the first end stands.
+const ENDED_ALREADY: &str = "That memory's condition has already ended; the first end stands";
+/// Why an `ended` names a memory that is stale or superseded.
+const ENDED_NOT_LIVE: &str = "That memory is not in force, so its condition can't end";
+/// Why a rule's `ended` needs the user's yes: the store can't tell a
+/// permission from a prohibition, and ending a prohibition loosens what the
+/// agent may do, which a planted file must never achieve.
+const RULE_ENDS_WITH_YES: &str = "A rule's condition ends only with the user's yes: ask the user once whether it is met, then pass user_confirmed";
+
+/// Ends a memory's text condition on the agent's evidence (`update`'s
+/// `ended`): a non-rule needs no yes, a rule needs the user's. The end
+/// record is final; the triggers write the `ended` event, move the change
+/// marker and stale the inferences that cite the memory.
+fn end_condition(db: &Path, input: Update) -> Result<Value> {
+    let refused = |reason: &str| Ok(json!({"updated":false,"reason":reason}));
+    let others = input.memory_type.is_some()
+        || input.category.is_some()
+        || input.title.is_some()
+        || input.content.is_some()
+        || input.context.is_some()
+        || input.reason.is_some()
+        || input.evidence.is_some()
+        || input.scope.is_some()
+        || input.project.is_some()
+        || input.replace_origins
+        || input.drop_history
+        || !input.distinct_from.is_empty()
+        || input.until.is_some();
+    if others {
+        return refused(ENDED_ALONE);
+    }
+    let evidence = clean(input.ended.as_deref().unwrap_or_default(), usize::MAX);
+    if evidence.is_empty() {
+        return refused(ENDED_EMPTY);
+    }
+    if let Some(problem) = too_long("ended", &evidence, NOTE_LIMIT, SHORTEN) {
+        return refused(&problem);
+    }
+    let origin = input
+        .origin
+        .as_deref()
+        .map(|origin| clean(origin, usize::MAX))
+        .unwrap_or_default();
+    if origin.chars().count() > ORIGIN_LIMIT {
+        return refused("Origin must be a short reference of at most 240 characters");
+    }
+    let conn = connect(db)?;
+    let mut tx = write(&conn)?;
+    let memory_id = match full_id(&tx, &input.memory_id)? {
+        Ok(id) => id,
+        Err(reason) => return refused(&reason),
+    };
+    let Some(memory) = get(&tx, memory_id)? else {
+        return refused("Memory does not exist");
+    };
+    let ended: bool = tx.query_row(
+        "SELECT EXISTS (SELECT 1 FROM memory_ended WHERE memory_id=?1)",
+        [memory_id.to_string()],
+        |r| r.get(0),
+    )?;
+    if ended {
+        return refused(ENDED_ALREADY);
+    }
+    match &memory.until {
+        None => return refused(ENDED_NO_CONDITION),
+        Some(until) if until.date.is_some() => return refused(ENDED_DATE),
+        Some(until) if until.tag.is_some() => return refused(ENDED_TAG),
+        Some(_) => {}
+    }
+    if !is_live(&tx, memory_id)? {
+        return refused(ENDED_NOT_LIVE);
+    }
+    if super::read::standing_rule(&memory) && !input.user_confirmed {
+        return refused(RULE_ENDS_WITH_YES);
+    }
+    tx.note(Some("update"), Some(memory_id), &origin)?;
+    tx.execute(
+        "INSERT INTO memory_ended(memory_id,how,evidence,origin) VALUES (?1,'evidence',?2,?3)",
+        params![memory_id.to_string(), evidence, origin],
+    )?;
+    tx.commit()?;
+    Ok(json!({"updated":true,"id":memory_id,"ended":true}))
+}
+
 fn mark_distinct(db: &Path, mut input: Update) -> Result<Value> {
     let refused = |reason: &str| Ok(json!({"updated":false,"reason":reason}));
     let changes = input.memory_type.is_some()
@@ -987,7 +1088,8 @@ fn mark_distinct(db: &Path, mut input: Update) -> Result<Value> {
         || input.project.is_some()
         || input.origin.is_some()
         || input.replace_origins
-        || input.drop_history;
+        || input.drop_history
+        || input.until.is_some();
     if changes {
         return refused("Mark memories distinct separately from changing one");
     }
