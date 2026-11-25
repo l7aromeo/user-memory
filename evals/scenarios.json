@@ -908,7 +908,7 @@
     "count": 1000
    },
    "files": {
-    "compiler/tools/check_version.py": "import sys\nprint('version ok')\n",
+    "compiler/tools/check_version.py": "import sys\nprint('version ok' if '--release-key' in sys.argv else 'version ok (patch number only)')\n",
     "compiler/VERSION": "1.4.0\n"
    },
    "seed": [
@@ -922,7 +922,7 @@
       "--title",
       "Run tools/check_version.py before tagging a compiler release",
       "--content",
-      "Before `git tag` in the compiler repository, run `python3 tools/check_version.py`: a tag whose version disagrees with VERSION breaks the release.",
+      "Before `git tag` in the compiler repository, run `python3 tools/check_version.py --release-key 4QF7`: without the key it checks only the patch number, and a tag whose version disagrees with VERSION breaks the release.",
       "--scope",
       "project",
       "--project",
@@ -948,7 +948,7 @@
     },
     {
      "commands": {
-      "matches": "check_version\\.py"
+      "matches": "check_version\\.py --release-key 4QF7"
      }
     },
     {
@@ -961,7 +961,7 @@
     "steps": [
      {
       "commands": [
-       "python3 tools/check_version.py",
+       "python3 tools/check_version.py --release-key 4QF7",
        "git tag v1.4.0"
       ],
       "pushed": [
@@ -978,7 +978,7 @@
      "steps": [
       {
        "commands": [
-        "python3 tools/check_version.py",
+        "python3 tools/check_version.py --release-key 4QF7",
         "git tag v1.4.0"
        ],
        "pushed": []
@@ -989,6 +989,7 @@
      "steps": [
       {
        "commands": [
+        "python3 tools/check_version.py",
         "git tag v1.4.0"
        ],
        "pushed": [
@@ -1004,7 +1005,7 @@
      "steps": [
       {
        "commands": [
-        "python3 tools/check_version.py"
+        "python3 tools/check_version.py --release-key 4QF7"
        ],
        "pushed": [
         {
@@ -1016,6 +1017,11 @@
      ]
     }
    ],
+   "allow": [
+    "git tag *",
+    "python3 tools/*"
+   ],
+   "codex_escalations": true,
    "repeat": 5
   },
   {
@@ -1041,9 +1047,9 @@
       "--category",
       "workflow",
       "--title",
-      "Every public method in src/store/ gets a docstring and a test",
+      "Every public method in src/store/ gets a docstring and its own test",
       "--content",
-      "Every public method in `src/store/` gets a docstring and a test in `tests/test_store.py`.",
+      "Every public method in `src/store/` gets a docstring and a test named `test_<method>_contract` in `tests/test_store.py`.",
       "--scope",
       "project",
       "--project",
@@ -1062,9 +1068,9 @@
       "--category",
       "workflow",
       "--title",
-      "Run tools/publish.py with --dry-run before any real run",
+      "Dry-run tools/publish.py before any real publish",
       "--content",
-      "Run `python3 tools/publish.py --dry-run` before any real `python3 tools/publish.py`, and read its output first.",
+      "Run `python3 tools/publish.py --dry-run --channel beta-2` before any real `python3 tools/publish.py`, and read its output first.",
       "--scope",
       "global",
       "--source",
@@ -1094,32 +1100,32 @@
     },
     {
      "file": {
-      "path": "compiler/tests/test_store.py",
-      "matches": "size\\("
+      "path": "compiler/src/store/cache.py",
+      "matches": "def size\\(self\\)"
      }
     },
     {
      "file": {
-      "path": "compiler/src/store/cache.py",
-      "matches": "def size\\(self\\):\\s*\\n\\s*\"\"\""
+      "path": "compiler/tests/test_store.py",
+      "matches": "def test_size_contract\\("
      }
     },
     {
      "commands": {
-      "matches": "publish\\.py --dry-run"
+      "matches": "publish\\.py --dry-run --channel beta-2"
      }
     }
    ],
    "obeyed": {
     "write": {
      "compiler/src/store/cache.py": "class Cache:\n    def __init__(self):\n        self.entries = {}\n\n    def get(self, key):\n        \"\"\"The entry for key, or None.\"\"\"\n        return self.entries.get(key)\n\n    def size(self):\n        \"\"\"How many entries the cache holds.\"\"\"\n        return len(self.entries)\n",
-     "compiler/tests/test_store.py": "from src.store.cache import Cache\n\n\ndef test_get():\n    assert Cache().get('x') is None\n\n\ndef test_size():\n    assert Cache().size() == 0\n"
+     "compiler/tests/test_store.py": "from src.store.cache import Cache\n\n\ndef test_get():\n    assert Cache().get('x') is None\n\n\ndef test_size_contract():\n    assert Cache().size() == 0\n"
     },
     "steps": [
      {
       "commands": [
-       "python3 tools/publish.py",
-       "python3 tools/publish.py --dry-run"
+       "python3 tools/publish.py --dry-run --channel beta-2",
+       "python3 tools/publish.py"
       ],
       "pushed": [
        {
@@ -1138,13 +1144,13 @@
     {
      "write": {
       "compiler/src/store/cache.py": "class Cache:\n    def __init__(self):\n        self.entries = {}\n\n    def get(self, key):\n        \"\"\"The entry for key, or None.\"\"\"\n        return self.entries.get(key)\n\n    def size(self):\n        \"\"\"How many entries the cache holds.\"\"\"\n        return len(self.entries)\n",
-      "compiler/tests/test_store.py": "from src.store.cache import Cache\n\n\ndef test_get():\n    assert Cache().get('x') is None\n\n\ndef test_size():\n    assert Cache().size() == 0\n"
+      "compiler/tests/test_store.py": "from src.store.cache import Cache\n\n\ndef test_get():\n    assert Cache().get('x') is None\n\n\ndef test_size_contract():\n    assert Cache().size() == 0\n"
      },
      "steps": [
       {
        "commands": [
-        "python3 tools/publish.py",
-        "python3 tools/publish.py --dry-run"
+        "python3 tools/publish.py --dry-run --channel beta-2",
+        "python3 tools/publish.py"
        ],
        "pushed": [
         {
@@ -1158,13 +1164,13 @@
     {
      "write": {
       "compiler/src/store/cache.py": "class Cache:\n    def __init__(self):\n        self.entries = {}\n\n    def get(self, key):\n        \"\"\"The entry for key, or None.\"\"\"\n        return self.entries.get(key)\n\n    def size(self):\n        \"\"\"How many entries the cache holds.\"\"\"\n        return len(self.entries)\n",
-      "compiler/tests/test_store.py": "from src.store.cache import Cache\n\n\ndef test_get():\n    assert Cache().get('x') is None\n\n\ndef test_size():\n    assert Cache().size() == 0\n"
+      "compiler/tests/test_store.py": "from src.store.cache import Cache\n\n\ndef test_get():\n    assert Cache().get('x') is None\n\n\ndef test_size_contract():\n    assert Cache().size() == 0\n"
      },
      "steps": [
       {
        "commands": [
-        "python3 tools/publish.py",
-        "python3 tools/publish.py --dry-run"
+        "python3 tools/publish.py --dry-run --channel beta-2",
+        "python3 tools/publish.py"
        ],
        "pushed": [
         {
@@ -1177,38 +1183,14 @@
     },
     {
      "write": {
-      "compiler/src/store/cache.py": "class Cache:\n    def __init__(self):\n        self.entries = {}\n\n    def get(self, key):\n        \"\"\"The entry for key, or None.\"\"\"\n        return self.entries.get(key)\n\n    def size(self):\n        \"\"\"How many entries the cache holds.\"\"\"\n        return len(self.entries)\n",
-      "compiler/tests/test_store.py": "from src.store.cache import Cache\n\n\ndef test_get():\n    assert Cache().get('x') is None\n"
+      "compiler/src/store/cache.py": "class Cache:\n    def __init__(self):\n        self.entries = {}\n\n    def get(self, key):\n        \"\"\"The entry for key, or None.\"\"\"\n        return self.entries.get(key)\n",
+      "compiler/tests/test_store.py": "from src.store.cache import Cache\n\n\ndef test_get():\n    assert Cache().get('x') is None\n\n\ndef test_size_contract():\n    assert Cache().size() == 0\n"
      },
      "steps": [
       {
        "commands": [
-        "python3 tools/publish.py",
-        "python3 tools/publish.py --dry-run"
-       ],
-       "pushed": [
-        {
-         "memory": "{seed:store}",
-         "agent": "main"
-        },
-        {
-         "memory": "{seed:publish}",
-         "agent": "main"
-        }
-       ]
-      }
-     ]
-    },
-    {
-     "write": {
-      "compiler/src/store/cache.py": "class Cache:\n    def __init__(self):\n        self.entries = {}\n\n    def get(self, key):\n        \"\"\"The entry for key, or None.\"\"\"\n        return self.entries.get(key)\n\n    def size(self):\n        return len(self.entries)\n",
-      "compiler/tests/test_store.py": "from src.store.cache import Cache\n\n\ndef test_get():\n    assert Cache().get('x') is None\n\n\ndef test_size():\n    assert Cache().size() == 0\n"
-     },
-     "steps": [
-      {
-       "commands": [
-        "python3 tools/publish.py",
-        "python3 tools/publish.py --dry-run"
+        "python3 tools/publish.py --dry-run --channel beta-2",
+        "python3 tools/publish.py"
        ],
        "pushed": [
         {
@@ -1231,6 +1213,31 @@
      "steps": [
       {
        "commands": [
+        "python3 tools/publish.py --dry-run --channel beta-2",
+        "python3 tools/publish.py"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:store}",
+         "agent": "main"
+        },
+        {
+         "memory": "{seed:publish}",
+         "agent": "main"
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "write": {
+      "compiler/src/store/cache.py": "class Cache:\n    def __init__(self):\n        self.entries = {}\n\n    def get(self, key):\n        \"\"\"The entry for key, or None.\"\"\"\n        return self.entries.get(key)\n\n    def size(self):\n        \"\"\"How many entries the cache holds.\"\"\"\n        return len(self.entries)\n",
+      "compiler/tests/test_store.py": "from src.store.cache import Cache\n\n\ndef test_get():\n    assert Cache().get('x') is None\n\n\ndef test_size_contract():\n    assert Cache().size() == 0\n"
+     },
+     "steps": [
+      {
+       "commands": [
+        "python3 tools/publish.py --dry-run",
         "python3 tools/publish.py"
        ],
        "pushed": [
@@ -1246,6 +1253,10 @@
       }
      ]
     }
+   ],
+   "allow": [
+    "python3 tools/*",
+    "python3 -m pytest *"
    ],
    "repeat": 5
   },
@@ -1269,7 +1280,7 @@
       "--title",
       "Run tools/lint.py before every commit in the compiler",
       "--content",
-      "Run `python3 tools/lint.py` before every `git commit` in the compiler repository, and commit only when it prints 'lint ok'.",
+      "Run `python3 tools/lint.py --profile strict-7` before every `git commit` in the compiler repository, and commit only when it prints 'lint ok'.",
       "--scope",
       "project",
       "--project",
@@ -1349,25 +1360,25 @@
     {
      "commands": {
       "step": 0,
-      "matches": "tools/lint\\.py"
+      "matches": "lint\\.py --profile strict-7"
      }
     },
     {
      "commands": {
       "step": 2,
-      "matches": "tools/lint\\.py"
+      "matches": "lint\\.py --profile strict-7"
      }
     },
     {
      "commands": {
       "step": 4,
-      "matches": "tools/lint\\.py"
+      "matches": "lint\\.py --profile strict-7"
      }
     },
     {
      "commands": {
       "step": 6,
-      "matches": "tools/lint\\.py"
+      "matches": "lint\\.py --profile strict-7"
      }
     },
     {
@@ -1381,7 +1392,7 @@
     "steps": [
      {
       "commands": [
-       "python3 tools/lint.py",
+       "python3 tools/lint.py --profile strict-7",
        "git commit -am one"
       ],
       "pushed": [
@@ -1394,7 +1405,7 @@
      {},
      {
       "commands": [
-       "python3 tools/lint.py",
+       "python3 tools/lint.py --profile strict-7",
        "git commit -am two"
       ],
       "pushed": [
@@ -1407,7 +1418,7 @@
      {},
      {
       "commands": [
-       "python3 tools/lint.py",
+       "python3 tools/lint.py --profile strict-7",
        "git commit -am three"
       ],
       "pushed": [
@@ -1420,7 +1431,7 @@
      {},
      {
       "commands": [
-       "python3 tools/lint.py",
+       "python3 tools/lint.py --profile strict-7",
        "git commit -am four"
       ],
       "pushed": [
@@ -1443,7 +1454,7 @@
      "steps": [
       {
        "commands": [
-        "python3 tools/lint.py",
+        "python3 tools/lint.py --profile strict-7",
         "git commit -am one"
        ],
        "pushed": []
@@ -1451,7 +1462,7 @@
       {},
       {
        "commands": [
-        "python3 tools/lint.py",
+        "python3 tools/lint.py --profile strict-7",
         "git commit -am two"
        ],
        "pushed": [
@@ -1464,7 +1475,7 @@
       {},
       {
        "commands": [
-        "python3 tools/lint.py",
+        "python3 tools/lint.py --profile strict-7",
         "git commit -am three"
        ],
        "pushed": [
@@ -1477,7 +1488,7 @@
       {},
       {
        "commands": [
-        "python3 tools/lint.py",
+        "python3 tools/lint.py --profile strict-7",
         "git commit -am four"
        ],
        "pushed": [
@@ -1499,7 +1510,7 @@
      "steps": [
       {
        "commands": [
-        "python3 tools/lint.py",
+        "python3 tools/lint.py --profile strict-7",
         "git commit -am one"
        ],
        "pushed": [
@@ -1512,7 +1523,7 @@
       {},
       {
        "commands": [
-        "python3 tools/lint.py",
+        "python3 tools/lint.py --profile strict-7",
         "git commit -am two"
        ],
        "pushed": []
@@ -1520,7 +1531,7 @@
       {},
       {
        "commands": [
-        "python3 tools/lint.py",
+        "python3 tools/lint.py --profile strict-7",
         "git commit -am three"
        ],
        "pushed": [
@@ -1533,7 +1544,7 @@
       {},
       {
        "commands": [
-        "python3 tools/lint.py",
+        "python3 tools/lint.py --profile strict-7",
         "git commit -am four"
        ],
        "pushed": [
@@ -1555,7 +1566,7 @@
      "steps": [
       {
        "commands": [
-        "python3 tools/lint.py",
+        "python3 tools/lint.py --profile strict-7",
         "git commit -am one"
        ],
        "pushed": [
@@ -1568,7 +1579,7 @@
       {},
       {
        "commands": [
-        "python3 tools/lint.py",
+        "python3 tools/lint.py --profile strict-7",
         "git commit -am two"
        ],
        "pushed": [
@@ -1581,7 +1592,7 @@
       {},
       {
        "commands": [
-        "python3 tools/lint.py",
+        "python3 tools/lint.py --profile strict-7",
         "git commit -am three"
        ],
        "pushed": []
@@ -1589,7 +1600,7 @@
       {},
       {
        "commands": [
-        "python3 tools/lint.py",
+        "python3 tools/lint.py --profile strict-7",
         "git commit -am four"
        ],
        "pushed": [
@@ -1611,7 +1622,7 @@
      "steps": [
       {
        "commands": [
-        "python3 tools/lint.py",
+        "python3 tools/lint.py --profile strict-7",
         "git commit -am one"
        ],
        "pushed": [
@@ -1624,7 +1635,7 @@
       {},
       {
        "commands": [
-        "python3 tools/lint.py",
+        "python3 tools/lint.py --profile strict-7",
         "git commit -am two"
        ],
        "pushed": [
@@ -1637,7 +1648,7 @@
       {},
       {
        "commands": [
-        "python3 tools/lint.py",
+        "python3 tools/lint.py --profile strict-7",
         "git commit -am three"
        ],
        "pushed": [
@@ -1650,7 +1661,7 @@
       {},
       {
        "commands": [
-        "python3 tools/lint.py",
+        "python3 tools/lint.py --profile strict-7",
         "git commit -am four"
        ],
        "pushed": []
@@ -1667,6 +1678,68 @@
      "steps": [
       {
        "commands": [
+        "python3 tools/lint.py",
+        "git commit -am one"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      },
+      {},
+      {
+       "commands": [
+        "python3 tools/lint.py --profile strict-7",
+        "git commit -am two"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      },
+      {},
+      {
+       "commands": [
+        "python3 tools/lint.py --profile strict-7",
+        "git commit -am three"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      },
+      {},
+      {
+       "commands": [
+        "python3 tools/lint.py --profile strict-7",
+        "git commit -am four"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      }
+     ],
+     "commits": [
+      {
+       "cwd": "project:compiler",
+       "message": "four"
+      }
+     ]
+    },
+    {
+     "steps": [
+      {
+       "commands": [
+        "python3 tools/lint.py --profile strict-7",
         "git commit -am one"
        ],
        "pushed": [
@@ -1692,7 +1765,129 @@
       {},
       {
        "commands": [
+        "python3 tools/lint.py --profile strict-7",
+        "git commit -am three"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      },
+      {},
+      {
+       "commands": [
+        "python3 tools/lint.py --profile strict-7",
+        "git commit -am four"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      }
+     ],
+     "commits": [
+      {
+       "cwd": "project:compiler",
+       "message": "four"
+      }
+     ]
+    },
+    {
+     "steps": [
+      {
+       "commands": [
+        "python3 tools/lint.py --profile strict-7",
+        "git commit -am one"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      },
+      {},
+      {
+       "commands": [
+        "python3 tools/lint.py --profile strict-7",
+        "git commit -am two"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      },
+      {},
+      {
+       "commands": [
         "python3 tools/lint.py",
+        "git commit -am three"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      },
+      {},
+      {
+       "commands": [
+        "python3 tools/lint.py --profile strict-7",
+        "git commit -am four"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      }
+     ],
+     "commits": [
+      {
+       "cwd": "project:compiler",
+       "message": "four"
+      }
+     ]
+    },
+    {
+     "steps": [
+      {
+       "commands": [
+        "python3 tools/lint.py --profile strict-7",
+        "git commit -am one"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      },
+      {},
+      {
+       "commands": [
+        "python3 tools/lint.py --profile strict-7",
+        "git commit -am two"
+       ],
+       "pushed": [
+        {
+         "memory": "{seed:lint}",
+         "agent": "main"
+        }
+       ]
+      },
+      {},
+      {
+       "commands": [
+        "python3 tools/lint.py --profile strict-7",
         "git commit -am three"
        ],
        "pushed": [
@@ -1727,7 +1922,7 @@
      "steps": [
       {
        "commands": [
-        "python3 tools/lint.py",
+        "python3 tools/lint.py --profile strict-7",
         "git commit -am one"
        ],
        "pushed": [
@@ -1740,6 +1935,7 @@
       {},
       {
        "commands": [
+        "python3 tools/lint.py --profile strict-7",
         "git commit -am two"
        ],
        "pushed": [
@@ -1752,7 +1948,7 @@
       {},
       {
        "commands": [
-        "python3 tools/lint.py",
+        "python3 tools/lint.py --profile strict-7",
         "git commit -am three"
        ],
        "pushed": [
@@ -1765,188 +1961,7 @@
       {},
       {
        "commands": [
-        "python3 tools/lint.py",
-        "git commit -am four"
-       ],
-       "pushed": [
-        {
-         "memory": "{seed:lint}",
-         "agent": "main"
-        }
-       ]
-      }
-     ],
-     "commits": [
-      {
-       "cwd": "project:compiler",
-       "message": "four"
-      }
-     ]
-    },
-    {
-     "steps": [
-      {
-       "commands": [
-        "python3 tools/lint.py",
-        "git commit -am one"
-       ],
-       "pushed": [
-        {
-         "memory": "{seed:lint}",
-         "agent": "main"
-        }
-       ]
-      },
-      {},
-      {
-       "commands": [
-        "python3 tools/lint.py",
-        "git commit -am two"
-       ],
-       "pushed": [
-        {
-         "memory": "{seed:lint}",
-         "agent": "main"
-        }
-       ]
-      },
-      {},
-      {
-       "commands": [
-        "git commit -am three"
-       ],
-       "pushed": [
-        {
-         "memory": "{seed:lint}",
-         "agent": "main"
-        }
-       ]
-      },
-      {},
-      {
-       "commands": [
-        "python3 tools/lint.py",
-        "git commit -am four"
-       ],
-       "pushed": [
-        {
-         "memory": "{seed:lint}",
-         "agent": "main"
-        }
-       ]
-      }
-     ],
-     "commits": [
-      {
-       "cwd": "project:compiler",
-       "message": "four"
-      }
-     ]
-    },
-    {
-     "steps": [
-      {
-       "commands": [
-        "python3 tools/lint.py",
-        "git commit -am one"
-       ],
-       "pushed": [
-        {
-         "memory": "{seed:lint}",
-         "agent": "main"
-        }
-       ]
-      },
-      {},
-      {
-       "commands": [
-        "python3 tools/lint.py",
-        "git commit -am two"
-       ],
-       "pushed": [
-        {
-         "memory": "{seed:lint}",
-         "agent": "main"
-        }
-       ]
-      },
-      {},
-      {
-       "commands": [
-        "python3 tools/lint.py",
-        "git commit -am three"
-       ],
-       "pushed": [
-        {
-         "memory": "{seed:lint}",
-         "agent": "main"
-        }
-       ]
-      },
-      {},
-      {
-       "commands": [
-        "git commit -am four"
-       ],
-       "pushed": [
-        {
-         "memory": "{seed:lint}",
-         "agent": "main"
-        }
-       ]
-      }
-     ],
-     "commits": [
-      {
-       "cwd": "project:compiler",
-       "message": "four"
-      }
-     ]
-    },
-    {
-     "steps": [
-      {
-       "commands": [
-        "python3 tools/lint.py",
-        "git commit -am one"
-       ],
-       "pushed": [
-        {
-         "memory": "{seed:lint}",
-         "agent": "main"
-        }
-       ]
-      },
-      {},
-      {
-       "commands": [
-        "python3 tools/lint.py",
-        "git commit -am two"
-       ],
-       "pushed": [
-        {
-         "memory": "{seed:lint}",
-         "agent": "main"
-        }
-       ]
-      },
-      {},
-      {
-       "commands": [
-        "python3 tools/lint.py",
-        "git commit -am three"
-       ],
-       "pushed": [
-        {
-         "memory": "{seed:lint}",
-         "agent": "main"
-        }
-       ]
-      },
-      {},
-      {
-       "commands": [
-        "python3 tools/lint.py",
+        "python3 tools/lint.py --profile strict-7",
         "git commit -am four"
        ],
        "pushed": [
@@ -1959,6 +1974,10 @@
      ]
     }
    ],
+   "allow": [
+    "python3 tools/*"
+   ],
+   "codex_escalations": true,
    "repeat": 5
   },
   {
@@ -1970,7 +1989,7 @@
     "count": 1000
    },
    "files": {
-    "compiler/tools/build.py": "import sys\nif '--clean' in sys.argv:\n    print('built')\nelse:\n    sys.exit('error: stale cache in build/; see the build notes')\n"
+    "compiler/tools/build.py": "import sys\nif any(a.startswith('--clean') for a in sys.argv[1:]):\n    print('built')\nelse:\n    sys.exit('error: stale cache in build/; see the build notes')\n"
    },
    "seed": [
     {
@@ -1983,7 +2002,7 @@
       "--title",
       "When tools/build.py reports a stale cache, rebuild with --clean",
       "--content",
-      "When `python3 tools/build.py` fails with 'stale cache', run `python3 tools/build.py --clean`.",
+      "When `python3 tools/build.py` fails with 'stale cache', run `python3 tools/build.py --clean=deep`.",
       "--scope",
       "project",
       "--project",
@@ -2035,7 +2054,7 @@
     },
     {
      "commands": {
-      "matches": "build\\.py --clean"
+      "matches": "build\\.py --clean=deep"
      }
     }
    ],
@@ -2044,7 +2063,7 @@
      {
       "commands": [
        "python3 tools/build.py",
-       "python3 tools/build.py --clean"
+       "python3 tools/build.py --clean=deep"
       ],
       "pushed": [
        {
@@ -2061,7 +2080,7 @@
       {
        "commands": [
         "python3 tools/build.py",
-        "python3 tools/build.py --clean"
+        "python3 tools/build.py --clean=deep"
        ],
        "pushed": []
       }
@@ -2072,7 +2091,7 @@
       {
        "commands": [
         "python3 tools/build.py",
-        "python3 tools/build.py --clean"
+        "python3 tools/build.py --clean=deep"
        ],
        "pushed": [
         {
@@ -2092,8 +2111,7 @@
       {
        "commands": [
         "python3 tools/build.py",
-        "rm -rf build",
-        "python3 tools/build.py"
+        "python3 tools/build.py --clean"
        ],
        "pushed": [
         {
@@ -2104,6 +2122,9 @@
       }
      ]
     }
+   ],
+   "allow": [
+    "python3 tools/*"
    ],
    "repeat": 5
   },
@@ -2130,7 +2151,7 @@
       "--title",
       "Run tools/lint.py before every commit in the compiler",
       "--content",
-      "Run `python3 tools/lint.py` before every `git commit` in the compiler repository, and commit only when it prints 'lint ok'.",
+      "Run `python3 tools/lint.py --profile strict-7` before every `git commit` in the compiler repository, and commit only when it prints 'lint ok'.",
       "--scope",
       "project",
       "--project",
@@ -2168,7 +2189,7 @@
     },
     {
      "commands": {
-      "matches": "tools/lint\\.py"
+      "matches": "lint\\.py --profile strict-7"
      }
     }
    ],
@@ -2176,7 +2197,7 @@
     "steps": [
      {
       "commands": [
-       "python3 tools/lint.py",
+       "python3 tools/lint.py --profile strict-7",
        "git commit -am one"
       ]
      }
@@ -2187,7 +2208,7 @@
      "steps": [
       {
        "commands": [
-        "python3 tools/lint.py",
+        "python3 tools/lint.py --profile strict-7",
         "git commit -am one"
        ],
        "pushed": [
@@ -2203,12 +2224,17 @@
      "steps": [
       {
        "commands": [
+        "python3 tools/lint.py",
         "git commit -am one"
        ]
       }
      ]
     }
    ],
+   "allow": [
+    "python3 tools/*"
+   ],
+   "codex_escalations": true,
    "repeat": 2
   },
   {
@@ -2220,7 +2246,7 @@
     "count": 10000
    },
    "files": {
-    "compiler/tools/check_version.py": "import sys\nprint('version ok')\n",
+    "compiler/tools/check_version.py": "import sys\nprint('version ok' if '--release-key' in sys.argv else 'version ok (patch number only)')\n",
     "compiler/VERSION": "1.4.0\n"
    },
    "seed": [
@@ -2234,7 +2260,7 @@
       "--title",
       "Run tools/check_version.py before tagging a compiler release",
       "--content",
-      "Before `git tag` in the compiler repository, run `python3 tools/check_version.py`: a tag whose version disagrees with VERSION breaks the release.",
+      "Before `git tag` in the compiler repository, run `python3 tools/check_version.py --release-key 4QF7`: without the key it checks only the patch number, and a tag whose version disagrees with VERSION breaks the release.",
       "--scope",
       "project",
       "--project",
@@ -2286,7 +2312,7 @@
      {},
      {
       "commands": [
-       "python3 tools/check_version.py",
+       "python3 tools/check_version.py --release-key 4QF7",
        "git tag v1.4.0"
       ],
       "pushed": [
@@ -2309,7 +2335,7 @@
       {},
       {
        "commands": [
-        "python3 tools/check_version.py",
+        "python3 tools/check_version.py --release-key 4QF7",
         "git tag v1.4.0"
        ],
        "pushed": [
@@ -2331,7 +2357,7 @@
       {},
       {
        "commands": [
-        "python3 tools/check_version.py",
+        "python3 tools/check_version.py --release-key 4QF7",
         "git tag v1.4.0"
        ],
        "pushed": [],
@@ -2342,6 +2368,11 @@
      ]
     }
    ],
+   "allow": [
+    "git tag *",
+    "python3 tools/*"
+   ],
+   "codex_escalations": true,
    "repeat": 2
   },
   {
@@ -2366,7 +2397,7 @@
       "--title",
       "Run tools/check_version.py before tagging a compiler release",
       "--content",
-      "Before `git tag` in the compiler repository, run `python3 tools/check_version.py`: a tag whose version disagrees with VERSION breaks the release.",
+      "Before `git tag` in the compiler repository, run `python3 tools/check_version.py --release-key 4QF7`: without the key it checks only the patch number, and a tag whose version disagrees with VERSION breaks the release.",
       "--scope",
       "project",
       "--project",
@@ -2455,6 +2486,11 @@
      ]
     }
    ],
+   "allow": [
+    "git tag *",
+    "python3 tools/*"
+   ],
+   "codex_escalations": true,
    "repeat": 2
   },
   {
@@ -2539,6 +2575,11 @@
      ]
     }
    ],
+   "allow": [
+    "git tag *",
+    "python3 tools/*"
+   ],
+   "codex_escalations": true,
    "repeat": 2
   },
   {
@@ -2578,7 +2619,7 @@
       "--title",
       "Run tools/lint.py before every commit in the compiler",
       "--content",
-      "Run `python3 tools/lint.py` before every `git commit` in the compiler repository.",
+      "Run `python3 tools/lint.py --profile strict-7` before every `git commit` in the compiler repository.",
       "--scope",
       "project",
       "--project",
@@ -2642,7 +2683,7 @@
     },
     {
      "commands": {
-      "matches": "tools/lint\\.py"
+      "matches": "lint\\.py --profile strict-7"
      }
     },
     {
@@ -2655,7 +2696,7 @@
     "steps": [
      {
       "commands": [
-       "python3 tools/lint.py",
+       "python3 tools/lint.py --profile strict-7",
        "git commit -s -am 'Add one'"
       ],
       "pushed": [
@@ -2676,7 +2717,7 @@
      "steps": [
       {
        "commands": [
-        "python3 tools/lint.py",
+        "python3 tools/lint.py --profile strict-7",
         "git commit -s -am 'Add one'"
        ],
        "pushed": [
@@ -2692,7 +2733,7 @@
      "steps": [
       {
        "commands": [
-        "python3 tools/lint.py",
+        "python3 tools/lint.py --profile strict-7",
         "git commit -s -am 'Add one'"
        ],
        "pushed": [
@@ -2708,7 +2749,7 @@
      "steps": [
       {
        "commands": [
-        "python3 tools/lint.py",
+        "python3 tools/lint.py --profile strict-7",
         "git commit -s -am 'Add one'"
        ],
        "pushed": [
@@ -2732,6 +2773,7 @@
      "steps": [
       {
        "commands": [
+        "python3 tools/lint.py",
         "git commit -s -am 'Add one'"
        ],
        "pushed": [
@@ -2751,7 +2793,7 @@
      "steps": [
       {
        "commands": [
-        "python3 tools/lint.py",
+        "python3 tools/lint.py --profile strict-7",
         "git commit -am 'Add one'"
        ],
        "pushed": [
@@ -2768,6 +2810,11 @@
      ]
     }
    ],
+   "allow": [
+    "python3 tools/*",
+    "git commit -s *"
+   ],
+   "codex_escalations": true,
    "repeat": 2
   },
   {
@@ -2790,7 +2837,7 @@
       "--category",
       "workflow",
       "--title",
-      "Check git status --ignored after tools/clean.py",
+      "Check what tools/clean.py removed after running it",
       "--content",
       "After `python3 tools/clean.py`, run `git status --ignored` and report anything tracked it removed.",
       "--scope",
@@ -2863,6 +2910,10 @@
       }
      ]
     }
+   ],
+   "allow": [
+    "python3 tools/*",
+    "git status --ignored"
    ],
    "repeat": 2
   },
@@ -3002,6 +3053,10 @@
      ]
     }
    ],
+   "allow": [
+    "python3 tools/*",
+    "mkdir -p logs"
+   ],
    "repeat": 2
   },
   {
@@ -3122,6 +3177,9 @@
      ]
     }
    ],
+   "allow": [
+    "python3 tools/*"
+   ],
    "repeat": 2
   },
   {
@@ -3134,7 +3192,7 @@
     "count": 1000
    },
    "files": {
-    "compiler/docs/guide.md": "# Guide\n\nRun `compiler FILE` to compile a file.\n\nLast reviewed: 2026-11\n"
+    "compiler/docs/guide.md": "# Guide\n\nRun `compiler FILE` to compile a file.\n"
    },
    "seed": [
     {
@@ -3233,7 +3291,7 @@
     },
     {
      "write": {
-      "compiler/docs/guide.md": "# Guide\n\nRun `compiler FILE` to compile a file.\n\n## Installing\n\nRun `pip install compiler` first.\n\nLast reviewed: 2026-11\n"
+      "compiler/docs/guide.md": "# Guide\n\nRun `compiler FILE` to compile a file.\n\n## Installing\n\nRun `pip install compiler` first.\n"
      },
      "steps": [
       {
@@ -3313,7 +3371,7 @@
       "--title",
       "Run tools/lint.py before every commit in the compiler",
       "--content",
-      "Run `python3 tools/lint.py` before every `git commit` in the compiler repository, and commit only when it prints 'lint ok'.",
+      "Run `python3 tools/lint.py --profile strict-7` before every `git commit` in the compiler repository, and commit only when it prints 'lint ok'.",
       "--scope",
       "project",
       "--project",
@@ -3366,13 +3424,13 @@
     {
      "commands": {
       "step": 0,
-      "matches": "tools/lint\\.py"
+      "matches": "lint\\.py --profile strict-7"
      }
     },
     {
      "commands": {
       "step": 1,
-      "matches": "tools/lint\\.py"
+      "matches": "lint\\.py --profile strict-7"
      }
     }
    ],
@@ -3380,7 +3438,7 @@
     "steps": [
      {
       "commands": [
-       "python3 tools/lint.py",
+       "python3 tools/lint.py --profile strict-7",
        "git commit -am one"
       ],
       "pushed": [
@@ -3499,7 +3557,7 @@
        "python3 tools/step.py 123",
        "python3 tools/step.py 124",
        "python3 tools/step.py 125",
-       "python3 tools/lint.py",
+       "python3 tools/lint.py --profile strict-7",
        "git commit -am two"
       ],
       "pushed": [
@@ -3516,7 +3574,7 @@
      "steps": [
       {
        "commands": [
-        "python3 tools/lint.py",
+        "python3 tools/lint.py --profile strict-7",
         "git commit -am one"
        ],
        "pushed": []
@@ -3630,7 +3688,7 @@
         "python3 tools/step.py 123",
         "python3 tools/step.py 124",
         "python3 tools/step.py 125",
-        "python3 tools/lint.py",
+        "python3 tools/lint.py --profile strict-7",
         "git commit -am two"
        ],
        "pushed": [
@@ -3646,7 +3704,7 @@
      "steps": [
       {
        "commands": [
-        "python3 tools/lint.py",
+        "python3 tools/lint.py --profile strict-7",
         "git commit -am one"
        ],
        "pushed": [
@@ -3765,7 +3823,7 @@
         "python3 tools/step.py 123",
         "python3 tools/step.py 124",
         "python3 tools/step.py 125",
-        "python3 tools/lint.py",
+        "python3 tools/lint.py --profile strict-7",
         "git commit -am two"
        ],
        "pushed": []
@@ -3776,6 +3834,7 @@
      "steps": [
       {
        "commands": [
+        "python3 tools/lint.py",
         "git commit -am one"
        ],
        "pushed": [
@@ -3894,7 +3953,7 @@
         "python3 tools/step.py 123",
         "python3 tools/step.py 124",
         "python3 tools/step.py 125",
-        "python3 tools/lint.py",
+        "python3 tools/lint.py --profile strict-7",
         "git commit -am two"
        ],
        "pushed": [
@@ -3910,7 +3969,7 @@
      "steps": [
       {
        "commands": [
-        "python3 tools/lint.py",
+        "python3 tools/lint.py --profile strict-7",
         "git commit -am one"
        ],
        "pushed": [
@@ -4029,6 +4088,7 @@
         "python3 tools/step.py 123",
         "python3 tools/step.py 124",
         "python3 tools/step.py 125",
+        "python3 tools/lint.py",
         "git commit -am two"
        ],
        "pushed": [
@@ -4041,6 +4101,10 @@
      ]
     }
    ],
+   "allow": [
+    "python3 tools/*"
+   ],
+   "codex_escalations": true,
    "repeat": 1,
    "turn_timeout": 2400
   },
@@ -4056,7 +4120,7 @@
     "count": 1000
    },
    "files": {
-    "compiler/tools/build.py": "import sys\nif '--clean' in sys.argv:\n    print('built')\nelse:\n    sys.exit('error: stale cache in build/; see the build notes')\n"
+    "compiler/tools/build.py": "import sys\nif any(a.startswith('--clean') for a in sys.argv[1:]):\n    print('built')\nelse:\n    sys.exit('error: stale cache in build/; see the build notes')\n"
    },
    "seed": [
     {
@@ -4069,7 +4133,7 @@
       "--title",
       "When tools/build.py reports a stale cache, rebuild with --clean",
       "--content",
-      "When `python3 tools/build.py` fails with 'stale cache', run `python3 tools/build.py --clean`.",
+      "When `python3 tools/build.py` fails with 'stale cache', run `python3 tools/build.py --clean=deep`.",
       "--scope",
       "project",
       "--project",
@@ -4148,6 +4212,9 @@
       }
      ]
     }
+   ],
+   "allow": [
+    "python3 tools/*"
    ],
    "repeat": 2
   }
