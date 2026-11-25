@@ -567,16 +567,29 @@ builds a throwaway store from the synthetic memories in
 `evals/retrieval/memories.json`, then runs the graded queries in
 `evals/retrieval/queries.json` in the session's project. There are three
 styles of query: sharing words with the memory, phrased as a task, and
-paraphrased. It reports top-1, top-3, mean reciprocal rank (MRR) and misses
-per style, plus the ranks of global targets among global memories alone.
-It runs keyword-only, and with `--embed-url` also fused with an embeddings
-endpoint; the qwen3-embedding defaults match the installer's:
+paraphrased. Per style it reports top-1, top-3, recall at 5, mean
+reciprocal rank (MRR), NDCG at 10 over each query's grades (2 for its
+target, 1 for the memories it names as related), misses, and the size of
+the default page as an agent receives it. It also reports the ranks of
+global targets among global memories alone. It runs keyword-only, and with
+`--embed-url` also fused with an embeddings endpoint; the qwen3-embedding
+defaults match the installer's:
 
     just retrieval-bench --embed-url http://127.0.0.1:11434/v1/embeddings
 
+Some queries test a case, and the report counts their wins apart:
+
+- **superseded**: a memory replaced by another (`supersedes` in
+  memories.json) is never returned.
+- **exception**: a project's exception to a global rule on the same subject
+  is within the default page, even when the query's words favour the rule.
+- **near-duplicate**: of two memories that share most of their words but
+  mean different things, the one the query asks for ranks above the other.
+
 Run it before and after a change to ranking, and report both. It needs no
 CI and runs no agent. `--out FILE` writes every query's ranks as JSON, and
-`--keep DIR` keeps the built store with its vectors.
+`--keep DIR` keeps the built store with its vectors. `just eval-tests` runs the checks of the benchmark's own
+metrics and cases, which CI runs too.
 
 ## Search budget
 
