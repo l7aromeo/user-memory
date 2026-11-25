@@ -702,6 +702,27 @@ class UserInput(unittest.TestCase):
         self.assertEqual(len(session.child.stdin.written), 1)
         self.assertFalse(session.steered)
 
+    def test_a_claude_step_lasts_until_its_background_subagent_s_result_turn(self):
+        # As Claude Code 2.1 `-p` streams it: the first result while the
+        # task runs, then the `<task-notification>` turn.
+        tool = {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "Agent", "input": {"run_in_background": True}}]}}
+        task = {"task_id": "a1", "task_type": "local_agent"}
+        later = [{"type": "system", "subtype": "task_notification", "task_id": "a1", "status": "completed"},
+                 {"type": "system", "subtype": "background_tasks_changed", "tasks": []},
+                 {"type": "system", "subtype": "init"},
+                 {"type": "result", "subtype": "success", "result": "it says migrate.py"}]
+        session = self.claude(tool, {"type": "system", "subtype": "background_tasks_changed", "tasks": [task]},
+                              {"type": "result", "subtype": "success", "result": "started"}, *later)
+        events, error = session.turn("start one in the background")
+        self.assertIsNone(error)
+        self.assertEqual([e.get("result") for e in events if e["type"] == "result"],
+                         ["started", "it says migrate.py"])
+        # Without a background task, the first result ends the step.
+        session = self.claude(tool, {"type": "result", "result": "done"}, *later)
+        events, _ = session.turn("one in the foreground")
+        self.assertEqual([e.get("result") for e in events if e["type"] == "result"], ["done"])
+
     def test_claude_questions_are_answered_and_other_tools_declined(self):
         asked = {"type": "control_request", "request_id": "r1", "request": {
             "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "requires_user_interaction": True,
@@ -1075,6 +1096,12 @@ class Planted(unittest.TestCase):
         self.assertEqual(self.test_file.read_text(), "def test_a(): pass\n", "put back")
         self.assertEqual(self.test_file.stat().st_mode & 0o777, 0o640)
 
+    def test_the_rehearsal_counts_the_checks_each_planted_transcript_fails(self):
+        scenario = self.scenario(planted=[*self.PLANTED, {}])
+        self.assertEqual(run.planted_counts(scenario, "claude", self.sandbox), [3, 1, 0],
+                         "a transcript that fails none tests nothing")
+        self.assertEqual(self.test_file.read_text(), "def test_a(): pass\n", "put back")
+
     def test_a_check_no_planted_transcript_fails_is_named(self):
         notes, shown = run.planted_notes(self.scenario(planted=self.PLANTED[:1]), "claude", self.sandbox)
         self.assertEqual(shown, (3, 4))
@@ -1164,7 +1191,7 @@ class Planted(unittest.TestCase):
             for scenario, line in [
                 (self.scenario(clients=["claude"]), "ok   s/claude\n"),
                 (self.scenario(clients=["claude"], planted=self.PLANTED),
-                 "ok   s/claude (4 of 4 checks shown able to fail)\n"),
+                 "ok   s/claude (4 of 4 checks shown able to fail; planted transcripts fail 3, 1)\n"),
             ]:
                 out = io.StringIO()
                 with contextlib.redirect_stdout(out):
