@@ -177,6 +177,17 @@ fn entry(content: &str, category: &str, extra: Value) -> Value {
 /// A store holding one group of every review kind, imported from an export.
 fn seed(home: &Path, db: &Path) {
     let global = entry("Use Helix as the text editor", "tools", json!({}));
+    // A date already passed, which a pattern cites: an ended support.
+    let dated = entry(
+        "Merge without review this week",
+        "release",
+        json!({"until": {"date": "2001-01-01T00:00:00Z"},
+               "origins": [{"origin": "claude:session/b", "first_seen": "2026-10-15 05:20:11"}]}),
+    );
+    // Ended today, so within the ended group's month.
+    let today = jiff::Timestamp::now()
+        .strftime("%Y-%m-%d %H:%M:%S")
+        .to_string();
     let memories = json!([
         global,
         entry(
@@ -218,8 +229,28 @@ fn seed(home: &Path, db: &Path) {
             json!({"type": "pattern", "source": "inferred", "status": "stale",
                    "evidence_ids": [global["id"], Uuid::new_v4()]})
         ),
+        entry(
+            "Ships small changes without review",
+            "release",
+            json!({"type": "pattern", "source": "inferred", "status": "tentative",
+                   "evidence_ids": [global["id"], dated["id"]]})
+        ),
+        dated,
+        entry(
+            "Skip the slow tests until the parser ships",
+            "testing",
+            json!({"until": {"text": "the parser ships"},
+                   "ended": {"at": today, "how": "evidence", "evidence": "ran the release: parser 2.0 out"}}),
+        ),
+        // Unchanged for years: an open condition.
+        entry(
+            "Hold the changelog until the docs ship",
+            "docs",
+            json!({"until": {"text": "the docs ship"},
+                   "created_at": "2020-01-01 00:00:00", "updated_at": "2020-01-01 00:00:00"}),
+        ),
     ]);
-    let document = json!({"format": "user-memory-export", "format_version": 2,
+    let document = json!({"format": "user-memory-export", "format_version": 3,
                           "schema_version": 3, "memories": memories, "distinct_pairs": []});
     let mut child = binary(home, db)
         .args(["import", "-", "--apply"])
@@ -395,6 +426,9 @@ fn surface(root: &TempDir) -> Surface {
         BTreeSet::from(
             [
                 "duplicate",
+                "ended",
+                "ended_support",
+                "open_condition",
                 "overlap",
                 "recent",
                 "redundant",

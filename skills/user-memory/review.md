@@ -3,11 +3,14 @@
 1. Call `review`. Inside a project, pass `projects` with the projects the session start's `Projects:` line lists, the folder's own, the listed and the linked ones (or the output of `user-memory project-id`), so their memories are reviewed with the global ones; list more projects to review them too. Raise `max_groups` (up to 20) if the user wants more groups.
 2. Present each group by kind, with each member's id, type, scope and a short paraphrase of its content:
    - `recent`: the rules added or changed in the last 30 days, then the memories agents recorded in that time. Session start sends the user here when a rule is new.
+   - `ended`: memories whose condition ended in the last 30 days, each with `ended` (when, how, the evidence and the conversation). A memory out of force by its condition is in no other group but these.
    - `duplicate`: the same memory recorded more than once in one scope.
    - `redundant`: a project memory that repeats a global one.
    - `shared`: the same rule as project memories in several projects, with no global memory covering them. Each project still needs its copy.
    - `overlap`: memories on one topic, each related to every other in the group. They may overlap, one may be an exception to the other, or they may simply be unrelated memories in the same category. A memory related to two that are not related to each other appears in two groups.
    - `stale`: patterns whose supporting memories changed or were forgotten.
+   - `ended_support`: patterns citing a memory whose date has passed.
+   - `open_condition`: memories whose tag or text condition has stood unchanged for over 60 days.
 
    A group that lists only some of its members gives the number left out as `left_out`: say so, and review again once its listed members are handled.
 3. Propose one action per group and let the user choose:
@@ -16,7 +19,9 @@
    - Redundant: forget the project copy; the global memory already applies there.
    - Shared: leave the copies, unless the user wants the rule everywhere. Then, with their yes, record it once with scope global and `user_confirmed: true`, and only after that forget the project copies. Never forget a copy on its own: each project would lose the rule.
    - Overlap: memories that seem to conflict usually combine into one rule once a missing condition or scope is found (the user's own repositories versus others', one project versus all). A rule newer memories do not mention still holds; only the user drops a rule. When the merged rule is clear, propose it and merge after the user's yes; when in doubt, ask. Never forget one side silently. Otherwise leave the group as is.
-   - Stale: forget it, or re-derive it from current evidence.
+   - Ended: show each end and its evidence. If one ended wrongly, with the user's yes, `update` it with a new `until`, or with `until` set to null to hold until changed, which reopens it; or forget it.
+   - Stale and ended support: forget it, or re-derive it from current evidence.
+   - Open condition: ask whether each still holds. With the user's yes, `update` its `until`, or forget it; otherwise leave it.
 4. Carry out only the approved actions:
    - Merge: call `record` with the consolidated `content` and a one-line `title` that states it, the members' `type`, `category`, `scope` and `project`, `supersedes` listing every member id, and `merge: true`. If any member is explicit, use `source: explicit`. Pass `user_confirmed: true` when any member is explicit or the scope is global: the user approved this merge. Pass the conversation `origin` printed at session start. The merged memory keeps every conversation its members came from.
    - Forget: call `forget` with `memory_id` and `user_confirmed: true`, one call per memory.

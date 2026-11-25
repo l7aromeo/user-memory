@@ -118,16 +118,28 @@ const RECENT_MEMBERS: usize = 20;
 const RULE_CHANGES: &str = "'record','update','import','merge','revive'";
 /// The history operations that add a memory.
 const ADDITIONS: &str = "'record','import','merge'";
+/// How far back the `ended` group looks: every end an agent made since the
+/// user last reviewed, with as long as a month between sessions, as
+/// `recent` does.
+const REVIEW_ENDED_DAYS: u32 = 30;
+/// How long a tag or text condition stays open before `open_condition`
+/// asks whether it still holds: two months, long enough that a release
+/// or a fix that was coming has had time to come.
+const OPEN_CONDITION_DAYS: u32 = 60;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Kind {
     /// First, since session start's message points the user here.
     Recent,
+    /// Next: an end an agent made loosens a rule, which the user checks.
+    Ended,
     Duplicate,
     Redundant,
     Shared,
     Overlap,
     Stale,
+    EndedSupport,
+    OpenCondition,
 }
 
 impl Kind {
@@ -139,6 +151,9 @@ impl Kind {
             Self::Shared => "shared",
             Self::Overlap => "overlap",
             Self::Stale => "stale",
+            Self::Ended => "ended",
+            Self::EndedSupport => "ended_support",
+            Self::OpenCondition => "open_condition",
         }
     }
     fn reason(self) -> &'static str {
@@ -160,6 +175,15 @@ impl Kind {
             }
             Self::Stale => {
                 "Patterns whose supporting memories changed or were forgotten. With the user's approval, forget them or re-derive them from current evidence."
+            }
+            Self::Ended => {
+                "Conditions that ended in the last 30 days, with how and the evidence. Show them to the user; if one ended wrongly, update its until with their yes, which reopens it, or forget it."
+            }
+            Self::EndedSupport => {
+                "Patterns citing a memory whose date has passed. With the user's approval, forget them or re-derive them from memories in force."
+            }
+            Self::OpenCondition => {
+                "Tag or text conditions unchanged for over 60 days. Ask the user whether each still holds; with their yes, update its until or forget it."
             }
         }
     }
@@ -281,6 +305,36 @@ fn recent(conn: &rusqlite::Connection, memories: &[Memory]) -> Result<(Vec<usize
             .collect(),
         left_out,
     ))
+}
+
+/// The end records written in the last [`REVIEW_ENDED_DAYS`], by memory:
+/// when, how, the evidence and the conversation.
+fn ended(conn: &rusqlite::Connection) -> Result<HashMap<Uuid, Value>> {
+    let mut found = HashMap::new();
+    let mut statement = conn.prepare(
+        "SELECT memory_id,ended_at,how,evidence,origin FROM memory_ended WHERE ended_at>=datetime('now',?1)",
+    )?;
+    let rows = statement.query_map([format!("-{REVIEW_ENDED_DAYS} days")], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, String>(4)?,
+        ))
+    })?;
+    for row in rows {
+        let (id, at, how, evidence, origin) = row?;
+        let Ok(id) = Uuid::parse_str(&id) else {
+            continue;
+        };
+        let mut end = json!({"at": at, "how": how, "evidence": evidence});
+        if !origin.is_empty() {
+            end["origin"] = json!(origin);
+        }
+        found.insert(id, end);
+    }
+    Ok(found)
 }
 
 fn recency(m: &Memory) -> (&str, i64) {
@@ -426,8 +480,15 @@ fn review_with(
             cutoffs.insert(length, found);
         }
     }
+    // Memories out of force by their condition are compared with nothing:
+    // a merge or trim of what no longer holds helps no one.
+    let out_of_force: HashSet<Uuid> = conn
+        .prepare("SELECT id FROM out_of_force")?
+        .query_map([], |r| r.get::<_, String>(0))?
+        .filter_map(|id| Uuid::parse_str(&id.ok()?).ok())
+        .collect();
     let active: Vec<usize> = (0..memories.len())
-        .filter(|&i| memories[i].status != "stale")
+        .filter(|&i| memories[i].status != "stale" && !out_of_force.contains(&memories[i].id))
         .collect();
     let mut duplicates = Vec::new();
     let mut related = Vec::new();
@@ -496,6 +557,65 @@ fn review_with(
     if !recent.is_empty() {
         groups.push((Kind::Recent, recent, left_out));
     }
+    let ends = ended(conn)?;
+    let mut ended_members: Vec<usize> = (0..memories.len())
+        .filter(|&i| ends.contains_key(&memories[i].id))
+        .collect();
+    ended_members.sort_by(|&a, &b| {
+        ends[&memories[b].id]["at"]
+            .as_str()
+            .cmp(&ends[&memories[a].id]["at"].as_str())
+            .then_with(|| memories[a].id.cmp(&memories[b].id))
+    });
+    let left_out = ended_members.len().saturating_sub(RECENT_MEMBERS);
+    ended_members.truncate(RECENT_MEMBERS);
+    if !ended_members.is_empty() {
+        groups.push((Kind::Ended, ended_members, left_out));
+    }
+    let passed: HashSet<Uuid> = conn
+        .prepare(
+            "SELECT id FROM memories WHERE until_kind='date' AND until_value<=strftime('%Y-%m-%dT%H:%M:%SZ','now')",
+        )?
+        .query_map([], |r| r.get::<_, String>(0))?
+        .filter_map(|id| Uuid::parse_str(&id.ok()?).ok())
+        .collect();
+    let mut citing: Vec<usize> = (0..memories.len())
+        .filter(|&i| {
+            memories[i].status != "stale"
+                && memories[i]
+                    .evidence_ids
+                    .iter()
+                    .any(|id| passed.contains(id))
+        })
+        .collect();
+    citing.sort_by(|&a, &b| recency(&memories[b]).cmp(&recency(&memories[a])));
+    let left_out = citing.len().saturating_sub(MAX_MEMBERS);
+    citing.truncate(MAX_MEMBERS);
+    if !citing.is_empty() {
+        groups.push((Kind::EndedSupport, citing, left_out));
+    }
+    let open_before: String = conn.query_row(
+        "SELECT datetime('now',?1)",
+        [format!("-{OPEN_CONDITION_DAYS} days")],
+        |r| r.get(0),
+    )?;
+    let mut open: Vec<usize> = (0..memories.len())
+        .filter(|&i| {
+            let m = &memories[i];
+            m.until
+                .as_ref()
+                .is_some_and(|u| u.tag.is_some() || u.text.is_some())
+                && !out_of_force.contains(&m.id)
+                && m.status != "stale"
+                && m.updated_at.as_str() < open_before.as_str()
+        })
+        .collect();
+    open.sort_by(|&a, &b| recency(&memories[a]).cmp(&recency(&memories[b])));
+    let left_out = open.len().saturating_sub(MAX_MEMBERS);
+    open.truncate(MAX_MEMBERS);
+    if !open.is_empty() {
+        groups.push((Kind::OpenCondition, open, left_out));
+    }
     let newest = |members: &[usize]| members.iter().map(|&i| recency(&memories[i])).max();
     let smallest = |members: &[usize]| members.iter().map(|&i| memories[i].id).min();
     groups.sort_by(|(ka, a, _), (kb, b, _)| {
@@ -512,6 +632,14 @@ fn review_with(
                 .map(|i| {
                     let m = &memories[i];
                     let mut member = json!({"id":m.id,"title":m.title,"content":m.content,"type":m.memory_type,"category":m.category,"scope":m.scope,"project":m.project,"status":m.status,"source":m.source,"confirmations":m.confirmations});
+                    if let Some(until) = &m.until {
+                        member["until"] = json!(until);
+                    }
+                    if kind == Kind::Ended
+                        && let Some(end) = ends.get(&m.id)
+                    {
+                        member["ended"] = end.clone();
+                    }
                     super::note_tentative(&mut member);
                     member
                 })
@@ -622,6 +750,100 @@ mod tests {
             .find(|(kind, _)| kind == "recent")
             .map(|(_, ids)| ids)
             .unwrap_or_default()
+    }
+
+    /// A condition's end shows in `ended` with its evidence, a pattern
+    /// citing a memory past its date in `ended_support`, and a tag or text
+    /// condition unchanged for over 60 days in `open_condition`; a memory
+    /// out of force joins no duplicate group.
+    #[test]
+    fn conditions_give_groups_of_their_own() {
+        let (_dir, _db, conn) = store();
+        let set = |id: Uuid, columns: &str| {
+            conn.execute(
+                &format!("UPDATE memories SET {columns} WHERE id=?1"),
+                [id.to_string()],
+            )
+            .unwrap();
+        };
+        let ended = insert(&conn, preference("workflow", "Skip the slow tests always"));
+        // Its duplicate, in force.
+        let twin = insert(&conn, preference("workflow", "Skip the slow tests always"));
+        set(ended, "until_kind='text',until_value='the parser ships'");
+        conn.execute(
+            "INSERT INTO memory_ended (memory_id,how,evidence,origin) VALUES (?1,'evidence','ran the release: parser 2.0 out','chat/end')",
+            [ended.to_string()],
+        )
+        .unwrap();
+        let dated = insert(&conn, preference("tooling", "Merge without review"));
+        set(
+            dated,
+            "until_kind='date',until_value='2001-01-01T00:00:00Z'",
+        );
+        let other = insert(&conn, preference("testing", "Name tests by scenario"));
+        let pattern = insert(
+            &conn,
+            New {
+                memory_type: "pattern",
+                source: "inferred",
+                status: "tentative",
+                ..preference("tooling", "Moves fast on small changes")
+            },
+        );
+        conn.execute(
+            "UPDATE memories SET evidence_ids=?2 WHERE id=?1",
+            params![pattern.to_string(), json!([dated, other]).to_string()],
+        )
+        .unwrap();
+        let open = insert(&conn, preference("release", "Hold the release notes"));
+        set(
+            open,
+            "until_kind='text',until_value='the docs ship',updated_at=datetime('now','-61 days')",
+        );
+        let young = insert(&conn, preference("design", "Sketch before building"));
+        set(
+            young,
+            "until_kind='tag',until_value='v1.0.0',until_project='github.com/example/app',updated_at=datetime('now','-59 days')",
+        );
+        let found = groups(&conn, None, false);
+        let group = |kind: &str| {
+            found
+                .iter()
+                .filter(|(k, _)| k == kind)
+                .flat_map(|(_, ids)| ids.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(group("ended"), [ended], "{found:?}");
+        assert_eq!(group("ended_support"), [pattern], "{found:?}");
+        assert_eq!(group("open_condition"), [open], "{found:?}");
+        assert!(
+            group("duplicate").is_empty(),
+            "{twin} grouped with an ended memory: {found:?}"
+        );
+        let reply = review_with(
+            &conn,
+            &Review {
+                projects: Vec::new(),
+                max_groups: 20,
+                keep: Vec::new(),
+                user_confirmed: false,
+            },
+            None,
+        )
+        .unwrap();
+        let member = reply["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["kind"] == "ended")
+            .unwrap()["members"][0]
+            .clone();
+        assert_eq!(
+            member["ended"]["evidence"],
+            "ran the release: parser 2.0 out"
+        );
+        assert_eq!(member["ended"]["origin"], "chat/end");
+        assert_eq!(member["until"], json!({"text":"the parser ships"}));
     }
 
     #[test]
