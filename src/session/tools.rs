@@ -217,6 +217,17 @@ impl Session {
         let remote = crate::setup::configured_remote()
             .ok()?
             .map(|connection| connection.url);
+        Self::on(remote, client, payload, deadline)
+    }
+
+    /// [`Session::of`] on the store setup names, read already: the server
+    /// at `remote`, or this machine's when none.
+    pub(super) fn on(
+        remote: Option<String>,
+        client: HookClient,
+        payload: &[u8],
+        deadline: Instant,
+    ) -> Option<Self> {
         let snapshot = super::session_file(client, payload)?;
         let projects = super::live::load_scope(&super::live::scope_path(&snapshot))?;
         Some(Self {
