@@ -172,7 +172,8 @@ class Cleanup(unittest.TestCase):
         home.mkdir(parents=True)
         own = base / f"{run.path_slug(home)}-work" / "s1" / "tasks"
         other = base / run.path_slug(trials / "1" / "trial-claude-y" / "work")
-        for path in (own, other):
+        running = base / run.path_slug(trials / "2" / "trial-claude-z" / "work")
+        for path in (own, other, running):
             path.mkdir(parents=True)
         sandbox = types.SimpleNamespace(dir=home, codex_home=home, state=home / "state",
                                         memories=lambda: [], setup_output="",
@@ -184,10 +185,10 @@ class Cleanup(unittest.TestCase):
 
             def close(self):
                 return ""
-        originals = run.prepare, run.open_session, run.CLAUDE_TMP_BASE, run.TRIALS
+        originals = run.prepare, run.open_session, run.CLAUDE_TMP_BASE
         run.prepare = lambda *a: sandbox
         run.open_session = lambda *a: Failing()
-        run.CLAUDE_TMP_BASE, run.TRIALS = base, trials
+        run.CLAUDE_TMP_BASE = base
         guard = types.SimpleNamespace(check=lambda *a: None)
         try:
             result = run.trial({"name": "s", "checks": [], "steps": []}, "claude", home, home, {}, guard)
@@ -200,9 +201,10 @@ class Cleanup(unittest.TestCase):
                 run.trial({"name": "s", "checks": [], "steps": [{"session": "a", "prompt": "fails"}]}, "claude",
                           home, home, {}, guard)
         finally:
-            run.prepare, run.open_session, run.CLAUDE_TMP_BASE, run.TRIALS = originals
+            run.prepare, run.open_session, run.CLAUDE_TMP_BASE = originals
         self.assertFalse(own.parent.parent.exists(), "cleared after a failed turn too")
         self.assertTrue(other.is_dir())
+        self.assertTrue(running.is_dir(), "another batch's, unreported and kept")
 
 
 def bash_rule_matches(rule, command):
@@ -1692,18 +1694,20 @@ class ClaudeTemporaryFolder(unittest.TestCase):
             "another trial": base / run.path_slug(trials / "20261125-000000" / "trial-claude-zz") / "s3",
             "a session of the user's": base / run.path_slug(top / "project") / "s4",
             "a longer name": base / f"{own}x" / "s5",
+            "a trial of another batch, perhaps running": base / run.path_slug(trials / "20261125-000001" / "trial-claude-ab_cd") / "s6",
         }
         for path in made.values():
             path.mkdir(parents=True)
         (made["own"] / "a.output").write_text("")
-        left = run.clear_claude_tmp(trial, base, trials)
+        left = run.clear_claude_tmp(trial, base)
         self.assertFalse((base / own).exists())
         self.assertFalse((base / f"{own}-compiler").exists())
-        for name in ("another trial", "a session of the user's", "a longer name"):
+        for name in ("another trial", "a session of the user's", "a longer name",
+                     "a trial of another batch, perhaps running"):
             self.assertTrue(made[name].is_dir(), name)
         self.assertEqual(left, sorted(str(base / p.relative_to(base).parts[0])
                                       for p in (made["another trial"], made["a longer name"])))
-        self.assertEqual(run.clear_claude_tmp(trial, top / "none", trials), [])
+        self.assertEqual(run.clear_claude_tmp(trial, top / "none"), [])
 
     def test_the_slug_is_claude_code_s(self):
         # As Claude Code names a work folder's: the `_` of a mkdtemp name too.
