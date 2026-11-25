@@ -36,9 +36,11 @@ a restart keeps, never into the repository.
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import queue
+import random
 import re
 import secrets
 import shlex
@@ -51,6 +53,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -1432,6 +1435,74 @@ def matches(memory, where):
     return True
 
 
+# The agent context of a session's own agent in a `.recall` file; any other
+# is a subagent's id.
+RECALL_MAIN = "main"
+
+
+def recall_state(sandbox):
+    """What the trial's hooks pushed, from each session's `.recall` file:
+    the `shown` rows (file, agent, memory, passage, step), leaving out the
+    rules session start printed in full (passage -1), which no hook pushed;
+    and each agent's characters pushed in its current epoch, the most any
+    session holds."""
+    rows, chars = set(), {}
+    for path in sorted((sandbox.state / "user-memory" / "sessions").glob("*.recall")):
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            rows |= {(path.name, *row) for row in conn.execute(
+                "SELECT agent, memory, passage, at FROM shown WHERE passage >= 0")}
+            for agent, used in conn.execute("SELECT agent, chars FROM contexts"):
+                chars[agent] = max(chars.get(agent, 0), used)
+        except sqlite3.Error:
+            # A file a hook is replacing, or of another layout: what it held
+            # is not graded, and the check that needed it fails.
+            pass
+        finally:
+            conn.close()
+    return rows, chars
+
+
+def pushes_since(rows, seen):
+    """The pushes in `rows` not in `seen`: each {"agent", "agent_id",
+    "memory", "passage"}, the agent "main" or "subagent". A passage pushed
+    again, after a compaction or a stretch, is a new row."""
+    return [{"agent": "main" if agent == RECALL_MAIN else "subagent", "agent_id": agent,
+             "memory": memory, "passage": passage}
+            for _, agent, memory, passage, _ in sorted(rows - seen)]
+
+
+def pushed_matches(push, spec):
+    """Whether `push` is one `spec` names: its memory (a short id or more),
+    agent, and passage, or any passage but `passage_not`."""
+    memory = spec.get("memory")
+    if memory and not (push["memory"].startswith(memory) or memory.startswith(push["memory"])):
+        return False
+    if spec.get("agent") not in (None, push["agent"]):
+        return False
+    if "passage" in spec and push.get("passage") != spec["passage"]:
+        return False
+    return not ("passage_not" in spec and push.get("passage") == spec["passage_not"])
+
+
+# What opens every push a hook prints (src/memory/push.rs's HEADER and
+# FAILED_HEADER).
+PUSH_HEADER = re.compile(r"^From user-memory, matching this (?:failed )?step ", re.M)
+
+
+def unseen_pushes(record):
+    """The pushes a Codex step's `.recall` file records that no hook output
+    of the step shows: a push line under a push header, naming the memory's
+    short id. Each is a harness error, so a `pushed` check never passes on
+    the state file's bookkeeping alone. Claude Code reports no hook output,
+    so nothing is compared there."""
+    if record.get("client") != "codex":
+        return []
+    texts = [e["text"] for e in record.get("hook_context", []) if PUSH_HEADER.search(e["text"])]
+    return [p for p in record.get("pushed", [])
+            if not any(re.search(rf"^- {re.escape(p['memory'][:8])} ", text, re.M) for text in texts)]
+
+
 def resolve(value, sandbox, memories):
     """Replaces `{seed:NAME}` with a seeded memory's short id and
     `{memory:REGEX}` with the short id of the memory whose title or content
@@ -1466,6 +1537,21 @@ def grade(check, sandbox, records, memories):
         # such as the tests ran or nothing was committed.
         results = [grade(c, sandbox, records, memories) for c in spec]
         return any(ok for ok, _ in results), "; ".join(detail for _, detail in results)
+    if kind in ("pushed", "pushed_not"):
+        # What the hooks pushed in the step (`"step": "all"` for every step),
+        # read from the session's `.recall` file after it.
+        chosen = records if spec.get("step") == "all" else [step()]
+        found = [p for r in chosen for p in r.get("pushed", []) if pushed_matches(p, spec)]
+        if kind == "pushed_not":
+            return not found, f"pushed {found[:3]}" if found else "nothing matching was pushed"
+        want = spec.get("count", ">=1")
+        ok = len(found) >= int(want[2:]) if str(want).startswith(">=") else len(found) == int(want)
+        return ok, f"{len(found)} pushes match (want {want})"
+    if kind == "recall_chars":
+        # Each agent's characters pushed in its epoch, after every step.
+        over = [(r["step"], agent, used) for r in records for agent, used in r.get("recall_chars", {}).items()
+                if spec.get("agent") in (None, agent) and used > spec["at_most"]]
+        return not over, f"over {spec['at_most']}: {over[:3]}" if over else f"within {spec['at_most']}"
     if kind == "memory":
         pool = memories if spec.get("status") == "all" else active
         found = [m for m in pool if matches(m, spec.get("where", {}))]
@@ -1513,6 +1599,11 @@ def grade(check, sandbox, records, memories):
     if kind in ("commands", "commands_not"):
         pool = [c for r in records for c in r["commands"]] if spec.get("step") == "all" else step()["commands"]
         hits = [c for c in pool if re.search(spec["matches"], c, re.IGNORECASE)]
+        if kind == "commands" and "count" in spec:
+            # How many commands match, such as one call per step asked for.
+            want = spec["count"]
+            ok = len(hits) >= int(want[2:]) if str(want).startswith(">=") else len(hits) == int(want)
+            return ok, f"{len(hits)} commands match (want {want})"
         ok = bool(hits) if kind == "commands" else not hits
         return ok, f"matching {hits[:3]}" if hits else f"commands {pool[:5]}"
     if kind == "approvals_not":
@@ -1774,6 +1865,78 @@ def bulk_export(spec):
             "memories": memories, "distinct_pairs": [], "history": []}
 
 
+# The filler `seed_many` adds is drawn from this seed, so every trial of a
+# scenario holds the same store.
+SEED_MANY_SEED = 117
+# The memory types filler takes: none a rule type, so no filler memory joins
+# the instruction file or the project rules session start prints.
+SEED_MANY_TYPES = ["fact", "decision", "goal"]
+
+
+def _world():
+    """The delivery benchmark's world (evals/delivery/world.py), whose filler
+    words, and the scale benchmark's vocabulary it loads, the filler uses."""
+    spec = importlib.util.spec_from_file_location("delivery_world", ROOT / "evals/delivery/world.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def many_export(count):
+    """An export of `count` synthetic filler memories, made-up words with the
+    common words of the delivery benchmark's world mixed in, as its filler
+    is. No filler memory holds an anchor, so none is pushed during a task;
+    they give the store its size, and its common words their rarity, while
+    the scenario's own seeds stay the only memories that can match. A tenth
+    belong to the scale benchmark's example projects, which no scenario
+    loads."""
+    world = _world()
+    scale = world.scale
+    rng = random.Random(SEED_MANY_SEED)
+    words, weights = scale.vocabulary(rng), scale.zipf_weights()
+
+    def phrase(bounds):
+        return " ".join(rng.choice(world.COMMON) if rng.random() < world.FILLER_COMMON_SHARE
+                        else rng.choices(words, weights)[0]
+                        for _ in range(rng.randint(*bounds)))
+
+    memories = []
+    for _ in range(count):
+        project = rng.choice(scale.PROJECTS) if rng.random() < scale.PROJECT_SHARE else ""
+        memories.append({
+            "id": str(uuid.UUID(int=rng.getrandbits(128), version=4)),
+            "type": rng.choice(SEED_MANY_TYPES), "category": rng.choice(scale.CATEGORIES),
+            "title": phrase(scale.TITLE_WORDS).capitalize()[:scale.TITLE_CHARS].rstrip(),
+            "content": phrase(scale.CONTENT_WORDS),
+            "context": "", "reason": "", "scope": "project" if project else "global",
+            "project": project, "source": "explicit", "status": "confirmed", "evidence": "",
+            "evidence_ids": [], "origins": [], "superseded_by": None,
+            "created_at": BULK_STAMP, "updated_at": BULK_STAMP, "last_confirmed_at": None,
+        })
+    return {"format": "user-memory-export", "format_version": 2, "exported_at": "2026-01-01T00:00:00Z",
+            "memories": memories, "distinct_pairs": [], "history": []}
+
+
+def filler_count(scenario):
+    """How many filler memories `seed_many` adds: its `count` less the
+    scenario's seeds and bulk memories, so the store holds `count` in all."""
+    if "seed_many" not in scenario:
+        return 0
+    named = len(scenario.get("seed", [])) + scenario.get("bulk", {}).get("count", 0)
+    count = scenario["seed_many"]["count"]
+    if count < named:
+        raise ValueError(f"seed_many count {count} is under the scenario's {named} named memories")
+    return count - named
+
+
+def import_export(sandbox, name, export):
+    """Imports `export` into the trial's store through the CLI."""
+    path = sandbox.dir / name
+    path.write_text(json.dumps(export))
+    sandbox.cli("import", str(path), "--apply")
+    path.unlink()
+
+
 def prepare(scenario, client, base, source, projects):
     """A trial's sandbox with its seeds stored, user-memory set up and the
     scenario's folders in place."""
@@ -1788,10 +1951,9 @@ def prepare(scenario, client, base, source, projects):
             if seed.get("aged"):
                 age(sandbox, saved["id"])
         if "bulk" in scenario:
-            bulk = sandbox.dir / "bulk.json"
-            bulk.write_text(json.dumps(bulk_export(scenario["bulk"])))
-            sandbox.cli("import", str(bulk), "--apply")
-            bulk.unlink()
+            import_export(sandbox, "bulk.json", bulk_export(scenario["bulk"]))
+        if filler := filler_count(scenario):
+            import_export(sandbox, "many.json", many_export(filler))
         sandbox.setup_output = sandbox.setup(scenario.get("hooks", True))
         for spec in scenario.get("folders", []):
             sandbox.workdir(spec, projects)
@@ -1827,6 +1989,9 @@ def trial(scenario, client, base, source, projects, guard):
     plan = steps(scenario)
     last = {step["session"]: i for i, step in enumerate(plan)}
     sessions, records, closed, conversation = {}, [], {}, {}
+    # What the trial's `.recall` files held after the last step, so each
+    # step's record names only what its own hooks pushed.
+    pushed_before = set()
     # Each conversation's running usage, which a resume carries on.
     totals = {}
     codex_memory = codex_memory_rows(sandbox)
@@ -1878,6 +2043,9 @@ def trial(scenario, client, base, source, projects, guard):
                 totals[name] = now
             record["origins"] = origins(record)
             record["files"] = watched(scenario, sandbox)
+            shown, record["recall_chars"] = recall_state(sandbox)
+            record["pushed"] = pushes_since(shown, pushed_before)
+            pushed_before = shown
             conversation.setdefault(name, next(iter(record["conversation_ids"]), None))
             records.append(record)
             if last[name] == index:
@@ -1902,6 +2070,12 @@ def trial(scenario, client, base, source, projects, guard):
         passed, detail = grade(check, sandbox, records, memories)
         results.append({"check": check, "passed": passed, "detail": detail,
                         "informational": informational})
+    void = None
+    if "void_unless" in scenario:
+        # A trial whose agent did not do what the scenario measures, such as
+        # make one call per step, proves nothing either way.
+        ok, detail = grade(resolve(scenario["void_unless"], sandbox, memories), sandbox, records, memories)
+        void = None if ok else detail
     if client == "codex":
         # Codex's own memory competes with user-memory as Claude's auto
         # memory does; reported on every Codex trial, not yet graded.
@@ -1914,9 +2088,12 @@ def trial(scenario, client, base, source, projects, guard):
     return {"scenario": scenario["name"], "client": client, "sandbox": str(sandbox.dir),
             "model": CLAUDE_MODEL if client == "claude" else CODEX_MODEL, "usage": usage,
             "passed": all(r["passed"] for r in results if not r["informational"]),
+            "void": void,
             # A turn the client ended as failed: the checks graded no choice
             # of the agent's, so the trial is an error, not a scenario result.
-            "errors": [f"step {r['step']}: {r['error']}" for r in records if r["error"]],
+            "errors": [f"step {r['step']}: {r['error']}" for r in records if r["error"]]
+            + [f"step {r['step']}: harness: the .recall file records a push of {p['memory'][:8]} "
+               f"to {p['agent_id']} that no hook output shows" for r in records for p in unseen_pushes(r)],
             "checks": results, "steps": records, "stderr": closed, "memories": memories,
             "setup": sandbox.setup_output}
 
@@ -2118,7 +2295,7 @@ def blank_record(index):
     """A turn that did nothing, which a planted transcript's step fills in."""
     return {"step": index, "answer": "", "tool_calls": [], "commands": [], "file_writes": [],
             "file_reads": [], "hook_context": [], "subagents": [], "approvals": [], "questions": [],
-            "origins": [],
+            "origins": [], "pushed": [], "recall_chars": {},
             "files": {}}
 
 
@@ -2336,10 +2513,13 @@ def main():
                 name = f"{b['label']}-{name}"
             (batch / f"{name}.json").write_text(json.dumps(result, indent=1))
             results.append(result)
-            outcome = "ERROR" if result["errors"] else "PASS" if result["passed"] else "FAIL"
+            outcome = ("ERROR" if result["errors"] else "VOID" if result.get("void")
+                       else "PASS" if result["passed"] else "FAIL")
             print(f"{outcome} {name}", flush=True)
             for error in result["errors"]:
                 print(f"    {error}", flush=True)
+            if result.get("void"):
+                print(f"    void: {result['void']}", flush=True)
             for r in result["checks"]:
                 if not r["passed"]:
                     tag = " (informational)" if r["informational"] else ""
@@ -2354,10 +2534,12 @@ def summarize(batch, results):
     summary = {}
     for r in results:
         key = (r["scenario"], r["client"], r.get("binary", "-"))
-        passed, total, errored, real, sent = summary.get(key, (0, 0, 0, 0, 0))
+        passed, total, errored, voided, real, sent = summary.get(key, (0, 0, 0, 0, 0, 0))
         sent_origins = [o for s in r["steps"] for o in s["origins"]]
-        summary[key] = (passed + r["passed"], total + 1, errored + bool(r.get("errors")),
-                        real + sum(o["real"] for o in sent_origins), sent + len(sent_origins))
+        void = bool(r.get("void")) and not r.get("errors")
+        summary[key] = (passed + (r["passed"] and not void), total + 1, errored + bool(r.get("errors")),
+                        voided + void, real + sum(o["real"] for o in sent_origins),
+                        sent + len(sent_origins))
     lines = [f"# Eval batch {batch.name}", ""]
     saved = batch / "binaries.json"
     if saved.exists():
@@ -2367,9 +2549,10 @@ def summarize(batch, results):
         lines.append("")
     lines += ["| scenario | client | binary | passed | origins with the real conversation id |",
               "|---|---|---|---|---|"]
-    # Errored runs count in the total, not as scenario failures.
-    lines += [f"| {s} | {c} | {b} | {p}/{t}{f' ({e} errored)' if e else ''} | {f'{o}/{n}' if n else '-'} |"
-              for (s, c, b), (p, t, e, o, n) in sorted(summary.items())]
+    # Errored and void runs count in the total, not as scenario failures.
+    lines += [f"| {s} | {c} | {b} | {p}/{t}{f' ({e} errored)' if e else ''}{f' ({v} void)' if v else ''} "
+              f"| {f'{o}/{n}' if n else '-'} |"
+              for (s, c, b), (p, t, e, v, o, n) in sorted(summary.items())]
     lines += ["", usage_table(results), "", f"Agent sessions counted so far: {counted_runs()}"]
     text = "\n".join(lines) + "\n"
     (batch / "summary.md").write_text(text)
