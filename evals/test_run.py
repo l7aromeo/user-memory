@@ -9,6 +9,7 @@ import io
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import tempfile
 import threading
@@ -143,7 +144,8 @@ class Cleanup(unittest.TestCase):
                 closed.append(self.name)
                 return ""
         home = Path(tempfile.mkdtemp())
-        sandbox = types.SimpleNamespace(codex_home=home, workdir=lambda spec, projects: home)
+        sandbox = types.SimpleNamespace(codex_home=home, state=home / "state",
+                                        workdir=lambda spec, projects: home)
         names = iter(["a", "b"])
         scenario = {"name": "s", "checks": [], "steps": [
             {"session": "a", "prompt": "first"},
@@ -275,7 +277,8 @@ class ResumeAndCompact(unittest.TestCase):
 
         home = Path(tempfile.mkdtemp())
         (home / "space").mkdir()
-        sandbox = types.SimpleNamespace(codex_home=home, dir=home, memories=lambda: [], setup_output="",
+        sandbox = types.SimpleNamespace(codex_home=home, dir=home, state=home / "state", memories=lambda: [],
+                                        setup_output="",
                                         workdir=lambda spec, projects: home)
         scenario = {"name": "s", "checks": [], "watch": ["space/.user-memory"], "steps": [
             {"session": "a", "prompt": "link it"},
@@ -891,6 +894,24 @@ class FailedTurns(unittest.TestCase):
                                      {**base, "passed": False, "errors": ["step 0: Codex ended the turn failed"]}])
         self.assertIn("| s | codex | b | 1/2 (1 errored) |", text)
 
+    def test_a_void_trial_is_counted_apart_from_passes_and_failures(self):
+        batch = Path(tempfile.mkdtemp())
+        base = {"scenario": "s", "client": "claude", "binary": "b", "steps": [], "usage": {}, "errors": []}
+        text = run.summarize(batch, [{**base, "passed": True},
+                                     {**base, "passed": True, "void": "12 commands match (want >=101)"},
+                                     {**base, "passed": False, "void": "40 commands match (want >=101)"},
+                                     {**base, "passed": False}])
+        self.assertIn("| s | claude | b | 1/4 (2 void) |", text)
+
+    def test_commands_can_be_counted_for_a_void_unless(self):
+        records = [{**run.blank_record(0), "commands": ["python3 tools/step.py 1", "python3 tools/step.py 2",
+                                                         "for n in 3 4; do python3 tools/step.py $n; done"]}]
+        grade = lambda want: run.grade(  # noqa: E731
+            {"commands": {"matches": "^python3 tools/step\\.py \\d+$", "count": want}}, None, records, [])[0]
+        self.assertTrue(grade(">=2"))
+        self.assertFalse(grade(">=3"), "a loop in one call is not one call per step")
+        self.assertTrue(grade(2))
+
     def test_the_fake_models_fail_reply_refuses_with_its_status(self):
         with fake_model.FakeModel({"anthropic": [{"fail": 400, "repeat": True}], "openai": [{"fail": 400}]}) as model:
             # A repeated refusal meets a client's retry too; a single one
@@ -1097,6 +1118,34 @@ class Planted(unittest.TestCase):
             self.assertEqual(str(uuid.UUID(m["id"])), m["id"])
             self.assertEqual(uuid.UUID(m["id"]).version, 4)
 
+    def test_seed_many_fills_the_store_to_its_count_with_filler_that_never_matches(self):
+        scenario = {"seed": [{"id": "a"}, {"id": "b"}], "bulk": {"count": 3},
+                    "seed_many": {"count": 40}}
+        self.assertEqual(run.filler_count(scenario), 35)
+        self.assertEqual(run.filler_count({"seed": [{"id": "a"}]}), 0)
+        with self.assertRaises(ValueError):
+            run.filler_count({"seed": [{"id": "a"}, {"id": "b"}], "seed_many": {"count": 1}})
+        export = run.many_export(35)
+        memories = export["memories"]
+        self.assertEqual(len(memories), 35)
+        self.assertEqual(run.many_export(35), export, "every trial holds the same store")
+        self.assertEqual(len({m["id"] for m in memories}), 35)
+        for m in memories:
+            self.assertEqual(uuid.UUID(m["id"]).version, 4)
+            # No rule type, so the instruction file and the project rules
+            # never list filler.
+            self.assertIn(m["type"], ("fact", "decision", "goal"))
+            # No anchor: no code span, path, identifier or flag a step could
+            # name.
+            text = f"{m['title']} {m['content']}"
+            self.assertIsNone(re.search(r"[`/_:.\-]|::|[a-z][A-Z]", text), text)
+        # A tenth are project memories, of projects no scenario loads.
+        named = set(re.findall(r"github\.com/[\w.-]+/[\w.-]+",
+                               (HERE / "scenarios.json").read_text()))
+        projects = {m["project"] for m in run.many_export(200)["memories"] if m["project"]}
+        self.assertTrue(projects)
+        self.assertFalse(projects & named, projects & named)
+
     def test_a_removed_file_is_put_back_when_a_check_raises(self):
         scenario = self.scenario(planted=self.PLANTED)
         scenario["checks"].append({"no_such_check": {}})
@@ -1202,6 +1251,86 @@ class ClientToolsAndHooks(unittest.TestCase):
         planted = [{**run.blank_record(0), "hook_context": ["Project rules of github.com/acme/x"]}]
         self.assertTrue(run.grade({"hook_context": {"matches": heading}}, None, planted, [])[0],
                         "a planted transcript's plain text still counts")
+
+    def recall_file(self, sessions, name, shown, contexts):
+        """A session's `.recall` file in `sessions` with `shown` rows (agent,
+        memory, passage, at) and `contexts` rows (agent, chars), in the
+        layout the hooks write."""
+        sessions.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(sessions / f"{name}.recall")
+        with conn:
+            conn.execute("CREATE TABLE contexts(agent TEXT PRIMARY KEY, epoch INTEGER NOT NULL, "
+                         "actions INTEGER NOT NULL, chars INTEGER NOT NULL)")
+            conn.execute("CREATE TABLE shown(agent TEXT NOT NULL, memory TEXT NOT NULL, "
+                         "passage INTEGER NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(agent, memory, passage))")
+            conn.executemany("INSERT INTO shown VALUES (?,?,?,?)", shown)
+            conn.executemany("INSERT INTO contexts VALUES (?,1,10,?)", contexts)
+        conn.close()
+
+    def test_a_step_records_what_its_own_hooks_pushed_from_the_recall_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = types.SimpleNamespace(state=Path(tmp))
+            sessions = Path(tmp) / "user-memory" / "sessions"
+            self.assertEqual(run.recall_state(sandbox), (set(), {}), "no session yet")
+            # A rule session start printed in full (passage -1) is no push.
+            self.recall_file(sessions, "claude-s1", [("main", "e0000001", -1, 0),
+                                                     ("main", "e0000002", 0, 3)], [("main", 120)])
+            first, chars = run.recall_state(sandbox)
+            self.assertEqual(chars, {"main": 120})
+            self.assertEqual(run.pushes_since(first, set()),
+                             [{"agent": "main", "agent_id": "main", "memory": "e0000002", "passage": 0}])
+            # The next step: a subagent's push, and the same passage pushed
+            # again to the main agent after a compaction, at a later step.
+            (sessions / "claude-s1.recall").unlink()
+            self.recall_file(sessions, "claude-s1", [("main", "e0000002", 0, 9),
+                                                     ("agent-7", "e0000003", 2, 1)],
+                             [("main", 240), ("agent-7", 80)])
+            second, chars = run.recall_state(sandbox)
+            self.assertEqual(chars, {"main": 240, "agent-7": 80})
+            self.assertEqual(run.pushes_since(second, first), [
+                {"agent": "subagent", "agent_id": "agent-7", "memory": "e0000003", "passage": 2},
+                {"agent": "main", "agent_id": "main", "memory": "e0000002", "passage": 0}])
+            self.assertEqual(run.pushes_since(second, second), [], "nothing new")
+
+    def test_pushed_checks_match_memory_agent_passage_and_step(self):
+        push = lambda memory, agent="main", passage=0: {  # noqa: E731
+            "agent": agent, "agent_id": agent, "memory": memory, "passage": passage}
+        records = [{**run.blank_record(0), "pushed": [push("e0000001-aaaa", passage=3)],
+                    "recall_chars": {"main": 900}},
+                   {**run.blank_record(1), "pushed": [push("e0000002", "subagent")],
+                    "recall_chars": {"main": 900, "agent-7": 8200}}]
+        grade = lambda check: run.grade(check, None, records, [])[0]  # noqa: E731
+        self.assertTrue(grade({"pushed": {"memory": "e0000002", "agent": "subagent"}}))
+        self.assertFalse(grade({"pushed": {"memory": "e0000002", "agent": "main"}}))
+        self.assertFalse(grade({"pushed": {"memory": "e0000001"}}), "the last step by default")
+        self.assertTrue(grade({"pushed": {"step": 0, "memory": "e0000001", "passage": 3}}))
+        self.assertFalse(grade({"pushed": {"step": 0, "memory": "e0000001", "passage": 4}}))
+        self.assertTrue(grade({"pushed": {"step": "all", "count": 2}}))
+        self.assertFalse(grade({"pushed": {"step": "all", "count": ">=3"}}))
+        self.assertFalse(grade({"pushed_not": {"step": "all"}}))
+        self.assertTrue(grade({"pushed_not": {"memory": "e0000001"}}))
+        self.assertTrue(grade({"pushed_not": {"step": 0, "memory": "e0000001", "passage_not": 3}}))
+        self.assertFalse(grade({"pushed_not": {"step": 0, "memory": "e0000001", "passage_not": 2}}))
+        self.assertTrue(grade({"recall_chars": {"agent": "main", "at_most": 8000}}))
+        self.assertFalse(grade({"recall_chars": {"at_most": 8000}}), "the subagent's 8,200")
+        self.assertTrue(run.grade({"pushed_not": {"step": "all"}}, None, [run.blank_record(0)], [])[0],
+                        "a planted step with no pushes pushed nothing")
+
+    def test_a_codex_push_the_hook_output_lacks_is_a_harness_error(self):
+        push = {"agent": "main", "agent_id": "main", "memory": "e0000001-0000-4000-8000-000000000001",
+                "passage": 0}
+        shown = {"event": "postToolUse", "text": "From user-memory, matching this failed step (read one "
+                 "for the rest before applying it):\n- e0000001 The user's rule: Ask before every push"}
+        record = {**run.blank_record(0), "client": "codex", "pushed": [push]}
+        self.assertEqual(run.unseen_pushes({**record, "hook_context": [shown]}), [])
+        self.assertEqual(run.unseen_pushes(record), [push], "no hook output at all")
+        quoted = {"event": "postToolUse", "text": "- e0000001 The user's rule: Ask before every push"}
+        self.assertEqual(run.unseen_pushes({**record, "hook_context": [quoted]}), [push],
+                         "a line without the push header")
+        other = {**shown, "text": shown["text"].replace("e0000001", "e0000002")}
+        self.assertEqual(run.unseen_pushes({**record, "hook_context": [other]}), [push])
+        self.assertEqual(run.unseen_pushes({**record, "client": "claude"}), [],
+                         "Claude Code reports no hook output to compare")
 
     def informational_grades(self, name, client, sandbox):
         scenario = self.SCENARIOS[name]

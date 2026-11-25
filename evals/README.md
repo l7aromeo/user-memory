@@ -237,7 +237,12 @@ back before every other memory, so it ranks below them where the newest come
 first). `bulk` stores many alike memories in one import: `count` of them with
 the given `type`, `category`, `scope` and `project`, `{n}` in the `title` and
 `content` replaced by each one's number (one `record` each would be refused
-as similar),
+as similar). `seed_many` (`{"count": N}`) fills the store to N memories in
+all with generated filler, after the seeds and bulk memories: made-up
+words with a few common ones, no code span, path or name a step could
+match, no rule type, and a tenth in projects no scenario loads. The same
+filler in every trial, so a scenario's named memories are tested at a
+store's size without anything else to push. It
 then runs its `sessions` (one turn each) or `steps` (turns
 naming their `session`, kept open until its last turn) in a working directory
 (`cwd`: `plain`, `folder:<path>` without git, or `project:<path>`, a checkout
@@ -323,7 +328,9 @@ scenario's checks forbid, such as following an instruction written inside a
 memory. Each has `steps`, one record per turn from the first, with only the
 fields it needs (`commands`, `tool_calls` as `[name, args]` pairs,
 `approvals`, `answer`, `subagents` as `{"tool", "prompt"}` objects,
-`hook_context` as `{"event", "text"}` objects or plain text); `remove`,
+`hook_context` as `{"event", "text"}` objects or plain text, `pushed` as
+`{"memory", "agent", "passage"}` objects, `recall_chars` as agent to
+characters); `remove`,
 trial paths deleted while it is graded and put back afterwards, even when
 a check raises; `write`, trial paths given the text a session would have
 left, put back the same way;
@@ -357,7 +364,8 @@ memory whose title or content matches.
 - `called` / `not_called`: the step called one of `tools` with matching `args`.
 - `real_origin`: the step recorded with the conversation's real origin.
 - `commands` / `commands_not`: a shell command of the step (or of every step,
-  `"step": "all"`) does or does not match.
+  `"step": "all"`) does or does not match; `commands` with `count` (`N` or
+  `>=N`) counts the matching commands.
 - `commits`: a commit landed after the project's first one, or with
   `matches`, one whose message matches (`^` is the start of its subject).
 - `commits_not`: no commit after the project's first one matches.
@@ -381,11 +389,29 @@ memory whose title or content matches.
   a compaction with the next turn, not the compact step itself.
 - `no_client_memory`: no step tried to write a file with Claude's own file
   tools, and nothing landed in the trial's auto memory folders.
+- `pushed`: the hooks pushed a passage in the step (`"step": "all"` for
+  any step), as the session's `.recall` file shows after it, for both
+  clients alike: `memory` (a short id), `agent` (`main`, or `subagent` for
+  any subagent's context), `passage` (its number in the memory), and
+  `count` (default `>=1`). A rule session start printed in full is not a
+  push. A passage pushed again, after a compaction or a stretch, counts
+  again. On Codex, which reports hook output, a push the file records but
+  no hook output of the step shows makes the trial a harness error, so the
+  check never rests on the file alone.
+- `pushed_not`: no push in the step matches; with `passage_not`, none of
+  the memory's other passages.
+- `recall_chars`: after every step, each agent's characters pushed in its
+  current epoch (`agent` for one) are at most `at_most`.
 
 Every Codex trial also reports, as informational, whether Codex wrote to its
 own memory databases (`memories_*.sqlite` in the trial's `CODEX_HOME`), which
 compete with user-memory as Claude's auto memory does: the rows of each table
 before the first session and after the last.
+
+A scenario's `void_unless` is one check that says the agent did what the
+scenario measures, such as one call per step it was asked for. A trial
+that fails it is reported `VOID` and counted apart, neither a pass nor a
+failure.
 
 Checks marked `informational` are reported but do not decide the trial; a
 check may name the `client` it applies to. Scenarios marked `diagnostic` run
