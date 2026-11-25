@@ -115,9 +115,15 @@ session in one repository does not see another's exceptions.
   listed projects') or `all` (every project, for review or inspection).
 - `category` (with its synonyms), `type`, `source` (explicit, observed or
   inferred) and `origin` (one conversation) narrow it further.
-- `status` is `active` (confirmed and tentative) unless set to `stale`,
-  `superseded` or `all`. A read by ids takes only `status`: ids outside it are
-  listed under `excluded` with their status. An id names one memory in any
+- `status` is `active` (confirmed and tentative, in force) unless set to
+  `ended` (confirmed or tentative, but their
+  [condition](memory-model.md#conditions) ended or their date passed),
+  `stale`, `superseded` or `all`, which includes ended ones. Each memory
+  out of force by its condition in a reply carries `ended`: when, how, the
+  evidence and the conversation, or for a passed date that date with how
+  `date`. A read by ids takes only `status`: ids outside it are listed
+  under `excluded` with their status; under `active` an ended memory is
+  still read, marked `ended`. An id names one memory in any
   scope, so `projects` and `scope` given with ids are ignored, and the other
   filters are refused.
 
@@ -285,7 +291,9 @@ says where the origin comes from.
   sees every end an agent made and can reopen it with `update` or forget it;
 - **ended_support** — patterns citing a memory whose date has passed;
 - **open_condition** — tag or text conditions unchanged for over 60 days,
-  asking whether each still holds.
+  asking whether each still holds. Nothing records when a condition was
+  set, so the memory's `updated_at` stands in for it: any later change to
+  the memory restarts the 60 days.
 
 A memory out of force by its condition is compared with nothing: it is in
 no duplicate or overlap group.
