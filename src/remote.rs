@@ -32,6 +32,7 @@ pub(crate) mod refused;
 pub(crate) mod scope;
 mod tokens;
 mod transfer;
+pub(crate) mod usage;
 
 #[derive(Clone, Args, Serialize, Deserialize)]
 pub struct Connection {
@@ -508,7 +509,8 @@ pub async fn host(options: HostOptions) -> Result<()> {
             transfer::admit,
         ));
     let transfers = transfer::routes(db.clone(), allowed.clone());
-    let delivery = delivery::routes(db.clone(), allowed);
+    let delivery = delivery::routes(db.clone(), allowed.clone());
+    let usage = usage::routes(db.clone(), allowed);
     let health = Health::new(db.clone());
     let service: StreamableHttpService<crate::UserMemoryServer, LocalSessionManager> =
         StreamableHttpService::new(
@@ -521,7 +523,7 @@ pub async fn host(options: HostOptions) -> Result<()> {
             Default::default(),
             config,
         );
-    // /mcp, the export, import and delivery endpoints and a token's own revocation
+    // /mcp, the export, import, delivery and use endpoints and a token's own revocation
     // need a token (src/remote/gate.rs). `/` names the service for health
     // checks and reverse-proxy smoke tests, reads no memory and needs no
     // token; other paths are 404.
@@ -529,6 +531,7 @@ pub async fn host(options: HostOptions) -> Result<()> {
         .nest_service("/mcp", service)
         .merge(transfers)
         .merge(delivery)
+        .merge(usage)
         .merge(own_token)
         .layer(middleware::from_fn_with_state(gate, gate::authenticate))
         .route("/", get(move || health.clone().answer()))

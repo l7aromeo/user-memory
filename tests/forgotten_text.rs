@@ -535,6 +535,8 @@ DELETE FROM search_words WHERE rowid=1000;",
     }
     conn.execute_batch("DROP TABLE store_changes; DROP TABLE memory_changes;")
         .unwrap();
+    // And version 12's record of use.
+    conn.execute_batch("DROP TABLE memory_use;").unwrap();
     // Closed, so its log is copied into the file the check reads.
     drop(conn);
     assert!(

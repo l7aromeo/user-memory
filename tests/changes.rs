@@ -23,8 +23,10 @@ use serde_json::{Value, json};
 use std::{
     collections::BTreeSet,
     fs,
+    io::{BufRead, BufReader, Read, Write},
+    net::TcpStream,
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
     time::{Duration, SystemTime},
 };
 use tempfile::{TempDir, tempdir};
@@ -240,6 +242,48 @@ fn link(s: &Store) {
     serve.close();
 }
 
+fn write_uses(s: &Store) {
+    let id = s.record("Runs the fast tests first", &[]);
+    let token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let token_file = s.root.path().join("access-token");
+    fs::write(&token_file, token).unwrap();
+    let mut host = s
+        .command(&["host", "--listen", "127.0.0.1:0", "--db"])
+        .arg(&s.db)
+        .arg("--token-file")
+        .arg(&token_file)
+        .env_remove("USER_MEMORY_DB")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(host.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let address = line
+        .trim()
+        .strip_prefix("Listening: http://")
+        .and_then(|rest| rest.strip_suffix("/mcp"))
+        .unwrap_or_else(|| panic!("{line}"))
+        .to_owned();
+    let body = json!({"origin":"claude:session/a","uses":[{"memory":id,"project":"github.com/acme/api","read":true,"recorded":false,"shown":false}]}).to_string();
+    s.expect("a session's use", false, || {
+        let mut socket = TcpStream::connect(&address).unwrap();
+        write!(
+            socket,
+            "POST /use HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nAuthorization: Bearer {token}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        let mut response = String::new();
+        socket.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    });
+    let _ = host.kill();
+    let _ = host.wait();
+}
+
 fn drop_vectors(s: &Store) {
     s.record("Writes tests first", &[]);
     s.expect("vectors dropped with semantic search off", false, || {
@@ -398,6 +442,7 @@ const PATHS: &[(&str, Case)] = &[
     ("write::forget", forget),
     ("review::keep", keep),
     ("links::link", link),
+    ("usage::write_uses", write_uses),
     ("embedding::drop_vectors", drop_vectors),
     ("index::reindex_with", reindex_with),
     ("history::prune", prune),
