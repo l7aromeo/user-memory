@@ -618,6 +618,143 @@ fn an_agent_ends_a_text_condition_on_its_evidence() {
     serve.close();
 }
 
+/// An export carries each memory's condition and end (format 3); an import
+/// keeps a date that has passed, merges ends as a union whatever
+/// on_conflict says, takes the file's condition and end with use-file, and
+/// its undo gives back the condition and the end it replaced.
+#[test]
+fn export_and_import_carry_conditions_and_ends() {
+    let source = Store::new();
+    let parser = source.record(&["--until-text", "the parser ships"])["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let dated = source.value(&[
+        "record",
+        "--category",
+        "workflow",
+        "--scope",
+        "global",
+        "--title",
+        "Merge without review this week",
+        "--content",
+        "Merge without review this week.",
+        "--until-date",
+        "2099-01-01T00:00:00Z",
+    ])["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let export = |store: &Store, name: &str| -> (PathBuf, Value) {
+        let file = store.root.path().join(name);
+        store.value(&["export", file.to_str().unwrap()]);
+        let document = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        (file, document)
+    };
+    // A date that passes before the export travels as it was.
+    Connection::open(&source.db)
+        .unwrap()
+        .execute(
+            "UPDATE memories SET until_value='2001-01-01T00:00:00Z' WHERE id=?1",
+            [&dated],
+        )
+        .unwrap();
+    let (before_end, _) = export(&source, "before.json");
+    let evidence = "ran the release recipe: parser 2.0 published";
+    source.value(&[
+        "update", &parser, "--ended", evidence, "--origin", "chat/end",
+    ]);
+    let (after_end, document) = export(&source, "after.json");
+    assert_eq!(document["format_version"], 3);
+    let memory = |id: &str| {
+        document["memories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    let exported = memory(&parser);
+    assert_eq!(exported["until"], json!({"text":"the parser ships"}));
+    assert_eq!(exported["ended"]["how"], "evidence");
+    assert_eq!(exported["ended"]["evidence"], evidence);
+    assert_eq!(exported["ended"]["origin"], "chat/end");
+    assert_eq!(
+        memory(&dated)["until"],
+        json!({"date":"2001-01-01T00:00:00Z"})
+    );
+    assert!(memory(&dated).get("ended").is_none());
+
+    let ends = |store: &Store| -> Vec<(String, String)> {
+        let conn = Connection::open(&store.db).unwrap();
+        let mut statement = conn
+            .prepare("SELECT memory_id,evidence FROM memory_ended ORDER BY memory_id")
+            .unwrap();
+        statement
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    let import = |store: &Store, file: &PathBuf, extra: &[&str]| {
+        let mut args = vec!["import", file.to_str().unwrap()];
+        args.extend_from_slice(extra);
+        store.value(&args)
+    };
+
+    // A fresh store takes the conditions, the passed date and the end.
+    let fresh = Store::new();
+    let out = import(&fresh, &after_end, &["--apply"]);
+    assert_eq!(out["applied"], true, "{out}");
+    assert_eq!(out["ends_added"], 1, "{out}");
+    assert_eq!(fresh.stored(&dated).1, "2001-01-01T00:00:00Z");
+    assert_eq!(ends(&fresh), [(parser.clone(), evidence.to_owned())]);
+
+    // A store holding the memory without its end gains the end alone: the
+    // preview counts it, so the agent asks before applying.
+    let behind = Store::new();
+    import(&behind, &before_end, &["--apply"]);
+    let out = import(&behind, &after_end, &[]);
+    assert_eq!(out["ends_added"], 1, "{out}");
+    assert!(out.get("next").is_some(), "{out}");
+    import(
+        &behind,
+        &after_end,
+        &["--apply", "--on-conflict", "keep-store"],
+    );
+    assert_eq!(ends(&behind), [(parser.clone(), evidence.to_owned())]);
+
+    // Another condition here: keep-store keeps it and ignores the file's
+    // end; use-file takes the file's condition and end, and its undo
+    // gives back this store's condition and end.
+    let other = Store::new();
+    import(&other, &before_end, &["--apply"]);
+    other.value(&["update", &parser, "--until-text", "the next parser ships"]);
+    let own = "ran the parser's tests: 3.0 passes";
+    other.value(&["update", &parser, "--ended", own]);
+    let out = import(
+        &other,
+        &after_end,
+        &["--apply", "--on-conflict", "keep-store"],
+    );
+    assert_eq!(out["ends_added"], 0, "{out}");
+    assert_eq!(ends(&other), [(parser.clone(), own.to_owned())]);
+    let out = import(
+        &other,
+        &after_end,
+        &["--apply", "--on-conflict", "use-file"],
+    );
+    assert_eq!(out["ends_added"], 1, "{out}");
+    assert_eq!(other.stored(&parser).1, "the parser ships");
+    assert_eq!(ends(&other), [(parser.clone(), evidence.to_owned())]);
+    let named = out["import"].as_str().unwrap().to_owned();
+    let out = other.value(&["forget", "--import", &named]);
+    assert_eq!(out["restored"], json!([parser]), "{out}");
+    assert_eq!(other.stored(&parser).1, "the next parser ships");
+    assert_eq!(ends(&other), [(parser.clone(), own.to_owned())]);
+}
+
 /// A project move carries the tag conditions that name the old key, so the
 /// tags of the moved project still end them.
 #[test]
@@ -844,6 +981,10 @@ const READS_EVERY_STATUS: &[(&str, &str)] = &[
         "saves a vector for a memory that exists",
     ),
     ("transfer::entries", "exports every memory"),
+    (
+        "transfer::replace",
+        "compares the stored condition of a memory an import replaces",
+    ),
     (
         "vectors::CURRENT",
         "the vectors of every memory, which a search narrows to its candidates",

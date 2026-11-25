@@ -31,6 +31,7 @@ use super::{
     selection::{Filter, Subset, candidates, local_path},
     similar::{Draft, Pool, similar},
     titles::{self, Titles},
+    until::Until,
     write::{Missing, Record, check_support, normalize},
 };
 use crate::private;
@@ -53,11 +54,16 @@ use uuid::Uuid;
 pub const MAX_BYTES: u64 = 64 * 1024 * 1024;
 const FORMAT: &str = "user-memory-export";
 /// Version of the logical memory model in the file, independent of the
-/// database schema. Version 2 added each memory's `title`.
-const FORMAT_VERSION: u64 = 2;
+/// database schema. Version 2 added each memory's `title`; version 3 its
+/// `until` and `ended`, so an older binary refuses the file rather than
+/// drop an end and bring an ended permission back into force.
+const FORMAT_VERSION: u64 = 3;
 /// Exports written before titles existed; still imported, because they
 /// are the user's backups, with each title from a map the user approved.
 const TITLELESS_VERSION: u64 = 1;
+/// Exports written before conditions: their memories hold until changed,
+/// so they import as they are.
+const UNCONDITIONED_VERSION: u64 = 2;
 /// Longest file name an agent may use in the exports directory.
 const NAME_LIMIT: usize = 255;
 const ORIGIN_LIMIT: usize = 240;
@@ -175,13 +181,29 @@ struct Entry {
     created_at: String,
     updated_at: String,
     last_confirmed_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    until: Option<Until>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ended: Option<Ended>,
 }
+
+/// The end of a memory's tag or text condition, as `memory_ended` holds it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+struct Ended {
+    at: String,
+    how: String,
+    evidence: String,
+    origin: String,
+}
+
+/// Longest evidence an end holds, as `memory_ended` checks it.
+const ENDED_EVIDENCE_CHARS: usize = 2000;
 
 impl Entry {
     /// Names of the content-bearing fields that differ from `other`.
     fn differences(&self, other: &Entry) -> Vec<&'static str> {
         let mut fields = Vec::new();
-        let pairs: [(&'static str, bool); 13] = [
+        let pairs: [(&'static str, bool); 14] = [
             ("type", self.memory_type == other.memory_type),
             ("category", self.category == other.category),
             ("title", self.title == other.title),
@@ -195,6 +217,7 @@ impl Entry {
             ("evidence", self.evidence == other.evidence),
             ("evidence_ids", self.evidence_ids == other.evidence_ids),
             ("superseded_by", self.superseded_by == other.superseded_by),
+            ("until", self.until == other.until),
         ];
         for (name, same) in pairs {
             if !same {
@@ -262,13 +285,37 @@ fn entries(conn: &Connection) -> Result<Vec<Entry>> {
             origins.entry(id).or_default().push(origin);
         }
     }
+    let mut ends: HashMap<Uuid, Ended> = HashMap::new();
+    let mut statement =
+        conn.prepare("SELECT memory_id,ended_at,how,evidence,origin FROM memory_ended")?;
+    let rows = statement.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            Ended {
+                at: r.get(1)?,
+                how: r.get(2)?,
+                evidence: r.get(3)?,
+                origin: r.get(4)?,
+            },
+        ))
+    })?;
+    for found in rows {
+        let (id, end) = found?;
+        if let Ok(id) = Uuid::parse_str(&id) {
+            ends.insert(id, end);
+        }
+    }
     Ok(memories
         .into_iter()
-        .map(|m| entry(m, &mut origins))
+        .map(|m| entry(m, &mut origins, &mut ends))
         .collect())
 }
 
-fn entry(m: Memory, origins: &mut HashMap<Uuid, Vec<Origin>>) -> Entry {
+fn entry(
+    m: Memory,
+    origins: &mut HashMap<Uuid, Vec<Origin>>,
+    ends: &mut HashMap<Uuid, Ended>,
+) -> Entry {
     Entry {
         id: m.id,
         memory_type: m.memory_type,
@@ -288,6 +335,8 @@ fn entry(m: Memory, origins: &mut HashMap<Uuid, Vec<Origin>>) -> Entry {
         created_at: m.created_at,
         updated_at: m.updated_at,
         last_confirmed_at: m.last_confirmed_at,
+        until: m.until,
+        ended: ends.remove(&m.id),
     }
 }
 
@@ -659,6 +708,66 @@ fn parse_entry(index: usize, value: &Value) -> std::result::Result<(Entry, bool)
             *earliest = first_seen;
         }
     }
+    // Checked without a now: a backup's date may have passed since, which
+    // leaves the memory out of force, as it was in the store.
+    let given_until: Option<Until> = match value.get("until") {
+        None | Some(Value::Null) => None,
+        Some(until) => match serde_json::from_value(until.clone()) {
+            Ok(until) => Some(until),
+            Err(_) => {
+                return Err(fail(
+                    "until must be an object with one of date, tag (with project) or text",
+                ));
+            }
+        },
+    };
+    let until = match &given_until {
+        None => None,
+        Some(given) => match given.condition(&record.project, None) {
+            Ok(condition) => Some(condition.to_input()),
+            Err(reason) => return Err(fail(&reason)),
+        },
+    };
+    let ended = match value.get("ended") {
+        None | Some(Value::Null) => None,
+        Some(end) => {
+            let field = |name: &str| end.get(name).and_then(Value::as_str);
+            let (Some(at), Some(how), Some(evidence)) =
+                (field("at"), field("how"), field("evidence"))
+            else {
+                return Err(fail("ended must give at, how and evidence"));
+            };
+            let Some(at) = stamp(at) else {
+                return Err(fail(
+                    "timestamps must be YYYY-MM-DD HH:MM:SS or ISO 8601 UTC",
+                ));
+            };
+            if !matches!(how, "tag" | "evidence") {
+                return Err(fail("ended's how must be tag or evidence"));
+            }
+            let evidence = super::clean(evidence, usize::MAX);
+            let length = evidence.chars().count();
+            if length == 0 || length > ENDED_EVIDENCE_CHARS {
+                return Err(fail("ended's evidence must be 1 to 2000 characters"));
+            }
+            let origin = super::clean(field("origin").unwrap_or_default(), usize::MAX);
+            if origin.chars().count() > ORIGIN_LIMIT {
+                return Err(fail("ended's origin must be at most 240 characters"));
+            }
+            if !until
+                .as_ref()
+                .is_some_and(|u| u.tag.is_some() || u.text.is_some())
+            {
+                return Err(fail("ended goes with a tag or text condition"));
+            }
+            Some(Ended {
+                at,
+                how: how.to_owned(),
+                evidence,
+                origin,
+            })
+        }
+    };
     let entry = Entry {
         id,
         memory_type: record.memory_type,
@@ -681,8 +790,11 @@ fn parse_entry(index: usize, value: &Value) -> std::result::Result<(Entry, bool)
         created_at,
         updated_at,
         last_confirmed_at,
+        until,
+        ended,
     };
     let changed = timestamps_changed
+        || entry.until != given_until
         || entry.title != text(value, "title").unwrap_or_default()
         || entry.memory_type != text(value, "type").unwrap_or_default()
         || entry.category != text(value, "category").unwrap_or_default()
@@ -974,7 +1086,7 @@ fn import(
         Ordering::Greater => {
             bail!("This export needs a newer user-memory (format version {version})")
         }
-        Ordering::Less if version == TITLELESS_VERSION => {}
+        Ordering::Less if matches!(version, TITLELESS_VERSION | UNCONDITIONED_VERSION) => {}
         Ordering::Less => bail!("Not a user-memory export: unknown format version"),
     }
     let Some(values) = file.get("memories").and_then(Value::as_array) else {
@@ -1174,7 +1286,22 @@ fn import(
     } else {
         Vec::new()
     };
-    let will_stale = if replaced.is_empty() {
+    let ends: Vec<bool> = rows
+        .iter()
+        .zip(&plans)
+        .map(|(entry, plan)| {
+            let use_file = matches!(plan, Plan::Conflict) && on_conflict == OnConflict::UseFile;
+            brings_end(entry, store.get(&entry.id), use_file)
+        })
+        .collect();
+    let ends_added = ends.iter().filter(|brought| **brought).count();
+    // An end stales the patterns that cite its memory, as a replacement
+    // can; a memory the import adds has no pattern citing it yet.
+    let ends_on_stored = rows
+        .iter()
+        .zip(&ends)
+        .any(|(entry, brought)| *brought && store.contains_key(&entry.id));
+    let will_stale = if replaced.is_empty() && !ends_on_stored {
         Vec::new()
     } else {
         // The triggers decide what goes stale: try the replacements, read
@@ -1186,6 +1313,13 @@ fn import(
         let before = statuses(&trial)?;
         for entry in rows.iter().filter(|e| replaced.contains(&e.id)) {
             replace(&trial, entry)?;
+        }
+        for (entry, _) in rows
+            .iter()
+            .zip(&ends)
+            .filter(|(entry, brought)| **brought && store.contains_key(&entry.id))
+        {
+            add_end(&trial, entry)?;
         }
         let staled = newly_stale(&trial, &before)?;
         trial.rollback()?;
@@ -1223,6 +1357,7 @@ fn import(
     }
     summary.insert("unchanged".into(), json!(unchanged));
     summary.insert("origins_merged".into(), json!(origins_merged));
+    summary.insert("ends_added".into(), json!(ends_added));
     // Only the rows being imported, in the file's order.
     let normalized: Vec<String> = rows
         .iter()
@@ -1287,7 +1422,8 @@ fn import(
                 .is_some_and(|found| !found.is_empty())
             || summary["origins_merged"]
                 .as_u64()
-                .is_some_and(|merged| merged != 0);
+                .is_some_and(|merged| merged != 0)
+            || ends_added != 0;
         if !blocked && writes {
             summary.insert("next".into(), json!(PREVIEWED));
         }
@@ -1312,6 +1448,11 @@ fn import(
         if matches!(plan, Plan::Add) {
             insert(&tx, entry)?;
         }
+    }
+    // Before the import marks its events, so the ends it adds and the
+    // ends a replacement removed carry its name, for its undo.
+    for (entry, _) in rows.iter().zip(&ends).filter(|(_, brought)| **brought) {
+        add_end(&tx, entry)?;
     }
     let added_ids: Vec<Uuid> = rows
         .iter()
@@ -1460,8 +1601,9 @@ fn newly_stale(conn: &Connection, before: &HashMap<Uuid, String>) -> Result<Vec<
 }
 
 fn insert(conn: &Connection, e: &Entry) -> Result<()> {
+    let (until_kind, until_value, until_project) = Until::columns(e.until.as_ref());
     conn.execute(
-        "INSERT INTO memories (id,created_at,updated_at,memory_type,category,context,content,reason,scope,project,source,status,evidence,evidence_ids,superseded_by,last_confirmed_at,title) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+        "INSERT INTO memories (id,created_at,updated_at,memory_type,category,context,content,reason,scope,project,source,status,evidence,evidence_ids,superseded_by,last_confirmed_at,title,until_kind,until_value,until_project) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
         params![
             e.id.to_string(),
             e.created_at,
@@ -1480,15 +1622,24 @@ fn insert(conn: &Connection, e: &Entry) -> Result<()> {
             e.superseded_by.map(|id| id.to_string()),
             e.last_confirmed_at,
             e.title,
+            until_kind,
+            until_value,
+            until_project,
         ],
     )?;
     Ok(())
 }
 
-/// The store row takes the file's fields, origins and timestamps.
+/// The store row takes the file's fields, origins and timestamps. A
+/// condition that changes takes its end record with it, as update does.
 fn replace(conn: &Connection, e: &Entry) -> Result<()> {
+    let (until_kind, until_value, until_project) = Until::columns(e.until.as_ref());
     conn.execute(
-        "UPDATE memories SET memory_type=?2,category=?3,context=?4,content=?5,reason=?6,scope=?7,project=?8,source=?9,status=?10,evidence=?11,evidence_ids=?12,superseded_by=?13,created_at=?14,updated_at=?15,last_confirmed_at=?16,title=?17 WHERE id=?1",
+        "DELETE FROM memory_ended WHERE memory_id=?1 AND (SELECT (until_kind,until_value,until_project) IS NOT (?2,?3,?4) FROM memories WHERE id=?1)",
+        params![e.id.to_string(), until_kind, until_value, until_project],
+    )?;
+    conn.execute(
+        "UPDATE memories SET memory_type=?2,category=?3,context=?4,content=?5,reason=?6,scope=?7,project=?8,source=?9,status=?10,evidence=?11,evidence_ids=?12,superseded_by=?13,created_at=?14,updated_at=?15,last_confirmed_at=?16,title=?17,until_kind=?18,until_value=?19,until_project=?20 WHERE id=?1",
         params![
             e.id.to_string(),
             e.memory_type,
@@ -1507,6 +1658,9 @@ fn replace(conn: &Connection, e: &Entry) -> Result<()> {
             e.updated_at,
             e.last_confirmed_at,
             e.title,
+            until_kind,
+            until_value,
+            until_project,
         ],
     )?;
     // The file's conversations go in before the others come out: removing
@@ -1539,6 +1693,33 @@ fn merge_origins(conn: &Connection, e: &Entry) -> Result<()> {
         conn.execute(
             "UPDATE memories SET last_confirmed_at=?2 WHERE id=?1 AND (last_confirmed_at IS NULL OR last_confirmed_at<?2)",
             params![e.id.to_string(), confirmed],
+        )?;
+    }
+    Ok(())
+}
+
+/// Whether the import adds `e`'s end record: ends merge as a union, so it
+/// is added wherever the stored memory, after the import, has the file's
+/// condition and no end of its own. With use-file the stored memory takes
+/// the file's condition; otherwise the end counts only for the same
+/// condition, since an end of another condition says nothing of this one.
+fn brings_end(e: &Entry, old: Option<&Entry>, use_file: bool) -> bool {
+    if e.ended.is_none() {
+        return false;
+    }
+    match old {
+        None => true,
+        Some(old) if old.until != e.until => use_file,
+        Some(old) => old.ended.is_none(),
+    }
+}
+
+/// Adds `e`'s end record unless the memory has one: the first end stands.
+fn add_end(conn: &Connection, e: &Entry) -> Result<()> {
+    if let Some(end) = &e.ended {
+        conn.execute(
+            "INSERT OR IGNORE INTO memory_ended (memory_id,ended_at,how,evidence,origin) VALUES (?1,?2,?3,?4,?5)",
+            params![e.id.to_string(), end.at, end.how, end.evidence, end.origin],
         )?;
     }
     Ok(())
@@ -2441,7 +2622,7 @@ mod tests {
                 "Not a user-memory export",
             ),
             (
-                r#"{"format":"user-memory-export","format_version":3,"memories":[]}"#,
+                r#"{"format":"user-memory-export","format_version":4,"memories":[]}"#,
                 "needs a newer user-memory",
             ),
         ] {

@@ -739,7 +739,7 @@ fn titles_travel_in_exports() {
     s.seed();
     let out = s.ok(&["export", "-"]);
     let document: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(document["format_version"], 2);
+    assert_eq!(document["format_version"], 3);
     assert_eq!(document["memories"][0]["title"], "Prefer Rust");
     let mut messy = document.clone();
     messy["memories"][0]["title"] = json!("  Prefer \t Rust ");

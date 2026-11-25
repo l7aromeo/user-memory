@@ -144,15 +144,21 @@ impl Until {
     }
 
     /// The stored condition for a memory in `memory_project` (blank for a
-    /// global memory), or the refusal to give the agent.
-    pub fn condition(&self, memory_project: &str, now: Timestamp) -> Result<Condition, String> {
+    /// global memory), or the refusal to give the agent. With `now`, a date
+    /// at or before it is refused, as a new condition would end at once;
+    /// without, any date is kept, for an import restoring what a store held.
+    pub fn condition(
+        &self,
+        memory_project: &str,
+        now: Option<Timestamp>,
+    ) -> Result<Condition, String> {
         self.condition_in(memory_project, now, local_zone)
     }
 
     fn condition_in(
         &self,
         memory_project: &str,
-        now: Timestamp,
+        now: Option<Timestamp>,
         zone: impl FnOnce() -> Result<TimeZone, String>,
     ) -> Result<Condition, String> {
         let date = self.date.as_deref().map(str::trim);
@@ -171,7 +177,9 @@ impl Until {
         }
         if let Some(date) = date {
             let stored = resolve_date(date, zone)?;
-            if stored.as_str() <= stored_now(now).as_str() {
+            if let Some(now) = now
+                && stored.as_str() <= stored_now(now).as_str()
+            {
                 return Err(DATE_PASSED.into());
             }
             return Ok(Condition::Date(stored));
@@ -405,7 +413,7 @@ mod tests {
     fn a_day_ends_at_the_next_local_midnight() {
         let today = until(Some("2026-11-11"), None, None);
         assert_eq!(
-            today.condition_in("", now(), jakarta),
+            today.condition_in("", Some(now()), jakarta),
             Ok(Condition::Date("2026-11-11T17:00:00Z".into()))
         );
     }
@@ -451,12 +459,23 @@ mod tests {
         }
     }
 
+    /// A new condition whose date has passed is refused; an imported one,
+    /// checked without a now, is kept as the store held it.
     #[test]
-    fn a_date_already_passed_is_refused() {
-        for date in ["2026-11-10", "2026-11-11T03:00:00Z"] {
+    fn a_date_already_passed_is_refused_unless_imported() {
+        for (date, stored) in [
+            ("2026-11-10", "2026-11-10T17:00:00Z"),
+            ("2026-11-11T03:00:00Z", "2026-11-11T03:00:00Z"),
+        ] {
+            let given = until(Some(date), None, None);
             assert_eq!(
-                until(Some(date), None, None).condition_in("", now(), jakarta),
+                given.condition_in("", Some(now()), jakarta),
                 Err(DATE_PASSED.into()),
+                "{date}"
+            );
+            assert_eq!(
+                given.condition_in("", None, jakarta),
+                Ok(Condition::Date(stored.into())),
                 "{date}"
             );
         }
@@ -472,7 +491,7 @@ mod tests {
             until(None, None, Some("   ")),
         ] {
             assert_eq!(
-                given.condition_in("p", now(), jakarta),
+                given.condition_in("p", Some(now()), jakarta),
                 Err(TWO_KINDS.into()),
                 "{given:?}"
             );
@@ -484,7 +503,7 @@ mod tests {
         let mut given = until(None, None, Some("it ships"));
         given.project = Some("github.com/x/y".into());
         assert_eq!(
-            given.condition_in("", now(), jakarta),
+            given.condition_in("", Some(now()), jakarta),
             Err(PROJECT_WITHOUT_TAG.into())
         );
     }
@@ -493,19 +512,19 @@ mod tests {
     fn a_tag_takes_the_memory_project_or_the_named_one() {
         let mut given = until(None, Some("v0.10.0"), None);
         assert_eq!(
-            given.condition_in("github.com/x/app", now(), jakarta),
+            given.condition_in("github.com/x/app", Some(now()), jakarta),
             Ok(Condition::Tag {
                 tag: "v0.10.0".into(),
                 project: "github.com/x/app".into()
             })
         );
         assert_eq!(
-            given.condition_in("", now(), jakarta),
+            given.condition_in("", Some(now()), jakarta),
             Err(GLOBAL_TAG_NEEDS_PROJECT.into())
         );
         given.project = Some("https://GitHub.com/Example/Tool.git".into());
         assert_eq!(
-            given.condition_in("", now(), jakarta),
+            given.condition_in("", Some(now()), jakarta),
             Ok(Condition::Tag {
                 tag: "v0.10.0".into(),
                 project: "github.com/example/tool".into()
@@ -538,12 +557,12 @@ mod tests {
     #[test]
     fn a_text_is_cleaned_and_limited() {
         assert_eq!(
-            until(None, None, Some("  the fix\n ships ")).condition_in("", now(), jakarta),
+            until(None, None, Some("  the fix\n ships ")).condition_in("", Some(now()), jakarta),
             Ok(Condition::Text("the fix ships".into()))
         );
         let long = "x".repeat(UNTIL_CHARS + 1);
         assert_eq!(
-            until(None, None, Some(&long)).condition_in("", now(), jakarta),
+            until(None, None, Some(&long)).condition_in("", Some(now()), jakarta),
             Err(format!(
                 "until's text has {} characters; the limit is {UNTIL_CHARS}; say what has to happen in fewer words",
                 UNTIL_CHARS + 1
@@ -552,7 +571,7 @@ mod tests {
         let exact = "x".repeat(UNTIL_CHARS);
         assert!(
             until(None, None, Some(&exact))
-                .condition_in("", now(), jakarta)
+                .condition_in("", Some(now()), jakarta)
                 .is_ok()
         );
     }

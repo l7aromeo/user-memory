@@ -816,16 +816,16 @@ pub(super) fn mark_import(
 ) -> Result<()> {
     let ids: Vec<String> = marked.iter().map(|m| m.id.to_string()).collect();
     conn.execute(
-        "UPDATE memory_events SET imported=?1 WHERE seq>?2 AND op='import' AND imported IS NULL AND memory_id IN (SELECT value FROM json_each(?3))",
+        "UPDATE memory_events SET imported=?1 WHERE seq>?2 AND op IN ('import','ended','reopened') AND imported IS NULL AND memory_id IN (SELECT value FROM json_each(?3))",
         params![named, mark, serde_json::to_string(&ids)?],
     )?;
     // json_set rather than json_patch, which drops a key whose value is
     // null, as a memory never confirmed has.
     let mut brought = conn.prepare(
-        "UPDATE memory_events SET before=json_set(coalesce(before,'{}'),'$.import_origins',json(?3)) WHERE imported=?1 AND memory_id=?2",
+        "UPDATE memory_events SET before=json_set(coalesce(before,'{}'),'$.import_origins',json(?3)) WHERE imported=?1 AND memory_id=?2 AND op='import'",
     )?;
     let mut replaced = conn.prepare(&format!(
-        "UPDATE memory_events SET before=json_set(before,'$.{REPLACED_ORIGINS}',json(?3),'$.created_at',?4,'$.last_confirmed_at',?5) WHERE imported=?1 AND memory_id=?2",
+        "UPDATE memory_events SET before=json_set(before,'$.{REPLACED_ORIGINS}',json(?3),'$.created_at',?4,'$.last_confirmed_at',?5) WHERE imported=?1 AND memory_id=?2 AND op='import'",
     ))?;
     for m in marked {
         brought.execute(params![
