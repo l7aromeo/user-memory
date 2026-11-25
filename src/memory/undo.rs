@@ -91,6 +91,7 @@ pub(super) fn forget_import(
             }
             Plan::Restore { before, stale } => {
                 restore(tx, &memory.id, &before, stale)?;
+                restore_end(tx, named, &memory.id)?;
                 if let Some(earlier) = undone_version(tx, &memory)? {
                     next.insert(format!(
                         "{} is back as import {earlier} left it, which was undone too; to finish, forget with import \"{earlier}\" (user-memory forget --import \"{earlier}\").",
@@ -213,6 +214,8 @@ fn plan(tx: &Connection, named: &str, memory: &Touched) -> Result<Option<Plan>> 
         let counts = match mark {
             // History a later import brought from its file: no change here.
             Some(Mark::Brought(_)) => false,
+            // The ends this import added or replaced: its own doing.
+            Some(Mark::Import(other)) if other == named => false,
             Some(Mark::Import(other) | Mark::Undo(other)) => !undone.contains(other),
             None => true,
         };
@@ -243,6 +246,8 @@ fn plan(tx: &Connection, named: &str, memory: &Touched) -> Result<Option<Plan>> 
             "revive" => "revive",
             "merge" => "merge",
             "distinct" => "distinct",
+            "ended" => "ended",
+            "reopened" => "reopened",
             // No write but an insert records, and the memory existed.
             _ => "record",
         };
@@ -340,6 +345,18 @@ fn restore(tx: &Connection, id: &str, before: &Map<String, Value>, stale: bool) 
         values.push(value);
         sets.push(format!("{column}=?{}", values.len() + 1));
     }
+    // The condition, as the history keeps it: one object for three columns,
+    // set together so their check sees the whole condition.
+    if let Some(until) = before.get("until") {
+        for (key, column) in [
+            ("kind", "until_kind"),
+            ("value", "until_value"),
+            ("project", "until_project"),
+        ] {
+            values.push(until.get(key).cloned().unwrap_or_else(|| json!("")));
+            sets.push(format!("{column}=?{}", values.len() + 1));
+        }
+    }
     for time in ["created_at", "last_confirmed_at"] {
         if let Some(value) = before.get(time) {
             values.push(value.clone());
@@ -368,6 +385,42 @@ fn restore(tx: &Connection, id: &str, before: &Map<String, Value>, stale: bool) 
         tx.execute(
             "DELETE FROM memory_origins WHERE memory_id=?1 AND origin NOT IN (SELECT value FROM json_each(?2))",
             params![id, serde_json::to_string(&keep)?],
+        )?;
+    }
+    Ok(())
+}
+
+/// Gives memory `id` back the end record it had before import `named`: the
+/// end the import brought goes, and the end its replacement removed, with
+/// the condition it ended, comes back from that removal's event.
+fn restore_end(tx: &Connection, named: &str, id: &str) -> Result<()> {
+    let events = tx
+        .prepare(
+            "SELECT op,before FROM memory_events WHERE memory_id=?1 AND imported=?2 AND op IN ('ended','reopened') ORDER BY seq",
+        )?
+        .query_map(params![id, named], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if events.iter().any(|(op, _)| op == "ended") {
+        tx.execute("DELETE FROM memory_ended WHERE memory_id=?1", [id])?;
+    }
+    for (_, before) in events.iter().filter(|(op, _)| op == "reopened") {
+        let Some(end) = before
+            .as_deref()
+            .and_then(|b| serde_json::from_str::<Value>(b).ok())
+        else {
+            continue;
+        };
+        tx.execute(
+            "INSERT OR IGNORE INTO memory_ended (memory_id,ended_at,how,evidence,origin) VALUES (?1,?2,?3,?4,?5)",
+            params![
+                id,
+                end["ended_at"].as_str(),
+                end["how"].as_str(),
+                end["evidence"].as_str(),
+                end["origin"].as_str().unwrap_or_default(),
+            ],
         )?;
     }
     Ok(())

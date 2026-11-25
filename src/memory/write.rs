@@ -380,7 +380,7 @@ pub(super) fn normalize(input: &mut Record) -> Option<String> {
     // Kept in its stored form: a date as a UTC instant, a tag with its
     // project, a text cleaned.
     if let Some(until) = &input.until {
-        match until.condition(&input.project, jiff::Timestamp::now()) {
+        match until.condition(&input.project, Some(jiff::Timestamp::now())) {
             Ok(condition) => input.until = Some(condition.to_input()),
             Err(reason) => return Some(reason),
         }

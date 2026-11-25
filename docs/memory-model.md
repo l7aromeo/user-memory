@@ -310,7 +310,16 @@ passages are worked out again whenever the memory is indexed.
   Applying from the CLI counts as your confirmation of every explicit memory
   in the file. Conflicts abort by default;
   `keep-store` keeps the store's version and `use-file` takes the file's.
-- Exports are format version 2 and carry each memory's title. Version 1
+- Exports are format version 3 and carry each memory's title, its
+  condition (`until`) and, once that has ended, its end (`ended`: when, how,
+  the evidence and the conversation). An older user-memory refuses a version
+  3 file rather than drop an end. Version 2 files import unchanged. A date
+  that has passed imports as it was, leaving the memory out of force. Ends
+  merge as a union whatever `on_conflict` says: an end is added where the
+  memory, after the import, has the file's condition and no end of its own,
+  and the preview counts them in `ends_added`. With `use-file`, a memory
+  whose condition differs takes the file's condition, and the end of the
+  old one goes with it; undoing that import gives both back. Version 1
   files, written before titles existed, import only with a
   [titles map](storage.md#titles-for-older-memories) (`--titles FILE`, or the import
   tool's `titles`) for each memory the store does not hold; memories it holds
