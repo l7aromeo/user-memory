@@ -4281,36 +4281,55 @@ fn session_start_folds_a_server_s_overlay_without_a_download() {
     );
 }
 
+/// How long a debug build's client takes to mark a base missed in the run
+/// that slows it: as a slow disk would, but within session start's 5
+/// seconds, so the ask still goes out before the limit.
+const MISSED_DELAY_MS: &str = "2000";
+
 // A base that does not arrive within session start's limit leaves no file
-// and prints nothing, and no prompt of the session asks for it again.
+// and prints nothing, and no prompt of the session asks for it again, also
+// when marking it missed is slow.
 #[test]
 fn a_base_that_misses_session_start_s_limit_is_not_asked_for_at_every_prompt() {
-    let host = Host::start(root());
-    record_tool(&host, 1, "quokka-deploy", "chat/deploy");
-    // A delivery file slower than session start's 5 seconds.
-    let proxy = Counting::slowed_for(
-        &host.address,
-        std::time::Duration::from_secs(6),
-        b"POST /delivery",
-    );
-    let machine = Machine {
-        home: tempdir().unwrap(),
-        url: format!("http://{}/mcp", proxy.address),
-        token: host.root.path().join("token"),
-        env: vec![(time::HOOK_LIMITS.0, time::HOOK_LIMITS.1.to_owned())],
-    };
-    let (_, said) = machine.hook("session-start");
-    assert_eq!(errors(&said), Vec::<&str>::new());
-    let home = machine.home.path();
-    assert_eq!(delivery_files(home), Vec::<std::path::PathBuf>::new());
-    let asks = delivery_asks(&proxy);
-    assert_eq!(asks, 1);
-    let (_, said) = machine.hook("prompt-submit");
-    assert_eq!(errors(&said), Vec::<&str>::new());
-    assert_eq!(delivery_asks(&proxy), asks, "a prompt asked again");
-    // The next session start asks again.
-    machine.hook("session-start");
-    assert_eq!(delivery_asks(&proxy), asks + 1);
+    for slow_mark in [false, true] {
+        let host = Host::start(root());
+        record_tool(&host, 1, "quokka-deploy", "chat/deploy");
+        // A delivery file slower than session start's 5 seconds.
+        let proxy = Counting::slowed_for(
+            &host.address,
+            std::time::Duration::from_secs(6),
+            b"POST /delivery",
+        );
+        let mut env = vec![(time::HOOK_LIMITS.0, time::HOOK_LIMITS.1.to_owned())];
+        if slow_mark {
+            env.push((
+                "USER_MEMORY_TEST_MISSED_DELAY_MS",
+                MISSED_DELAY_MS.to_owned(),
+            ));
+        }
+        let machine = Machine {
+            home: tempdir().unwrap(),
+            url: format!("http://{}/mcp", proxy.address),
+            token: host.root.path().join("token"),
+            env,
+        };
+        let (_, said) = machine.hook("session-start");
+        assert_eq!(errors(&said), Vec::<&str>::new());
+        let home = machine.home.path();
+        assert_eq!(delivery_files(home), Vec::<std::path::PathBuf>::new());
+        let asks = delivery_asks(&proxy);
+        assert_eq!(asks, 1, "slow mark: {slow_mark}");
+        let (_, said) = machine.hook("prompt-submit");
+        assert_eq!(errors(&said), Vec::<&str>::new());
+        assert_eq!(
+            delivery_asks(&proxy),
+            asks,
+            "a prompt asked again; slow mark: {slow_mark}"
+        );
+        // The next session start asks again.
+        machine.hook("session-start");
+        assert_eq!(delivery_asks(&proxy), asks + 1, "slow mark: {slow_mark}");
+    }
 }
 
 // A download cut short is never renamed into place: the old files stay.

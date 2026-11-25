@@ -30,6 +30,12 @@ const ROUTE: &str = "delivery";
 #[cfg(debug_assertions)]
 const CUT: &str = "USER_MEMORY_TEST_DELIVERY_CUT";
 
+/// Makes a debug build's client take this many milliseconds to mark a
+/// base missed, so tests see the mark race the hook's deadline as a slow
+/// disk makes it.
+#[cfg(debug_assertions)]
+const MISSED_DELAY: &str = "USER_MEMORY_TEST_MISSED_DELAY_MS";
+
 /// Makes a debug build's server leave the route out, as a server released
 /// before it answers: 404.
 #[cfg(debug_assertions)]
@@ -262,33 +268,41 @@ fn lock_deadline(until: tokio::time::Instant) -> Instant {
 
 /// Asks the server `connection` names for the base of `projects` and
 /// writes it, by `until`; a base that doesn't arrive in time is dropped,
-/// never renamed into place, and marked missed (see
-/// [`delivery_files::served_missed`]). Also marked: a server that keeps no
+/// never renamed into place, and left marked missed (see
+/// [`delivery_files::served_missed`]), as is a server that keeps no
 /// delivery index this version reads, so no prompt asks it again before
-/// the next session start.
+/// the next session start. The mark is made before the server is asked and
+/// dropped when the base is written: the hook's own deadline can cut this
+/// off at any await, and the process ends right after.
 async fn download(connection: &Connection, projects: &[String], until: tokio::time::Instant) {
+    mark_missed(connection, projects).await;
     let fetched = tokio::time::timeout_at(until, connection.delivery(projects, None)).await;
-    let taken = match fetched {
-        Ok(Ok(Fetched::File(bytes))) => {
-            let (url, projects) = (connection.url.clone(), projects.to_vec());
-            let deadline = lock_deadline(until);
-            tokio::task::spawn_blocking(move || {
-                delivery_files::take_served(&url, &projects, bytes, deadline)
-            })
-            .await
-            .ok()
-            .and_then(Result::ok)
-        }
-        _ => None,
-    };
-    if !matches!(
-        taken,
-        Some(delivery_files::Taken::Written | delivery_files::Taken::Folded)
-    ) {
+    if let Ok(Ok(Fetched::File(bytes))) = fetched {
         let (url, projects) = (connection.url.clone(), projects.to_vec());
-        let _ = tokio::task::spawn_blocking(move || delivery_files::served_missed(&url, &projects))
-            .await;
+        let deadline = lock_deadline(until);
+        // Writing the base drops the mark under the files' lock.
+        let _ = tokio::task::spawn_blocking(move || {
+            delivery_files::take_served(&url, &projects, bytes, deadline)
+        })
+        .await;
     }
+}
+
+/// Marks the base of `projects` missed on the server `connection` names
+/// (see [`delivery_files::served_missed`]), on a blocking thread.
+async fn mark_missed(connection: &Connection, projects: &[String]) {
+    let (url, projects) = (connection.url.clone(), projects.to_vec());
+    let _ = tokio::task::spawn_blocking(move || {
+        #[cfg(debug_assertions)]
+        if let Some(delay) = std::env::var(MISSED_DELAY)
+            .ok()
+            .and_then(|ms| ms.parse().ok())
+        {
+            std::thread::sleep(std::time::Duration::from_millis(delay));
+        }
+        delivery_files::served_missed(&url, &projects);
+    })
+    .await;
 }
 
 /// Session start's part for a memory server's client (#180), by `until`:
