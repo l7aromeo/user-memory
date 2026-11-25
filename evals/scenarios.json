@@ -4041,7 +4041,7 @@
      ]
     }
    ],
-   "repeat": 2
+   "repeat": 1
   },
   {
    "name": "a_message_to_a_running_codex_sub_agent_is_matched_from_the_parent",
