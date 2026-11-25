@@ -12,6 +12,7 @@ use super::{
     ids::SHORT_ID,
     matcher::{self, Matched},
     read::is_rule,
+    reads_as_wish,
 };
 use rusqlite::{Connection, OptionalExtension};
 use std::time::Instant;
@@ -173,18 +174,30 @@ fn labelled(
 
 /// Whose word a memory is, in the voice of every text for agents: the
 /// user's rule or decision, any other stated memory by its type, or an
-/// agent's note with how many conversations learned it. None for an
-/// inference, which is never pushed.
+/// agent's note with how many conversations learned it. An agent's note
+/// that [`reads_as_wish`] says it is not the user's rule, as its `note` in
+/// a read does; one about the work (a fact, decision, goal or lesson)
+/// names its type. None for an inference, which is never pushed.
 fn label(source: &str, status: &str, memory_type: &str, origins: usize) -> Option<String> {
     match source {
         "explicit" if is_rule(source, status, memory_type) => Some("The user's rule".to_owned()),
         "explicit" => Some(format!("The user's {memory_type}")),
         "observed" => {
             let sessions = origins.max(1);
-            let unit = if sessions == 1 { "session" } else { "sessions" };
-            Some(format!(
-                "An agent's note, learned in {sessions} {unit}, not the user's rule"
-            ))
+            if reads_as_wish(memory_type) {
+                let unit = if sessions == 1 { "session" } else { "sessions" };
+                Some(format!(
+                    "An agent's note, learned in {sessions} {unit}, not the user's rule"
+                ))
+            } else if sessions == 1 {
+                Some(format!(
+                    "An agent's note from an earlier session ({memory_type})"
+                ))
+            } else {
+                Some(format!(
+                    "An agent's note from {sessions} earlier sessions ({memory_type})"
+                ))
+            }
         }
         _ => None,
     }
@@ -265,14 +278,28 @@ mod tests {
                 "tentative",
                 "lesson",
                 0,
-                "An agent's note, learned in 1 session, not the user's rule",
+                "An agent's note from an earlier session (lesson)",
             ),
             (
                 "observed",
                 "tentative",
-                "lesson",
+                "fact",
+                2,
+                "An agent's note from 2 earlier sessions (fact)",
+            ),
+            (
+                "observed",
+                "tentative",
+                "preference",
                 2,
                 "An agent's note, learned in 2 sessions, not the user's rule",
+            ),
+            (
+                "observed",
+                "tentative",
+                "constraint",
+                1,
+                "An agent's note, learned in 1 session, not the user's rule",
             ),
         ] {
             assert_eq!(
@@ -294,7 +321,7 @@ mod tests {
         let lines = [
             line(
                 "e0000005",
-                "- e0000005 An agent's note, learned in 2 sessions, not the user's rule: Run the tests before every commit",
+                "- e0000005 An agent's note from 2 earlier sessions (lesson): Run the tests before every commit",
             ),
             line(
                 "e0000001",
