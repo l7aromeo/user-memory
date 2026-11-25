@@ -804,26 +804,37 @@ pub async fn prompt_submit(client: HookClient) -> String {
         let _ = std::fs::remove_file(missed);
     }
     // The scope's delivery index, with what is left of the prompt's limit.
-    if let Some(projects) = &projects
-        && let Ok(Some(connection)) = setup::configured_remote()
-    {
-        crate::remote::delivery::at_prompt(&connection, projects, deadline).await;
-    } else if let Some(projects) = projects
-        && matches!(setup::configured_remote(), Ok(None))
-    {
-        let db = db_path();
-        let until = std::time::Instant::now()
-            + deadline.saturating_duration_since(tokio::time::Instant::now());
-        let kept = tokio::task::spawn_blocking(move || {
-            memory::delivery_files::at_prompt(&db, &projects, until)
-        });
-        let _ = tokio::time::timeout_at(deadline, kept).await;
+    let remote = setup::configured_remote();
+    if let Some(projects) = projects {
+        match &remote {
+            Ok(Some(connection)) => {
+                crate::remote::delivery::at_prompt(connection, &projects, deadline).await;
+            }
+            Ok(None) => {
+                let db = db_path();
+                let until = std::time::Instant::now()
+                    + deadline.saturating_duration_since(tokio::time::Instant::now());
+                let kept = tokio::task::spawn_blocking(move || {
+                    memory::delivery_files::at_prompt(&db, &projects, until)
+                });
+                let _ = tokio::time::timeout_at(deadline, kept).await;
+            }
+            Err(_) => {}
+        }
     }
     // Recall from the prompt's words (#117), after the notice, within what
-    // is left of the limit.
+    // is left of the limit, on the store read above.
     let until =
         std::time::Instant::now() + deadline.saturating_duration_since(tokio::time::Instant::now());
-    let recalled = asked.and_then(|payload| recall_prompt(client, &payload, until));
+    let recalled = match (asked, remote) {
+        (Some(payload), Ok(remote)) => recall_prompt(
+            client,
+            &payload,
+            remote.map(|connection| connection.url),
+            until,
+        ),
+        _ => None,
+    };
     let (limit, unit) = hook_limit(Some(client), None);
     let text = prompt_text(notice, recalled, limit, unit);
     if text.is_empty() {
@@ -857,11 +868,13 @@ fn prompt_text(
 const TASK_NOTIFICATION: &str = "<task-notification>";
 
 /// The push of what the prompt in `payload` matches for its agent context
-/// (#117), read until `deadline`; none for a task notification, a
-/// session with no scope file, or when nothing passes.
+/// (#117), on the store of the server `remote` or this machine's when none,
+/// read until `deadline`; none for a task notification, a session with no
+/// scope file, or when nothing passes.
 fn recall_prompt(
     client: HookClient,
     payload: &[u8],
+    remote: Option<String>,
     deadline: std::time::Instant,
 ) -> Option<String> {
     let value: Value = serde_json::from_slice(payload).ok()?;
@@ -869,7 +882,7 @@ fn recall_prompt(
     if prompt.trim_start().starts_with(TASK_NOTIFICATION) {
         return None;
     }
-    let session = tools::Session::of(client, payload, deadline)?;
+    let session = tools::Session::on(remote, client, payload, deadline)?;
     let action = memory::matcher::Action {
         kind: memory::matcher::Kind::Prompt,
         text: prompt.to_owned(),
