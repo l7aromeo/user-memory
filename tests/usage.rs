@@ -107,6 +107,20 @@ impl Host {
         serde_json::from_slice(&out.stdout).unwrap()
     }
 
+    /// `user-memory ARGS` on the server's store: its text output.
+    fn text(&self, args: &[&str]) -> String {
+        let out = Command::new(env!("CARGO_BIN_EXE_user-memory"))
+            .args(args)
+            .sandboxed(self.root.path())
+            .env("USER_MEMORY_DB", self.db())
+            .env_remove("USER_MEMORY_URL")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}: {out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    }
+
     /// A memory recorded in `project`, or global without one; its id.
     fn record(&self, title: &str, project: Option<&str>) -> String {
         let mut args = vec![
@@ -356,4 +370,125 @@ fn use_is_refused_with_its_reason_and_writes_nothing() {
         )
     );
     assert!(host.rows().is_empty());
+}
+
+/// The 8-character ids an index lists, in its order.
+fn listed(index: &str) -> Vec<String> {
+    index
+        .lines()
+        .filter_map(|line| line.strip_prefix("    "))
+        .filter_map(|line| line.split_whitespace().next())
+        .map(str::to_owned)
+        .collect()
+}
+
+// Memories a project's sessions read come first among the other memories
+// of the project's index, so three past the first page reach its top; a
+// read orders before a delivery; rules keep their place; and a project
+// with no use, or an index of no project, keeps today's order.
+#[test]
+fn the_index_lists_what_the_project_s_sessions_used_first() {
+    let host = Host::start(&[]);
+    let fact = |title: &str| {
+        host.cli(&[
+            "record",
+            "--type",
+            "fact",
+            "--category",
+            "build",
+            "--scope",
+            "global",
+            "--title",
+            title,
+            "--content",
+            title,
+        ])["id"]
+            .as_str()
+            .unwrap()[..8]
+            .to_owned()
+    };
+    // Recorded first, so listed last.
+    let used: Vec<String> = [
+        "The cache lives in target",
+        "Builds need the vendored crates",
+        "The linter runs in CI only",
+    ]
+    .iter()
+    .map(|title| fact(title))
+    .collect();
+    let shown = fact("Release builds strip symbols");
+    for title in [
+        "Docker images pin their base digest",
+        "Fixtures live under tests/fixtures",
+        "The changelog is written at release time",
+        "Windows paths need forward slashes in config",
+        "Postgres runs on port 5433 in development",
+        "Translations are synced every Monday",
+        "The staging deploy takes ten minutes",
+        "Feature flags are read from the flags service",
+        "Logs rotate daily and keep a week",
+        "Fonts are bundled with the desktop app",
+        "Error codes are listed in errors.md",
+        "Screenshots are taken at 2x scale",
+    ] {
+        fact(title);
+    }
+    let rule = host.cli(&[
+        "record",
+        "--type",
+        "preference",
+        "--category",
+        "build",
+        "--scope",
+        "global",
+        "--title",
+        "Ask before a release build",
+        "--content",
+        "Ask before a release build",
+    ])["id"]
+        .as_str()
+        .unwrap()[..8]
+        .to_owned();
+    let page = |project: &[&str]| {
+        let mut args = vec!["index", "--page-size", "6"];
+        args.extend_from_slice(project);
+        listed(&host.text(&args))
+    };
+    let before = page(&["--project", PROJECT]);
+    assert_eq!(before, page(&[]), "no use, no other order");
+    for id in used.iter().chain([&shown]) {
+        assert!(
+            !before[1..].contains(id),
+            "{id} on the first page: {before:?}"
+        );
+    }
+    let full = |id: &str| -> String {
+        host.cli(&["read", id])["memories"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let mut rows: Vec<Value> = used
+        .iter()
+        .map(|id| used_row(&full(id), true, false))
+        .collect();
+    rows.push(used_row(&full(&shown), false, true));
+    let body = json!({"origin": "claude:session/one", "uses": rows});
+    assert_eq!(host.post(SHARED, &body.to_string()).0, 200);
+    let after = page(&["--project", PROJECT]);
+    assert_eq!(after[0], rule, "rules first: {after:?}");
+    let mut top = after[1..4].to_vec();
+    top.sort();
+    let mut expected = used.clone();
+    expected.sort();
+    assert_eq!(top, expected, "{after:?}");
+    assert_eq!(after[4], shown, "a delivery after the reads: {after:?}");
+    // Another project's index, or one of no project, is as before.
+    assert_eq!(page(&[]), before);
+    assert_eq!(page(&["--project", "github.com/example/site"]), before);
+}
+
+/// A use row of the tests' project, read or shown.
+fn used_row(memory: &str, read: bool, shown: bool) -> Value {
+    used(memory, PROJECT, read, false, shown)
 }

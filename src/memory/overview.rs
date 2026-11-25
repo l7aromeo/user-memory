@@ -563,7 +563,17 @@ fn render_listed(
             .then_with(|| group_order(a, b))
     });
     let counted = counts(&all, input.selection.scope == Some(ScopeFilter::All));
-    let (mut rules, others): (Vec<Memory>, Vec<Memory>) = all.into_iter().partition(standing_rule);
+    let (mut rules, mut others): (Vec<Memory>, Vec<Memory>) =
+        all.into_iter().partition(standing_rule);
+    // Other memories the project's recent sessions used come first in their
+    // group, after a topic's matches; rules keep their own order (#123).
+    let used = super::usage::used(conn, &filter.projects)?;
+    let use_of = |m: &Memory| used.get(&m.id).copied().unwrap_or_default();
+    others.sort_by(|a, b| {
+        relevance(a)
+            .cmp(&relevance(b))
+            .then_with(|| use_of(b).cmp(&use_of(a)))
+    });
     if input.without_global_rules {
         rules.retain(|m| m.scope != "global");
     }
