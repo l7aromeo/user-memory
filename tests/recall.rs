@@ -1254,6 +1254,35 @@ fn a_note_on_a_script_at_the_folder_root_comes_however_it_is_run() {
 }
 
 #[test]
+fn a_note_on_a_program_comes_when_the_program_is_written_with_its_exe() {
+    let home = Home::new();
+    let note = home.record(
+        "Search here",
+        "`rg` here is ripgrep 14, which skips ignored files.",
+        &[
+            "--type",
+            "fact",
+            "--source",
+            "observed",
+            "--evidence",
+            "Seen in two sessions",
+        ],
+    );
+    let mut missed = Vec::new();
+    for (n, command) in ["rg -n foo", "rg.exe -n foo", "RG.EXE -n foo"]
+        .into_iter()
+        .enumerate()
+    {
+        let session = format!("s{n}");
+        home.start(&session, "startup");
+        if !home.run(&session, command).contains(short(&note)) {
+            missed.push(command);
+        }
+    }
+    assert!(missed.is_empty(), "no push after {missed:?}");
+}
+
+#[test]
 fn a_note_on_the_interpreter_still_comes_when_it_runs_a_script() {
     let home = Home::new();
     let note = home.record(

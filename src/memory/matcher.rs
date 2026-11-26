@@ -525,8 +525,16 @@ fn part_terms<'a>(
         .unwrap_or(program);
     let name = program_name(program);
     let sub = args.first().filter(|arg| !arg.starts_with('-'));
+    // `rg` and `rg.exe` are one program (#229), whichever a memory or the
+    // command writes: its name with and without [`WINDOWS_PROGRAM`] are
+    // spellings of one term, counted once, and its words are the name's.
+    let windows = program
+        .to_lowercase()
+        .strip_suffix(WINDOWS_PROGRAM)
+        .is_some_and(|stem| !stem.is_empty());
+    let named = [name.clone(), format!("{name}{WINDOWS_PROGRAM}")];
     part.anchors.insert(name.clone());
-    if passages::path_like(written) {
+    if passages::path_like(written) && !windows {
         // A program run by its path, `tools/x.sh`, `./tools/x.sh` or a
         // script at the root (`./build.sh`, `build.sh` an interpreter
         // runs), is what a memory names either way (#220): the spellings,
@@ -538,9 +546,15 @@ fn part_terms<'a>(
         part.anchors.extend(spelled.iter().cloned());
         part.paths.push(spelled);
     } else {
-        part.anchors.extend(passages::anchors(program));
+        // A bare program, or one run by its `.exe`: written with a folder
+        // (`C:\tools\rg.exe`) it keeps that path as one more spelling.
+        let mut spelled = passages::anchors(written);
+        spelled.extend(passages::anchors(program));
+        spelled.extend(named);
+        part.anchors.extend(spelled.iter().cloned());
+        part.paths.push(spelled);
     }
-    part.words(stems, program);
+    part.words(stems, if windows { &name } else { program });
     if let Some(sub) = sub {
         part.words(stems, sub);
     }
@@ -1887,6 +1901,38 @@ mod tests {
     }
 
     #[test]
+    fn a_program_scores_the_same_with_its_exe_or_without() {
+        let shares = |content: &str, lines: &[&str]| -> Vec<f64> {
+            let index = store("deploy", &[("A note", content)]);
+            lines
+                .iter()
+                .map(|line| {
+                    let found = rank(&index, &[action(Kind::Command, line)]);
+                    by_id(&index, &found, 40).unwrap().share
+                })
+                .collect()
+        };
+        // A note on the program: its `.exe` adds nothing to match.
+        let rg = shares(
+            "`rg` here is ripgrep 14, which skips ignored files.",
+            &["rg -n foo", "rg.exe -n foo", "RG.EXE -n foo"],
+        );
+        assert_eq!(rg[1], rg[0], "{rg:?}");
+        assert_eq!(rg[2], rg[0], "{rg:?}");
+        let git = shares(
+            "Run `git status` before a commit to see untracked files.",
+            &["git status", "git.exe status"],
+        );
+        assert_eq!(git[1], git[0], "{git:?}");
+        // A note writing `.exe` matches both spellings as one program.
+        let exe = shares(
+            "`rg.exe` here is ripgrep 14, which skips ignored files.",
+            &["rg -n foo", "rg.exe -n foo"],
+        );
+        assert_eq!(exe[0], exe[1], "{exe:?}");
+    }
+
+    #[test]
     fn other_actions_are_tested_on_the_mixed_score() {
         let index = store(
             "deploy",
@@ -2110,9 +2156,15 @@ mod tests {
             by_id(&index, &found, 40).is_none_or(|m| !m.push()),
             "{found:?}"
         );
-        // Its tails and folders spell the one path it names.
+        // Its tails and folders spell the one path it names; the program
+        // is a term of its own (#229).
         let terms = of(Kind::Command, "cat src/store/cache.py");
-        assert_eq!(terms.paths.len(), 1, "{terms:?}");
+        let file: Vec<_> = terms
+            .paths
+            .iter()
+            .filter(|path| path.contains("cache.py"))
+            .collect();
+        assert_eq!(file.len(), 1, "{terms:?}");
         for anchor in [
             "src/store/cache.py",
             "store/cache.py",
@@ -2120,8 +2172,9 @@ mod tests {
             "src/store/",
             "src",
         ] {
-            assert!(terms.paths[0].contains(anchor), "{anchor}: {terms:?}");
+            assert!(file[0].contains(anchor), "{anchor}: {terms:?}");
         }
+        assert!(!file[0].contains("cat"), "{terms:?}");
     }
 
     #[test]
