@@ -135,7 +135,8 @@ source out.
   refusals, the build choice, the checksum and the uninstaller's stand-in
   binary behave as on Windows. Without `pwsh` or the PSScriptAnalyzer
   module the tests skip with a note; in CI, or with `REQUIRE_PWSH=1`, they
-  fail instead. The check workflow installs PSScriptAnalyzer at the version
+  fail instead. When PowerShell fails, the failure names its exit code, or
+  on Unix the signal that ended it, and what it printed. The check workflow installs PSScriptAnalyzer at the version
   tests/ci.rs pins; locally, `Install-Module PSScriptAnalyzer -Scope
   CurrentUser` in `pwsh`. They run under the PowerShell that
   `USER_MEMORY_TEST_POWERSHELL` names instead, such as `powershell` for
