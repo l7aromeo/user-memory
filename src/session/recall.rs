@@ -275,7 +275,7 @@ impl State {
                 terms: Terms {
                     stems: serde_json::from_str(&stems)?,
                     anchors: serde_json::from_str(&anchors)?,
-                    parts: Vec::new(),
+                    ..Default::default()
                 },
             });
         }
@@ -392,7 +392,7 @@ impl State {
         Ok(Some(Terms {
             stems: serde_json::from_str(&stems)?,
             anchors: serde_json::from_str(&anchors)?,
-            parts: Vec::new(),
+            ..Default::default()
         }))
     }
 }
@@ -505,7 +505,7 @@ mod tests {
             terms: Terms {
                 stems: stems.iter().map(|s| (*s).to_owned()).collect(),
                 anchors: anchors.iter().map(|s| (*s).to_owned()).collect(),
-                parts: Vec::new(),
+                ..Default::default()
             },
         }
     }
@@ -941,7 +941,7 @@ mod tests {
         let task = |anchor: &str| Terms {
             stems: BTreeSet::new(),
             anchors: BTreeSet::from([anchor.to_owned()]),
-            parts: Vec::new(),
+            ..Default::default()
         };
         state.spawn("p1\nExplore", &task("docs/notes.md")).unwrap();
         state.spawn("p1\nPlan", &task("src/parse.rs")).unwrap();
