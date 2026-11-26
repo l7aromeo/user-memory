@@ -125,6 +125,65 @@ const READERS: &[&str] = &[
 /// Shells whose `-c` script is the command line they run.
 const SHELLS: &[&str] = &["bash", "sh", "zsh"];
 
+/// Programs that run the script file they are given, which is what a
+/// memory names: `bash tools/release.sh` runs `tools/release.sh`, and
+/// `python3 tools/build.py` runs `tools/build.py` (#220). Their own terms
+/// (`bash`, `python3`) would otherwise lower a note on the script below
+/// the command bars, so the script is matched as if it ran alone too.
+/// Each comes with its flags whose next word is code or a module, not a
+/// script file (`python3 -m pytest`, `node -p 'expr'`); they differ by
+/// interpreter, as a shell's `-e` takes no value and perl's `-p` neither.
+/// A shell's `-c` is [`shell_script`]'s.
+const INTERPRETERS: &[Interpreter] = &[
+    Interpreter::new("bash", &["-c"]),
+    Interpreter::new("dash", &["-c"]),
+    Interpreter::new("fish", &["-c", "--command"]),
+    Interpreter::new("ksh", &["-c"]),
+    Interpreter::new("node", &["-e", "--eval", "-p", "--print"]),
+    Interpreter::new("perl", &["-e", "-E"]),
+    Interpreter::new("php", &["-r"]),
+    // PowerShell reads its parameters in any case.
+    Interpreter {
+        name: "pwsh",
+        code: &["-c", "-command", "-e", "-ec", "-encodedcommand"],
+        any_case: true,
+    },
+    Interpreter::new("python", &["-c", "-m"]),
+    Interpreter::new("python3", &["-c", "-m"]),
+    Interpreter::new("ruby", &["-e"]),
+    Interpreter::new("sh", &["-c"]),
+    Interpreter::new("zsh", &["-c"]),
+];
+
+/// One of [`INTERPRETERS`]: its name, the flags whose next word is code,
+/// and whether those flags are read in any case.
+struct Interpreter {
+    name: &'static str,
+    code: &'static [&'static str],
+    any_case: bool,
+}
+
+impl Interpreter {
+    const fn new(name: &'static str, code: &'static [&'static str]) -> Self {
+        Self {
+            name,
+            code,
+            any_case: false,
+        }
+    }
+
+    /// Whether `flag` takes code or a module as its next word.
+    fn takes_code(&self, flag: &str) -> bool {
+        self.code.iter().any(|code| {
+            if self.any_case {
+                code.eq_ignore_ascii_case(flag)
+            } else {
+                *code == flag
+            }
+        })
+    }
+}
+
 /// The most parts of one command line scored apart, one bit of a `u64`
 /// each; parts past the last are scored together as the last, which can
 /// only lower their share.
@@ -346,6 +405,18 @@ fn command_terms(line: &str, stems: &mut Stems, terms: &mut Terms) {
             command_terms(script, stems, terms);
             continue;
         }
+        if let Some(interpreter) = INTERPRETERS.iter().find(|i| i.name == name)
+            && let Some(at) = script_file(interpreter, args)
+        {
+            // The script as if it ran alone, beside the interpreter's own
+            // part, so a note on either matches as before.
+            part_terms(
+                &args[at],
+                args[at + 1..].iter().map(String::as_str),
+                stems,
+                terms,
+            );
+        }
         let paths: Vec<usize> = if READERS.contains(&name.as_str()) {
             (0..args.len())
                 .filter(|&i| path_argument(&args[i]))
@@ -377,6 +448,23 @@ fn shell_script(args: &[String]) -> Option<&str> {
         .take_while(|arg| arg.starts_with('-') && !arg.starts_with("--"));
     let at = flags.clone().position(|flag| flag.contains('c'))?;
     args.get(at + 1).map(String::as_str)
+}
+
+/// Where in an interpreter's arguments the script file it runs is: the
+/// first word after its flags, when it is a path; none after a flag that
+/// takes code or a module ([`Interpreter::takes_code`]), or when that word is no path
+/// (a flag's value, a subcommand).
+fn script_file(interpreter: &Interpreter, args: &[String]) -> Option<usize> {
+    for (at, arg) in args.iter().enumerate() {
+        if arg.starts_with('-') {
+            if interpreter.takes_code(arg) {
+                return None;
+            }
+            continue;
+        }
+        return (!arg.contains(char::is_whitespace) && passages::path_like(arg)).then_some(at);
+    }
+    None
 }
 
 /// A program's name as a memory names it: the file name of its path,
@@ -430,10 +518,28 @@ fn part_terms<'a>(
         .filter(|arg| !arg.contains(char::is_whitespace))
         .collect();
     let mut part = Terms::default();
+    let written = program;
+    let program = program
+        .strip_prefix("./")
+        .or_else(|| program.strip_prefix(".\\"))
+        .unwrap_or(program);
     let name = program_name(program);
     let sub = args.first().filter(|arg| !arg.starts_with('-'));
     part.anchors.insert(name.clone());
-    part.anchors.extend(passages::anchors(program));
+    if passages::path_like(written) {
+        // A program run by its path, `tools/x.sh`, `./tools/x.sh` or a
+        // script at the root (`./build.sh`, `build.sh` an interpreter
+        // runs), is what a memory names either way (#220): the spellings,
+        // as written and with and without `./`, are one path, counted
+        // once.
+        let mut spelled = passages::anchors(written);
+        spelled.extend(passages::anchors(program));
+        spelled.extend(passages::anchors(&format!("./{program}")));
+        part.anchors.extend(spelled.iter().cloned());
+        part.paths.push(spelled);
+    } else {
+        part.anchors.extend(passages::anchors(program));
+    }
     part.words(stems, program);
     if let Some(sub) = sub {
         part.words(stems, sub);
@@ -469,6 +575,15 @@ fn path_terms(arg: &str, stems: &mut Stems, part: &mut Terms) {
         part.anchors.extend(spelled.iter().cloned());
         part.paths.push(spelled);
     }
+}
+
+/// The first of the path spellings joined with `p`: `joined` holds, for
+/// each, one joined with it that comes no later.
+fn root(joined: &[usize], mut p: usize) -> usize {
+    while joined[p] != p {
+        p = joined[p];
+    }
+    p
 }
 
 /// Whether a command's argument is a word a subcommand could be: it starts
@@ -920,11 +1035,19 @@ fn ranked(source: &impl Lookup, window: &Window) -> Result<Vec<Matched>, Error> 
         .actions
         .back()
         .map_or(&[][..], |(_, terms, _)| terms.paths.as_slice());
+    // Spellings shared by two of them spell one path: a script the line
+    // runs is its own part's program and its interpreter's argument.
     let mut path_of: HashMap<Vec<u8>, usize> = HashMap::new();
+    let mut joined: Vec<usize> = (0..fired_paths.len()).collect();
     for (p, spelled) in fired_paths.iter().enumerate() {
         for anchor in spelled {
-            path_of.entry(key(true, anchor)).or_insert(p);
+            let first = *path_of.entry(key(true, anchor)).or_insert(p);
+            let (a, b) = (root(&joined, first), root(&joined, p));
+            joined[a.max(b)] = a.min(b);
         }
+    }
+    for p in path_of.values_mut() {
+        *p = root(&joined, *p);
     }
     // Each path's best spelling some memory holds, and its parts.
     let mut paths: Vec<(Option<f64>, u64)> = vec![(None, 0); fired_paths.len()];
@@ -1068,7 +1191,10 @@ fn ranked(source: &impl Lookup, window: &Window) -> Result<Vec<Matched>, Error> 
             }
         }
     }
-    for (best, bits) in paths {
+    for (p, (best, bits)) in paths.into_iter().enumerate() {
+        if joined[p] != p {
+            continue;
+        }
         // As written, a path no memory holds is as rare as one memory's.
         let most = best.unwrap_or(ANCHOR_WEIGHT * rarity(all, 1.0) / rarest);
         possible += most;
@@ -1242,6 +1368,54 @@ mod tests {
 
     fn stems(text: &str) -> BTreeSet<String> {
         Stems::new().all(text)
+    }
+
+    #[test]
+    fn an_interpreter_runs_the_script_file_after_its_flags_only() {
+        let words = |line: &str| line.split(' ').map(str::to_owned).collect::<Vec<_>>();
+        let file = |interpreter: &str, line: &str| {
+            let interpreter = INTERPRETERS.iter().find(|i| i.name == interpreter).unwrap();
+            script_file(interpreter, &words(line))
+        };
+        assert_eq!(file("python3", "tools/build.py"), Some(0));
+        assert_eq!(file("python3", "-u -X tools/build.py --fast"), Some(2));
+        assert_eq!(file("bash", "./tools/step2.sh"), Some(0));
+        // A flag that takes no value: a shell's `-e`, perl's `-p`.
+        assert_eq!(file("sh", "-e tools/step2.sh --all"), Some(1));
+        assert_eq!(file("perl", "-p tools/fix.pl"), Some(1));
+        // Code or a module, not a file.
+        for (interpreter, given) in [
+            ("python3", "-m tools.lint"),
+            ("python3", "-c tools/x.py"),
+            ("node", "-e app.js"),
+            ("node", "-p ./package.json"),
+            ("node", "--print ./package.json"),
+            ("php", "-r tools/x.php"),
+            ("perl", "-E say.pl"),
+            ("pwsh", "-Command x.ps1"),
+            ("pwsh", "-EC x.ps1"),
+        ] {
+            assert_eq!(file(interpreter, given), None, "{interpreter} {given}");
+        }
+        // Only PowerShell reads its flags in any case.
+        assert_eq!(file("python3", "-C tools/x.py"), Some(1));
+        // A word that is no path: a flag's value or a subcommand.
+        assert_eq!(file("python3", "run tools/build.py"), None);
+        // The script's part is the script alone: `./` and the interpreter
+        // gone, its own arguments kept.
+        let terms = of(Kind::Command, "python3 -u ./tools/build.py --fast");
+        let script = terms
+            .parts
+            .iter()
+            .find(|part| !part.anchors.contains("python3"))
+            .unwrap();
+        assert!(script.anchors.contains("tools/build.py"), "{script:?}");
+        assert!(
+            terms
+                .parts
+                .iter()
+                .any(|part| part.anchors.contains("python3"))
+        );
     }
 
     #[test]
@@ -1677,6 +1851,42 @@ mod tests {
     }
 
     #[test]
+    fn a_path_a_line_names_twice_counts_once() {
+        let index = store(
+            "deploy",
+            &[(
+                "Copying here",
+                "`cp` here is the GNU one, which keeps links.",
+            )],
+        );
+        let share = |line: &str| {
+            let found = rank(&index, &[action(Kind::Command, line)]);
+            by_id(&index, &found, 40).unwrap().share
+        };
+        let once = share("cp tools/a.sh");
+        assert!(once > 0.0);
+        assert_eq!(share("cp tools/a.sh tools/a.sh"), once);
+        // A script its interpreter runs is its own part's program and the
+        // interpreter's argument: one path, so a note on the interpreter
+        // scores as if the script were named once.
+        let index = store(
+            "deploy",
+            &[(
+                "Python here",
+                "`python3` here is 3.13, which the tools need.",
+            )],
+        );
+        let share = |line: &str| {
+            let found = rank(&index, &[action(Kind::Command, line)]);
+            by_id(&index, &found, 40).unwrap().share
+        };
+        assert_eq!(
+            share("python3 tools/build.py"),
+            share("python3 tools/build.py tools/build.py")
+        );
+    }
+
+    #[test]
     fn other_actions_are_tested_on_the_mixed_score() {
         let index = store(
             "deploy",
@@ -1763,7 +1973,7 @@ mod tests {
         // Subshells, substitutions and backticks split; a redirection's `&`
         // does not.
         for (line, count) in [
-            ("(cd tools && python3 package.py)", 2),
+            ("(cd tools && make package)", 2),
             ("echo $(cat VERSION) `git rev-parse HEAD`", 3),
             ("cargo test 2>&1 | tail -5", 2),
             ("cargo build &> build.log", 1),

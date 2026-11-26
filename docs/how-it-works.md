@@ -362,8 +362,12 @@ From user-memory, matching this step (read one for the rest before applying it):
   folders and its file name, taken relative to the session's folder. On
   Windows a path matches whichever of `\` and `/` it is written with,
   with its drive as Git Bash writes it (`/c/`) too, and the session's
-  folder in any case; a program is its file name without `.exe`. Quoted text, such as a commit message,
-  is no part of the command.
+  folder in any case; a program is its file name without `.exe`. A script
+  run through its interpreter (`bash tools/release.sh`,
+  `python3 tools/build.py`) is also matched as if the script ran alone,
+  and a program run by its path matches a memory that writes it with or
+  without `./`. Quoted text, such as a commit message, is no part of the
+  command.
 - **What is pushed:** a passage that holds an anchor the step names (a
   command with its next word, a path, a code span) and matches the work of
   the last 30 steps well enough. Words alone never push one. Each line
