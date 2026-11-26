@@ -942,3 +942,71 @@ fn the_notices_cover_every_target_the_release_builds() {
         "about.toml's targets are the release's builds"
     );
 }
+
+/// The tests that take `MEASURING`, as (test binary, test name): each `fn`
+/// in tests/ with a `let` that takes it, as `let _alone = MEASURING`.
+fn measuring_tests() -> std::collections::BTreeSet<(String, String)> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let mut found = std::collections::BTreeSet::new();
+    for entry in fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|ext| ext != "rs") {
+            continue;
+        }
+        let binary = path.file_stem().unwrap().to_string_lossy().into_owned();
+        let mut current = None;
+        for line in fs::read_to_string(&path).unwrap().lines() {
+            if let Some(rest) = line.strip_prefix("fn ") {
+                current = rest.split('(').next().map(str::to_owned);
+            }
+            let code = line.trim();
+            if code.starts_with("let ") && code.contains(" = MEASURING") {
+                let name = current.clone().expect("MEASURING is taken inside a fn");
+                found.insert((binary.clone(), name));
+            }
+        }
+    }
+    found
+}
+
+/// The names `kind(...)` holds in a nextest filter, without `=`.
+fn filter_names(filter: &str, kind: &str) -> std::collections::BTreeSet<String> {
+    filter
+        .split(&format!("{kind}("))
+        .skip(1)
+        .filter_map(|rest| rest.split(')').next())
+        .map(|name| name.trim_start_matches('=').to_owned())
+        .collect()
+}
+
+/// `MEASURING` keeps the timing tests apart only within one process, as
+/// `cargo test` runs them; nextest runs each test in a process of its own.
+/// So every test that takes it is in the nextest override that runs it
+/// alone, and that override names no other test.
+#[test]
+fn every_test_that_takes_measuring_runs_alone_under_nextest() {
+    let measuring = measuring_tests();
+    assert!(
+        !measuring.is_empty(),
+        "no test takes MEASURING; drop this check and its override"
+    );
+    let config = repo_file(".config/nextest.toml");
+    let alone = config
+        .split("[[profile.")
+        .find(|table| table.contains("threads-required = \"num-test-threads\""))
+        .expect(".config/nextest.toml has no override that runs tests alone");
+    assert!(
+        alone.starts_with("default.overrides]]"),
+        "the override is in the default profile, which every profile inherits: {alone}"
+    );
+    assert!(
+        alone.contains("success-output = \"final\""),
+        "the override prints the tests' times on success too: {alone}"
+    );
+    let binaries: std::collections::BTreeSet<String> =
+        measuring.iter().map(|(binary, _)| binary.clone()).collect();
+    let names: std::collections::BTreeSet<String> =
+        measuring.iter().map(|(_, name)| name.clone()).collect();
+    assert_eq!(filter_names(alone, "binary"), binaries, "{alone}");
+    assert_eq!(filter_names(alone, "test"), names, "{alone}");
+}

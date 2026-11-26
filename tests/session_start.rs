@@ -1081,7 +1081,10 @@ fn linked_projects_load_beside_the_folders_own_for_their_conversation_only() {
 }
 
 /// Held by the tests that measure time or build large workspaces, so one
-/// never runs while the other loads the machine.
+/// never runs while the other loads the machine. It holds only within one
+/// process, as `cargo test` runs them; nextest runs each test in its own
+/// process, so .config/nextest.toml runs these alone (tests/ci.rs checks
+/// that it names every test that takes this).
 static MEASURING: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// What Claude Code's prompt hook adds before a prompt in conversation
