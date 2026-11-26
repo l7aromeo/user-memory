@@ -270,8 +270,58 @@ fn lines(stdout: std::process::ChildStdout) -> std::sync::mpsc::Receiver<String>
     rx
 }
 fn reply(lines: &std::sync::mpsc::Receiver<String>) -> Value {
-    let line = lines.recv_timeout(STUCK).expect("Connector sent no reply");
+    reply_to(lines, "a request", None)
+}
+/// The connector's next line, the reply to `what`. How long it took goes to
+/// stderr, which a failed test shows; a reply that never comes names `what`
+/// and shows what the connector wrote to stderr so far (`said`), so a stall
+/// says which call it was and what the connector logged.
+fn reply_to(lines: &std::sync::mpsc::Receiver<String>, what: &str, said: Option<&Logged>) -> Value {
+    let started = std::time::Instant::now();
+    let line = lines.recv_timeout(STUCK).unwrap_or_else(|err| {
+        let logged = said.map_or_else(|| "not kept".to_owned(), Logged::so_far);
+        panic!("Connector sent no reply to {what}: {err}; its stderr so far:\n{logged}")
+    });
+    eprintln!("reply to {what}: {:?}", started.elapsed());
     serde_json::from_str(&line).unwrap()
+}
+/// What a child writes to stderr, read on a thread as it comes, so a test
+/// that stalls can show it and one that ends can check all of it.
+struct Logged {
+    text: std::sync::Arc<std::sync::Mutex<String>>,
+    reader: std::thread::JoinHandle<()>,
+}
+impl Logged {
+    fn of(mut stderr: std::process::ChildStderr) -> Self {
+        let text = std::sync::Arc::<std::sync::Mutex<String>>::default();
+        let kept = std::sync::Arc::clone(&text);
+        let reader = std::thread::spawn(move || {
+            let mut chunk = [0; 4096];
+            while let Ok(read) = stderr.read(&mut chunk)
+                && read > 0
+            {
+                kept.lock()
+                    .unwrap()
+                    .push_str(&String::from_utf8_lossy(&chunk[..read]));
+            }
+        });
+        Self { text, reader }
+    }
+    /// What it wrote so far, unless that holds the token, which no output
+    /// may show.
+    fn so_far(&self) -> String {
+        let text = self.text.lock().unwrap().clone();
+        if text.contains(TOKEN) {
+            "(it holds the token, so it is not shown; that alone fails the test)".to_owned()
+        } else {
+            text
+        }
+    }
+    /// All it wrote, once the child has closed stderr.
+    fn all(self) -> String {
+        self.reader.join().unwrap();
+        self.text.lock().unwrap().clone()
+    }
 }
 fn initialize(id: u64) -> Value {
     json!({"jsonrpc":"2.0","id":id,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test-device","version":"1"}}})
@@ -481,11 +531,15 @@ fn connector_answers_a_tool_call_when_the_host_stops() {
     fs::write(&client_token, TOKEN).unwrap();
     let mut child = connector(&host, client.path(), &client_token);
     let mut input = child.0.stdin.take().unwrap();
-    let errors = child.0.stderr.take().unwrap();
+    let errors = Logged::of(child.0.stderr.take().unwrap());
     let output = lines(child.0.stdout.take().unwrap());
     writeln!(input, "{}", initialize(1)).unwrap();
     input.flush().unwrap();
-    assert!(reply(&output).get("result").is_some());
+    assert!(
+        reply_to(&output, "initialize", Some(&errors))
+            .get("result")
+            .is_some()
+    );
     writeln!(
         input,
         "{}",
@@ -497,7 +551,7 @@ fn connector_answers_a_tool_call_when_the_host_stops() {
     host.child.wait().unwrap();
     writeln!(input, "{}", call(2, "index", json!({}))).unwrap();
     input.flush().unwrap();
-    let value = reply(&output);
+    let value = reply_to(&output, "index after the host stopped", Some(&errors));
     assert_eq!(value["id"], 2);
     assert_eq!(value["result"]["isError"], true);
     assert!(
@@ -515,13 +569,13 @@ fn connector_answers_a_tool_call_when_the_host_stops() {
     )
     .unwrap();
     input.flush().unwrap();
-    let unavailable = reply(&output);
+    let unavailable = reply_to(&output, "tools/list while the host is down", Some(&errors));
     assert_eq!(unavailable["id"], 3);
     assert!(unavailable.get("error").is_some());
     host.restart();
     writeln!(input, "{}", call(4, "index", json!({}))).unwrap();
     input.flush().unwrap();
-    let recovered = reply(&output);
+    let recovered = reply_to(&output, "index after the host restarted", Some(&errors));
     assert_eq!(recovered["id"], 4);
     assert_ne!(recovered["result"]["isError"], true);
     host.child.kill().unwrap();
@@ -530,7 +584,7 @@ fn connector_answers_a_tool_call_when_the_host_stops() {
     host.restart();
     writeln!(input, "{}", call(5, "index", json!({}))).unwrap();
     input.flush().unwrap();
-    let unauthorized = reply(&output);
+    let unauthorized = reply_to(&output, "index with a refused token", Some(&errors));
     assert_eq!(unauthorized["id"], 5);
     assert_eq!(unauthorized["result"]["isError"], true);
     // The server answered: a refused token names its file, never itself.
@@ -570,12 +624,10 @@ fn connector(host: &Host, home: &Path, token: &Path) -> ChildGuard {
     )
 }
 
-/// Reads a finished connector's whole stderr and fails if the token is in it.
-fn assert_no_token(mut errors: impl Read) {
-    let mut said = String::new();
-    errors.read_to_string(&mut said).unwrap();
+/// Takes a finished connector's whole stderr and fails if the token is in it.
+fn assert_no_token(said: Logged) {
     assert!(
-        !said.contains(TOKEN),
+        !said.all().contains(TOKEN),
         "the token is in the connector's stderr"
     );
 }
@@ -639,11 +691,15 @@ fn connector_keeps_working_across_a_restart_between_calls() {
     fs::write(&client_token, TOKEN).unwrap();
     let mut child = connector(&host, client.path(), &client_token);
     let mut input = child.0.stdin.take().unwrap();
-    let errors = child.0.stderr.take().unwrap();
+    let errors = Logged::of(child.0.stderr.take().unwrap());
     let output = lines(child.0.stdout.take().unwrap());
     writeln!(input, "{}", initialize(1)).unwrap();
     input.flush().unwrap();
-    assert!(reply(&output).get("result").is_some());
+    assert!(
+        reply_to(&output, "initialize", Some(&errors))
+            .get("result")
+            .is_some()
+    );
     writeln!(
         input,
         "{}",
@@ -652,7 +708,7 @@ fn connector_keeps_working_across_a_restart_between_calls() {
     .unwrap();
     writeln!(input, "{}", call(2, "index", json!({}))).unwrap();
     input.flush().unwrap();
-    let before = reply(&output);
+    let before = reply_to(&output, "index before the restart", Some(&errors));
     assert_eq!(before["id"], 2);
     assert_ne!(before["result"]["isError"], true, "{before}");
     host.child.kill().unwrap();
@@ -660,7 +716,7 @@ fn connector_keeps_working_across_a_restart_between_calls() {
     host.restart();
     writeln!(input, "{}", call(3, "index", json!({}))).unwrap();
     input.flush().unwrap();
-    let after = reply(&output);
+    let after = reply_to(&output, "index after the restart", Some(&errors));
     assert_eq!(after["id"], 3);
     assert_ne!(after["result"]["isError"], true, "{after}");
     drop(input);
