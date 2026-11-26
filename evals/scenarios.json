@@ -2670,7 +2670,7 @@
   },
   {
    "name": "a_rule_left_out_and_a_note_both_come_at_their_command",
-   "summary": "With 60 more project rules, a rule session start left out and an agent's note both name `git commit`: both are pushed at it, the rule printed in full is not pushed again, and both are followed (#117's H1).",
+   "summary": "With 60 more project rules, a rule session start left out and an agent's note both name `git commit`: both are pushed at it, the rule printed in full is not pushed again, and the rule is followed. Whether the agent follows the note is reported, not graded: an agent may decline an observation (#117's H1).",
    "shell": true,
    "cwd": "project:compiler",
    "files": {
@@ -2795,6 +2795,7 @@
      }
     },
     {
+     "informational": true,
      "commands": {
       "matches": "git commit[^\\n]*\\s-s\\b|--signoff"
      }
@@ -3326,7 +3327,7 @@
   },
   {
    "name": "a_subagent_gets_the_docs_note_at_its_first_step_there",
-   "summary": "A subagent asked to edit the user guide gets the agent's fact about docs/ on its first step there, in its own context, and acts on it (#117's S2).",
+   "summary": "A subagent asked to edit the user guide gets the agent's fact about docs/ on its first step there, in its own context. Whether it acts on it is reported, not graded: an agent may decline an observation (#117's S2).",
    "shell": true,
    "subagents": true,
    "cwd": "project:compiler",
@@ -3373,6 +3374,7 @@
      }
     },
     {
+     "informational": true,
      "file": {
       "path": "compiler/docs/guide.md",
       "matches": "^Last reviewed: 2027-03\\s*\\Z"
