@@ -1776,6 +1776,147 @@ fn tool_hook(
     (out, begun.elapsed())
 }
 
+/// How much later than a blocking wait [`time::finish`] may return for a
+/// child that exits at once: well under the 20 ms a polling wait sleeps
+/// between looks, so a wait that polls is caught.
+const FINISH_SLACK: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// How long [`time::finish`] gives a child that never exits in its own
+/// test: long enough for the child to start, short enough to keep the test
+/// quick.
+const HANG_LIMIT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// `user-memory --version` in `home`, ready to wait for.
+fn version_child(home: &Path) -> std::process::Child {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_user-memory"));
+    command.arg("--version");
+    in_folder(command, home, home)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+// time::finish returns when the child exits, not at a later look, so the
+// tests that time a child through it time the child. Fastest of five
+// against a blocking wait on the same command, taken in turn.
+#[test]
+fn finish_returns_as_soon_as_the_child_exits() {
+    let _alone = MEASURING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tmp = tempdir().unwrap();
+    let (mut blocking, mut finished) = (Vec::new(), Vec::new());
+    for _ in 0..5 {
+        let begun = Instant::now();
+        let out = version_child(tmp.path()).wait_with_output().unwrap();
+        blocking.push(begun.elapsed());
+        assert!(out.status.success(), "{out:?}");
+        let begun = Instant::now();
+        let out = time::finish(version_child(tmp.path()), "--version");
+        finished.push(begun.elapsed());
+        assert!(out.status.success(), "{out:?}");
+    }
+    blocking.sort();
+    finished.sort();
+    eprintln!(
+        "--version: blocking wait fastest {:?}, time::finish fastest {:?}",
+        blocking[0], finished[0]
+    );
+    assert!(
+        finished[0] < blocking[0] + FINISH_SLACK,
+        "finish {finished:?}, blocking {blocking:?}"
+    );
+}
+
+/// Whether the process `id` is still running.
+fn running(id: u32) -> bool {
+    let id = id.to_string();
+    if cfg!(windows) {
+        let out = Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {id}"), "/NH"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).contains(&id)
+    } else {
+        Command::new("kill")
+            .args(["-0", &id])
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    }
+}
+
+/// A child that never ends on its own and ignores its stdin.
+fn endless_child() -> std::process::Child {
+    let mut command = if cfg!(windows) {
+        let mut ping = Command::new("ping");
+        ping.args(["-n", "600", "127.0.0.1"]);
+        ping
+    } else {
+        let mut sleep = Command::new("sleep");
+        sleep.arg("600");
+        sleep
+    };
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+// A child that never exits is killed at time::finish's limit, and the test
+// fails naming it.
+#[test]
+fn finish_kills_a_child_that_never_exits_and_names_it() {
+    let child = endless_child();
+    let id = child.id();
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        time::finish_within(child, "the endless child", HANG_LIMIT)
+    }))
+    .unwrap_err();
+    assert_eq!(
+        failed.downcast_ref::<String>().map(String::as_str),
+        Some("the endless child hung")
+    );
+    time::until("the endless child is killed", || !running(id));
+}
+
+// time::finish keeps a child's stdin open until it exits, as a client
+// holding the pipe does: the tool hook reads its payload to the end, so it
+// is still waiting at the limit. A start before it takes the first start's
+// cost (0.7 s on a Mac after the test binary was rebuilt), so with its
+// stdin closed the hook would exit well inside the limit.
+#[test]
+fn finish_keeps_the_childs_stdin_open_until_it_exits() {
+    let tmp = tempdir().unwrap();
+    assert!(
+        version_child(tmp.path())
+            .wait_with_output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let mut command = Command::new(env!("CARGO_BIN_EXE_user-memory"));
+    command.args(["pre-tool-use", "--client", "codex"]);
+    let child = in_folder(command, tmp.path(), tmp.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        time::finish_within(child, "the waiting hook", HANG_LIMIT)
+    }))
+    .unwrap_err();
+    assert_eq!(
+        failed.downcast_ref::<String>().map(String::as_str),
+        Some("the waiting hook hung")
+    );
+}
+
 /// A tool call's payload as `client` sends it to its `event` hook.
 fn tool_call(client: &str, event: &str, tool: &str) -> Value {
     let session = if client == "codex" { "thr_1" } else { "s-1" };
@@ -1815,6 +1956,7 @@ fn a_tool_the_hook_does_not_act_on_is_passed_over_at_once() {
             "{client} pre-tool hook, {tool}: fastest {:?}, median {:?}",
             times[0], times[2]
         );
+        eprintln!("  (spawn to exit, the exit seen by a thread blocked on it: time::finish)");
         assert!(times[0] < PASSED_OVER, "{client} {tool}: {times:?}");
     }
 }
