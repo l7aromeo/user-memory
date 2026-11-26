@@ -332,7 +332,10 @@ on Windows), each private to you:
   and which a hold showed or put off for a push after the command.
   A session's `startup` empties it in place, so another hook of the
   session may hold it open; a `/clear` or a compaction starts a new count
-  in it; a resume keeps it. It goes with the 30-day clean-up.
+  in it; a resume keeps it. A file an earlier release wrote is upgraded
+  in place by the session's next hook and keeps what it holds; one a
+  later release wrote is not read until the session's next `startup`
+  rebuilds it. It goes with the 30-day clean-up.
   Deleting it loses only the session's recent steps and what its agents
   were pushed, so a passage may reach them again. `seen-<store key>.json` holds, per
   store, the ids and fingerprints of the rules session start last listed,

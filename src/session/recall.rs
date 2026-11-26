@@ -56,8 +56,12 @@ pub(super) const SESSION_PUSH_CHARS: usize = 8_000;
 /// holds the id as session start prints it, its first characters.
 const WHOLE: i64 = -1;
 
-/// The state file's layout. Another layout is refused, never read: the
-/// file is rebuilt at the session's next `startup`.
+/// The state file's layout. An older one is upgraded in place, by running
+/// [`SCHEMA`] and setting this number, so a session that moves to a new
+/// binary keeps its state: that holds only while each layout change adds
+/// tables (`CREATE TABLE IF NOT EXISTS`); a change that alters or drops a
+/// table needs a step of its own here. A newer layout is refused, never
+/// read: the file is rebuilt at the session's next `startup`.
 const VERSION: i64 = 2;
 
 const SCHEMA: &str = "
@@ -168,6 +172,16 @@ impl State {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             tx.execute_batch(SCHEMA)?;
             tx.pragma_update(None, "user_version", VERSION)?;
+            tx.commit()?;
+        } else if version < VERSION {
+            // One IMMEDIATE transaction, so of two hooks opening it at once
+            // one upgrades it and the other finds it done.
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let now: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+            if now < VERSION {
+                tx.execute_batch(SCHEMA)?;
+                tx.pragma_update(None, "user_version", VERSION)?;
+            }
             tx.commit()?;
         } else if version != VERSION {
             bail!("{} has layout {version}, not {VERSION}", path.display());
@@ -1182,6 +1196,106 @@ mod tests {
                 .unwrap(),
             [0]
         );
+    }
+
+    /// Every layout before [`VERSION`], as the release that used it wrote
+    /// the file, with one row in each table.
+    const LAYOUTS: &[(i64, &str)] = &[(
+        1,
+        "CREATE TABLE contexts(
+             agent TEXT PRIMARY KEY, epoch INTEGER NOT NULL,
+             actions INTEGER NOT NULL, chars INTEGER NOT NULL
+         ) WITHOUT ROWID;
+         CREATE TABLE window(
+             agent TEXT NOT NULL, seq INTEGER NOT NULL, kind TEXT NOT NULL,
+             failed INTEGER NOT NULL, stems TEXT NOT NULL, anchors TEXT NOT NULL,
+             PRIMARY KEY(agent, seq)
+         ) WITHOUT ROWID;
+         CREATE TABLE spawns(
+             seq INTEGER PRIMARY KEY, key TEXT NOT NULL, stems TEXT NOT NULL,
+             anchors TEXT NOT NULL, claimed INTEGER NOT NULL DEFAULT 0
+         );
+         CREATE TABLE shown(
+             agent TEXT NOT NULL, memory TEXT NOT NULL, passage INTEGER NOT NULL,
+             at INTEGER NOT NULL, PRIMARY KEY(agent, memory, passage)
+         ) WITHOUT ROWID;
+         INSERT INTO contexts VALUES ('main', 0, 3, 0);
+         INSERT INTO window VALUES ('main', 1, 'command', 0, 'cargo', 'cargo build');
+         INSERT INTO spawns(key, stems, anchors) VALUES ('k', 'cargo', 'cargo build');
+         INSERT INTO shown VALUES ('main', 'e0000001', 0, 3);",
+    )];
+
+    /// The tables of `conn`'s file, each with its row count.
+    fn tables(conn: &Connection) -> Vec<(String, i64)> {
+        let names: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        names
+            .into_iter()
+            .map(|name| {
+                let rows = conn
+                    .query_row(&format!("SELECT count(*) FROM {name}"), [], |r| r.get(0))
+                    .unwrap();
+                (name, rows)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_older_layout_is_upgraded_in_place_keeping_its_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let fresh = file(&dir).with_extension("fresh");
+        State::start(&fresh, Source::Startup, &[], soon()).unwrap();
+        let current: Vec<String> = tables(&Connection::open(&fresh).unwrap())
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert!(LAYOUTS.iter().all(|(layout, _)| *layout < VERSION));
+        assert_eq!(
+            LAYOUTS.last().map(|(layout, _)| *layout),
+            Some(VERSION - 1),
+            "the layout before this one is listed"
+        );
+        for (layout, sql) in LAYOUTS {
+            let path = file(&dir).with_extension(format!("v{layout}"));
+            let old = Connection::open(&path).unwrap();
+            old.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get::<_, String>(0))
+                .unwrap();
+            old.execute_batch(sql).unwrap();
+            old.pragma_update(None, "user_version", layout).unwrap();
+            let rows = tables(&old);
+            drop(old);
+            let mut state = State::open(&path, soon()).unwrap();
+            let conn = Connection::open(&path).unwrap();
+            let version: i64 = conn
+                .query_row("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(version, VERSION, "layout {layout}");
+            let now = tables(&conn);
+            for row in &rows {
+                assert!(now.contains(row), "layout {layout} kept {row:?}: {now:?}");
+            }
+            let names: Vec<&String> = now.iter().map(|(name, _)| name).collect();
+            assert_eq!(names, current.iter().collect::<Vec<_>>(), "layout {layout}");
+            assert!(
+                state
+                    .handled(MAIN, Use::Push)
+                    .unwrap()
+                    .contains("e0000001", 0),
+                "layout {layout}"
+            );
+            assert_eq!(
+                state
+                    .hold(MAIN, &[offer("e0000002", 0)], &[], ROOM_CHARS, soon())
+                    .unwrap(),
+                [0],
+                "layout {layout}"
+            );
+        }
     }
 
     #[test]
