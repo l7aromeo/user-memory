@@ -14,6 +14,7 @@ use super::{
     read::is_rule,
     reads_as_wish,
 };
+use crate::memory::in_force::live;
 use rusqlite::{Connection, OptionalExtension};
 use std::time::Instant;
 
@@ -152,8 +153,9 @@ pub(crate) struct Labelled {
 }
 
 /// The label of memory `id` and `matched`'s passage of it, from the store;
-/// none when the memory is gone, is not one a hook delivers, or the
-/// passage no longer falls on its text.
+/// none when the memory is gone or no longer in force (an end or a passed
+/// date since the delivery index was built), is not one a hook delivers,
+/// or the passage no longer falls on its text.
 pub(crate) fn labelled(
     conn: &Connection,
     id: &str,
@@ -161,9 +163,12 @@ pub(crate) fn labelled(
 ) -> Result<Option<Labelled>, Error> {
     let row = conn
         .query_row(
-            "SELECT content,context,source,status,memory_type,\
-             (SELECT COUNT(*) FROM memory_origins WHERE memory_id=memories.id) \
-             FROM memories WHERE id=?1",
+            concat!(
+                "SELECT content,context,source,status,memory_type,\
+                 (SELECT COUNT(*) FROM memory_origins WHERE memory_id=memories.id) \
+                 FROM memories WHERE id=?1 AND ",
+                live!("memories")
+            ),
             [id],
             |r| {
                 Ok((

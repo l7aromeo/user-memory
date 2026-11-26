@@ -1032,10 +1032,6 @@ const READS_EVERY_STATUS: &[(&str, &str)] = &[
         "index::similarities",
         "embeds the text of candidates a search already chose",
     ),
-    (
-        "matcher::text",
-        "the text of a match a delivery query already chose",
-    ),
     ("migrate::memory_rows", "copies every memory for a backup"),
     ("migrate::titled", "a migration step"),
     ("migrate::V3_REBUILD", "a migration step"),
