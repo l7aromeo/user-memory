@@ -116,6 +116,11 @@ pub(super) struct Snapshot {
     /// before them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changes: Option<Position>,
+    /// The earliest date a memory the session sees holds until, in the
+    /// stored form: once it passes, the next prompt reads every memory
+    /// again, as no marker moves when a date ends one (#121).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<String>,
 }
 
 /// The snapshot's file name for `client`'s session `session_id` of the
@@ -649,6 +654,7 @@ mod tests {
             }]),
             stamps: stamps(&[("11111111-aaaa", stamp("t", "confirmed", "Prefer Rust"))]),
             changes: None,
+            until: None,
         };
         let old = sessions.join("codex-gone.json");
         let recent = sessions.join("codex-recent.json");
@@ -710,6 +716,7 @@ mod tests {
             projects: None,
             stamps: Stamps::new(),
             changes: None,
+            until: None,
         };
         save(&path, &second, &Landing::default()).unwrap();
         assert_eq!(load(&path), Some(second));
@@ -773,6 +780,7 @@ mod tests {
                 })
                 .collect(),
             changes: None,
+            until: None,
         };
         let mut calls = Calls::default();
         write_whole(&mut calls, &snapshot).unwrap();
@@ -787,6 +795,7 @@ mod tests {
             projects: None,
             stamps: stamps(&[("11111111-aaaa", stamp("t", "confirmed", "Prefer Rust"))]),
             changes: None,
+            until: None,
         };
         save(&path, &told, &Landing::default()).unwrap();
         // Abandoned before it replaced the file: the session keeps what it
@@ -797,6 +806,7 @@ mod tests {
             projects: None,
             stamps: Stamps::new(),
             changes: None,
+            until: None,
         };
         let err = save(&path, &unsaid, &landing).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::Interrupted);
@@ -826,6 +836,7 @@ mod tests {
             ]),
             stamps: kept.clone(),
             changes: None,
+            until: None,
         };
         let mut gained = kept.clone();
         gained.insert(
@@ -839,6 +850,7 @@ mod tests {
             ]),
             stamps: gained,
             changes: None,
+            until: None,
         };
         assert_eq!(
             notice(&old, &new, &BTreeSet::new(), &BTreeSet::new()).unwrap(),
@@ -854,6 +866,7 @@ mod tests {
             projects: new.projects.clone(),
             stamps: kept.clone(),
             changes: None,
+            until: None,
         };
         assert!(
             notice(&old, &same_memories, &BTreeSet::new(), &BTreeSet::new())
@@ -864,6 +877,7 @@ mod tests {
             projects: None,
             stamps: kept,
             changes: None,
+            until: None,
         };
         assert_eq!(
             notice(&unknown, &same_memories, &BTreeSet::new(), &BTreeSet::new()),

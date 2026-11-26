@@ -1023,6 +1023,24 @@ impl View {
             _ => self.base.id(m),
         }
     }
+
+    /// Whether the memory at position `m` of a [`View::rank`] match holds
+    /// until a date at or before `now`, both in the stored form: ended,
+    /// though no marker moved, so no push names it (#121). A base's memory
+    /// a match names is one its overlay doesn't hide, so the base's date
+    /// is its own.
+    pub(crate) fn past_date(&self, m: usize, now: &str) -> Result<bool, Error> {
+        let (file, id) = match &self.overlay {
+            Some(overlay) if m >= self.base.memories => {
+                (overlay, overlay.id(m - self.base.memories)?)
+            }
+            _ => (&self.base, self.base.id(m)?),
+        };
+        let dates = &file.header.dates;
+        Ok(dates
+            .binary_search_by(|(dated, _)| dated.as_str().cmp(id))
+            .is_ok_and(|at| dates[at].1.as_str() <= now))
+    }
 }
 
 /// The passages `window` matches, one per memory (its best), strongest
@@ -1604,6 +1622,7 @@ mod tests {
             made_for: base.header.position.clone(),
             projects: base.header.projects.clone(),
             skip: skip.iter().map(|id| (*id).to_owned()).collect(),
+            dates: Vec::new(),
         };
         let overlay =
             DeliveryIndex::read(DeliveryIndex::write_with(&header, &sources(changed)).unwrap())

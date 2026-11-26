@@ -357,10 +357,17 @@ impl Session {
         if let Some(view) = delivery_files::open(self.remote.as_deref(), &db, &self.projects) {
             let found = view.rank(&window)?;
             // What the context had in this stretch takes no read: a passage
-            // a hold deferred is among the next ones.
+            // a hold deferred is among the next ones. A date passed since
+            // the index was kept ends its memory with no write: dropped
+            // here, from the file alone.
             let handled = state.handled(agent, Use::Push)?;
+            let now = crate::memory::until::stored_now(jiff::Timestamp::now());
             let mut passing = Vec::new();
-            for matched in found.iter().filter(|m| push::passes(m, failed)) {
+            for matched in found
+                .iter()
+                .filter(|m| push::passes(m, failed))
+                .filter(|m| !view.past_date(m.memory, &now).unwrap_or(true))
+            {
                 if passing.len() == push::READ_PER_EVENT {
                     break;
                 }

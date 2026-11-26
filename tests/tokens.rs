@@ -860,7 +860,7 @@ fn delivery_bases(home: &std::path::Path) -> Vec<std::path::PathBuf> {
 #[test]
 fn the_delivery_route_refuses_a_request_without_a_valid_token_as_export_does() {
     let host = Host::start();
-    let body = r#"{"projects":[],"format":"UMDELIV2","stems":""}"#;
+    let body = r#"{"projects":[],"format":"UMDELIV3","stems":""}"#;
     for token in ["", "not-a-token-of-this-server-at-all-0123456789"] {
         let delivery = host.send("POST", "/delivery", token, body);
         let export = host.send("POST", "/export", token, "{}");
