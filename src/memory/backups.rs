@@ -592,7 +592,7 @@ pub fn now(db: &Path) -> Result<Made> {
 /// its file there before its tables, holds none.
 fn has_memories(db: &Path) -> Result<bool> {
     let store = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    store.busy_timeout(super::schema::BUSY)?;
+    store.busy_timeout(super::budget::wait(super::schema::BUSY))?;
     let created: bool = store.query_row(
         "SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type='table' AND name='memories')",
         [],
@@ -1000,6 +1000,27 @@ mod tests {
         let db = dir.join("memories.sqlite3");
         connect(&db).unwrap();
         db
+    }
+
+    // A backup made inside a tool call, at its write's commit, gives up on a
+    // store another program locks when the call's budget runs out.
+    #[test]
+    fn a_backup_in_a_call_waits_for_a_locked_store_no_longer_than_its_budget() {
+        let dir = tempdir().unwrap();
+        let db = store(dir.path());
+        add(&db);
+        let holder = Connection::open(&db).unwrap();
+        holder
+            .pragma_update(None, "journal_mode", "DELETE")
+            .unwrap();
+        holder.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        let started = Instant::now();
+        super::super::budget::until(Some(Instant::now() + Duration::from_millis(300)), || {
+            assert!(has_memories(&db).is_err());
+        });
+        let took = started.elapsed();
+        holder.execute_batch("ROLLBACK").unwrap();
+        assert!(took < Duration::from_secs(5), "{took:?}");
     }
 
     /// Records one memory through a write turn, as every writer does.

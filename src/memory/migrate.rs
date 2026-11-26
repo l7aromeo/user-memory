@@ -880,7 +880,7 @@ pub(crate) fn create_private(path: &Path) -> std::io::Result<fs::File> {
 /// and holds what its write-ahead log holds too.
 pub(crate) fn copy_into(db: &Path, backup: &Path) -> Result<i64> {
     let source = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    source.busy_timeout(super::schema::BUSY)?;
+    source.busy_timeout(super::budget::wait(super::schema::BUSY))?;
     let mut copy = Connection::open(backup)?;
     Backup::new(&source, &mut copy)?.run_to_completion(COPY_PAGES, Duration::ZERO, None)?;
     // The copy takes the store's write-ahead log mode. The rollback

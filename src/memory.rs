@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub mod backups;
+pub(crate) mod budget;
 mod calibration;
 mod changes;
 mod delivery;

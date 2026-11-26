@@ -838,6 +838,50 @@ fn a_forget_waits_for_a_hook_holding_the_lock_and_leaves_none_of_its_words() {
     );
 }
 
+// A tool call's waits share its budget (#227): the delivery lock's own
+// 10 s wait gives up when the call's budget runs out.
+#[test]
+fn a_forget_call_behind_a_held_delivery_lock_is_refused_within_its_budget() {
+    let (home, id) = started();
+    // A change for the hook to take in, so it takes the lock.
+    home.record("test", "numbat-test");
+    let hold = home.path().join("hold");
+    fs::write(&hold, "").unwrap();
+    let hook = home.spawn(
+        "PostToolUse",
+        "s1",
+        &[("USER_MEMORY_HOLD_REFRESH", hold.to_str().unwrap())],
+    );
+    time::until("the hook holds the lock", || {
+        home.path().join("hold.reached").exists()
+    });
+    let budget = std::time::Duration::from_millis(2000);
+    let started = std::time::Instant::now();
+    let result = serve::result(
+        home.command(&["serve"], &[("USER_MEMORY_TOOL_CALL_BUDGET_MS", "2000")]),
+        "forget",
+        serde_json::json!({"memory_id": id, "user_confirmed": true}),
+    );
+    let took = started.elapsed();
+    fs::remove_file(&hold).unwrap();
+    time::finish(hook, "the hook");
+    let said = result["content"][0]["text"].as_str().unwrap();
+    assert!(
+        said.contains("has held this machine's delivery index for"),
+        "{result}"
+    );
+    assert!(
+        said.contains(" s, the rest of this tool call's 2 s. Wait a moment"),
+        "{result}"
+    );
+    // The server's start and the call's own work, on a loaded machine; far
+    // under the lock's own 10 s.
+    assert!(
+        took < budget + std::time::Duration::from_millis(3500),
+        "answered after {took:?}"
+    );
+}
+
 #[test]
 fn a_forget_refuses_while_a_hook_holds_the_lock_and_changes_nothing() {
     let (home, id) = started();
@@ -885,6 +929,108 @@ fn a_forget_refuses_while_a_hook_holds_the_lock_and_changes_nothing() {
         "{still}"
     );
     assert!(home.voided().is_empty(), "nothing voided");
+}
+
+// Two calls in one server: a forget holds the store's write turn in this
+// process past its commit (the test's hold), and a record behind it waits
+// for that turn only as long as its budget (#227), not its own 30 s.
+#[test]
+fn a_call_behind_another_calls_write_turn_in_the_same_server_gives_up_at_its_budget() {
+    use std::io::{BufRead, BufReader};
+    let (home, id) = started();
+    let hold = home.path().join("hold");
+    fs::write(&hold, "").unwrap();
+    let mut serve = home
+        .command(
+            &["serve"],
+            &[
+                ("USER_MEMORY_HOLD_REMOVAL", hold.to_str().unwrap()),
+                ("USER_MEMORY_TOOL_CALL_BUDGET_MS", "2000"),
+            ],
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut input = serve.stdin.take().unwrap();
+    let (tx, replies) = std::sync::mpsc::channel();
+    let output = BufReader::new(serve.stdout.take().unwrap());
+    std::thread::spawn(move || {
+        for line in output.lines() {
+            let Ok(line) = line else { break };
+            if tx
+                .send(serde_json::from_str::<Value>(&line).unwrap())
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    let send = |input: &mut std::process::ChildStdin, message: Value| {
+        writeln!(input, "{message}").unwrap();
+        input.flush().unwrap();
+    };
+    let call = |id: u64, name: &str, arguments: Value| json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":arguments}});
+    send(
+        &mut input,
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}),
+    );
+    send(
+        &mut input,
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+    );
+    send(
+        &mut input,
+        call(
+            2,
+            "forget",
+            json!({"memory_id": id, "user_confirmed": true}),
+        ),
+    );
+    time::until("the forget committed and holds its turn", || {
+        home.path().join("hold.reached").exists()
+    });
+    let started = std::time::Instant::now();
+    send(
+        &mut input,
+        call(
+            3,
+            "record",
+            json!({
+                "type": "fact", "category": "build", "title": "The walnut gate",
+                "content": "The walnut gate opens with the ember key.", "scope": "global",
+                "user_confirmed": true,
+            }),
+        ),
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let reply = loop {
+        let message = replies
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            .expect("the record was not answered");
+        if message["id"] == 3 {
+            break message;
+        }
+    };
+    let took = started.elapsed();
+    fs::remove_file(&hold).unwrap();
+    drop(input);
+    time::finish(serve, "the server");
+    let said = reply["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        said.contains("another write in this process kept its write turn"),
+        "{reply}"
+    );
+    assert!(
+        said.contains(", the rest of this tool call's 2 s"),
+        "{reply}"
+    );
+    // The call's own work on a loaded machine, far under the turn's 30 s.
+    assert!(
+        took < Duration::from_millis(2000 + 3500),
+        "answered after {took:?}"
+    );
 }
 
 #[test]

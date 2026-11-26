@@ -152,7 +152,7 @@ pub fn connect(db: &Path) -> Result<Connection> {
     }
     drop(creating);
     let conn = Connection::open(db)?;
-    conn.busy_timeout(BUSY)?;
+    conn.busy_timeout(super::budget::wait(BUSY))?;
     // Per connection and ignored inside a transaction, so set it first.
     conn.pragma_update(None, "foreign_keys", true)?;
     // Deleted and replaced content is overwritten with zeros rather than
@@ -213,7 +213,7 @@ pub fn connect(db: &Path) -> Result<Connection> {
     conn.busy_timeout(Duration::ZERO)?;
     let switched =
         conn.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get::<_, String>(0));
-    conn.busy_timeout(BUSY)?;
+    conn.busy_timeout(super::budget::wait(BUSY))?;
     match switched {
         Ok(_) => {}
         Err(err) if err.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy) => {}
@@ -273,6 +273,7 @@ fn wait_for_migration(conn: &Connection, mut found: i64, current: i64) -> Result
     let Some(deadline) = deadline else {
         return Ok(found);
     };
+    let deadline = deadline.min(std::time::Instant::now() + super::budget::wait(MIGRATION_WAIT));
     while found < current
         && std::time::Instant::now() < deadline
         && inspect(conn, found, super::migrate::BASELINE, current)? == Found::Older
@@ -382,8 +383,9 @@ impl Gate {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if holder.is_some() {
             bail!(
-                "database is locked: another write in this process kept its write turn on the store for {} s",
-                wait.as_secs()
+                "database is locked: another write in this process kept its write turn on the store for {} s{}",
+                wait.as_secs(),
+                super::budget::ran_out()
             );
         }
         *holder = Some(me);
@@ -475,8 +477,9 @@ impl FileTurn {
             Ok(Ok(file)) => Ok(Self(file)),
             Ok(Err(err)) => Err(err).with_context(|| format!("Cannot lock {}", path.display())),
             Err(_) => bail!(
-                "database is locked: another process kept its write turn on the store for {} s",
-                wait.as_secs()
+                "database is locked: another process kept its write turn on the store for {} s{}",
+                wait.as_secs(),
+                super::budget::ran_out()
             ),
         }
     }
@@ -497,9 +500,12 @@ pub struct StoreTurn {
 
 /// Takes the write turn on the store at `db`, waiting as a write does.
 pub fn store_turn(db: &Path) -> Result<StoreTurn> {
-    let turn = WRITERS.enter(turn_wait())?;
+    let turn = WRITERS.enter(super::budget::wait(turn_wait()))?;
     let file = match turn {
-        Some(_) => Some(FileTurn::take(&lock_path(db), turn_wait())?),
+        Some(_) => Some(FileTurn::take(
+            &lock_path(db),
+            super::budget::wait(turn_wait()),
+        )?),
         None => None,
     };
     Ok(StoreTurn {
@@ -553,19 +559,29 @@ pub(super) fn write(conn: &Connection) -> Result<Write<'_>> {
     write_at(&WRITERS, conn, turn_wait())
 }
 
-/// [`write`] at `gate`, waiting at most `wait` for each turn.
+/// [`write`] at `gate`, waiting at most `wait` for each turn and SQLite's
+/// lock, or what is left of the call's budget ([`super::budget`]).
 fn write_at<'c>(gate: &'static Gate, conn: &'c Connection, wait: Duration) -> Result<Write<'c>> {
     #[cfg(debug_assertions)]
     assert!(
         !super::delivery_files::holds_lock(),
         "a store write turn is never taken under a delivery lock"
     );
-    let turn = gate.enter(wait)?;
+    let turn = gate.enter(super::budget::wait(wait))?;
     // A write inside another on this thread already has the file's turn.
     let file = match (&turn, conn.path().filter(|path| !path.is_empty())) {
-        (Some(_), Some(db)) => Some(FileTurn::take(&lock_path(Path::new(db)), wait)?),
+        (Some(_), Some(db)) => Some(FileTurn::take(
+            &lock_path(Path::new(db)),
+            super::budget::wait(wait),
+        )?),
         _ => None,
     };
+    // Inside a call, what is left of its budget: the connection's timeout
+    // was set when it opened, and the budget has run on since. Outside one
+    // the connection keeps its own.
+    if super::budget::deadline().is_some() {
+        conn.busy_timeout(super::budget::wait(BUSY))?;
+    }
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     let named = super::history::begin(&tx)?;
     if file.is_some()
@@ -628,7 +644,7 @@ fn clear_log(conn: &Connection, db: &str) {
             r.get::<_, i64>(0)
         })
     });
-    let _ = conn.busy_timeout(BUSY);
+    let _ = conn.busy_timeout(super::budget::wait(BUSY));
     match cleared {
         Ok(0) => {}
         Ok(_) => eprintln!(
@@ -1126,6 +1142,29 @@ mod tests {
         FAIL_CHECKPOINT.set(false);
         assert!(committed.is_ok(), "{committed:?}");
         assert_eq!(super::super::backups::list(&db).unwrap().len(), 1);
+    }
+
+    // Inside a tool call a connection waits for SQLite's lock no longer than
+    // what is left of the call's budget: set when it opens, after the open
+    // tries the log mode, and after a removal clears the log.
+    #[test]
+    fn a_calls_connection_waits_for_sqlite_no_longer_than_its_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("m.sqlite3");
+        let left = Duration::from_secs(2);
+        let busy = |conn: &Connection| -> u128 {
+            let ms: i64 = conn
+                .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+                .unwrap();
+            u128::try_from(ms).unwrap()
+        };
+        super::super::budget::until(Some(std::time::Instant::now() + left), || {
+            let conn = connect(&db).unwrap();
+            assert!(busy(&conn) <= left.as_millis(), "{}", busy(&conn));
+            conn.busy_timeout(BUSY).unwrap();
+            clear_log(&conn, &db.to_string_lossy());
+            assert!(busy(&conn) <= left.as_millis(), "{}", busy(&conn));
+        });
     }
 
     // One bound serves the wait for a write turn and SQLite's busy timeout.

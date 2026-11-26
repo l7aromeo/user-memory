@@ -202,7 +202,7 @@ impl Config {
     /// Embeds `inputs` in order. Blocks the calling thread.
     pub(in crate::memory) fn embed(&self, inputs: &[String]) -> Result<Vec<Vec<f32>>> {
         // The first request may wait for the model to load.
-        self.embed_within(inputs, Duration::from_secs(60))
+        self.embed_within(inputs, crate::memory::budget::wait(Duration::from_secs(60)))
     }
 
     /// Like `embed`, but each request gives up after `timeout`.

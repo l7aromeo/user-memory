@@ -570,6 +570,38 @@ fn a_handed_over_serve_waits_for_a_running_migration_then_answers() {
     }
 }
 
+/// A migration that never comes is waited for only as long as the call's
+/// budget (#227), not the hand-over's own 50 s.
+#[test]
+fn a_handed_over_serve_waits_for_a_migration_no_longer_than_the_calls_budget() {
+    let schema = newer_schema().to_string();
+    for way in ways() {
+        let place = Place::new();
+        let mut session = place.serve(
+            way,
+            &[
+                ("FAKE_USER_MEMORY_SCHEMA", &schema),
+                ("USER_MEMORY_TOOL_CALL_BUDGET_MS", "2000"),
+            ],
+        );
+        let first = session.call("first", "index");
+        assert_eq!(first["result"]["isError"], false, "{way:?}: {first}");
+        place.upgrade();
+        let started = Instant::now();
+        session.write(&[session.call_message("waits", "index")]);
+        let reply = session.reply("waits");
+        let took = started.elapsed();
+        assert_eq!(reply["result"]["isError"], true, "{way:?}: {reply}");
+        // The hand-over and the call's own work on a loaded machine, far
+        // under the 50 s wait.
+        assert!(
+            took < Duration::from_millis(2000 + 5000),
+            "{way:?}: answered after {took:?}"
+        );
+        session.close();
+    }
+}
+
 /// A replacement that is older, or doesn't run, leaves the session on the
 /// code serving it, which says so once in the next tool reply.
 #[test]

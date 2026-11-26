@@ -241,7 +241,7 @@ pub(super) fn embed_draft(draft: &Draft) -> Option<DraftVector> {
     embed_draft_with(
         embed::Config::from_env().as_ref(),
         draft,
-        RECORD_EMBED_TIMEOUT,
+        super::budget::wait(RECORD_EMBED_TIMEOUT),
     )
 }
 
