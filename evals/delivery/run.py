@@ -107,7 +107,11 @@ garnet igloo jigsaw kayak lilac magpie nickel olive parsnip quokka radish salmon
 urchin vellum walrus yeoman zircon apricot badger candle dolphin emerald flannel gopher
 hornet inkwell jackal kelp lemur mosaic nimbus otter pelican quince rosin sparrow tulip
 upland vulture wasabi yucca zest artichoke biscuit cricket drizzle eggplant fiddle
-gondola hyacinth icicle jubilee kumquat lagoon mammoth narwhal""".split()
+gondola hyacinth icicle jubilee kumquat lagoon mammoth narwhal oriole papaya quarry
+riverbed sequoia tapir upbeat vanilla wigwam xenon yearling zucchini alpaca bluebell
+cormorant dewdrop eucalyptus flamingo gecko hibiscus ibex jackfruit kingfisher lobster
+marigold nightjar ocelot puffin quahog raccoon sandpiper toucan umbrella verbena
+warbler yam zebu aster bobcat chickpea damselfly elderberry foxglove grackle""".split()
 
 
 def sandbox(home):
@@ -428,10 +432,11 @@ def hook_env(home):
 
 
 def upkeep(binary, folder, drawn):
-    """#175's and #117's costs through the real binary on the store in
-    `folder`, from process start: a tool hook that finds a change, pushing
-    nothing and pushing the memory its command names; the prompt hook
-    pushing the memory its words name; what a forget adds when three
+    """#175's, #117's and #118's costs through the real binary on the store
+    in `folder`, from process start: a tool hook that finds a change, pushing
+    nothing and pushing the memory its command names; the pre-tool hook
+    holding back the command a memory names; the prompt hook pushing the
+    memory its words name; what a forget adds when three
     scopes' files hold the memory; and the prompt hook building a missing
     base. Returns their medians by name, whether the prompt hook built its
     base, and session start's medians building its base and finding it."""
@@ -453,7 +458,7 @@ def upkeep(binary, folder, drawn):
 
     def hook_said(event, session, cwd, **extra):
         name = {"SessionStart": "session-start", "UserPromptSubmit": "prompt-submit",
-                "PostToolUse": "post-tool-use"}[event]
+                "PreToolUse": "pre-tool-use", "PostToolUse": "post-tool-use"}[event]
         return said(name, "--client", "claude",
                     payload={"session_id": session, "cwd": str(cwd), "hook_event_name": event, **extra})
 
@@ -505,9 +510,10 @@ def upkeep(binary, folder, drawn):
             raise SystemExit(f"{what} did not push the memory it names: {text!r}")
 
     # After each change, a call that matches nothing, a call naming the new
-    # memory's command, and in another session a prompt naming it.
-    tool, push, prompted = [], [], []
-    for n in range(3 * HOOK_RUNS):
+    # memory's command, in another session a prompt naming it, and a call
+    # about to run the new memory's command, which holds it back.
+    tool, push, prompted, holding = [], [], [], []
+    for n in range(4 * HOOK_RUNS):
         command, short = record(n)
         if n < HOOK_RUNS:
             took = hook("PostToolUse", "s0", folders[0], tool_name="Bash",
@@ -520,12 +526,20 @@ def upkeep(binary, folder, drawn):
             pushed(out, short, "a tool hook")
             if n > HOOK_RUNS:
                 push.append(took)
-        else:
+        elif n < 3 * HOOK_RUNS:
             took, out = hook_said("UserPromptSubmit", "s0", folders[0],
                                   prompt=f"Run `{command}` next.")
             pushed(out, short, "the prompt hook")
             if n > 2 * HOOK_RUNS:
                 prompted.append(took)
+        else:
+            took, out = hook_said("PreToolUse", "s0", folders[0], tool_name="Bash",
+                                  tool_input={"command": command})
+            if '"permissionDecision":"deny"' not in out:
+                raise SystemExit(f"the pre-tool hook did not hold back the command a memory names: {out!r}")
+            pushed(out, short, "a hold")
+            if n > 3 * HOOK_RUNS:
+                holding.append(took)
 
     held = [m["id"] for m in drawn["memories"] if m["scope"] == "global"]
     added = []
@@ -542,7 +556,9 @@ def upkeep(binary, folder, drawn):
         path.unlink()
     prompt = hook("UserPromptSubmit", "s0", folders[0], prompt="go on")
     built = len(list(delivery.glob("*.index"))) == 1
+    holding.sort()
     return {"tool": statistics.median(tool), "push": statistics.median(push),
+            "hold": statistics.median(holding), "hold_p95": holding[int(len(holding) * 0.95) - 1],
             "prompted": statistics.median(prompted), "added": statistics.median(added),
             "built_at_prompt": built, "prompt": prompt,
             "start_built": statistics.median(starts["built"]),
@@ -731,6 +747,9 @@ def cost(found, seed, size, keep):
               f"start included ({HOOK_RUNS - 1} runs, limit {tool_limit} ms)")
         print(f"  tool hook   median {kept['push']:6.1f} ms after a change, pushing the memory "
               f"its command names ({HOOK_RUNS - 1} runs, limit {tool_limit} ms)")
+        print(f"  pre-tool hook median {kept['hold']:6.1f} ms, 95th percentile {kept['hold_p95']:6.1f} ms "
+              f"after a change, holding back the command a memory names ({HOOK_RUNS - 1} runs, "
+              f"limit {tool_limit} ms)")
         print(f"  prompt hook median {kept['prompted']:6.1f} ms after a change, pushing the memory "
               f"its words name ({HOOK_RUNS - 1} runs, limit {prompt_limit} ms)")
         print(f"  forget      median {kept['added']:6.1f} ms added by three scopes' files "
@@ -796,6 +815,7 @@ def main():
         # source (`rust_ms`), so the two cannot drift.
         for key, what, limit in (("tool", "the tool hook pushing nothing", tool_limit),
                                  ("push", "the tool hook pushing a memory", tool_limit),
+                                 ("hold", "the pre-tool hook holding a command back", tool_limit),
                                  ("prompted", "the prompt hook pushing a memory", prompt_limit)):
             if args.check_cost and kept[key] > limit:
                 print(f"{what} is over its {limit} ms limit")
