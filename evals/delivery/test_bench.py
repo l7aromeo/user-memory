@@ -383,7 +383,8 @@ class Generator(unittest.TestCase):
         drawn = world.generate(5, 1_000)
         actions = [a for t in drawn["tasks"] for a in t["actions"] if a["kind"] in ("command", "file")
                    and a.get("about")]
-        spelled = [a for a in actions if a.get("spelled")]
+        together = ("chained", "read with others")
+        spelled = [a for a in actions if a.get("spelled") and a["spelled"] not in together]
         self.assertTrue(0.1 < len(spelled) / len(actions) < 0.3, (len(spelled), len(actions)))
         for a in spelled:
             if a["spelled"] in ("alias", "wrapper"):
@@ -399,6 +400,30 @@ class Generator(unittest.TestCase):
                 self.assertTrue(a["text"].startswith(("./", world.ROOT_FOLDER)), a)
         self.assertEqual({a["spelled"] for a in spelled} & {"alias", "wrapper", "relative"},
                          {"alias", "wrapper", "relative"})
+
+    def test_a_stated_share_of_commands_and_reads_run_in_a_line_with_others(self):
+        # Pooled over seeds: one world runs too few commands for a share.
+        actions = [a for seed in range(1, 9) for t in world.generate(seed, 50)["tasks"]
+                   for a in t["actions"] if a.get("about")]
+        commands = [a for a in actions if a["about"][0] == "command"]
+        chained = [a for a in commands if a.get("spelled") == "chained"]
+        # Of the first runs spelled as written, CHAINED_SHARE; a repeat
+        # runs its first line again.
+        written = [a for a in commands if not a.get("repeat") and a.get("spelled") in (None, "chained")]
+        self.assertAlmostEqual(len(chained) / len(written), world.CHAINED_SHARE, delta=0.1)
+        for a in chained:
+            self.assertEqual(a["kind"], "command")
+            self.assertIn(" ".join(p for p in a["about"][1:] if p), a["text"], a)
+            self.assertRegex(a["text"], r"&&|;|\|", a)
+        reads = [a for a in actions if a.get("spelled") == "read with others"]
+        self.assertTrue(reads)
+        for a in reads:
+            self.assertEqual(a["kind"], "command")
+            program, *paths = a["text"].split()
+            own = [path for path in paths if path not in world.READ_BESIDE]
+            self.assertEqual(program, "cat", a)
+            self.assertTrue(len(paths) >= 2 and len(own) == 1, a)
+            self.assertIn(f"/{a['about'][1]}.", own[0], a)
 
     def test_a_share_of_tasks_run_a_command_naming_another_subcommand(self):
         drawn = world.generate(5, 1_000)
