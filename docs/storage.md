@@ -350,9 +350,11 @@ on Windows), each private to you:
   the session's scope has none it can use, as after a `link`;
   `<store key>-<scope key>.overlay`, the memories changed since, which the
   tool hooks keep current; `<store key>.lock`, which every writer of the store's files
-  holds; and at times `<store key>.void`, naming files to take as absent. A
-  forget, an update or an import that removes or replaces a memory's text
-  builds the files that held it again, under the lock, before it replies.
+  holds; and, from the first forget, update or import that removes a
+  memory's text, `<store key>.void`, naming files to take as absent, and
+  empty when none is. A forget, an update or an import that removes or
+  replaces a memory's text builds the files that held it again, under the
+  lock, before it replies.
   `migrate` and `project move` delete the store's files, and the next
   prompt builds them again. A file not written for a day goes at that
   store's next session start.
@@ -406,6 +408,16 @@ changes nothing and says so, as here for a forget:
 ```output
 Nothing was forgotten: the mark that keeps this machine's delivery index from using the removed words could not be written to …: …. Make that folder writable, or free space on its disk, then forget again.
 ```
+
+A mark that is there but can't be read is never taken as naming nothing.
+On Windows another program may hold it so that opens are refused for a
+moment; a reader tries again briefly, then takes every file of the store
+as named, so recall delivers nothing for that step rather than use words
+a removal took out. A writer that can't read the mark changes nothing: a
+forget, an update or an import then fails before its change, saying it
+cannot read the mark. Once the files it names are gone, the mark is left
+empty rather than deleted: on Windows a file being deleted refuses opens
+until the deleter closes it, and readers open the mark at every step.
 
 `user-memory doctor` deletes such files, and any a writer killed while
 writing left, and says how many:

@@ -188,6 +188,21 @@ impl Home {
         found
     }
 
+    /// The names the void mark lists: none without a mark, or with an
+    /// empty one, which is what a mark that names nothing is kept as.
+    fn voided(&self) -> Vec<String> {
+        self.files(".void")
+            .iter()
+            .flat_map(|mark| {
+                fs::read_to_string(mark)
+                    .unwrap()
+                    .lines()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
     fn base(&self) -> PathBuf {
         let bases = self.files(".index");
         assert_eq!(bases.len(), 1, "{bases:?}");
@@ -627,7 +642,10 @@ fn removed(home: &Home, gone: &str, kept: &str, what: &str) {
     assert_eq!(holding, Vec::<PathBuf>::new(), "{what}");
     assert!(holds(&home.base(), &hex(kept)), "{what}: built again");
     assert!(home.overlay().exists(), "{what}: with its overlay");
-    assert!(home.files(".void").is_empty(), "{what}: no void mark left");
+    assert!(
+        home.voided().is_empty(),
+        "{what}: the void mark names nothing"
+    );
 }
 
 #[test]
@@ -866,7 +884,7 @@ fn a_forget_refuses_while_a_hook_holds_the_lock_and_changes_nothing() {
         Some(1),
         "{still}"
     );
-    assert!(home.files(".void").is_empty(), "nothing voided");
+    assert!(home.voided().is_empty(), "nothing voided");
 }
 
 #[test]
@@ -904,10 +922,7 @@ fn a_forget_whose_commit_fails_leaves_the_files_in_use() {
         .output()
         .unwrap();
     assert!(!out.status.success(), "{out:?}");
-    assert!(
-        home.files(".void").is_empty(),
-        "the void mark is taken back"
-    );
+    assert!(home.voided().is_empty(), "the void mark is taken back");
     assert_eq!(modified(&base), written, "the base is kept");
     let still = home.cli(&["read", &id]);
     assert_eq!(
@@ -1004,7 +1019,7 @@ fn left_until_the_next_writer(home: &Home, reply: &Value, base: &Path, gone: &st
     assert!(fs::read_to_string(&void[0]).unwrap().contains(name));
     home.hook("PostToolUse", "s1", &[]);
     assert_eq!(delivered(home, gone), Vec::<PathBuf>::new());
-    assert!(home.files(".void").is_empty(), "the mark goes with it");
+    assert!(home.voided().is_empty(), "the mark names nothing then");
 }
 
 #[test]
@@ -1100,7 +1115,7 @@ fn doctor_deletes_the_files_a_removal_left_and_names_one_still_held() {
         "{done}"
     );
     assert_eq!(holding(&home, "quokka-deploy"), Vec::<PathBuf>::new());
-    assert!(home.files(".void").is_empty());
+    assert!(home.voided().is_empty());
     partial(4243);
     let one = doctor(&home, &[]);
     assert!(
@@ -1223,7 +1238,7 @@ fn a_mark_that_cannot_be_rewritten_after_the_commit_still_names_the_files_left()
         !base.exists() && !overlay.exists(),
         "the next writer deletes them"
     );
-    assert!(home.files(".void").is_empty(), "and the mark");
+    assert!(home.voided().is_empty(), "and the mark names nothing");
 }
 
 /// How many times [`a_read_while_hooks_replace_the_files_finds_them_or_nothing`]

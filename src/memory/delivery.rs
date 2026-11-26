@@ -14,7 +14,7 @@ use crate::memory::index::{
     stems::{Field, stamp, token},
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params_from_iter};
-use std::{collections::HashMap, fmt, fs, path::Path};
+use std::{collections::HashMap, fmt, path::Path};
 
 /// The first byte of a term's key: an anchor's sorts before a stem's.
 pub(in crate::memory) fn prefix(anchor: bool) -> u8 {
@@ -487,11 +487,6 @@ impl DeliveryIndex {
             return Err(Error::Format);
         }
         Ok(index)
-    }
-
-    /// Reads the index from its file at `path`.
-    pub(crate) fn load(path: &Path) -> Result<Self, Error> {
-        Self::read(fs::read(path)?)
     }
 
     /// How many memories it holds.

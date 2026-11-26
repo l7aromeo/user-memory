@@ -525,7 +525,7 @@ mod tests {
         let file = dir.path().join("delivery.index");
         let built = delivery::build(&db, &[ours.to_owned()], |_, change| change.to_string());
         std::fs::write(&file, built.unwrap()).unwrap();
-        let index = DeliveryIndex::load(&file).unwrap();
+        let index = DeliveryIndex::read(std::fs::read(&file).unwrap()).unwrap();
         assert_eq!(index.len(), 1, "only this project's stated memory");
         let index = delivery::View::new(index, None).unwrap();
         let mut window = Window::default();
