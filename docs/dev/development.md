@@ -37,7 +37,10 @@ test` runs the tests alone and passes arguments on, as `just test --test
 schema`. `cargo test --locked` still runs the same tests. A local run stops
 at the first failing test; the workflows set `NEXTEST_PROFILE=ci`, whose
 profile in `.config/nextest.toml` runs every test, reports every failure, and
-ends any test still running after 5 minutes as a failure. Every workflow job
+ends any test still running after 5 minutes as a failure. The tests that
+measure time run alone in every profile, with no other test beside them,
+and print their times even when they pass; the override in the same file
+lists them. Every workflow job
 also has a `timeout-minutes`, about twice its longest green run and at
 least 5 minutes; the workflow files give the numbers. The crate has no
 doctests: it is a binary without a library, and rustdoc tests only
