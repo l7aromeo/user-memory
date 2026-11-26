@@ -1573,6 +1573,29 @@ class ClientToolsAndHooks(unittest.TestCase):
         self.assertEqual(self.informational_grades(
             "a_conditional_project_rule_survives_three_compactions", "codex", sandbox), [True, False])
 
+    def test_h1_and_s2_pass_on_the_note_delivered_and_report_whether_it_was_followed(self):
+        # An agent's note is an observation the agent may decline, so a trial
+        # that delivers it passes, with the follow-through reported beside it.
+        trial = Path(tempfile.mkdtemp()).resolve()
+        (trial / "compiler/docs").mkdir(parents=True)
+        (trial / "compiler/docs/guide.md").write_text("# Guide\n")
+        ids = {seed: f"e000000{n}-0000" for n, seed in enumerate(["lint", "signoff", "full", "reviewed"], 1)}
+        sandbox = types.SimpleNamespace(dir=trial, ids=ids, memories=lambda: [])
+        for name, declined, followed in [
+            ("a_rule_left_out_and_a_note_both_come_at_their_command", -1,
+             {"commands": {"matches": "git commit[^\\n]*\\s-s\\b|--signoff"}}),
+            ("a_subagent_gets_the_docs_note_at_its_first_step_there", 1,
+             {"file": {"path": "compiler/docs/guide.md", "matches": "^Last reviewed: 2027-03\\s*\\Z"}}),
+        ]:
+            scenario = self.SCENARIOS[name]
+            checks = [c for c in scenario["checks"] if c.get("client", "claude") == "claude"]
+            grades = run.planted_grades(
+                scenario, scenario["planted"][declined],
+                [run.resolve({k: v for k, v in c.items() if k not in ("client", "informational")}, sandbox, [])
+                 for c in checks], sandbox, [])
+            failed = [c for c, (passed, _) in zip(checks, grades) if not passed]
+            self.assertEqual(failed, [{"informational": True, **followed}], name)
+
 
 class Batch(unittest.TestCase):
     """What a batch runs, and in which order."""
