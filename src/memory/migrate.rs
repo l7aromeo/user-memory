@@ -112,7 +112,9 @@ const STEPS: &[Step] = &[
 
 /// Version 13 lets a memory hold until a condition (#121): the three
 /// `until_*` columns, `memory_ended` and its trigger that stales the
-/// patterns citing an ended memory, and `live_memories`, what is in force.
+/// patterns citing an ended memory, `out_of_force` (ended or past its
+/// date, with a partial index on dates) and `live_memories`, what is in
+/// force.
 /// The history's operations gain `ended` and `reopened`, which its check
 /// lists, so the events table is rebuilt with its rows and its triggers,
 /// and the history and the change counter watch the new columns. No
@@ -134,10 +136,10 @@ CREATE TRIGGER memory_support_ended AFTER INSERT ON memory_ended BEGIN
     UPDATE memories SET status='stale',updated_at=CURRENT_TIMESTAMP
     WHERE status!='superseded' AND EXISTS (SELECT 1 FROM json_each(evidence_ids) WHERE value=NEW.memory_id);
 END;
-CREATE VIEW live_memories AS SELECT rowid AS rowid, * FROM memories
-WHERE status IN ('confirmed','tentative')
-    AND NOT (until_kind='date' AND until_value<=strftime('%Y-%m-%dT%H:%M:%SZ','now'))
-    AND NOT EXISTS (SELECT 1 FROM memory_ended WHERE memory_id=memories.id);
+CREATE INDEX memories_until_date ON memories(until_value) WHERE until_kind='date';
+CREATE VIEW out_of_force AS SELECT memory_id AS id FROM memory_ended
+UNION ALL SELECT id FROM memories WHERE until_kind='date' AND until_value<=strftime('%Y-%m-%dT%H:%M:%SZ','now');
+CREATE VIEW live_memories AS SELECT rowid AS rowid, * FROM memories WHERE memories.status IN ('confirmed','tentative') AND memories.id NOT IN (SELECT id FROM out_of_force);
 DROP TRIGGER memory_event_recorded;
 DROP TRIGGER memory_event_changed;
 DROP TRIGGER memory_event_forgotten;
@@ -1248,6 +1250,7 @@ mod tests {
              DROP TRIGGER memory_event_reopened;
              DROP TRIGGER memory_change_reopened;
              DROP VIEW live_memories;
+             DROP VIEW out_of_force;
              CREATE TABLE memories_new (id TEXT PRIMARY KEY NOT NULL, created_at, updated_at, memory_type, category, context, content, reason, scope, project, source, status, evidence, evidence_ids, superseded_by, last_confirmed_at);
              INSERT INTO memories_new SELECT id,created_at,updated_at,memory_type,category,context,content,reason,scope,project,source,status,evidence,evidence_ids,superseded_by,last_confirmed_at FROM memories;
              DROP TABLE memories;

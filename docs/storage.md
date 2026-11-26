@@ -29,9 +29,10 @@ conversations, which memories it read, recorded or was shown, the number
 of the passage it was shown most, whether it held to or set aside each,
 and when; no text; a memory's rows are deleted with it), `memory_ended`
 (when a memory's tag or text condition ended, how and on what evidence,
-since schema version 13), the view `live_memories` (the memories in
-force: confirmed or tentative, their date not passed and not ended,
-which every reader that shows memories reads), and
+since schema version 13), the views `out_of_force` (the memories ended
+or past their date) and `live_memories` (the memories in force:
+confirmed or tentative and not out of force, the test every reader that
+shows memories applies), and
 derived search tables that `reindex` can always rebuild: the
 [keyword index](#the-keyword-index) (`search_keys`, `search_words`,
 `search_pending`, `search_state` and `search_changes`, since schema version

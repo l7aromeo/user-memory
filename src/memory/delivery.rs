@@ -9,6 +9,7 @@
 //! evals/delivery/entry.rs) compiles it through a `#[path]` mirror of
 //! `src/memory`: use only std, rusqlite and the mirrored modules here.
 
+use crate::memory::in_force::live;
 use crate::memory::index::{
     passages::SLOTS,
     stems::{Field, stamp, token},
@@ -649,12 +650,15 @@ pub(crate) struct Overlay {
 
 /// The memories changed since a position that a scope can see, in key
 /// order: [`CANDIDATES`] for the ids in `?2`.
-const CHANGED_CANDIDATES: &str = "SELECT k.key,m.id FROM search_keys k JOIN memories m ON m.id=k.id \
-     WHERE m.id IN (SELECT id FROM live_memories) AND m.source!='inferred' \
+const CHANGED_CANDIDATES: &str = concat!(
+    "SELECT k.key,m.id FROM search_keys k JOIN memories m ON m.id=k.id WHERE ",
+    live!("m"),
+    " AND m.source!='inferred' \
      AND m.memory_type NOT IN ('behavior','pattern') \
      AND (m.scope='global' OR (m.scope='project' AND m.project IN (SELECT value FROM json_each(?1)))) \
      AND m.id IN (SELECT value FROM json_each(?2)) \
-     ORDER BY k.key";
+     ORDER BY k.key"
+);
 
 /// A JSON array of `items`, for `json_each`.
 fn json_array(items: &[String]) -> String {
@@ -1042,11 +1046,14 @@ impl View {
 /// The memories search may deliver in a scope: active ones of the global
 /// scope and of `projects`, never a guess or an observation about the user
 /// (inferred memories, types `behavior` and `pattern`).
-pub(in crate::memory) const CANDIDATES: &str = "SELECT k.key,m.id FROM search_keys k JOIN memories m ON m.id=k.id \
-     WHERE m.id IN (SELECT id FROM live_memories) AND m.source!='inferred' \
+pub(in crate::memory) const CANDIDATES: &str = concat!(
+    "SELECT k.key,m.id FROM search_keys k JOIN memories m ON m.id=k.id WHERE ",
+    live!("m"),
+    " AND m.source!='inferred' \
      AND m.memory_type NOT IN ('behavior','pattern') \
      AND (m.scope='global' OR (m.scope='project' AND m.project IN (SELECT value FROM json_each(?1)))) \
-     ORDER BY k.key";
+     ORDER BY k.key"
+);
 
 /// The base file of the memories search may deliver in the global scope
 /// and `projects`, from the store at `db`, read without writing, with the

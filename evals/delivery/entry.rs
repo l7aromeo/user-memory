@@ -26,6 +26,7 @@
 #[path = "../../src/memory"]
 mod memory {
     pub mod delivery;
+    pub mod in_force;
     pub mod matcher;
     pub mod words;
     pub mod index {
