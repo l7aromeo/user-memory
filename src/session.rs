@@ -10,6 +10,7 @@ mod live;
 mod recall;
 mod seen;
 mod subagent;
+mod tags;
 mod tools;
 mod used;
 
@@ -400,6 +401,30 @@ pub async fn start(
             },
         );
     }
+    // The tag check (#121): what is pending, and the checkout's tags,
+    // once recall's state has started, which a startup empties.
+    let check_tags = async {
+        let (client, payload) = client.zip(payload.as_deref())?;
+        let snapshot = session_file(client, payload)?;
+        let origin = origin.clone()?;
+        let folder = looking.folder.clone();
+        let until = std::time::Instant::now()
+            + deadline.saturating_duration_since(tokio::time::Instant::now());
+        let checked = tokio::task::spawn_blocking(move || {
+            let remote = setup::configured_remote().ok().flatten();
+            tags::check(
+                &snapshot,
+                &folder,
+                &origin,
+                remote.as_ref(),
+                &db_path(),
+                tags::When::Start,
+                until,
+            )
+        });
+        tokio::time::timeout_at(deadline, checked).await.ok()
+    };
+    check_tags.await;
     let (limit, unit) = hook_limit(client, context_limit);
     let found = match (seen.ok().flatten(), &index) {
         // Only beside an index: a start without one says nothing is new.
@@ -908,6 +933,30 @@ pub async fn prompt_submit(client: HookClient) -> String {
             }
             Err(_) => {}
         }
+    }
+    // The tag check (#121) asks the store again what is pending, before
+    // recall, so nothing a tag ended is pushed.
+    if let Some(payload) = &asked
+        && let Some(snapshot) = session_file(client, payload)
+        && let Some(origin) = origin(client, payload)
+        && let Ok(value) = serde_json::from_slice::<Value>(payload)
+        && let Some(folder) = value["cwd"].as_str().map(PathBuf::from)
+    {
+        let until = std::time::Instant::now()
+            + deadline.saturating_duration_since(tokio::time::Instant::now());
+        let checked = tokio::task::spawn_blocking(move || {
+            let remote = setup::configured_remote().ok().flatten();
+            tags::check(
+                &snapshot,
+                &folder,
+                &origin,
+                remote.as_ref(),
+                &db_path(),
+                tags::When::Prompt,
+                until,
+            )
+        });
+        let _ = tokio::time::timeout_at(deadline, checked).await;
     }
     // Recall from the prompt's words (#117), after the notice, within what
     // is left of the limit, on the store read above.

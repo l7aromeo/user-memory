@@ -457,6 +457,17 @@ pub fn record_in(db: &Path, mut input: Record, zone: Zone) -> Result<Value> {
     if let Some(reason) = normalize(&mut input) {
         return refused(&reason);
     }
+    // A tag checked against a checkout of its project here, on the user's
+    // machine only: a server has none.
+    let here = match (&input.until, zone) {
+        (Some(until), Zone::Local) => {
+            match until.checked_here(std::env::current_dir().ok().as_deref()) {
+                Ok(here) => here,
+                Err(reason) => return refused(&reason),
+            }
+        }
+        _ => None,
+    };
     let resolutions = usize::from(input.confirms.is_some())
         + usize::from(!input.supersedes.is_empty())
         + usize::from(!input.distinct_from.is_empty());
@@ -583,7 +594,7 @@ pub fn record_in(db: &Path, mut input: Record, zone: Zone) -> Result<Value> {
         result["duplicate"] = json!(true);
     }
     if let Some(until) = &input.until {
-        result["until"] = json!(until.echo(zone));
+        result["until"] = json!(with_here(until.echo(zone), here.as_deref()));
     }
     if !input.supersedes.is_empty() {
         if uuids(&input.supersedes).contains(&id) {
@@ -898,6 +909,15 @@ pub fn update_in(db: &Path, mut input: Update, zone: Zone) -> Result<Value> {
         None => old.until.clone(),
     };
     let until_changed = until != old.until;
+    let here = match (&until, zone) {
+        (Some(until), Zone::Local) if until_changed => {
+            match until.checked_here(std::env::current_dir().ok().as_deref()) {
+                Ok(here) => here,
+                Err(reason) => return Ok(json!({"updated":false,"reason":reason})),
+            }
+        }
+        _ => None,
+    };
     // A scope change always changes the project too: a global memory names
     // none, and a project memory must name one.
     let changed = next.memory_type != old.memory_type
@@ -958,7 +978,11 @@ pub fn update_in(db: &Path, mut input: Update, zone: Zone) -> Result<Value> {
         result["revived"] = json!(true);
     }
     if until_changed {
-        result["until"] = json!(until.as_ref().map(|until| until.echo(zone)));
+        result["until"] = json!(
+            until
+                .as_ref()
+                .map(|until| with_here(until.echo(zone), here.as_deref()))
+        );
     }
     left.note(&mut result);
     Ok(result)
@@ -1003,6 +1027,14 @@ const RULE_ENDS_WITH_YES: &str = "A rule's condition ends only with the user's y
 /// Ends a memory's text condition on the agent's evidence (`update`'s
 /// `ended`): a non-rule needs no yes, a rule needs the user's. The end
 /// record is final; the triggers write the `ended` event, move the change
+/// A condition's echo with what a checkout here said of it, in brackets.
+fn with_here(echo: String, here: Option<&str>) -> String {
+    match here {
+        Some(here) => format!("{echo} ({here})"),
+        None => echo,
+    }
+}
+
 /// marker and stale the inferences that cite the memory.
 fn end_condition(db: &Path, input: Update) -> Result<Value> {
     let refused = |reason: &str| Ok(json!({"updated":false,"reason":reason}));

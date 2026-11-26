@@ -39,6 +39,15 @@ pub const BAD_DATE: &str = "until's date is a day, such as 2026-11-20, which end
 pub const DATE_PASSED: &str =
     "until's date has already passed, so this memory would end at once; give a later date";
 pub const NO_LOCAL_ZONE: &str = "This machine's time zone could not be found, so a bare day has no end; give until's date as an RFC 3339 time with its offset, such as 2026-11-20T23:59:59+07:00";
+/// After `tag NAME`, when a checkout of the project here has the tag.
+pub const TAG_EXISTS: &str =
+    "already exists, so this memory would end at once; name the next release's tag";
+/// In the echo, when no checkout of the condition's project is here to
+/// check the name against: `review` is the safety net.
+pub const NOT_CHECKED_HERE: &str = "not checked here";
+/// In the echo, after the latest tags, when the name has none of their
+/// shapes (`v0.10` beside `v0.9.3`, `V1.0.0` beside `v0.9.3`).
+pub const UNLIKE_TAGS: &str = "has the shape of none of them, so check its name";
 pub const HOSTED_DAY: &str = "This server doesn't know your time zone, so a bare day has no end here; send until's date as a full RFC 3339 time with its offset, such as 2026-11-20T23:59:59+07:00";
 
 /// What ends a memory, as typed: exactly one of `date`, `tag` (with its
@@ -57,7 +66,7 @@ pub struct Until {
     )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub date: Option<String>,
-    /// A release tag's literal name, never a pattern; in a monorepo, the package's own.
+    /// A release tag's literal name, never a pattern; in a monorepo, the package's own. Recorded in a checkout of the project, one that exists there already is refused.
     #[arg(
         id = "until_tag",
         long = "until-tag",
@@ -111,6 +120,39 @@ pub enum Zone {
 }
 
 impl Until {
+    /// What a checkout of a tag condition's project at `folder` says of it
+    /// as the memory is recorded, for the echo: the latest tags there, and
+    /// whether the name looks like them; [`NOT_CHECKED_HERE`] without such a
+    /// checkout. Refused when the checkout already has the tag, as the
+    /// memory would end at once. Nothing for another kind. `self` is in its
+    /// stored form, the tag with its project.
+    pub fn checked_here(&self, folder: Option<&std::path::Path>) -> Result<Option<String>, String> {
+        let (Some(tag), Some(project)) = (&self.tag, &self.project) else {
+            return Ok(None);
+        };
+        let Some(folder) = folder
+            .filter(|folder| crate::project::project_id(folder).is_ok_and(|key| key == *project))
+        else {
+            return Ok(Some(NOT_CHECKED_HERE.to_owned()));
+        };
+        let tags = crate::project::tags::found(folder, &[tag.as_str()]);
+        match tags {
+            None => return Ok(Some(NOT_CHECKED_HERE.to_owned())),
+            Some(found) if !found.is_empty() => return Err(format!("tag {tag} {TAG_EXISTS}")),
+            Some(_) => {}
+        }
+        let latest = crate::project::tags::latest(folder);
+        if latest.is_empty() {
+            return Ok(Some("no tags here yet".to_owned()));
+        }
+        let list = latest.join(", ");
+        Ok(Some(if latest.iter().any(|t| shape(t) == shape(tag)) {
+            format!("latest here: {list}")
+        } else {
+            format!("latest here: {list}; {tag} {UNLIKE_TAGS}")
+        }))
+    }
+
     /// The stored columns (kind, value, project) of a condition in its
     /// stored form, as [`Until::condition`] leaves it; blank for none.
     pub fn columns(until: Option<&Self>) -> (&'static str, String, String) {
@@ -385,6 +427,22 @@ fn describe_date(at: &str, zone: Option<&TimeZone>) -> String {
 /// stays `None` by `#[serde(default)]`, and a present one is `Some`.
 pub fn present<'de, D: Deserializer<'de>>(input: D) -> Result<Option<Option<Until>>, D::Error> {
     Option::<Until>::deserialize(input).map(Some)
+}
+
+/// A tag's shape: each run of digits as one `0`, so `v0.9.3` and
+/// `v0.10.0` share one and `v0.10` or `V0.10.0` don't.
+fn shape(tag: &str) -> String {
+    let mut out = String::with_capacity(tag.len());
+    for c in tag.chars() {
+        if c.is_ascii_digit() {
+            if !out.ends_with('0') || out.is_empty() {
+                out.push('0');
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 #[cfg(test)]

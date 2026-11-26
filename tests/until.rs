@@ -282,7 +282,7 @@ fn each_kind_is_stored_and_echoed() {
     let tag = out["id"].as_str().unwrap().to_owned();
     assert_eq!(
         out["until"],
-        "until tag v3.0.0 exists in github.com/example/tool"
+        "until tag v3.0.0 exists in github.com/example/tool (not checked here)"
     );
     assert_eq!(
         s.stored(&tag),

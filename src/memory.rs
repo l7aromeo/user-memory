@@ -78,6 +78,8 @@ pub use transfer::{
     export_document, export_named, export_next, import_document, import_named, import_next,
     write_export,
 };
+mod ends;
+pub use ends::{Pending, TAGS_PENDING, TAGS_WAIT, TagEnd, end_by_tags, pending_tags};
 pub(crate) use usage::{USE_REQUEST_BYTES, USES_PER_REQUEST};
 pub use usage::{Use, Uses, Written, write_uses};
 pub use write::{

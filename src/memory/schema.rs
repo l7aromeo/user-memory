@@ -588,6 +588,15 @@ pub(super) fn write(conn: &Connection) -> Result<Write<'_>> {
     write_at(&WRITERS, conn, turn_wait())
 }
 
+/// [`write`] for a caller with its own time limit, such as a hook: waits at
+/// most `wait` for the turns and SQLite's write lock, and fails past it.
+/// Its callers (the hooks, the `/tags` route) run outside a tool call's
+/// budget ([`super::budget`]), so nothing raises that wait.
+pub(super) fn write_within(conn: &Connection, wait: Duration) -> Result<Write<'_>> {
+    conn.busy_timeout(wait)?;
+    write_at(&WRITERS, conn, wait.min(turn_wait()))
+}
+
 /// [`write`] at `gate`, waiting at most `wait` for each turn and SQLite's
 /// lock, or what is left of the call's budget ([`super::budget`]).
 fn write_at<'c>(gate: &'static Gate, conn: &'c Connection, wait: Duration) -> Result<Write<'c>> {
