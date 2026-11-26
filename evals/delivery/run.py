@@ -332,6 +332,13 @@ def report(title, total, by_kind):
         for group in spellings:
             print(f"    {group.removeprefix('spelling '):<16} {fmt(r(total[f'found|{group}'], total[f'needed|{group}']))}"
                   f" of {total[f'needed|{group}']}")
+    scripts = [f"script {how}" for how in ("bare", "./", "bash or sh", "python3", "with flags")]
+    if any(total[f"needed|{group}"] or total[f"delivered|{group}"] for group in scripts):
+        print("  script runs by how they are invoked: deliveries right of delivered; needs found of needed")
+        for group in scripts:
+            print(f"    {group.removeprefix('script '):<16} {fmt(r(total[f'right|{group}'], total[f'delivered|{group}']))}"
+                  f" of {total[f'delivered|{group}']:<5} {fmt(r(total[f'found|{group}'], total[f'needed|{group}']))}"
+                  f" of {total[f'needed|{group}']}")
     if total["needed|subject:trap"]:
         print(f"  traps: needed {total['needed|subject:trap']}, found {total['found|subject:trap']}, "
               f"in time (held, or pushed before the run) {total['in time|subject:trap']}")

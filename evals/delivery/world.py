@@ -105,10 +105,14 @@ COMMANDS = {
     ("terraform", "plan"): ["planning", "previewing changes"],
     ("make", "docs"): ["building the docs", "documentation builds"],
     ("pytest", ""): ["python tests", "the python suite"],
+    # Scripts a project keeps, run by their path, `./` or an interpreter.
+    ("tools/release.sh", ""): ["the release script", "cutting a release"],
+    ("tools/migrate.py", ""): ["the migration script", "schema migrations"],
 }
 
 # Subcommands no task runs, which look-alikes are about: they share a
-# needed note's program and none of its subject.
+# needed note's program and none of its subject. A script's are other
+# scripts in its folder, since a flag of the script itself is its subject.
 UNRUN = {
     "git": ["bisect", "log", "blame", "reflog", "cherry-pick"],
     "cargo": ["doc", "bench", "tree", "update", "fmt"],
@@ -120,12 +124,16 @@ UNRUN = {
     "terraform": ["init", "fmt", "validate"],
     "make": ["clean", "lint"],
     "pytest": ["--collect-only", "--lf"],
+    "tools/release.sh": ["tools/changelog.sh", "tools/bump.sh"],
+    "tools/migrate.py": ["tools/seed.py", "tools/backup.py"],
 }
 
 # The commands each kind of work runs; every world has these.
 WORK = {
-    "change": [("cargo", "build"), ("cargo", "test"), ("git", "commit"), ("git", "push")],
-    "release": [("just", "check"), ("cargo", "publish"), ("git", "tag"), ("gh", "release")],
+    "change": [("cargo", "build"), ("cargo", "test"), ("tools/migrate.py", ""), ("git", "commit"),
+               ("git", "push")],
+    "release": [("just", "check"), ("cargo", "publish"), ("tools/release.sh", ""), ("git", "tag"),
+                ("gh", "release")],
     "review": [("gh", "pr")],
     "research": [],
     "split": [("cargo", "test"), ("git", "rebase")],
@@ -145,6 +153,9 @@ WRAPPED = {("cargo", "test"): "just test", ("cargo", "build"): "make build",
 FLAG_FIRST = {"git": "-C .", "cargo": "--locked", "gh": "--repo example/ledger", "docker": "--debug",
               "kubectl": "-n prod", "terraform": "-chdir=infra", "npm": "--prefix .",
               "just": "--justfile justfile", "make": "-C ."}
+# The interpreter a script of each extension is run through, as one of
+# its spellings (#220); `./` before its path is another.
+INTERPRETER = {"sh": "bash", "py": "python3"}
 # Of those, the flags whose value is a word, which a rule taking the first
 # word argument as the subcommand reads as the subcommand.
 WORD_VALUED = {"kubectl", "just"}
@@ -534,11 +545,13 @@ class World:
                 if subject[0] in ("command", "failure", "trap"):
                     program = subject[1]
                     other = rng.choice(UNRUN[program])
-                    text = (f"`{program} {other}` {rng.choice(['needs', 'skips', 'reads'])} "
+                    named, about = ((other, [other, ""]) if "/" in program
+                                    else (f"{program} {other}", [program, other]))
+                    text = (f"`{named}` {rng.choice(['needs', 'skips', 'reads'])} "
                             f"{rng.choice(THINGS)} on the {rng.choice(COMMON)} {rng.choice(COMMON)}.")
-                    title = f"{program} {other}: {rng.choice(COMMON)} {rng.choice(COMMON)}"
+                    title = f"{named}: {rng.choice(COMMON)} {rng.choice(COMMON)}"
                     self._memory("look-alike", "fact", "tooling", title, text, PROJECT,
-                                 about=["command", program, other], anchored=True)
+                                 about=["command", *about], anchored=True)
                 else:
                     folder = self.files[subject[1]].rsplit("/", 1)[0]
                     path = f"{folder}/{rng.choice(NEIGHBOURS)}.{rng.choice(EXTENSIONS)}"
@@ -609,7 +622,9 @@ class World:
                     [("wrapper", WRAPPED[(program, sub)])] if (program, sub) in WRAPPED else []) + (
                     [("flag with a word value" if program in WORD_VALUED else "flag first",
                       f"{program} {FLAG_FIRST[program]} {sub}")] if program in FLAG_FIRST else []) + (
-                    [("prefix", f"{rng.choice(PREFIXES)} {program} {sub}")] if sub else [])
+                    [("prefix", f"{rng.choice(PREFIXES)} {program} {sub}")] if sub else []) + (
+                    [("interpreter", f"{INTERPRETER[program.rsplit('.', 1)[1]]} {program}"),
+                     ("dot slash", f"./{program}")] if "/" in program else [])
                 if ways:
                     spelled, said = rng.choice(ways)
                     text = " ".join(part for part in [said, flags] if part)
