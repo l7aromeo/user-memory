@@ -1126,3 +1126,142 @@ fn a_memory_recorded_changed_or_forgotten_mid_turn_reaches_the_next_call() {
     );
     assert_eq!(sub, "");
 }
+
+#[test]
+fn a_note_on_a_script_comes_however_the_script_is_run() {
+    let home = Home::new();
+    let note = home.record(
+        "Step two reads its region",
+        "`tools/step2.sh` reads region2.conf and stops when it is stale.",
+        &[
+            "--type",
+            "fact",
+            "--source",
+            "observed",
+            "--evidence",
+            "Seen in two sessions",
+        ],
+    );
+    let script = home.record(
+        "The build script needs its cache",
+        "`tools/build.py` reads build/cache.json and stops when it is missing.",
+        &[
+            "--type",
+            "fact",
+            "--source",
+            "observed",
+            "--evidence",
+            "Seen in two sessions",
+        ],
+    );
+    // A session each, so a push in one says nothing of the others.
+    let mut missed = Vec::new();
+    for (n, (command, id)) in [
+        ("tools/step2.sh", &note),
+        ("./tools/step2.sh", &note),
+        ("bash tools/step2.sh", &note),
+        ("sh -e tools/step2.sh --all", &note),
+        ("zsh ./tools/step2.sh", &note),
+        ("python3 tools/build.py", &script),
+        ("python3 -u ./tools/build.py --fast", &script),
+        ("bash -c 'tools/step2.sh'", &note),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let session = format!("s{n}");
+        home.start(&session, "startup");
+        if !home.run(&session, command).contains(short(id)) {
+            missed.push(command);
+        }
+    }
+    assert!(missed.is_empty(), "no push after {missed:?}");
+    for (n, command) in [
+        "bash tools/other.sh",
+        "python3 tools/other.py",
+        "./tools/other.sh",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let session = format!("n{n}");
+        home.start(&session, "startup");
+        assert_eq!(home.run(&session, command), "", "{command}");
+    }
+}
+
+#[test]
+fn a_note_writing_the_script_with_its_dot_slash_comes_however_it_is_run() {
+    let home = Home::new();
+    let note = home.record(
+        "Deploy needs its target",
+        "`./tools/deploy.sh` reads deploy/target and stops when it is unset.",
+        &[
+            "--type",
+            "fact",
+            "--source",
+            "observed",
+            "--evidence",
+            "Seen in two sessions",
+        ],
+    );
+    let mut missed = Vec::new();
+    for (n, command) in [
+        "./tools/deploy.sh",
+        "tools/deploy.sh",
+        "bash tools/deploy.sh",
+        "bash ./tools/deploy.sh",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let session = format!("s{n}");
+        home.start(&session, "startup");
+        if !home.run(&session, command).contains(short(&note)) {
+            missed.push(command);
+        }
+    }
+    assert!(missed.is_empty(), "no push after {missed:?}");
+}
+
+#[test]
+fn a_note_on_a_script_at_the_folder_root_comes_however_it_is_run() {
+    let home = Home::new();
+    let note = home.record(
+        "Build needs its toolchain",
+        "`./build.sh` reads toolchain.txt and stops when it is missing.",
+        &[
+            "--type",
+            "fact",
+            "--source",
+            "observed",
+            "--evidence",
+            "Seen in two sessions",
+        ],
+    );
+    let mut missed = Vec::new();
+    for (n, command) in ["./build.sh", "bash ./build.sh", "sh build.sh", "build.sh"]
+        .into_iter()
+        .enumerate()
+    {
+        let session = format!("s{n}");
+        home.start(&session, "startup");
+        if !home.run(&session, command).contains(short(&note)) {
+            missed.push(command);
+        }
+    }
+    assert!(missed.is_empty(), "no push after {missed:?}");
+}
+
+#[test]
+fn a_note_on_the_interpreter_still_comes_when_it_runs_a_script() {
+    let home = Home::new();
+    let note = home.record(
+        "Python here is 3.13",
+        "In this checkout `python3` is 3.13; `python` is an older one that the scripts do not support.",
+        &["--type", "fact", "--source", "observed", "--evidence", "Seen in two sessions"],
+    );
+    home.start("s1", "startup");
+    let pushed = home.run("s1", "python3 tools/build.py");
+    assert!(pushed.contains(short(&note)), "{pushed:?}");
+}
