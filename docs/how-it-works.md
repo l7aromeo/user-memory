@@ -334,10 +334,12 @@ From user-memory, matching this step (read one for the rest before applying it):
   edit writes never count. A shell line that chains, pipes or nests
   commands (`&&`, `||`, `;`, `|`, a subshell) is matched as if each command
   ran alone, so a note on one of them comes after the whole line; a command
-  that reads files (`cat`, `head`, `sed`, `grep` and the like) is matched
-  once for each file it names, as a read of that file. A path in a command
-  names what a read of it does: its folders and its file name, taken
-  relative to the session's folder. Quoted text, such as a commit message,
+  that reads files (`cat`, `head`, `sed`, `grep`, PowerShell's
+  `Get-Content` and the like) is matched once for each file it names, as a
+  read of that file. A path in a command names what a read of it does: its
+  folders and its file name, taken relative to the session's folder. On
+  Windows a path matches whichever of `\` and `/` it is written with, and
+  the session's folder in any case. Quoted text, such as a commit message,
   is no part of the command.
 - **What is pushed:** a passage that holds an anchor the step names (a
   command with its next word, a path, a code span) and matches the work of

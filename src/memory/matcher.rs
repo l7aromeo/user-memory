@@ -22,6 +22,7 @@ use crate::memory::index::{
     weights::{ANCHOR_WEIGHT, rarity, weight},
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::ops::Range;
 
 /// Actions the window keeps: older ones fall out. #117's starting value,
 /// which the delivery benchmark cannot measure: each of its tasks is
@@ -99,9 +100,32 @@ const WRAPPERS: &[&str] = &["sudo", "env", "time", "nohup", "exec", "command"];
 /// reads several files is a part per file, each a read of its file as the
 /// read tool's is: a note on one of them is as much about the line as
 /// about a lone read of it. A `sed` script that looks like a path is a
-/// part no memory holds, which pushes nothing.
+/// part no memory holds, which pushes nothing. PowerShell's readers and
+/// their aliases (`Get-Content`, `gc`, `type`, `Select-String`, `sls`,
+/// `Get-ChildItem`, `gci`, `dir`) and cmd's `findstr` read as theirs do.
 const READERS: &[&str] = &[
-    "bat", "cat", "file", "grep", "head", "less", "ls", "more", "nl", "rg", "sed", "stat", "tail",
+    "bat",
+    "cat",
+    "dir",
+    "file",
+    "findstr",
+    "gc",
+    "gci",
+    "get-childitem",
+    "get-content",
+    "grep",
+    "head",
+    "less",
+    "ls",
+    "more",
+    "nl",
+    "rg",
+    "sed",
+    "select-string",
+    "sls",
+    "stat",
+    "tail",
+    "type",
     "wc",
 ];
 
@@ -212,35 +236,75 @@ impl Terms {
 /// and line ends outside quotes, each as its words without quotes. A
 /// redirection's `&` (`2>&1`, `&>log`) is part of its word.
 fn segments(line: &str) -> Vec<Vec<String>> {
+    lex(line)
+        .into_iter()
+        .map(|words| words.into_iter().map(|word| word.text).collect())
+        .collect()
+}
+
+/// Where each word of a command line is in it, split as [`segments`]
+/// splits the line: from the first character the word keeps to the end of
+/// its last, so a word's start is past any quote that opens it.
+pub(crate) fn word_spans(line: &str) -> impl Iterator<Item = Range<usize>> {
+    lex(line).into_iter().flatten().map(|word| word.span)
+}
+
+/// A word of a command line, as [`segments`] gives it, and where it is.
+struct Word {
+    text: String,
+    span: Range<usize>,
+}
+
+/// The words of a command line in their segments, for [`segments`] and
+/// [`word_spans`].
+fn lex(line: &str) -> Vec<Vec<Word>> {
     let mut segments = Vec::new();
-    let mut words: Vec<String> = Vec::new();
-    let mut word = String::new();
+    let mut words: Vec<Word> = Vec::new();
+    let mut word = Word {
+        text: String::new(),
+        span: 0..0,
+    };
     let mut quote: Option<char> = None;
-    let mut chars = line.chars().peekable();
-    let end_word = |word: &mut String, words: &mut Vec<String>| {
-        if !word.is_empty() {
-            words.push(std::mem::take(word));
+    let mut chars = line.char_indices().peekable();
+    let end_word = |word: &mut Word, words: &mut Vec<Word>| {
+        if !word.text.is_empty() {
+            words.push(std::mem::replace(
+                word,
+                Word {
+                    text: String::new(),
+                    span: 0..0,
+                },
+            ));
         }
     };
-    while let Some(c) = chars.next() {
+    let push = |word: &mut Word, at: usize, c: char| {
+        if word.text.is_empty() {
+            word.span.start = at;
+        }
+        word.text.push(c);
+        word.span.end = at + c.len_utf8();
+    };
+    while let Some((at, c)) = chars.next() {
+        let next = chars.peek().map(|&(_, next)| next);
         match (quote, c) {
             (Some(q), c) if c == q => quote = None,
-            (Some(_), c) => word.push(c),
+            (Some(_), c) => push(&mut word, at, c),
             (None, '\'' | '"') => quote = Some(c),
-            (None, '&') if word.ends_with(['>', '<']) || chars.peek() == Some(&'>') => {
-                word.push(c);
+            (None, '&') if word.text.ends_with(['>', '<']) || next == Some('>') => {
+                push(&mut word, at, c);
             }
             (None, '(' | ')' | '`') => {
                 // `$(` opens a command substitution: the `$` is no word.
-                if word.ends_with('$') {
-                    word.pop();
+                if word.text.ends_with('$') {
+                    word.text.pop();
+                    word.span.end -= '$'.len_utf8();
                 }
                 end_word(&mut word, &mut words);
                 segments.push(std::mem::take(&mut words));
             }
             (None, '&' | '|') => {
                 // `&&`, `||`, a pipe, or a command sent to the background.
-                if chars.peek() == Some(&c) {
+                if next == Some(c) {
                     chars.next();
                 }
                 end_word(&mut word, &mut words);
@@ -251,7 +315,7 @@ fn segments(line: &str) -> Vec<Vec<String>> {
                 segments.push(std::mem::take(&mut words));
             }
             (None, c) if c.is_whitespace() => end_word(&mut word, &mut words),
-            (None, c) => word.push(c),
+            (None, c) => push(&mut word, at, c),
         }
     }
     end_word(&mut word, &mut words);

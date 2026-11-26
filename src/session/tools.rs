@@ -14,7 +14,7 @@ use super::{
 };
 use crate::memory::{
     delivery_files,
-    matcher::{Action, Kind, Matched, Terms, Window, terms_of},
+    matcher::{Action, Kind, Matched, Terms, Window, terms_of, word_spans},
     push,
 };
 use rusqlite::{Connection, OpenFlags};
@@ -492,22 +492,118 @@ fn command_line(command: &Value) -> Option<String> {
 }
 
 /// `path` as the session's folder (the payload's `cwd`) sees it: relative
-/// when it is inside, as a memory names a project's files.
+/// when it is inside, as a memory names a project's files, with `/`
+/// between its names on Windows ([`Folder`]).
 fn relative(payload: &Value, path: &str) -> String {
-    payload["cwd"]
-        .as_str()
-        .and_then(|cwd| Path::new(path).strip_prefix(cwd).ok())
-        .map_or_else(|| path.to_owned(), |p| p.to_string_lossy().into_owned())
+    match Folder::of(payload) {
+        Some(folder) => folder.relative(path),
+        None => path.to_owned(),
+    }
 }
 
-/// A command line with the session's folder (the payload's `cwd`) taken off
-/// the paths inside it, so a path names what a read of the same file does.
+/// A command line with the session's folder (the payload's `cwd`) taken
+/// off each word that starts with it, and on Windows each path's `\`
+/// written `/`, so a path names what a read of the same file does. Words
+/// are split as the matcher splits the line, so a folder inside a word or
+/// inside quoted text stays as written.
 fn relative_line(payload: &Value, line: &str) -> String {
-    match payload["cwd"].as_str() {
-        Some(cwd) if !cwd.is_empty() => {
-            line.replace(&format!("{}/", cwd.trim_end_matches('/')), "")
+    let Some(folder) = Folder::of(payload) else {
+        return line.to_owned();
+    };
+    let mut relative = String::with_capacity(line.len());
+    let mut at = 0;
+    for span in word_spans(line) {
+        relative.push_str(&line[at..span.start]);
+        let word = &line[span.clone()];
+        if folder.windows && !word.contains(WINDOWS_RESERVED) {
+            relative.push_str(&folder.relative(word));
+        } else {
+            relative.push_str(&word[folder.prefix(word).unwrap_or(0)..]);
         }
-        _ => line.to_owned(),
+        at = span.end;
+    }
+    relative.push_str(&line[at..]);
+    relative
+}
+
+/// The characters no Windows file name holds: a word with one is no path,
+/// so its `\` is left as written (`findstr "a\|b"`).
+const WINDOWS_RESERVED: [char; 6] = ['<', '>', '"', '|', '?', '*'];
+
+/// The session's folder, split as its platform splits a path. One that
+/// starts with a drive (`C:\`, `C:/`) or a share (`\\`) is a Windows
+/// folder, wherever the hook runs: `\` and `/` both separate, and a name
+/// matches in any case, as Windows opens files. Any other separates by `/`
+/// alone and matches as written, as `Path` does on Unix.
+struct Folder<'a> {
+    /// How many separators the folder's path starts with: 1 from the root,
+    /// 2 for a share, none after a drive.
+    root: usize,
+    names: Vec<&'a str>,
+    windows: bool,
+}
+
+impl<'a> Folder<'a> {
+    fn of(payload: &'a Value) -> Option<Self> {
+        let cwd = payload["cwd"].as_str().filter(|cwd| !cwd.is_empty())?;
+        let windows = matches!(
+            cwd.as_bytes(),
+            [letter, b':', b'\\' | b'/', ..] if letter.is_ascii_alphabetic()
+        ) || cwd.starts_with(r"\\");
+        let mut folder = Self {
+            root: 0,
+            names: Vec::new(),
+            windows,
+        };
+        folder.root = cwd.len() - cwd.trim_start_matches(|c| folder.separator(c)).len();
+        folder.names = cwd
+            .split(|c| folder.separator(c))
+            .filter(|name| !name.is_empty())
+            .collect();
+        Some(folder)
+    }
+
+    fn separator(&self, c: char) -> bool {
+        c == '/' || (self.windows && c == '\\')
+    }
+
+    /// `path` as a memory names it: relative when inside the folder, with
+    /// `/` between its names on Windows.
+    fn relative(&self, path: &str) -> String {
+        let inside = &path[self.prefix(path).unwrap_or(0)..];
+        if self.windows {
+            inside.replace('\\', "/")
+        } else {
+            inside.to_owned()
+        }
+    }
+
+    /// How many bytes the folder and the separators after it take at the
+    /// start of `path`, when `path` names something inside the folder.
+    fn prefix(&self, path: &str) -> Option<usize> {
+        let mut rest = path.trim_start_matches(|c| self.separator(c));
+        if path.len() - rest.len() != self.root {
+            return None;
+        }
+        for name in &self.names {
+            let end = rest.find(|c| self.separator(c))?;
+            if !self.same(&rest[..end], name) {
+                return None;
+            }
+            rest = rest[end..].trim_start_matches(|c| self.separator(c));
+        }
+        (!rest.is_empty()).then(|| path.len() - rest.len())
+    }
+
+    /// Whether two names name the same folder.
+    fn same(&self, one: &str, other: &str) -> bool {
+        if self.windows {
+            one.chars()
+                .flat_map(char::to_lowercase)
+                .eq(other.chars().flat_map(char::to_lowercase))
+        } else {
+            one == other
+        }
     }
 }
 
@@ -684,6 +780,83 @@ mod tests {
             ("WebFetch", json!({"url": "https://example.com"})),
         ] {
             assert_eq!(of(tool, input), None, "{tool}");
+        }
+    }
+
+    /// On Windows a path in a command is taken off the session's folder as
+    /// a read of it is, whatever its separators and case, and every path
+    /// names its folders with `/`, as a memory does.
+    #[test]
+    fn a_windows_path_in_a_command_is_relative_as_a_read_of_it_is() {
+        let of = |cwd: &str, tool: &str, input: Value| {
+            action(&json!({"cwd": cwd, "tool_name": tool, "tool_input": input})).map(|a| a.text)
+        };
+        let cwd = r"C:\Users\dev\proj";
+        assert_eq!(
+            of(
+                cwd,
+                "Read",
+                json!({"file_path": r"C:\Users\dev\proj\src\store\cache.py"})
+            )
+            .as_deref(),
+            Some("src/store/cache.py")
+        );
+        for (line, relative) in [
+            (
+                r"Get-Content C:\Users\dev\proj\src\store\cache.py",
+                "Get-Content src/store/cache.py",
+            ),
+            (
+                r#"type "c:\users\DEV\proj\src\store\cache.py""#,
+                r#"type "src/store/cache.py""#,
+            ),
+            (
+                "cat C:/Users/dev/proj/src/store/cache.py",
+                "cat src/store/cache.py",
+            ),
+            (r"type src\store\cache.py", "type src/store/cache.py"),
+            (r"type D:\other\notes.md", "type D:/other/notes.md"),
+            (r#"findstr "a\|b" src\a.py"#, r#"findstr "a\|b" src/a.py"#),
+        ] {
+            assert_eq!(
+                of(cwd, "PowerShell", json!({"command": line})).as_deref(),
+                Some(relative),
+                "{line}"
+            );
+        }
+        // A share's folder starts with two separators, so one does not name it.
+        for (line, relative) in [
+            (r"type \\srv\share\proj\a.md", "type a.md"),
+            (r"type \srv\share\proj\a.md", "type /srv/share/proj/a.md"),
+        ] {
+            assert_eq!(
+                of(r"\\srv\share\proj", "PowerShell", json!({"command": line})).as_deref(),
+                Some(relative),
+                "{line}"
+            );
+        }
+    }
+
+    /// Only a word that starts with the session's folder is taken off it:
+    /// the folder's path inside another path, a word or quoted text stays.
+    #[test]
+    fn a_folder_inside_a_word_or_quoted_text_stays() {
+        let payload = json!({"cwd": "/home/u/proj"});
+        assert_eq!(
+            relative_line(
+                &payload,
+                "cat /home/u/proj/src/a.py && ls '/home/u/proj/docs'"
+            ),
+            "cat src/a.py && ls 'docs'"
+        );
+        for line in [
+            "cat /mnt/home/u/proj/a.py",
+            "cp a.py backup/home/u/proj/a.py",
+            "git commit -m \"see /home/u/proj/src/a.py\"",
+            "cat /home/u/project/a.py",
+            r"cat /home/u/proj\a.py",
+        ] {
+            assert_eq!(relative_line(&payload, line), line);
         }
     }
 

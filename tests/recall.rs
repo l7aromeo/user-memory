@@ -468,6 +468,50 @@ fn a_file_read_through_the_shell_reaches_what_a_read_of_it_reaches() {
 }
 
 #[test]
+fn a_windows_path_read_through_the_shell_reaches_what_a_read_of_it_reaches() {
+    let home = Home::new();
+    let store = home.record(
+        "Store contract tests",
+        "CI collects only `test_<name>_contract` functions for code under `src/store/`.",
+        &[],
+    );
+    // On Windows the session's folder and the paths in it name their
+    // folders with `\`, in any case, and a command may write either `\`
+    // or `/`.
+    let call = |session: &str, tool: &str, input: Value| {
+        home.start(session, "startup");
+        let payload = json!({"session_id": session, "cwd": r"C:\Users\dev\proj",
+                             "hook_event_name": "PostToolUse", "tool_name": tool,
+                             "tool_input": input, "tool_response": {}});
+        home.push("claude", &payload).1
+    };
+    let read = call(
+        "r1",
+        "Read",
+        json!({"file_path": r"C:\Users\dev\proj\src\store\cache.py"}),
+    );
+    assert!(read.contains(short(&store)), "a read: {read:?}");
+    for (n, line) in [
+        r"Get-Content C:\Users\dev\proj\src\store\cache.py",
+        r"type c:\users\dev\proj\src\store\cache.py",
+        r"Get-Content src\store\cache.py",
+        "cat C:/Users/dev/proj/src/store/cache.py",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let pushed = call(&format!("p{n}"), "PowerShell", json!({"command": line}));
+        assert!(pushed.contains(short(&store)), "{line}: {pushed:?}");
+    }
+    let other = call(
+        "other",
+        "PowerShell",
+        json!({"command": r"Get-Content C:\Users\dev\proj\src\parse\lexer.py"}),
+    );
+    assert_eq!(other, "");
+}
+
+#[test]
 fn an_agents_note_is_labelled_as_one() {
     let home = Home::new();
     let note = home.record(
