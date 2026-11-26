@@ -348,7 +348,11 @@ on Windows), each private to you:
   which a hold showed or put off for a push after the command, and which
   memories each agent read, recorded or was pushed, with how often each
   passage was pushed, the session's origin and what of it was sent to
-  `memory_use` yet.
+  `memory_use` yet. For the [tag check](memory-model.md#conditions) it also
+  keeps each folder's project key and git folder, the tags its project
+  waits for, the sizes and times of the git folder's ref files at the last
+  lookup, ends found but not yet written to the store, and whether the
+  session's server lacks `POST /tags` or refused its token as read-only.
   A session's `startup` empties it in place, so another hook of the
   session may hold it open; a `/clear` or a compaction starts a new count
   in it; a resume keeps it. A file an earlier release wrote is upgraded
@@ -369,7 +373,8 @@ on Windows), each private to you:
   in on this machine: `<store key>-<scope key>.index`, a copy of the
   keyword index's rows for the global memories and the scope's projects
   (every word's stem in hex and every literal anchor, with each passage's
-  place, no sentence), built at session start, and at the next prompt when
+  place, and the end date of each memory that has one, no sentence),
+  built at session start, and at the next prompt when
   the session's scope has none it can use, as after a `link`;
   `<store key>-<scope key>.overlay`, the memories changed since, which the
   tool hooks keep current; `<store key>.lock`, which every writer of the store's files

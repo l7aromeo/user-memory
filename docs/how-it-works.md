@@ -288,9 +288,12 @@ Memory changed since this session last looked (+ new, ~ changed, - forgotten or 
 - e0000004 Answer in short paragraphs
 ```
 
-`+` is a new memory, `~` a changed one, and `-` one that was forgotten or
-replaced, which the agent stops following even where the rules it loaded at
-the start still list it. What the session changed itself is not repeated
+`+` is a new memory, `~` a changed one, and `-` one that was forgotten,
+replaced or ended by its [condition](memory-model.md#conditions), which the
+agent stops following even where the rules it loaded at the start still list
+it. A date that passes changes nothing stored, so the session keeps the
+earliest date among its memories and, once it passes, the next prompt looks
+at every memory again. What the session changed itself is not repeated
 back to it, unless another session changed the same memory too. When the session's projects change, for example after you edit
 `.user-memory` or the agent links a project, the notice starts with a line
 such as the one below, and the memories of a project that left follow as `<`
@@ -334,8 +337,10 @@ it on the machine otherwise), the prompt hook downloads one the session
 lacks, and the connector takes each change in at its poll. A forget or a
 correction on the server leaves the client's files at the connector's next
 poll, and the hooks read them only while a connector runs
-([privacy](privacy.md#what-a-forgotten-memory-leaves)). The tool hooks
-never ask the server.
+([privacy](privacy.md#what-a-forgotten-memory-leaves)). For the index,
+the tool hooks never ask the server; they ask it only when the checkout's
+refs changed and a tag a memory waits for may be there
+([conditions](memory-model.md#conditions)).
 
 ## Recall during the task
 

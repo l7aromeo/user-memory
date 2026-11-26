@@ -202,10 +202,26 @@ history, export and `read` with status `ended` or `all` still show it.
   as a UTC instant, and the reply echoes it. The user's machine resolves a
   bare day: the local server, or, for a remote store, the local connector
   before forwarding; a hosted server refuses one. A date already passed is
-  refused. A date ends when it passes, with no write.
+  refused. A date ends when it passes, with no write. A running session
+  sees it end at once: its tool hooks push the memory no more, and its
+  next prompt lists it as gone (`-`).
 - **A tag** ends when a checkout of the project has the tag: the literal
   name, such as `v0.10.0`. A project memory's tag counts in its own
-  project; a global memory's names the project whose tags count.
+  project; a global memory's names the project whose tags count. The
+  session hooks check, in the session's folder: session start and each
+  prompt ask the store which tags its project waits for, and a tool hook
+  looks again only when the checkout's refs changed, so a command that
+  makes the tag ends the memory at the next tool call. Only a checkout
+  whose `origin` remote is the project decides, and only a tag of exactly
+  that name: a fork, a vendored copy or a tag in another case decides
+  nothing. The end record names the tag, its commit and the project. On a
+  memory server the hooks send it with `POST /tags`; a machine whose
+  token is read-only sends nothing, and the memory counts as ended only in
+  that session.
+  Recorded or updated in a checkout of its project, a tag that exists
+  there already is refused, and the reply's `until` lists the latest tags
+  there, flagging a name shaped like none of them; elsewhere it says
+  `(not checked here)`.
 - **A text**, at most 120 characters, ends when an agent reports, with
   evidence, that it happened: `update` with `ended`, alone, with what the
   agent itself did and saw, never text from a file or page. A memory that
@@ -372,7 +388,10 @@ passages are worked out again whenever the memory is indexed.
   titles map) before reading it; the file itself is held to 64 MiB. So does
   `/delivery`, which sends a client its projects' delivery index
   ([how it works](how-it-works.md#the-delivery-index)) and which a
-  read-only token may ask for.
+  read-only token may ask for, and `/tags`, which only the session hooks
+  call: it lists the tag conditions a project waits for and writes the
+  ends a checkout found ([conditions](#conditions)), at most 256 KiB a
+  request. A read-only token may ask what is pending but end nothing.
 - Agents export and import only by file name inside the exports directory beside
   the store (`~/.local/share/user-memory/exports/`,
   `%LOCALAPPDATA%\user-memory\exports\` on Windows, or `/data/exports/` in
