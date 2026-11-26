@@ -113,6 +113,38 @@ def holds_whole(candidate, point):
     return start <= point["start"] and point["end"] <= start + candidate["length"]
 
 
+# Programs a script is run through, by the name the world spells them
+# with (#220): a shell for `.sh`, Python for `.py`.
+SCRIPT_SHELLS = ("bash", "sh", "zsh")
+# Words that end the command a script run is part of, so a chain's next
+# command adds no flags to the script's.
+LINE_ENDS = ("&&", "||", "|", ";")
+
+
+def invocation(action):
+    """How a command action runs a script by its path (#220), as its
+    breakdown groups: "bare", "./", "bash or sh" or "python3", and "with
+    flags" too when flags follow the script; none for any other action."""
+    about = action.get("about") or []
+    if action.get("kind") != "command" or len(about) < 2 or "/" not in about[1]:
+        return []
+    words = action.get("text", "").split()
+    for at, word in enumerate(words):
+        word = word.rstrip(";")
+        if word not in (about[1], f"./{about[1]}"):
+            continue
+        before = words[at - 1] if at else ""
+        how = ("bash or sh" if before in SCRIPT_SHELLS else "python3" if before.startswith("python")
+               else "./" if word.startswith("./") else "bare")
+        after = []
+        for rest in words[at + 1:]:
+            if rest in LINE_ENDS or rest.startswith("2>"):
+                break
+            after.append(rest)
+        return [how] + (["with flags"] if any(w.startswith("-") for w in after) else [])
+    return []
+
+
 def subject_of(about):
     """The subject a memory point or action is about, as one key: a
     command, a component (its files and its design) or a kind of work."""
@@ -226,7 +258,8 @@ def evaluate(task, matched, memories, bars, earlier=None):
             ok = right(c, needed_points)
             held_here |= way == "hold"
             groups = ([f"shape:{shape}"] if shape in OUTSIDE
-                      else ["all", f"way:{way}", f"signal:{signal}", f"shape:{shape}"])
+                      else ["all", f"way:{way}", f"signal:{signal}", f"shape:{shape}",
+                            *(f"script {how}" for how in invocation(actions[i]))])
             if signal == "prompt" and shape not in OUTSIDE:
                 groups.append("prompt literal" if actions[i].get("literal") else "prompt plain")
             wrong = None if ok else ("about" if about_action(c, memory, actions[i], kind_of_work)
@@ -309,6 +342,7 @@ def evaluate(task, matched, memories, bars, earlier=None):
         groups = [f"subject:{need['subject']}", f"shape:{shape}"]
         if need["subject"] not in OUTSIDE:
             groups.append("all")
+            groups.extend(f"script {how}" for how in invocation(actions[need["action"]]))
             # The matcher's own recall: needs whose point an anchor can match.
             if point.get("anchored"):
                 groups.append("anchored")

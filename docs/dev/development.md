@@ -694,17 +694,20 @@ essentials; long merged memories; filler from `evals/scale`'s vocabulary;
 and whole tasks of five kinds of work, each action with the memories it
 needs then. A stated share of actions spell their command or path another
 way (an alias, a wrapper, a flag before the subcommand, a path from the
-root), run their command in a line with others (a chain or a pipe), or
-read their file in one shell command beside other files. It writes the memories into a throwaway store, indexes them with
-`user-memory reindex`, builds the delivery index, runs every task through
-`user-memory-bench match` and reports what the bars deliver, at most three
-pushes an action (`evals/delivery/metrics.py`):
+root, a script run by `./` or through its interpreter), run their command
+in a line with others (a chain or a pipe), or read their file in one shell
+command beside other files. It writes the memories into a throwaway store,
+indexes them with `user-memory reindex`, builds the delivery index, runs
+every task through `user-memory-bench match` and reports what the bars
+deliver, at most three pushes an action (`evals/delivery/metrics.py`):
 
 - precision three ways: needed at that moment, about the action, about
   something else; and by when each delivery was seen against its
   command's run;
 - recall over all needs and over needs whose point an anchor can match,
   by holders of the anchor and by how the action spells it, with timing;
+- script runs by how they are invoked (bare, `./`, `bash` or `sh`,
+  `python3`, with flags), each with its precision and recall;
 - holds, the commands they deny per task and per session, and failures;
 - why each missed need was missed: its memory holds no anchor, its anchor
   matched nothing, or it matched below the bar.

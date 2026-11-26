@@ -453,10 +453,21 @@ class Generator(unittest.TestCase):
         runs = [a for t in varied["tasks"] for a in t["actions"] if a.get("busy")]
         repeats = [a for a in runs if a["repeat"]]
         self.assertEqual(len(repeats), 2 * (len(runs) - len(repeats)))
-        # A run needs fewer of the busy notes than every one of them.
-        need = lambda drawn: sum(len(t["needs"]) for t in drawn["tasks"])
-        per_run = need(varied) / sum(len(t["actions"]) for t in varied["tasks"])
-        self.assertLess(per_run, need(base) / sum(len(t["actions"]) for t in base["tasks"]))
+        # A run needs fewer of the busy notes than every one of them:
+        # counted at the busy runs, as the world's other commands would
+        # dilute a count over every action.
+        def per_run(drawn):
+            runs = needs = 0
+            for t in drawn["tasks"]:
+                at = [n["action"] for n in t["needs"]]
+                for i, a in enumerate(t["actions"]):
+                    if a.get("busy"):
+                        runs += 1
+                        needs += at.count(i)
+            return needs / runs
+        # A quarter of them needed: well under three quarters of the
+        # notes per run, where needing all of them would be about equal.
+        self.assertLess(per_run(varied), 0.75 * per_run(base))
 
     def test_tasks_no_memory_names_hold_only_unnamed_commands(self):
         drawn = world.generate(5, 1_000)
@@ -526,6 +537,37 @@ class SessionRounds(unittest.TestCase):
         self.assertEqual(orders[:3], [("alone", "building", "finding"), ("building", "finding", "alone"),
                                       ("finding", "alone", "building")])
         self.assertEqual({o[0] for o in orders}, {"alone", "building", "finding"})
+
+
+class Scripts(unittest.TestCase):
+    def test_a_script_run_is_grouped_by_how_it_is_invoked(self):
+        def how(text, program="tools/release.sh"):
+            return metrics.invocation({"kind": "command", "about": ["command", program, ""], "text": text})
+        self.assertEqual(how("tools/release.sh"), ["bare"])
+        self.assertEqual(how("./tools/release.sh --dry-run"), ["./", "with flags"])
+        self.assertEqual(how("bash tools/release.sh"), ["bash or sh"])
+        self.assertEqual(how("python3 tools/migrate.py --check", "tools/migrate.py"),
+                         ["python3", "with flags"])
+        # What a chain runs beside the script adds no flags to it.
+        self.assertEqual(how("cd ledger && tools/release.sh 2>&1 | tail -20"), ["bare"])
+        self.assertEqual(how("echo start; ./tools/release.sh; echo done"), ["./"])
+        self.assertEqual(how("cargo build", "cargo"), [])
+        self.assertEqual(metrics.invocation({"kind": "file", "text": "tools/release.sh"}), [])
+
+    def test_a_script_runs_deliveries_and_needs_are_counted_by_its_invocation(self):
+        memories = {"note": {"shape": "note", "points": [{"start": 0, "end": 40}]},
+                    "noise": {"shape": "look-alike", "points": [{"start": 0, "end": 40}]}}
+        task = {"actions": [{"kind": "prompt"},
+                            {"kind": "command", "about": ["command", "tools/release.sh", ""],
+                             "text": "bash tools/release.sh --fast"}],
+                "needs": [{"action": 1, "memory": "note", "point": 0, "subject": "command"}]}
+        matched = [[], [candidate("note", 3.5, length=40, command=True),
+                        candidate("noise", 3.1, length=40, command=True)]]
+        c = metrics.evaluate(task, matched, memories, BARS)
+        for group in ("script bash or sh", "script with flags"):
+            self.assertEqual((c[f"delivered|{group}"], c[f"right|{group}"]), (2, 1), group)
+            self.assertEqual((c[f"needed|{group}"], c[f"found|{group}"]), (1, 1), group)
+        self.assertEqual(c["delivered|script bare"], 0)
 
 
 if __name__ == "__main__":
