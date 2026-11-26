@@ -250,7 +250,7 @@ back before every other memory, so it ranks below them where the newest come
 first). `bulk` stores many alike memories in one import: `count` of them with
 the given `type`, `category`, `scope` and `project`, `{n}` in the `title` and
 `content` replaced by each one's number (one `record` each would be refused
-as similar). `seed_many` (`{"count": N}`) fills the store to N memories in
+as similar); a list of such groups stores each. `seed_many` (`{"count": N}`) fills the store to N memories in
 all with generated filler, after the seeds and bulk memories: made-up
 words with a few common ones, no code span, path or name a step could
 match, no rule type, and a tenth in projects no scenario loads. The same
@@ -300,7 +300,9 @@ kept after every step, for `file` checks on one step.
 `files` maps trial paths to text written before the first session, in
 private folders; a file inside a project checkout joins the project's first
 commit, so `commits` checks count only what the agent committed, and
-one in `exports/` is in the trial store's exports folder. `servers` names
+one in `exports/` is in the trial store's exports folder. `history` lists
+the project's earlier work, each a `cwd` and a `message` made as an empty
+commit after the first, which `commits` checks do not count either. `servers` names
 `user-memory host` servers, each on a loopback port with its store, token
 and log in the trial's `servers/<name>/`; they start before the first
 session and stop after the last. The client connects to the one `connect`
@@ -395,7 +397,8 @@ memory whose title or content matches.
 - `commands` / `commands_not`: a shell command of the step (or of every step,
   `"step": "all"`) does or does not match; `commands` with `count` (`N` or
   `>=N`) counts the matching commands.
-- `commits`: a commit landed after the project's first one, or with
+- `commits`: a commit landed after the project's first one and its
+  `history`, or with
   `matches`, one whose message matches (`^` is the start of its subject).
 - `commits_not`: no commit after the project's first one matches.
 - `approvals_not`: no escalation Codex asked for matches, whatever the

@@ -929,6 +929,29 @@ class FilesAndServers(unittest.TestCase):
                                     capture_output=True, text=True).stdout
         self.assertEqual(status, "")
 
+    def test_history_commits_come_after_the_first_and_only_the_agents_are_counted(self):
+        trial = Path(tempfile.mkdtemp()).resolve()
+        sandbox = types.SimpleNamespace(dir=trial, env={"PATH": "/usr/bin:/bin", "HOME": str(trial)})
+        sandbox.workdir = lambda spec, projects: run.Sandbox.workdir(sandbox, spec, projects)
+        signed = "Add the lexer\n\nSigned-off-by: Eval User <eval@example.invalid>"
+        scenario = {"cwd": "plain", "files": {"notebooks/NOTES.md": "x\n"},
+                    "history": [{"cwd": "project:notebooks", "message": signed},
+                                {"cwd": "project:notebooks", "message": "Add the parser"}]}
+        run.write_files(scenario, sandbox, {"notebooks": "git@github.com:acme/notebooks.git"})
+        checkout = trial / "notebooks"
+        git_out = lambda *a: run.subprocess.run([run.GIT, *a], cwd=checkout, capture_output=True,  # noqa: E731
+                                                text=True).stdout
+        self.assertEqual(git_out("log", "--format=%s").split("\n")[:3],
+                         ["Add the parser", "Add the lexer", "Start the project"])
+        self.assertIn("Signed-off-by: Eval User", git_out("log", "-1", "--format=%B", "HEAD~1"))
+        # The file joined the first commit, before the history.
+        self.assertIn("NOTES.md", git_out("show", "--name-only", "--format=", "HEAD~2"))
+        self.assertEqual(run.Sandbox.commit_messages(sandbox, checkout), [])
+        git = {**sandbox.env, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null"}
+        run.subprocess.run([run.GIT, "commit", "-q", "--allow-empty", "-m", "Mine"], cwd=checkout, env=git,
+                           check=True)
+        self.assertEqual(run.Sandbox.commit_messages(sandbox, checkout), ["Mine"])
+
     def test_servers_start_on_loopback_stop_and_refuse_the_clients_token(self):
         trial = Path(tempfile.mkdtemp()).resolve()
         # A stand-in for `user-memory host`: it listens where it is told.
@@ -1253,13 +1276,20 @@ class Planted(unittest.TestCase):
         self.assertEqual(self.test_file.stat().st_mode & 0o777, 0o640)
 
     def test_bulk_memories_are_numbered_and_valid_ids(self):
-        export = run.bulk_export({"count": 3, "type": "preference", "category": "style",
-                                  "scope": "project", "project": "github.com/acme/x",
-                                  "title": "Rule {n}", "content": "Say {n}"})
+        rules = {"count": 3, "type": "preference", "category": "style", "scope": "project",
+                 "project": "github.com/acme/x", "title": "Rule {n}", "content": "Say {n}"}
+        facts = {**rules, "count": 2, "type": "fact", "title": "Fact {n}"}
+        export = run.bulk_export(run.bulk_groups({"bulk": rules}))
         memories = export["memories"]
         self.assertEqual([m["title"] for m in memories], ["Rule 1", "Rule 2", "Rule 3"])
         self.assertEqual(memories[2]["content"], "Say 3")
         self.assertEqual(len({m["id"] for m in memories}), 3)
+        # Groups, each numbered on its own, with ids that never collide.
+        both = run.bulk_export(run.bulk_groups({"bulk": [rules, facts]}))["memories"]
+        self.assertEqual([m["title"] for m in both], ["Rule 1", "Rule 2", "Rule 3", "Fact 1", "Fact 2"])
+        self.assertEqual([m["type"] for m in both], ["preference"] * 3 + ["fact"] * 2)
+        self.assertEqual(len({m["id"] for m in both}), 5)
+        self.assertEqual(run.filler_count({"bulk": [rules, facts], "seed_many": {"count": 10}}), 5)
         for m in memories:
             self.assertEqual(str(uuid.UUID(m["id"])), m["id"])
             self.assertEqual(uuid.UUID(m["id"]).version, 4)
