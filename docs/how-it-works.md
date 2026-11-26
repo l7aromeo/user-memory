@@ -368,7 +368,9 @@ From user-memory, matching this step (read one for the rest before applying it):
   a `/clear` and a compaction. A passage is pushed once to each agent, and
   again only after 100 more steps when the work matches it again. A
   project rule session start printed in full counts as pushed to the
-  session's agent.
+  session's agent. A rule a subagent's start printed in full, or one a
+  forked Codex sub-agent carries from its parent, counts as pushed to that
+  subagent.
 - **Compaction and clear:** after a compaction the passages already pushed
   may be pushed again when the work matches them, as the earlier copies
   are gone; a `/clear` also forgets the steps; a resumed session keeps

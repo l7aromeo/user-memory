@@ -194,14 +194,22 @@ impl State {
                 [MAIN],
             )?;
         }
-        for memory in whole {
-            tx.execute(
-                "INSERT OR REPLACE INTO shown(agent, memory, passage, at) VALUES (?1, ?2, ?3, ?4)",
-                params![MAIN, memory, WHOLE, actions],
-            )?;
-        }
+        mark_whole(&tx, MAIN, whole, actions)?;
         tx.commit()?;
         Ok(state)
+    }
+
+    /// Counts `whole`, memories printed in full to `agent`'s context, as
+    /// shown to it from its current action: a subagent's start prints the
+    /// project rules as session start does for the session's own context.
+    pub(super) fn show_whole(&mut self, agent: &str, whole: &[&str]) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (_, actions, _) = context(&tx, agent)?;
+        mark_whole(&tx, agent, whole, actions)?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// The state of a session starting anew: every table dropped and made
@@ -439,6 +447,19 @@ fn context(conn: &Connection, agent: &str) -> Result<(i64, i64, usize)> {
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
     Ok((epoch, actions, usize::try_from(chars)?))
+}
+
+/// Marks each of `whole`, by the id as its print shows it, as shown in full
+/// to `agent` at action `at`: [`State::record`] then skips every passage of
+/// it for a stretch.
+fn mark_whole(conn: &Connection, agent: &str, whole: &[&str], at: i64) -> Result<()> {
+    for memory in whole {
+        conn.execute(
+            "INSERT OR REPLACE INTO shown(agent, memory, passage, at) VALUES (?1, ?2, ?3, ?4)",
+            params![agent, memory, WHOLE, at],
+        )?;
+    }
+    Ok(())
 }
 
 /// SQLite's write-ahead log beside the state file at `path`.
@@ -764,6 +785,30 @@ mod tests {
                 .record(MAIN, &command(), &reprinted, ROOM_CHARS)
                 .unwrap(),
             [] as [usize; 0]
+        );
+    }
+
+    #[test]
+    fn rules_printed_whole_to_a_subagent_count_as_shown_to_it_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = file(&dir);
+        let mut state = State::start(&path, Source::Startup, &[], soon()).unwrap();
+        state.show_whole("a1", &["e0000009"]).unwrap();
+        let rule = [offer("e0000009-0000-4000-8000-000000000009", 0)];
+        assert_eq!(
+            state.record("a1", &command(), &rule, ROOM_CHARS).unwrap(),
+            [] as [usize; 0],
+            "printed to the subagent"
+        );
+        assert_eq!(
+            state.record(MAIN, &command(), &rule, ROOM_CHARS).unwrap(),
+            [0],
+            "its parent was never shown it"
+        );
+        assert_eq!(
+            state.record("a2", &command(), &rule, ROOM_CHARS).unwrap(),
+            [0],
+            "nor another subagent"
         );
     }
 

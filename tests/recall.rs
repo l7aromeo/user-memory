@@ -174,8 +174,8 @@ impl Home {
         )
     }
 
-    /// Starts Codex's `session`.
-    fn start_codex(&self, session: &str) {
+    /// Starts Codex's `session` and returns what its start printed.
+    fn start_codex(&self, session: &str) -> String {
         let mut child = self
             .command(&["session-start", "--client", "codex"])
             .stdin(Stdio::piped())
@@ -190,7 +190,9 @@ impl Home {
             .unwrap()
             .write_all(payload.to_string().as_bytes())
             .unwrap();
-        assert!(time::finish(child, "session-start").status.success());
+        let out = time::finish(child, "session-start");
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout).unwrap()
     }
 
     /// The push after `command` ran in the main context of `session`.
@@ -896,6 +898,91 @@ fn a_codex_sub_agent_claims_the_oldest_task_of_its_session() {
         home.run_hook("subagent-start", "codex", &started("x3")).1,
         ""
     );
+}
+
+/// A home in a checkout of github.com/you/app holding one project rule,
+/// to run `cargo publish --dry-run` first, and that rule's id.
+fn publish_rule() -> (Home, String) {
+    let home = Home::new();
+    home.checkout();
+    let rule = home.record(
+        "Dry run before publishing",
+        "Run `cargo publish --dry-run` before `cargo publish`.",
+        &[
+            "--type",
+            "preference",
+            "--scope",
+            "project",
+            "--project",
+            "github.com/you/app",
+        ],
+    );
+    (home, rule)
+}
+
+#[test]
+fn a_rule_a_subagents_start_prints_in_full_is_not_pushed_to_it_again() {
+    let (home, rule) = publish_rule();
+    let publish = json!({"command": "cargo publish"});
+    // Claude Code: the subagent's start prints the rule in full, and its
+    // task names the rule's command.
+    home.start("s1", "startup");
+    home.run_hook(
+        "pre-tool-use",
+        "claude",
+        &json!({"session_id": "s1", "cwd": home.path(), "hook_event_name": "PreToolUse", "prompt_id": "p1",
+                "tool_name": "Agent", "tool_use_id": "t-1",
+                "tool_input": {"prompt": "Run `cargo publish` for the release.", "description": "Release",
+                               "subagent_type": "general-purpose"}}),
+    );
+    let (_, started) = home.run_hook(
+        "subagent-start",
+        "claude",
+        &json!({"session_id": "s1", "cwd": home.path(), "hook_event_name": "SubagentStart",
+                "prompt_id": "p1", "agent_id": "a1", "agent_type": "general-purpose"}),
+    );
+    assert_eq!(
+        started.matches(short(&rule)).count(),
+        1,
+        "printed in full, not pushed below it: {started}"
+    );
+    assert_eq!(
+        home.call("s1", Some("a1"), "Bash", publish, json!({})),
+        "",
+        "nor at the subagent's step"
+    );
+}
+
+#[test]
+fn a_rule_a_forked_codex_sub_agent_carries_is_not_pushed_to_it_again() {
+    let (home, rule) = publish_rule();
+    let publish = json!({"command": "cargo publish"});
+    // A forked sub-agent carries its parent's session start, rules
+    // included, so its start prints nothing and they count as shown.
+    let rules = home.start_codex("c1");
+    assert!(rules.contains(short(&rule)), "{rules}");
+    let forked = home.path().join("forked.jsonl");
+    let said = json!({"type": "response_item", "payload": {"type": "message", "role": "developer",
+                      "content": [{"type": "input_text", "text": rules}]}});
+    std::fs::write(&forked, format!("{said}\n")).unwrap();
+    assert_eq!(
+        home.run_hook(
+            "subagent-start",
+            "codex",
+            &json!({"session_id": "c1", "cwd": home.path(), "hook_event_name": "SubagentStart",
+                    "turn_id": "turn-x1", "agent_id": "x1", "agent_type": "default",
+                    "transcript_path": forked}),
+        )
+        .1,
+        ""
+    );
+    let (_, pushed) = home.push(
+        "codex",
+        &json!({"session_id": "c1", "cwd": home.path(), "hook_event_name": "PostToolUse",
+                "tool_name": "Bash", "tool_use_id": "call_1", "agent_id": "x1",
+                "tool_input": publish, "tool_response": ""}),
+    );
+    assert_eq!(pushed, "", "carried from the parent");
 }
 
 #[test]
