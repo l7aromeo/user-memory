@@ -12,6 +12,8 @@
 #[path = "support/sandbox.rs"]
 mod sandbox;
 use sandbox::Sandboxed;
+#[path = "support/older.rs"]
+mod older;
 #[path = "support/session.rs"]
 mod session;
 #[path = "support/time.rs"]
@@ -505,6 +507,8 @@ fn migrate_leaves_no_word_deleted_under_the_old_keyword_index() {
     // so its rows are not damage, with the marker's word deleted from it.
     // Words of many other rows make it far larger than the new index, so
     // the upgrade cannot overwrite its pages by reusing them.
+    // Versions 12 and 13 go first, then the index and the count.
+    older::back_to_v11(&store.db);
     let conn = Connection::open(&store.db).unwrap();
     conn.execute_batch(&format!(
             "DROP TABLE search_words;
@@ -535,8 +539,6 @@ DELETE FROM search_words WHERE rowid=1000;",
     }
     conn.execute_batch("DROP TABLE store_changes; DROP TABLE memory_changes;")
         .unwrap();
-    // And version 12's record of use.
-    conn.execute_batch("DROP TABLE memory_use;").unwrap();
     // Closed, so its log is copied into the file the check reads.
     drop(conn);
     assert!(

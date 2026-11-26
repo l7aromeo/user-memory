@@ -13,7 +13,7 @@ use uuid::Uuid;
 /// previous version in `migrate.rs`: `IF NOT EXISTS` keeps an older table or
 /// trigger as it was, so connecting refuses a store from another version
 /// instead of half upgrading it.
-pub(super) const SCHEMA_VERSION: i64 = 12;
+pub(super) const SCHEMA_VERSION: i64 = 13;
 
 /// The tables and the triggers that stale inferred patterns when their
 /// support weakens: a supporting memory deleted; one changed in what it
@@ -24,7 +24,16 @@ pub(super) const SCHEMA_VERSION: i64 = 12;
 /// refuses too (made global, or moved with its pattern, it still holds); or
 /// a removed conversation leaving the supports fewer than two independent
 /// conversations, counting each support without one as its own, as
-/// recording an inference requires.
+/// recording an inference requires; or a supporting memory ended.
+///
+/// A memory may hold until a condition (#121): one kind per memory, a UTC
+/// instant in one fixed format (so comparing the text compares the times),
+/// a tag with the project whose tags count, or free text. `memory_ended`
+/// records the end of a tag or text condition, once; a date ends when it
+/// passes, with no write. `live_memories` is what is in force: confirmed or
+/// tentative, its date not passed, not ended. Every reader that shows
+/// memories reads it, so no channel can miss an end; it selects `rowid`,
+/// which the store reads.
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS memories (
     id TEXT PRIMARY KEY NOT NULL CHECK(length(id)=36 AND substr(id,9,1)='-' AND substr(id,14,1)='-' AND substr(id,19,1)='-' AND substr(id,24,1)='-' AND substr(id,15,1)='4' AND substr(id,20,1) IN ('8','9','a','b') AND length(replace(id,'-',''))=32 AND replace(id,'-','') NOT GLOB '*[^0-9a-f]*'),
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -43,6 +52,9 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS memories (
     evidence_ids TEXT NOT NULL DEFAULT '[]',
     superseded_by TEXT,
     last_confirmed_at TEXT,
+    until_kind TEXT NOT NULL DEFAULT '' CHECK(until_kind IN ('','date','tag','text')),
+    until_value TEXT NOT NULL DEFAULT '',
+    until_project TEXT NOT NULL DEFAULT '' CHECK((until_kind='' AND until_value='' AND until_project='') OR (until_kind='date' AND until_value GLOB '[0-9][0-9][0-9][0-9]-[01][0-9]-[0-3][0-9]T[0-2][0-9]:[0-5][0-9]:[0-5][0-9]Z' AND until_project='') OR (until_kind='tag' AND length(until_value) BETWEEN 1 AND 255 AND length(until_project) BETWEEN 1 AND 240) OR (until_kind='text' AND length(until_value) BETWEEN 1 AND 120 AND until_project='')),
     CHECK(source='inferred' OR evidence_ids='[]'),
     CHECK(status IN ('confirmed','tentative','stale','superseded')),
     CHECK((status='superseded')=(superseded_by IS NOT NULL))
@@ -83,7 +95,22 @@ CREATE TRIGGER IF NOT EXISTS memory_origin_removed AFTER DELETE ON memory_origin
     WHERE status!='superseded' AND EXISTS (SELECT 1 FROM json_each(evidence_ids) WHERE value=OLD.memory_id)
     AND (SELECT COUNT(DISTINCT o.origin) FROM json_each(memories.evidence_ids) e JOIN memory_origins o ON o.memory_id=e.value)
         + (SELECT COUNT(*) FROM json_each(memories.evidence_ids) e WHERE NOT EXISTS (SELECT 1 FROM memory_origins o WHERE o.memory_id=e.value)) < 2;
-END;";
+END;
+CREATE TABLE IF NOT EXISTS memory_ended (
+    memory_id TEXT PRIMARY KEY NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    ended_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    how TEXT NOT NULL CHECK(how IN ('tag','evidence')),
+    evidence TEXT NOT NULL CHECK(length(evidence) BETWEEN 1 AND 2000),
+    origin TEXT NOT NULL DEFAULT ''
+);
+CREATE TRIGGER IF NOT EXISTS memory_support_ended AFTER INSERT ON memory_ended BEGIN
+    UPDATE memories SET status='stale',updated_at=CURRENT_TIMESTAMP
+    WHERE status!='superseded' AND EXISTS (SELECT 1 FROM json_each(evidence_ids) WHERE value=NEW.memory_id);
+END;
+CREATE VIEW IF NOT EXISTS live_memories AS SELECT rowid AS rowid, * FROM memories
+WHERE status IN ('confirmed','tentative')
+    AND NOT (until_kind='date' AND until_value<=strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+    AND NOT EXISTS (SELECT 1 FROM memory_ended WHERE memory_id=memories.id);";
 
 /// Cutoffs computed for an embedding model and vector length that has none
 /// built in, from the labelled pairs that ship in the binary. Null cutoffs

@@ -40,7 +40,7 @@ pub(super) enum Counts {
 /// it moves the counter. The triggers are made from this list, and a test
 /// fails when the table has a column it lacks, so a new column is decided
 /// here.
-pub(super) const MEMORY_COLUMNS: [(&str, Counts); 17] = [
+pub(super) const MEMORY_COLUMNS: [(&str, Counts); 20] = [
     ("id", Counts::No("the row's identity, never updated")),
     (
         "created_at",
@@ -69,6 +69,9 @@ pub(super) const MEMORY_COLUMNS: [(&str, Counts); 17] = [
         "last_confirmed_at",
         Counts::No("a confirmation changes nothing an agent acts on"),
     ),
+    ("until_kind", Counts::Yes),
+    ("until_value", Counts::Yes),
+    ("until_project", Counts::Yes),
 ];
 
 /// The columns whose change moves the counter.
@@ -92,7 +95,10 @@ pub(super) fn digested() -> String {
 /// The tables, index and triggers of the counter, safe to run on every open:
 /// each is created only where missing. The row of `store_changes` is not
 /// here, since an insert takes a write lock even when it adds nothing; a
-/// new or migrated store gets it from [`START`].
+/// new or migrated store gets it from [`START`]. An end record added, or
+/// removed while its memory stays (a reopening; a forget counts as its
+/// own), changes what is in force, so it counts as a change of its memory.
+/// A date passing writes nothing; the hooks watch for it instead.
 pub(super) fn schema() -> String {
     let columns: Vec<&str> = counted().collect();
     let old: Vec<String> = columns.iter().map(|c| format!("OLD.{c}")).collect();
@@ -133,6 +139,13 @@ END;
 CREATE TRIGGER IF NOT EXISTS memory_change_forgotten AFTER DELETE ON memories BEGIN
 {forgotten}
 END;
+CREATE TRIGGER IF NOT EXISTS memory_change_ended AFTER INSERT ON memory_ended BEGIN
+{ended}
+END;
+CREATE TRIGGER IF NOT EXISTS memory_change_reopened AFTER DELETE ON memory_ended
+WHEN EXISTS (SELECT 1 FROM memories WHERE id=OLD.memory_id) BEGIN
+{reopened}
+END;
 CREATE TRIGGER IF NOT EXISTS link_change_added AFTER INSERT ON conversation_projects BEGIN
 {links}
 END;
@@ -149,6 +162,8 @@ END;",
         new = new.join(","),
         updated = count("NEW.id", "NULL"),
         forgotten = count("OLD.id", "CURRENT_TIMESTAMP"),
+        ended = count("NEW.memory_id", "NULL"),
+        reopened = count("OLD.memory_id", "NULL"),
     )
 }
 
@@ -442,6 +457,11 @@ mod tests {
                 "created_at" | "updated_at" | "last_confirmed_at" => {
                     format!("{column}='2030-01-01 00:00:00'")
                 }
+                // A condition is one kind with what it needs: a text, then
+                // another text, then a tag with its project.
+                "until_kind" => "until_kind='text',until_value='changed'".to_owned(),
+                "until_value" => "until_value='changed again'".to_owned(),
+                "until_project" => "until_kind='tag',until_project='changed'".to_owned(),
                 _ => format!("{column}='changed'"),
             };
             conn.execute(&format!("UPDATE memories SET {set} WHERE id=?1"), [ID])
