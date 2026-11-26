@@ -29,8 +29,8 @@ use std::{
 use windows::{
     Win32::{
         Foundation::{
-            CloseHandle, ERROR_SHARING_VIOLATION, ERROR_SUCCESS, HANDLE, HLOCAL, LPARAM, LocalFree,
-            WIN32_ERROR, WPARAM,
+            CloseHandle, ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION, ERROR_SUCCESS, HANDLE,
+            HLOCAL, LPARAM, LocalFree, WIN32_ERROR, WPARAM,
         },
         Security::{
             ACCESS_ALLOWED_ACE, ACL, ACL_SIZE_INFORMATION, AclSizeInformation,
@@ -242,6 +242,16 @@ pub fn remove_file(path: &Path, wait: Duration) -> io::Result<()> {
     retry_shared(wait, || std::fs::remove_file(path))
 }
 
+/// Whether Windows refused to open a file that is there: a name being
+/// deleted, from the moment a delete marks the file until the handle that
+/// marked it closes (access denied), or a file another program opened
+/// without sharing (a sharing violation). Both pass once that handle closes.
+pub fn refused(err: &io::Error) -> bool {
+    [ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION]
+        .iter()
+        .any(|code| err.raw_os_error() == i32::try_from(code.0).ok())
+}
+
 /// Runs `step` until it ends in anything but a sharing violation, or `wait`
 /// has passed, pausing longer between tries as [`RENAME_PAUSE`] and
 /// [`RENAME_PAUSE_MAX`] say.
@@ -353,6 +363,38 @@ fn check(code: WIN32_ERROR) -> io::Result<()> {
     }
 }
 
+/// Marks `path` for deletion through a handle it keeps open, as a delete
+/// does between marking a file and closing it: until the returned file is
+/// dropped, every open of the name is refused, and then the name is gone.
+#[cfg(test)]
+pub fn pending_delete(path: &Path) -> std::fs::File {
+    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+    use windows::Win32::Storage::FileSystem::{
+        DELETE, FILE_DISPOSITION_INFO, FileDispositionInfo, SetFileInformationByHandle,
+    };
+    let file = std::fs::OpenOptions::new()
+        .access_mode(DELETE.0)
+        .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0)
+        .open(path)
+        .expect("the test's file is there");
+    let info = FILE_DISPOSITION_INFO { DeleteFile: true };
+    let size = u32::try_from(size_of::<FILE_DISPOSITION_INFO>())
+        .expect("a one-byte structure's size fits a u32");
+    // SAFETY: the handle is `file`'s, open with delete access for the whole
+    // call, and `info` is a FILE_DISPOSITION_INFO of `size` bytes, which the
+    // call only reads.
+    unsafe {
+        SetFileInformationByHandle(
+            HANDLE(file.as_raw_handle()),
+            FileDispositionInfo,
+            ptr::from_ref(&info).cast::<c_void>(),
+            size,
+        )
+    }
+    .expect("a file this test made can be marked for deletion");
+    file
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -450,5 +492,36 @@ mod tests {
             took < limit + ROOM,
             "the broadcast took {took:?}, past its {limit:?} limit"
         );
+    }
+
+    // An open of a name being deleted, or of a file opened without
+    // sharing, is refused, and `refused` names both; once the other handle
+    // closes, the name opens again or is gone.
+    #[test]
+    fn an_open_refused_while_another_handle_holds_the_name_is_named() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mark");
+        std::fs::write(&path, "named").unwrap();
+        let held = pending_delete(&path);
+        let refused_open = std::fs::read(&path).unwrap_err();
+        assert!(refused(&refused_open), "{refused_open}");
+        drop(held);
+        assert_eq!(
+            std::fs::read(&path).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        std::fs::write(&path, "named").unwrap();
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+        let shared = std::fs::read(&path).unwrap_err();
+        assert!(refused(&shared), "{shared}");
+        drop(held);
+        assert_eq!(std::fs::read(&path).unwrap(), b"named");
+        let missing = std::fs::read(dir.path().join("none")).unwrap_err();
+        assert!(!refused(&missing), "{missing}");
     }
 }

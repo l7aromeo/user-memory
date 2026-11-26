@@ -164,7 +164,8 @@ fn text(conn: &Connection, id: &str, m: &Matched) -> rusqlite::Result<String> {
 
 /// The base file at `path`, read as a hook reads a scope with no overlay.
 fn base(path: &std::path::Path) -> Result<View, String> {
-    let index = DeliveryIndex::load(path).map_err(|e| e.to_string())?;
+    let bytes = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let index = DeliveryIndex::read(bytes).map_err(|e| e.to_string())?;
     View::new(index, None).ok_or_else(|| format!("{}: not a base file", path.display()))
 }
 

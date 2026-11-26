@@ -28,6 +28,7 @@ use super::{
     delivery::{DeliveryIndex, View},
 };
 use crate::{paths, private};
+use anyhow::Context;
 use std::{
     collections::HashSet,
     fs::{self, File, OpenOptions, TryLockError},
@@ -56,6 +57,19 @@ const LOCK_POLL: Duration = Duration::from_millis(5);
 /// never stops either.
 #[cfg(windows)]
 pub(crate) const DELIVERY_REPLACE_WAIT: Duration = Duration::from_secs(2);
+
+/// How long a read of a delivery file tries again while Windows refuses to
+/// open it ([`crate::platform::windows::refused`]): a name another program
+/// deleted without POSIX semantics (a FAT or network volume, or an older
+/// user-memory) until its last reader closes, or a file a program opened
+/// without sharing, as a scanner does for a moment. Short, as a refusal is,
+/// and well inside the tool hook's 100 ms.
+#[cfg(windows)]
+const REFUSED_READ_WAIT: Duration = Duration::from_millis(20);
+
+/// The pause between two tries of a refused read.
+#[cfg(windows)]
+const REFUSED_READ_PAUSE: Duration = Duration::from_millis(2);
 
 /// How long a store's delivery file may go unwritten before session start
 /// deletes it: a scope no session used for a day keeps no copy of its
@@ -269,21 +283,33 @@ impl Files {
             .ok()
     }
 
-    /// The names of the files the void mark says readers take as absent.
-    pub(crate) fn voided(&self) -> Vec<String> {
-        fs::read_to_string(self.void_path())
-            .map(|text| text.lines().map(str::to_owned).collect())
-            .unwrap_or_default()
+    /// The names of the files the void mark says readers take as absent;
+    /// none without a mark or with an empty one. An error when the mark is
+    /// there but cannot be read: a removal's mark is never taken as naming
+    /// nothing, so a reader then uses none of the files, and a writer
+    /// changes nothing.
+    pub(crate) fn voided(&self) -> io::Result<Vec<String>> {
+        match read(&self.void_path()) {
+            Ok(bytes) => Ok(String::from_utf8_lossy(&bytes)
+                .lines()
+                .map(str::to_owned)
+                .collect()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(err) => Err(err),
+        }
     }
 
-    /// Makes the void mark name `names`, and removes it when there are
-    /// none.
+    /// Makes the void mark name `names`. A mark that comes to name nothing
+    /// is written empty, never deleted: on Windows a delete refuses every
+    /// open of the name for a moment, and readers open the mark at every
+    /// step (#218). With no mark and nothing to name, none is made.
     pub(crate) fn void(&self, lock: &Lock, names: &[String]) -> io::Result<()> {
         if names.is_empty() {
-            return match self.remove(lock, &self.void_path()) {
-                Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-                removed => removed,
-            };
+            match read(&self.void_path()) {
+                Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+                Ok(bytes) if bytes.is_empty() => return Ok(()),
+                _ => {}
+            }
         }
         self.write(lock, &self.void_path(), names.join("\n").as_bytes())
     }
@@ -304,7 +330,7 @@ impl Files {
         .and_then(|mut file| file.write_all(bytes))
         .and_then(|()| replace(&partial, path));
         if written.is_err() {
-            let _ = fs::remove_file(&partial);
+            let _ = remove(&partial);
         }
         written
     }
@@ -317,7 +343,7 @@ impl Files {
     /// Deletes `scope`'s base, then its overlay; a file that cannot be
     /// deleted is named in the void mark, so no reader uses it.
     pub(crate) fn clear(&self, lock: &Lock, scope: &[String]) -> io::Result<()> {
-        let mut left = self.voided();
+        let mut left = self.voided()?;
         for path in [self.base(scope), self.overlay(scope)] {
             match self.remove(lock, &path) {
                 Ok(()) => {}
@@ -350,14 +376,18 @@ impl Files {
     }
 
     /// What a writer holding the lock clears before its own work: the files
-    /// the void mark names, then the mark once none is left; every file
+    /// the void mark names, then the names, once none is left; every file
     /// being written, since only the holder can have one under way, so any
     /// other was left by a writer that was killed; and, when `aged` is
     /// given, every base and overlay not written for [`DELIVERY_AGE`]
     /// before it. A file that cannot be deleted stays named in the mark.
     pub(crate) fn tidy(&self, lock: &Lock, aged: Option<SystemTime>) {
+        // A mark that cannot be read stays as it is, naming what it names.
+        let Ok(voided) = self.voided() else {
+            return;
+        };
         let mut left = Vec::new();
-        for name in self.voided() {
+        for name in voided {
             match self.remove(lock, &self.dir.join(&name)) {
                 Err(err) if err.kind() != io::ErrorKind::NotFound => left.push(name),
                 _ => {}
@@ -397,20 +427,18 @@ impl Files {
     /// them, whatever the base's position: [`Files::open`] without its check
     /// against the store.
     fn view(&self, scope: &[String]) -> Option<View> {
-        let voided = self.voided();
+        let voided = self.voided().ok()?;
         let readable = |path: &Path| {
             let name = path.file_name().map(|name| name.to_string_lossy());
             !voided.iter().any(|v| Some(v.as_str()) == name.as_deref())
         };
         let overlay = self.overlay(scope);
-        let overlay = readable(&overlay)
-            .then(|| DeliveryIndex::load(&overlay).ok())
-            .flatten();
+        let overlay = readable(&overlay).then(|| load(&overlay).ok()).flatten();
         let base = self.base(scope);
         if !readable(&base) {
             return None;
         }
-        let base = DeliveryIndex::load(&base).ok()?;
+        let base = load(&base).ok()?;
         if base.header.projects != scope {
             return None;
         }
@@ -569,7 +597,7 @@ pub(crate) fn refresh(
     let scope = scope(projects);
     // Before the lock: one small read says whether there is anything to do.
     let marked = super::changes::marked(db);
-    let held = DeliveryIndex::load(&files.overlay(&scope)).ok();
+    let held = load(&files.overlay(&scope)).ok();
     let unchanged = marked
         .as_ref()
         .zip(held.as_ref())
@@ -578,7 +606,7 @@ pub(crate) fn refresh(
         });
     // A base deleted beside its overlay, by hand or by another program,
     // is built again by the prompt hook, so it is looked for too.
-    if unchanged && files.voided().is_empty() && files.base(&scope).exists() {
+    if unchanged && files.voided().is_ok_and(|v| v.is_empty()) && files.base(&scope).exists() {
         return Ok(Refreshed::Unchanged);
     }
     let lock = if wait {
@@ -681,6 +709,15 @@ fn held_for_tests(path: &Path, writing: bool) -> io::Result<()> {
 
 /// Renames `from` over `to`, on Windows trying again for up to
 /// [`DELIVERY_REPLACE_WAIT`] while another program holds either file.
+///
+/// On Windows a reader never finds `to` refused meanwhile, unlike after a
+/// delete: `fs::rename` tries `MoveFileExW`, which fails as access denied
+/// while a reader has `to` open, and then renames with POSIX semantics,
+/// which replaces the old file without leaving its name being deleted. So
+/// the files readers open are replaced, never deleted, in the steps of a
+/// session, the void mark among them ([`Files::void`]). The test that reads
+/// while hooks replace the files (tests/delivery_files.rs) fails if a
+/// later standard library drops that.
 fn replace(from: &Path, to: &Path) -> io::Result<()> {
     held_for_tests(to, true)?;
     #[cfg(windows)]
@@ -689,7 +726,38 @@ fn replace(from: &Path, to: &Path) -> io::Result<()> {
     fs::rename(from, to)
 }
 
-/// Deletes `path`, on Windows trying again as [`replace`] does.
+/// The bytes of the delivery file at `path`, tried again for up to
+/// [`REFUSED_READ_WAIT`] while Windows refuses to open it, so a file that
+/// is there is not taken as missing. Every read of a delivery file goes
+/// through it.
+pub(crate) fn read(path: &Path) -> io::Result<Vec<u8>> {
+    #[cfg(not(windows))]
+    return fs::read(path);
+    #[cfg(windows)]
+    {
+        let deadline = Instant::now() + REFUSED_READ_WAIT;
+        loop {
+            match fs::read(path) {
+                Err(err)
+                    if crate::platform::windows::refused(&err) && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(REFUSED_READ_PAUSE);
+                }
+                read => return read,
+            }
+        }
+    }
+}
+
+/// The delivery index at `path`, read through [`read`].
+fn load(path: &Path) -> Result<DeliveryIndex, super::delivery::Error> {
+    DeliveryIndex::read(read(path)?)
+}
+
+/// Deletes `path`, on Windows trying again as [`replace`] does. A reader
+/// that opens the name while it is being deleted is refused for that
+/// moment, which [`read`] waits out. Every delete of a delivery file goes
+/// through it.
 fn remove(path: &Path) -> io::Result<()> {
     held_for_tests(path, false)?;
     #[cfg(windows)]
@@ -794,6 +862,125 @@ mod tests {
         crate::memory::store_position(db).unwrap()
     }
 
+    // Every read and delete of a delivery file goes through `read` and
+    // `remove`, which on Windows try a refused open again and delete with
+    // POSIX semantics (#218): no other `fs::read` or `fs::remove_file` in
+    // this file's code, and none in the remote delivery code.
+    #[test]
+    fn every_read_and_delete_of_a_delivery_file_goes_through_one_helper() {
+        let source = include_str!("delivery_files.rs");
+        let start = source.find("#[cfg(test)]\nmod tests {").unwrap();
+        let end = start + source[start..].find("\n}\n").unwrap();
+        let code = format!("{}{}", &source[..start], &source[end..]);
+        for (call, helper) in [
+            ("fs::read(", "\npub(crate) fn read(path: &Path)"),
+            ("fs::remove_file(", "\nfn remove(path: &Path)"),
+        ] {
+            let start = code.find(helper).unwrap();
+            let body = start..start + code[start..].find("\n}\n").unwrap();
+            let outside: Vec<usize> = code
+                .match_indices(call)
+                .map(|(at, _)| at)
+                .filter(|at| !body.contains(at))
+                .collect();
+            assert!(outside.is_empty(), "{call} outside{helper}: {outside:?}");
+        }
+        assert!(
+            !code.contains("DeliveryIndex::load("),
+            "an index read past `load`"
+        );
+        let remote = include_str!("../remote/delivery.rs");
+        for call in ["fs::read(", "fs::remove_file(", "read_to_string("] {
+            assert!(
+                !remote.contains(call),
+                "src/remote/delivery.rs calls {call}"
+            );
+        }
+    }
+
+    // A void mark that is there but cannot be read is never taken as naming
+    // nothing: a reader uses none of the files, and a writer changes
+    // nothing. Here the mark's name is a folder, which no read opens.
+    #[test]
+    fn a_void_mark_that_cannot_be_read_withholds_every_file() {
+        let (_dir, db, files) = setup();
+        let lock = files.try_lock().unwrap().unwrap();
+        let built = base(&db);
+        files.write(&lock, &files.base(&ledger()), &built).unwrap();
+        files
+            .write(&lock, &files.overlay(&ledger()), &overlay_for(&built))
+            .unwrap();
+        assert!(files.view(&ledger()).is_some(), "read with no mark");
+        fs::create_dir(files.void_path()).unwrap();
+        assert!(files.voided().is_err());
+        assert!(files.view(&ledger()).is_none(), "a reader uses nothing");
+        assert!(files.readable_base(&ledger()).is_none());
+        assert!(files.clear(&lock, &ledger()).is_err(), "a writer stops");
+        files.tidy(&lock, None);
+        assert!(files.void_path().is_dir(), "the mark is left as it is");
+        assert!(files.base(&ledger()).exists() && files.overlay(&ledger()).exists());
+    }
+
+    // An empty void mark names nothing: a mark that came to name nothing
+    // is kept empty rather than deleted (#218), and every reader, older
+    // ones too, reads it as no names.
+    #[test]
+    fn an_empty_void_mark_voids_nothing() {
+        let (_dir, db, files) = setup();
+        let lock = files.try_lock().unwrap().unwrap();
+        let built = base(&db);
+        files.write(&lock, &files.base(&ledger()), &built).unwrap();
+        files
+            .write(&lock, &files.overlay(&ledger()), &overlay_for(&built))
+            .unwrap();
+        files.void(&lock, &[]).unwrap();
+        assert!(!files.void_path().exists(), "no mark is made for nothing");
+        let name = name_of(&files.base(&ledger()));
+        files.void(&lock, std::slice::from_ref(&name)).unwrap();
+        assert!(files.view(&ledger()).is_none(), "the named base is voided");
+        files.void(&lock, &[]).unwrap();
+        assert_eq!(fs::read(files.void_path()).unwrap(), b"", "kept, empty");
+        assert_eq!(files.voided().unwrap(), Vec::<String>::new());
+        assert!(
+            files.view(&ledger()).is_some(),
+            "an empty mark voids nothing"
+        );
+        files.tidy(&lock, None);
+        assert!(files.view(&ledger()).is_some());
+        assert_eq!(fs::read(files.void_path()).unwrap(), b"");
+    }
+
+    // On Windows, an open of a delivery file whose name is being deleted is
+    // refused: a read tries again, and finds the file gone once the delete
+    // ends; while it lasts past the wait, the void mark is taken as voiding
+    // everything, never as naming nothing.
+    #[cfg(windows)]
+    #[test]
+    fn a_read_waits_out_a_delete_and_a_mark_it_cannot_read_voids_everything() {
+        let (_dir, _db, files) = setup();
+        let lock = files.try_lock().unwrap().unwrap();
+        files.void(&lock, &["named.index".to_owned()]).unwrap();
+        let held = crate::platform::windows::pending_delete(&files.void_path());
+        let started = Instant::now();
+        let refused = files.voided().unwrap_err();
+        assert!(crate::platform::windows::refused(&refused), "{refused}");
+        assert!(started.elapsed() >= REFUSED_READ_WAIT, "tried again first");
+        drop(held);
+        assert_eq!(files.voided().unwrap(), Vec::<String>::new(), "gone");
+        // A delete that ends within the wait: the read finds no file.
+        files.void(&lock, &["named.index".to_owned()]).unwrap();
+        let held = crate::platform::windows::pending_delete(&files.void_path());
+        let ends = std::thread::spawn(move || {
+            std::thread::sleep(REFUSED_READ_WAIT / 4);
+            drop(held);
+        });
+        assert_eq!(
+            read(&files.void_path()).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        ends.join().unwrap();
+    }
+
     #[test]
     fn a_base_is_read_with_the_overlay_made_for_it_and_no_other() {
         let (_dir, db, files) = setup();
@@ -844,7 +1031,7 @@ mod tests {
         assert!(files.open(&ledger(), &now(&db)).is_none());
         files.void(&lock, &[]).unwrap();
         assert!(files.open(&ledger(), &now(&db)).is_some());
-        assert!(!files.void_path().exists());
+        assert_eq!(fs::read(files.void_path()).unwrap(), b"", "kept, empty");
     }
 
     #[test]
@@ -1296,14 +1483,19 @@ pub(crate) fn before_removal(
         anyhow::bail!(removing.refusal(files.holder(), wait));
     };
     files.tidy(&lock, None);
-    let kept = files.voided();
+    let kept = files.voided().with_context(|| {
+        format!(
+            "cannot read {}; nothing was changed",
+            files.void_path().display()
+        )
+    })?;
     let mut scopes: Vec<Vec<String>> = Vec::new();
     let mut damaged = Vec::new();
     for (_, path) in files.own() {
         if !path.extension().is_some_and(|e| e == BASE || e == OVERLAY) {
             continue;
         }
-        match DeliveryIndex::load(&path) {
+        match load(&path) {
             Ok(index) => {
                 let holds =
                     (0..index.len()).any(|m| index.id(m).is_ok_and(|id| touched.contains(id)));
@@ -1485,7 +1677,7 @@ impl Files {
         };
         let partial = format!(".{PARTIAL}");
         let before: Vec<PathBuf> = files
-            .voided()
+            .voided()?
             .iter()
             .map(|name| files.dir.join(name))
             .chain(
@@ -1503,7 +1695,7 @@ impl Files {
             .collect();
         files.tidy(&lock, aged);
         let held: Vec<PathBuf> = files
-            .voided()
+            .voided()?
             .iter()
             .map(|name| files.dir.join(name))
             .filter(|path| path.exists())
@@ -1586,10 +1778,10 @@ impl Files {
     fn readable_base(&self, scope: &[String]) -> Option<DeliveryIndex> {
         let path = self.base(scope);
         let name = path.file_name()?.to_string_lossy().into_owned();
-        if self.voided().contains(&name) {
+        if self.voided().ok()?.contains(&name) {
             return None;
         }
-        DeliveryIndex::load(&path).ok()
+        load(&path).ok()
     }
 
     /// Writes `base` in place of `scope`'s base, with an empty overlay made
@@ -1722,11 +1914,14 @@ pub(crate) fn served_bases(url: &str) -> Vec<(Vec<String>, String)> {
         return Vec::new();
     };
     let base = format!(".{BASE}");
+    let Ok(voided) = files.voided() else {
+        return Vec::new();
+    };
     files
         .own()
         .into_iter()
-        .filter(|(name, _)| name.ends_with(&base) && !files.voided().contains(name))
-        .filter_map(|(_, path)| DeliveryIndex::load(&path).ok())
+        .filter(|(name, _)| name.ends_with(&base) && !voided.contains(name))
+        .filter_map(|(_, path)| load(&path).ok())
         .filter(|index| index.header.part == super::delivery::Part::Base)
         .map(|index| (index.header.projects.clone(), index.header.position.clone()))
         .collect()
@@ -1762,7 +1957,7 @@ pub(crate) fn served_at_session_start(
     let Some(base) = files.readable_base(&scope) else {
         return Ok(ServedStart::Missing);
     };
-    let overlay = DeliveryIndex::load(&files.overlay(&scope))
+    let overlay = load(&files.overlay(&scope))
         .ok()
         .filter(|overlay| overlay.header.made_for == base.header.position);
     if let Some(overlay) = overlay

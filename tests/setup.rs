@@ -1301,7 +1301,11 @@ fn doctor_deletes_the_delivery_files_a_removal_left() {
         stdout(&out)
     );
     assert!(!left.exists());
-    assert!(!delivery.join(format!("{key}.void")).exists());
+    // The mark names nothing now, and stays, empty (#218).
+    assert_eq!(
+        fs::read_to_string(delivery.join(format!("{key}.void"))).unwrap(),
+        ""
+    );
 }
 
 /// Only Windows needs a particular Claude Code: elsewhere an old one is

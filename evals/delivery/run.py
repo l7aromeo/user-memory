@@ -549,6 +549,49 @@ def upkeep(binary, folder, drawn):
             "start_found": statistics.median(starts["found"])}
 
 
+# Windows' share modes (winnt.h). A reader that shares all three never stops
+# a writer from replacing or deleting the file, as the hooks' reads don't.
+FILE_SHARE_READ = 0x1
+FILE_SHARE_WRITE = 0x2
+FILE_SHARE_DELETE = 0x4
+# What Windows answers an open of a file being replaced or deleted
+# (winerror.h): access denied for a name pending delete, a sharing
+# violation for a file opened without sharing. Both pass in a moment.
+REFUSED_OPENS = {5, 32}
+# Not found (winerror.h): the file, or the path to it, is gone.
+NOT_FOUND = {2, 3}
+# What `read_shared` returns for a file Windows refused to open.
+REFUSED = object()
+
+
+def read_shared(path):
+    """The bytes of the delivery file at `path`, opened as the hooks open it,
+    so this read neither fails on nor holds up a writer replacing it: on
+    Windows through `CreateFile` sharing read, write and delete, as Rust's
+    `fs::read` does, where `Path.read_bytes` (the C runtime's `_wopen`)
+    shares no delete. None when the file is gone; REFUSED when Windows
+    refused to open it."""
+    if os.name != "nt":
+        try:
+            return path.read_bytes()
+        except FileNotFoundError:
+            return None
+    import _winapi
+    import msvcrt
+    try:
+        handle = _winapi.CreateFile(str(path), _winapi.GENERIC_READ,
+                                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                    0, _winapi.OPEN_EXISTING, 0, 0)
+    except OSError as err:
+        if err.winerror in NOT_FOUND:
+            return None
+        if err.winerror in REFUSED_OPENS:
+            return REFUSED
+        raise
+    with open(msvcrt.open_osfhandle(handle, os.O_RDONLY), "rb") as file:
+        return file.read()
+
+
 def served(binary, folder):
     """#180's costs through the real binary, with the store in `folder`
     served by `host` on loopback to a client in a throwaway home: session
@@ -613,18 +656,28 @@ def served(binary, folder):
         memory = json.loads(out.stdout)["id"]
 
         def held():
-            return any(hexed in path.read_bytes() for path in delivery.glob("*.*")
-                       if path.suffix in (".index", ".overlay"))
+            """Whether a delivery file holds the word; None when a file could
+            not be opened, which says neither (see `read_shared`)."""
+            unknown = False
+            for path in delivery.glob("*.*"):
+                if path.suffix not in (".index", ".overlay"):
+                    continue
+                data = read_shared(path)
+                if data is REFUSED:
+                    unknown = True
+                elif data is not None and hexed in data:
+                    return True
+            return None if unknown else False
 
         poll = rust_ms("src/remote/marker.rs", "REMOTE_MARKER_POLL")
         deadline = time.perf_counter() + 10 * poll / 1000
-        while not held() and time.perf_counter() < deadline:
+        while held() is not True and time.perf_counter() < deadline:
             time.sleep(0.05)
         subprocess.run([str(binary), "forget", memory], env=env, check=True, capture_output=True)
         forgot = time.perf_counter()
         left = None
         while time.perf_counter() < forgot + 10 * poll / 1000:
-            if not held():
+            if held() is False:
                 left = (time.perf_counter() - forgot) * 1000
                 break
             time.sleep(0.05)
