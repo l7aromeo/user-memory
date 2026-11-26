@@ -453,3 +453,46 @@ fn an_error_missing_state_or_an_overrun_never_holds() {
         "a damaged state file"
     );
 }
+
+#[test]
+fn a_session_whose_state_the_release_before_holds_wrote_holds_and_pushes() {
+    let home = Home::new();
+    let rule = dry_run(&home);
+    let [before, after] = ["quill", "ember"].map(|tool| {
+        home.record(
+            "fact",
+            &format!("{tool} sync needs its token"),
+            &format!("`{tool} sync` reads ~/.{tool}/token and stops when it is missing."),
+            true,
+        )
+    });
+    home.start("s1");
+    assert!(
+        home.after("s1", None, "quill sync")
+            .contains(short(&before))
+    );
+    // The state file as the release before holds writes it: layout 1, with
+    // no `held` table. The session's next hook runs on this release.
+    let files = home.recall_files();
+    assert_eq!(files.len(), 1, "{files:?}");
+    rusqlite::Connection::open(&files[0])
+        .unwrap()
+        .execute_batch("DROP TABLE held; PRAGMA user_version = 1;")
+        .unwrap();
+    let reason = home.before("s1", None, "cargo publish");
+    assert!(
+        reason.as_deref().is_some_and(|r| r.contains(short(&rule))),
+        "{reason:?}"
+    );
+    assert_eq!(
+        home.after("s1", None, "cargo publish"),
+        "",
+        "held, so shown"
+    );
+    assert_eq!(
+        home.after("s1", None, "quill sync"),
+        "",
+        "what the session was shown is kept"
+    );
+    assert!(home.after("s1", None, "ember sync").contains(short(&after)));
+}
