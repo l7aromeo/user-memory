@@ -1,6 +1,6 @@
 //! SQLite storage: schema, connection and row mapping.
 
-use super::Memory;
+use super::{Memory, in_force::live};
 use crate::private;
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
@@ -30,11 +30,13 @@ pub(super) const SCHEMA_VERSION: i64 = 13;
 /// instant in one fixed format (so comparing the text compares the times),
 /// a tag with the project whose tags count, or free text. `memory_ended`
 /// records the end of a tag or text condition, once; a date ends when it
-/// passes, with no write. `live_memories` is what is in force: confirmed or
-/// tentative, its date not passed, not ended. Every reader that shows
-/// memories reads it, so no channel can miss an end; it selects `rowid`,
-/// which the store reads.
-const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS memories (
+/// passes, with no write. `out_of_force` lists the memories ended or past
+/// their date, few beside the store, found through the end records and a
+/// partial index on dates; `live_memories` is what is in force: confirmed
+/// or tentative and not out of force ([`live`]). Every reader that shows
+/// memories applies that test, so no channel can miss an end; the view
+/// selects `rowid`, which the store reads.
+const SCHEMA: &str = concat!("CREATE TABLE IF NOT EXISTS memories (
     id TEXT PRIMARY KEY NOT NULL CHECK(length(id)=36 AND substr(id,9,1)='-' AND substr(id,14,1)='-' AND substr(id,19,1)='-' AND substr(id,24,1)='-' AND substr(id,15,1)='4' AND substr(id,20,1) IN ('8','9','a','b') AND length(replace(id,'-',''))=32 AND replace(id,'-','') NOT GLOB '*[^0-9a-f]*'),
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -107,10 +109,10 @@ CREATE TRIGGER IF NOT EXISTS memory_support_ended AFTER INSERT ON memory_ended B
     UPDATE memories SET status='stale',updated_at=CURRENT_TIMESTAMP
     WHERE status!='superseded' AND EXISTS (SELECT 1 FROM json_each(evidence_ids) WHERE value=NEW.memory_id);
 END;
-CREATE VIEW IF NOT EXISTS live_memories AS SELECT rowid AS rowid, * FROM memories
-WHERE status IN ('confirmed','tentative')
-    AND NOT (until_kind='date' AND until_value<=strftime('%Y-%m-%dT%H:%M:%SZ','now'))
-    AND NOT EXISTS (SELECT 1 FROM memory_ended WHERE memory_id=memories.id);";
+CREATE INDEX IF NOT EXISTS memories_until_date ON memories(until_value) WHERE until_kind='date';
+CREATE VIEW IF NOT EXISTS out_of_force AS SELECT memory_id AS id FROM memory_ended
+UNION ALL SELECT id FROM memories WHERE until_kind='date' AND until_value<=strftime('%Y-%m-%dT%H:%M:%SZ','now');
+CREATE VIEW IF NOT EXISTS live_memories AS SELECT rowid AS rowid, * FROM memories WHERE ", live!("memories"), ";");
 
 /// Cutoffs computed for an embedding model and vector length that has none
 /// built in, from the labelled pairs that ship in the binary. Null cutoffs
@@ -977,11 +979,9 @@ pub(super) fn refusal(
     })
 }
 
-/// The one test of "in force" for a statement over `memories` (or a table
-/// aliased so): the memory is in `live_memories`, whose definition is the
-/// only place the statuses, a passed date and an end record are written
-/// out. SQLite reads the uncorrelated `IN` once per statement.
-pub(super) const LIVE: &str = "memories.id IN (SELECT id FROM live_memories)";
+/// The test of "in force" for a statement over `memories` (or a table
+/// aliased so), as [`live`] writes it.
+pub(super) const LIVE: &str = live!("memories");
 pub(super) const SELECT: &str = "SELECT id,created_at,updated_at,memory_type,category,context,content,reason,source,status,scope,project,evidence,evidence_ids,rowid,(SELECT json_group_array(origin) FROM (SELECT origin FROM memory_origins WHERE memory_id=memories.id ORDER BY origin)),superseded_by,last_confirmed_at,title,until_kind,until_value,until_project FROM memories";
 pub(super) fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Memory> {
     let evidence: String = r.get(13)?;

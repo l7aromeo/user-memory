@@ -83,10 +83,12 @@ CREATE TRIGGER memory_support_ended AFTER INSERT ON memory_ended BEGIN
     WHERE status!='superseded' AND EXISTS (SELECT 1 FROM json_each(evidence_ids) WHERE value=NEW.memory_id);
 END
 ;
-CREATE VIEW live_memories AS SELECT rowid AS rowid, * FROM memories
-WHERE status IN ('confirmed','tentative')
-    AND NOT (until_kind='date' AND until_value<=strftime('%Y-%m-%dT%H:%M:%SZ','now'))
-    AND NOT EXISTS (SELECT 1 FROM memory_ended WHERE memory_id=memories.id)
+CREATE INDEX memories_until_date ON memories(until_value) WHERE until_kind='date'
+;
+CREATE VIEW out_of_force AS SELECT memory_id AS id FROM memory_ended
+UNION ALL SELECT id FROM memories WHERE until_kind='date' AND until_value<=strftime('%Y-%m-%dT%H:%M:%SZ','now')
+;
+CREATE VIEW live_memories AS SELECT rowid AS rowid, * FROM memories WHERE memories.status IN ('confirmed','tentative') AND memories.id NOT IN (SELECT id FROM out_of_force)
 ;
 CREATE TABLE conversation_projects (
     origin TEXT NOT NULL CHECK(length(origin) BETWEEN 1 AND 240),

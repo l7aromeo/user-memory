@@ -24,6 +24,7 @@ pub mod embedding;
 mod history;
 pub(crate) mod hold;
 mod ids;
+mod in_force;
 mod index;
 mod links;
 pub(crate) mod matcher;
