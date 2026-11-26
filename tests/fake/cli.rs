@@ -771,10 +771,22 @@ fn gh(calls: &Path, args: &[String]) -> u8 {
 }
 
 /// git for tests/tag_check.rs: logs each call to `git.calls` beside this
-/// copy, then runs the real git that `git.real` beside it names, with the
-/// same standard streams, and exits with its code.
+/// copy, waits as a slow machine's git would when `git.delay` beside it
+/// says so, then runs the real git that `git.real` names, with the same
+/// standard streams, and exits with its code. `git.delay` holds the
+/// milliseconds, then optionally an argument: only a call naming it waits.
 fn git(exe: &Path, args: &[String]) -> u8 {
     log(&exe.with_file_name("git.calls"), args);
+    if let Ok(delay) = fs::read_to_string(exe.with_file_name("git.delay")) {
+        let mut words = delay.split_whitespace();
+        let millis: u64 = words.next().unwrap().parse().unwrap();
+        if words
+            .next()
+            .is_none_or(|only| args.iter().any(|arg| arg == only))
+        {
+            thread::sleep(Duration::from_millis(millis));
+        }
+    }
     let real = fs::read_to_string(exe.with_file_name("git.real")).unwrap();
     Command::new(real.trim())
         .args(args)
