@@ -132,7 +132,12 @@ pub async fn subagent_rules(
     {
         return Some(Rules {
             text: String::new(),
-            whole: owned(memory::rules_in_full(part)),
+            whole: owned(
+                memory::rules_in_full(part)
+                    .into_iter()
+                    .chain(memory::most_used_in_full(most))
+                    .collect(),
+            ),
         });
     }
     let (limit, unit) = hook_limit(Some(client), context_limit);
@@ -145,7 +150,12 @@ pub async fn subagent_rules(
     let text = super::capped(printed.join("\n"), limit, unit, super::NOTICE_CUT);
     // A rule is one line, and the cap keeps whole lines: those still
     // printed in the rules part are the rules the subagent holds in full.
-    let whole = owned(memory::rules_in_full(memory::rules_part(&text)));
+    let whole = owned(
+        memory::rules_in_full(memory::rules_part(&text))
+            .into_iter()
+            .chain(memory::most_used_in_full(memory::most_used_part(&text)))
+            .collect(),
+    );
     Some(Rules { text, whole })
 }
 

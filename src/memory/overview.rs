@@ -913,6 +913,19 @@ pub fn most_used_part(text: &str) -> &str {
     rest[..end].trim_end_matches('\n')
 }
 
+/// The ids, as the most-used part prints them, of the memories it shows
+/// whole: each line but those that end with ` …`, a title and one passage.
+/// A whole memory whose own text ends so is taken for a passage, so it may
+/// be pushed again: a duplicate, never a memory held back.
+pub fn most_used_in_full(part: &str) -> Vec<&str> {
+    part.lines()
+        .skip(1)
+        .filter(|line| !line.ends_with(" …"))
+        .filter_map(|line| line.strip_prefix("- ")?.get(..super::read::SHORT_ID))
+        .filter(|id| id.bytes().all(|b| b.is_ascii_hexdigit()))
+        .collect()
+}
+
 /// The ids, as [`full_rule`] prints them, of the rules a rules part shows
 /// in full: each project's rule lines before its [`BY_TITLE`] line. Recall
 /// counts these as shown, so a hook does not push them again.

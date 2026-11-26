@@ -203,9 +203,16 @@ pub fn post_tool_use(client: HookClient, _context_limit: Option<usize>) -> Strin
         return String::new();
     };
     session.keep_current();
+    let origin = super::origin(client, &payload);
     let Ok(payload) = serde_json::from_slice::<Value>(&payload) else {
         return String::new();
     };
+    super::used::note(
+        session.snapshot(),
+        &payload,
+        origin.as_deref(),
+        session.deadline(),
+    );
     let Some(mut action) = action(&payload) else {
         return String::new();
     };

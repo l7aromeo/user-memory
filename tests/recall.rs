@@ -643,10 +643,19 @@ fn session_start_opens_epochs_and_its_rules_in_full_count_as_shown() {
             "github.com/you/app",
         ],
     );
+    // An agent's note of a wish, which the most-used part never prints
+    // (#123): only pushes bring it.
     let note = home.record(
         "Check before committing",
         "Run `just check` before every commit.",
-        &[],
+        &[
+            "--type",
+            "preference",
+            "--source",
+            "observed",
+            "--evidence",
+            "The user ran it before each commit",
+        ],
     );
     home.start("s1", "startup");
     assert_eq!(

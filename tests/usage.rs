@@ -1029,3 +1029,137 @@ fn the_most_used_part_prints_the_passage_most_sessions_were_shown() {
     post("s4", Some(3));
     assert!(line(&host).contains("— foxtrot "), "{}", line(&host));
 }
+
+/// Runs `hook` of Claude Code in `folder` as a client of the server, with
+/// its own home at `home` and `payload` on stdin.
+fn as_client(host: &Host, home: &Path, folder: &Path, hook: &str, payload: &Value) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_user-memory"))
+        .args([hook, "--client", "claude"])
+        .current_dir(folder)
+        .sandboxed(home)
+        .env("USER_MEMORY_URL", format!("http://{}/mcp", host.address))
+        .env(
+            "USER_MEMORY_TOKEN_FILE",
+            host.root.path().join("access-token"),
+        )
+        .env_remove("USER_MEMORY_DB")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", host.git_config())
+        .env(HOOK_ROOM.0, HOOK_ROOM.1)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    let out = time::finish(child, hook);
+    assert!(out.status.success(), "{out:?}");
+}
+
+/// A session of a server's client in `folder`: its start, a `read` that
+/// returned `memory`, and a prompt.
+fn read_then_prompt(host: &Host, home: &Path, folder: &Path, session: &str, memory: &str) {
+    let base = json!({"session_id": session, "cwd": folder});
+    let with = |event: &str, extra: Value| {
+        let mut payload = base.clone();
+        payload["hook_event_name"] = json!(event);
+        for (key, value) in extra.as_object().unwrap() {
+            payload[key] = value.clone();
+        }
+        payload
+    };
+    as_client(
+        host,
+        home,
+        folder,
+        "session-start",
+        &with("SessionStart", json!({"source": "startup"})),
+    );
+    let reply = json!({"memories": [{"id": memory}]}).to_string();
+    as_client(
+        host,
+        home,
+        folder,
+        "post-tool-use",
+        &with(
+            "PostToolUse",
+            json!({"tool_name": "mcp__user-memory__read", "tool_input": {}, "tool_response": [{"type": "text", "text": reply}]}),
+        ),
+    );
+    as_client(
+        host,
+        home,
+        folder,
+        "prompt-submit",
+        &with("UserPromptSubmit", json!({"prompt": "Go on."})),
+    );
+}
+
+// A server's client sends its session's use with POST /use at the next
+// prompt; a server from before the route (404) gets none, now or later in
+// the session.
+#[test]
+fn a_server_s_client_sends_its_use_at_the_next_prompt() {
+    let host = Host::start(&[]);
+    let app = host.repository("app", "git@github.com:example/app.git");
+    let id = host.record("Run the fast tests first", None);
+    let home = tempdir().unwrap();
+    read_then_prompt(&host, home.path(), &app, "s1", &id);
+    let rows = host.rows();
+    assert_eq!(
+        rows,
+        [(
+            id.clone(),
+            PROJECT.to_owned(),
+            "claude:session/s1".to_owned(),
+            1,
+            0,
+            0,
+            None,
+            None
+        )]
+    );
+    // Sent once: a later prompt with nothing new sends nothing.
+    let at = || -> String {
+        Connection::open(host.db())
+            .unwrap()
+            .query_row("SELECT at FROM memory_use", [], |r| r.get(0))
+            .unwrap()
+    };
+    let written = at();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    as_client(
+        &host,
+        home.path(),
+        &app,
+        "prompt-submit",
+        &json!({"session_id": "s1", "cwd": app, "hook_event_name": "UserPromptSubmit", "prompt": "Go on."}),
+    );
+    assert_eq!(at(), written, "nothing new, nothing sent");
+    let older = Host::start(&[("USER_MEMORY_TEST_NO_USE_ROUTE", "1")]);
+    let app = older.repository("app", "git@github.com:example/app.git");
+    let id = older.record("Run the fast tests first", None);
+    let home = tempdir().unwrap();
+    read_then_prompt(&older, home.path(), &app, "s1", &id);
+    assert_eq!(older.rows(), []);
+    // The session keeps that the server takes no use, so it never asks
+    // again.
+    let state = fs::read_dir(home.path().join(".local/state/user-memory/sessions"))
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| path.extension().is_some_and(|e| e == "recall"))
+        .unwrap();
+    let refused: i64 = Connection::open(state)
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM meta WHERE key = 'no_use'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(refused, 1);
+}
