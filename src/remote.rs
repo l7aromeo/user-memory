@@ -579,6 +579,7 @@ pub async fn connect_over(
         &endpoint,
         &token_file,
         behind_front,
+        forwarded_call_limit(),
     )
     .await;
     // The poller ends its kept session on its own time, so a hand-over or
@@ -709,6 +710,32 @@ const FIRST_ANSWER: Duration = Duration::from_secs(3);
 /// keeps what it had before the bridge answered handshakes itself; a later
 /// reconnect has [`RECONNECT_TIMEOUT`].
 const APP_START_LIMIT: Duration = Duration::from_secs(30);
+
+/// How long a call the relay forwarded may wait for the server's answer
+/// before the relay answers it with an error and drops the connection. Above
+/// the slowest call the server bounds, a semantic `search` at about 214 s
+/// (two embedding requests of 2 s connect and 60 s each, then a write's three
+/// 30 s [`crate::memory::BUSY`] stages), and under the 300 s Codex gives a
+/// tool call (`DEFAULT_TOOL_TIMEOUT` in its codex-rs/codex-mcp/src/rmcp_client.rs;
+/// its docs say 60 s), so the agent gets this answer, not the app's timeout.
+/// Claude Code moves a call past two minutes to a background task, where the
+/// reply still arrives, and its own limits are far longer (code.claude.com/docs/en/mcp,
+/// "Time limits on MCP tool calls").
+const FORWARDED_CALL_LIMIT: Duration = Duration::from_secs(240);
+
+/// [`FORWARDED_CALL_LIMIT`], which debug builds take in milliseconds from
+/// `USER_MEMORY_FORWARDED_CALL_LIMIT_MS` so tests can see a stalled server's
+/// call answered without waiting minutes.
+fn forwarded_call_limit() -> Duration {
+    #[cfg(debug_assertions)]
+    if let Some(ms) = std::env::var("USER_MEMORY_FORWARDED_CALL_LIMIT_MS")
+        .ok()
+        .and_then(|ms| ms.parse().ok())
+    {
+        return Duration::from_millis(ms);
+    }
+    FORWARDED_CALL_LIMIT
+}
 
 /// How long the bridge waits for the stand-in's answers to the requests it
 /// still holds when the server takes over. It answers from memory, in the
@@ -852,7 +879,9 @@ async fn replay_handshake<R: Transport<RoleClient>>(
 /// ends the relay: its calls are answered and the next one reconnects.
 /// Ending would not even free the client, since the process can't exit
 /// while tokio's stdin reader is blocked in a read that can't be cancelled,
-/// so it would stay up, silent, until the client's next message.
+/// so it would stay up, silent, until the client's next message. A call
+/// forwarded to the server waits at most `call_limit` for its answer
+/// ([`FORWARDED_CALL_LIMIT`]).
 async fn forward<R: Transport<RoleClient>>(
     mut local: impl Transport<RoleServer>,
     mut remote: R,
@@ -860,6 +889,7 @@ async fn forward<R: Transport<RoleClient>>(
     endpoint: &str,
     token_file: &Path,
     behind_front: bool,
+    call_limit: Duration,
 ) -> Result<()> {
     let mut sends = tokio::task::JoinSet::<Result<()>>::new();
     let mut outgoing = tokio::task::JoinSet::<Result<()>>::new();
@@ -867,6 +897,10 @@ async fn forward<R: Transport<RoleClient>>(
     let mut writes = Vec::new();
     // The app's requests the server has not answered, with their methods.
     let mut pending: Vec<(serde_json::Value, String)> = Vec::new();
+    // When each request forwarded to the server is answered with an error
+    // instead ([`FORWARDED_CALL_LIMIT`]), oldest first; only those still
+    // pending count.
+    let mut due: Vec<(serde_json::Value, tokio::time::Instant)> = Vec::new();
     let mut initialize: Option<RxJsonRpcMessage<RoleServer>> = None;
     let mut initialized: Option<RxJsonRpcMessage<RoleServer>> = None;
     let mut initial_version: Option<serde_json::Value> = None;
@@ -900,6 +934,7 @@ async fn forward<R: Transport<RoleClient>>(
     let mut disconnected = false;
     let mut error = None;
     loop {
+        due.retain(|(id, _)| pending.iter().any(|(request_id, _)| request_id == id));
         tokio::select! {
             message = Transport::<RoleServer>::receive(&mut local) => {
                 let Some(message) = message else { break; };
@@ -1036,6 +1071,9 @@ async fn forward<R: Transport<RoleClient>>(
                     continue;
                 }
                 writes.extend(write_call(&message));
+                if let Some(id) = value.get("id") && value.get("method").is_some() {
+                    due.push((id.clone(), tokio::time::Instant::now() + call_limit));
+                }
                 let send = Transport::<RoleClient>::send(&mut remote, message);
                 start_in_order(&mut outgoing, async move { send.await.context("Memory server request failed") });
             }
@@ -1104,6 +1142,19 @@ async fn forward<R: Transport<RoleClient>>(
                 let message = Failure::Unanswered.message(endpoint, token_file);
                 fail_pending(&mut local, &mut sends, &mut pending, &message)?;
                 writes.clear();
+                disconnected = true;
+            }
+            () = tokio::time::sleep_until(due.first().map_or_else(tokio::time::Instant::now, |(_, at)| *at)), if !disconnected && !due.is_empty() => {
+                // The server took a forwarded call and has not answered it in
+                // time. Every call waiting on it is answered. Cancelling the
+                // sends drops their requests, so the server's late answers
+                // have nowhere to arrive; the connection is not read while
+                // disconnected, and the next call replaces it.
+                outgoing.shutdown().await;
+                let message = Failure::Unanswered.message(endpoint, token_file);
+                fail_pending(&mut local, &mut sends, &mut pending, &message)?;
+                writes.clear();
+                due.clear();
                 disconnected = true;
             }
             message = from_stand_in(&mut stand_in) => {
@@ -1708,6 +1759,7 @@ mod tests {
             "test",
             Path::new("token"),
             false,
+            FORWARDED_CALL_LIMIT,
         ));
         runtime.block_on(async {
             while written.lock().unwrap().len() < 2 || sent.lock().unwrap().len() < 3 {
@@ -1738,7 +1790,7 @@ mod tests {
                 let local = Local { incoming, written: written.clone() };
                 let remote = Remote { replies, sent: sent.clone() };
                 let mut next = Some(Remote { replies: next_replies, sent: resumed.clone() });
-                let task = tokio::spawn(forward(local, remote, move || next.take().context("no transport"), "test", Path::new("token"), false));
+                let task = tokio::spawn(forward(local, remote, move || next.take().context("no transport"), "test", Path::new("token"), false, FORWARDED_CALL_LIMIT));
                 let wait_for = |log: Log, n| async move {
                     tokio::time::timeout(Duration::from_secs(5), async {
                         while log.lock().unwrap().len() < n {
@@ -1773,5 +1825,133 @@ mod tests {
                 task.await.unwrap().unwrap();
             });
         }
+    }
+
+    /// Stands in for the stdio client, keeping every message it is sent.
+    struct Seen {
+        incoming: mpsc::UnboundedReceiver<RxJsonRpcMessage<RoleServer>>,
+        written: Arc<Mutex<Vec<serde_json::Value>>>,
+    }
+
+    impl Transport<RoleServer> for Seen {
+        type Error = io::Error;
+        fn send(
+            &mut self,
+            item: TxJsonRpcMessage<RoleServer>,
+        ) -> impl Future<Output = io::Result<()>> + Send + 'static {
+            self.written
+                .lock()
+                .unwrap()
+                .push(serde_json::to_value(&item).unwrap());
+            std::future::ready(Ok(()))
+        }
+        async fn receive(&mut self) -> Option<RxJsonRpcMessage<RoleServer>> {
+            self.incoming.recv().await
+        }
+        async fn close(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Stands in for a server connection whose send of request `held` waits
+    /// until the test lets it go, then fails, as a connection reset after a
+    /// stall does.
+    struct Stalling {
+        replies: mpsc::UnboundedReceiver<RxJsonRpcMessage<RoleClient>>,
+        sent: Log,
+        held: Option<(serde_json::Value, tokio::sync::oneshot::Receiver<()>)>,
+    }
+
+    impl Transport<RoleClient> for Stalling {
+        type Error = io::Error;
+        fn send(
+            &mut self,
+            item: TxJsonRpcMessage<RoleClient>,
+        ) -> impl Future<Output = io::Result<()>> + Send + 'static {
+            let id = serde_json::to_value(&item).unwrap()["id"].clone();
+            self.sent.lock().unwrap().push(label(&item));
+            let held = match self.held.take() {
+                Some((held, release)) if held == id => Some(release),
+                other => {
+                    self.held = other;
+                    None
+                }
+            };
+            async move {
+                if let Some(release) = held {
+                    let _ = release.await;
+                    return Err(io::Error::other("connection reset"));
+                }
+                Ok(())
+            }
+        }
+        async fn receive(&mut self) -> Option<RxJsonRpcMessage<RoleClient>> {
+            self.replies.recv().await
+        }
+        async fn close(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The forwarded-call deadline of the given-up-send test: long enough for
+    /// the steps after it, which take milliseconds, short enough to be quick.
+    const GIVE_UP_AFTER: Duration = Duration::from_secs(1);
+
+    // A call the server never answered is answered at the deadline. Its send
+    // failing later, once the next connection carries a call, must not answer
+    // that call too: the relay cancels the sends it gave up on.
+    #[test]
+    fn a_send_given_up_on_that_fails_later_leaves_the_next_connections_call_be() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let written = Arc::<Mutex<Vec<serde_json::Value>>>::default();
+            let (sent, resumed) = (Log::default(), Log::default());
+            let (to_local, incoming) = mpsc::unbounded_channel();
+            let (to_remote, replies) = mpsc::unbounded_channel();
+            let (to_next, next_replies) = mpsc::unbounded_channel();
+            let (release, released) = tokio::sync::oneshot::channel();
+            let local = Seen { incoming, written: written.clone() };
+            let remote = Stalling { replies, sent: sent.clone(), held: Some((serde_json::json!(3), released)) };
+            let mut next = Some(Stalling { replies: next_replies, sent: resumed.clone(), held: None });
+            let task = tokio::spawn(forward(local, remote, move || next.take().context("no transport"), "test", Path::new("token"), false, GIVE_UP_AFTER));
+            let wait_until = |done: Box<dyn Fn() -> bool>| async move {
+                while !done() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            };
+            let init = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}});
+            let init_reply = serde_json::json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"test","version":"1"}}});
+            let call = |id| serde_json::json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"index","arguments":{}}});
+            to_local.send(message(init)).unwrap();
+            let log = sent.clone();
+            wait_until(Box::new(move || !log.lock().unwrap().is_empty())).await;
+            to_remote.send(message(init_reply.clone())).unwrap();
+            let seen = written.clone();
+            wait_until(Box::new(move || !seen.lock().unwrap().is_empty())).await;
+            to_local.send(message(serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}))).unwrap();
+            to_local.send(message(call(3))).unwrap();
+            // At the deadline, call 3 is answered.
+            let seen = written.clone();
+            wait_until(Box::new(move || seen.lock().unwrap().iter().any(|m| m["id"] == 3))).await;
+            to_next.send(message(init_reply)).unwrap();
+            to_local.send(message(call(5))).unwrap();
+            let log = resumed.clone();
+            wait_until(Box::new(move || log.lock().unwrap().len() == 3)).await;
+            // Call 5 waits on the new connection; the given-up send fails now.
+            let _ = release.send(());
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            to_next.send(message(serde_json::json!({"jsonrpc":"2.0","id":5,"result":{"content":[],"isError":false}}))).unwrap();
+            let seen = written.clone();
+            wait_until(Box::new(move || seen.lock().unwrap().iter().any(|m| m["id"] == 5))).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let answers: Vec<_> = written.lock().unwrap().iter().filter(|m| m["id"] == 5).cloned().collect();
+            assert_eq!(answers, [serde_json::json!({"jsonrpc":"2.0","id":5,"result":{"content":[],"isError":false}})]);
+            assert_eq!(*resumed.lock().unwrap(), ["initialize", "notifications/initialized", "tools/call"]);
+            drop(to_local);
+            task.await.unwrap().unwrap();
+        });
     }
 }

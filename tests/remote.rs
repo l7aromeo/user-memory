@@ -607,6 +607,11 @@ fn connector_answers_a_tool_call_when_the_host_stops() {
 /// A `user-memory connect` to `host` from a client folder `home` with the
 /// token file `token`; its stderr is piped for [`assert_no_token`].
 fn connector(host: &Host, home: &Path, token: &Path) -> ChildGuard {
+    connector_with(host, home, token, &[])
+}
+
+/// [`connector`] with `env` set as well.
+fn connector_with(host: &Host, home: &Path, token: &Path, env: &[(&str, &str)]) -> ChildGuard {
     ChildGuard(
         Command::new(env!("CARGO_BIN_EXE_user-memory"))
             .arg("connect")
@@ -616,6 +621,7 @@ fn connector(host: &Host, home: &Path, token: &Path) -> ChildGuard {
             .arg(token)
             .sandboxed(home)
             .env_remove("USER_MEMORY_DB")
+            .envs(env.iter().copied())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -719,6 +725,124 @@ fn connector_keeps_working_across_a_restart_between_calls() {
     let after = reply_to(&output, "index after the restart", Some(&errors));
     assert_eq!(after["id"], 3);
     assert_ne!(after["result"]["isError"], true, "{after}");
+    drop(input);
+    assert!(child.0.wait().unwrap().success());
+    assert_no_token(errors);
+}
+
+/// The forwarded-call deadline the stall test gives the connector, in
+/// milliseconds: past the relay's 10 s reconnect bound with room to tell the
+/// two apart, so a call after the deadline shows it reconnects (answered at
+/// the reconnect bound) rather than waiting out another deadline.
+#[cfg(unix)]
+const FORWARDED_CALL_TEST_LIMIT_MS: u64 = 15_000;
+
+/// How long the stall test waits for a late reply that must not come: the
+/// resumed host answers within milliseconds.
+#[cfg(unix)]
+const LATE_REPLY_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The relay's reconnect bound (`RECONNECT_TIMEOUT` in src/remote.rs).
+#[cfg(unix)]
+const RECONNECT_BOUND: std::time::Duration = std::time::Duration::from_secs(10);
+
+// Unix only: it stops the host with SIGSTOP, so the host keeps its
+// connections open and answers nothing until SIGCONT.
+#[cfg(unix)]
+#[test]
+fn a_call_a_stalled_host_never_answers_is_answered_at_the_deadline_and_its_late_reply_dropped() {
+    let host = Host::start(root());
+    let client = tempdir().unwrap();
+    let client_token = client.path().join("token");
+    fs::write(&client_token, TOKEN).unwrap();
+    let limit = FORWARDED_CALL_TEST_LIMIT_MS.to_string();
+    let mut child = connector_with(
+        &host,
+        client.path(),
+        &client_token,
+        &[("USER_MEMORY_FORWARDED_CALL_LIMIT_MS", &limit)],
+    );
+    let mut input = child.0.stdin.take().unwrap();
+    let errors = Logged::of(child.0.stderr.take().unwrap());
+    let output = lines(child.0.stdout.take().unwrap());
+    writeln!(input, "{}", initialize(1)).unwrap();
+    input.flush().unwrap();
+    assert!(
+        reply_to(&output, "initialize", Some(&errors))
+            .get("result")
+            .is_some()
+    );
+    writeln!(
+        input,
+        "{}",
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"})
+    )
+    .unwrap();
+    writeln!(input, "{}", call(2, "index", json!({}))).unwrap();
+    input.flush().unwrap();
+    let answered = reply_to(&output, "index before the stall", Some(&errors));
+    assert_eq!(answered["id"], 2);
+    assert_ne!(answered["result"]["isError"], true, "{answered}");
+    let pid = host.child.id().to_string();
+    let signal = |name: &str| {
+        assert!(
+            Command::new("kill")
+                .args([format!("-{name}"), pid.clone()])
+                .status()
+                .unwrap()
+                .success()
+        );
+    };
+    signal("STOP");
+    let started = std::time::Instant::now();
+    writeln!(input, "{}", call(3, "index", json!({}))).unwrap();
+    input.flush().unwrap();
+    let unanswered = reply_to(&output, "index while the host is stalled", Some(&errors));
+    let waited = started.elapsed();
+    assert_eq!(unanswered["id"], 3);
+    assert_eq!(unanswered["result"]["isError"], true, "{unanswered}");
+    assert!(
+        unanswered["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .ends_with("did not answer; the call may not have completed. Before repeating a write, search for it. Memory reconnects on the next call."),
+        "{unanswered}"
+    );
+    assert!(
+        waited >= std::time::Duration::from_millis(FORWARDED_CALL_TEST_LIMIT_MS),
+        "answered after {waited:?}, before the deadline"
+    );
+    // The next call reconnects instead of waiting on the dropped
+    // connection: the stalled host never answers its handshake, so it is
+    // answered at the reconnect bound, before another deadline.
+    let started = std::time::Instant::now();
+    writeln!(input, "{}", call(4, "index", json!({}))).unwrap();
+    input.flush().unwrap();
+    let retried = reply_to(
+        &output,
+        "index while the host is still stalled",
+        Some(&errors),
+    );
+    let waited = started.elapsed();
+    assert_eq!(retried["id"], 4);
+    assert_eq!(retried["result"]["isError"], true, "{retried}");
+    assert!(
+        waited >= RECONNECT_BOUND
+            && waited < std::time::Duration::from_millis(FORWARDED_CALL_TEST_LIMIT_MS),
+        "answered after {waited:?}, not at the reconnect bound"
+    );
+    signal("CONT");
+    // The host, running again, answers calls 3 and 4 on what the relay
+    // dropped: call 5 gets its own answer, and neither late one follows.
+    writeln!(input, "{}", call(5, "index", json!({}))).unwrap();
+    input.flush().unwrap();
+    let next = reply_to(&output, "index after the stall", Some(&errors));
+    assert_eq!(next["id"], 5, "{next}");
+    assert_ne!(next["result"]["isError"], true, "{next}");
+    assert!(
+        output.recv_timeout(LATE_REPLY_WAIT).is_err(),
+        "a late reply was passed on"
+    );
     drop(input);
     assert!(child.0.wait().unwrap().success());
     assert_no_token(errors);
