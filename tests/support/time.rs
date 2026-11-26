@@ -4,7 +4,9 @@
 #![allow(dead_code, reason = "each test file uses part of this module")]
 
 use std::{
-    process::{Child, Output},
+    process::{Child, Command, Output},
+    sync::mpsc,
+    thread,
     time::{Duration, Instant},
 };
 
@@ -12,20 +14,47 @@ use std::{
 /// is stuck. Only a hang should reach it; a slow, loaded machine must not.
 pub const STUCK: Duration = Duration::from_secs(60);
 
-/// The output of `child` once it exits; past [`STUCK`] it is killed and the
-/// test fails, naming `what` hung. Its output must fit the pipe buffers
-/// (64 KiB on Linux and macOS), as it is read only after the exit.
-pub fn finish(mut child: Child, what: &str) -> Output {
-    let deadline = Instant::now() + STUCK;
-    while child.try_wait().unwrap().is_none() {
-        if Instant::now() > deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("{what} hung");
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    child.wait_with_output().unwrap()
+/// The output of `child` once it exits, returned as soon as it exits; past
+/// [`STUCK`] it is killed and the test fails, naming `what` hung.
+///
+/// A thread blocks on the exit and reads the output meanwhile, so a test
+/// that times the child measures the child. Polling would add up to one
+/// poll interval, and the OS stretches a polling sleep: at macOS's
+/// background priority a 20 ms sleep takes about 200 ms. Its stdin, if
+/// piped and still open, stays open until the exit, as a client holding the
+/// pipe keeps it. It returns once stdout and stderr close too, so a child
+/// whose own child inherits them is timed to that grandchild's end.
+pub fn finish(child: Child, what: &str) -> Output {
+    finish_within(child, what, STUCK)
+}
+
+/// [`finish`], with `limit` in place of [`STUCK`]: for the tests of
+/// `finish` itself.
+pub fn finish_within(mut child: Child, what: &str, limit: Duration) -> Output {
+    let id = child.id();
+    let input = child.stdin.take();
+    let (sent, exited) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = sent.send(child.wait_with_output());
+    });
+    let Ok(output) = exited.recv_timeout(limit) else {
+        kill(id);
+        panic!("{what} hung");
+    };
+    drop(input);
+    output.unwrap()
+}
+
+/// Kills the process `id`, which [`finish`]'s waiting thread owns. std's
+/// `Child::kill` needs the `Child`, and `wait_with_output` holds it until
+/// the exit, so it is killed by its id, as a user would.
+fn kill(id: u32) {
+    let id = id.to_string();
+    let _ = if cfg!(windows) {
+        Command::new("taskkill").args(["/F", "/PID", &id]).output()
+    } else {
+        Command::new("kill").args(["-9", &id]).output()
+    };
 }
 
 /// Waits until `done` holds; past [`STUCK`] the test fails, naming `what`
