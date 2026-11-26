@@ -53,8 +53,9 @@ struct Step {
 ///   constraints, so put it at that place in `SCHEMA` too.
 /// - Other table changes rebuild the table: create the new table, copy the
 ///   rows, drop the old table, rename the new one, then recreate its indexes
-///   and triggers. Before renaming, drop the triggers in other tables that
-///   name it (SQLite re-parses them on rename) and recreate them afterwards.
+///   and triggers. Before renaming, drop the triggers in other tables and
+///   the views that name it (SQLite re-parses them on rename) and recreate
+///   them afterwards.
 /// - `run` turns foreign keys off before `BEGIN IMMEDIATE` and checks them
 ///   with `pragma_foreign_key_check` before commit. Keep it that way: with
 ///   them on, dropping `memories` cascade-deletes every conversation and
@@ -103,7 +104,168 @@ const STEPS: &[Step] = &[
         check: always,
         apply: to_v12,
     },
+    Step {
+        check: always,
+        apply: to_v13,
+    },
 ];
+
+/// Version 13 lets a memory hold until a condition (#121): the three
+/// `until_*` columns, `memory_ended` and its trigger that stales the
+/// patterns citing an ended memory, and `live_memories`, what is in force.
+/// The history's operations gain `ended` and `reopened`, which its check
+/// lists, so the events table is rebuilt with its rows and its triggers,
+/// and the history and the change counter watch the new columns. No
+/// memory is written: every memory holds without a condition. The SQL is
+/// written out as it was at version 13.
+fn to_v13(conn: &Connection, _: Option<&Titles>) -> Result<()> {
+    conn.execute_batch(
+        "ALTER TABLE memories ADD COLUMN until_kind TEXT NOT NULL DEFAULT '' CHECK(until_kind IN ('','date','tag','text'));
+ALTER TABLE memories ADD COLUMN until_value TEXT NOT NULL DEFAULT '';
+ALTER TABLE memories ADD COLUMN until_project TEXT NOT NULL DEFAULT '' CHECK((until_kind='' AND until_value='' AND until_project='') OR (until_kind='date' AND until_value GLOB '[0-9][0-9][0-9][0-9]-[01][0-9]-[0-3][0-9]T[0-2][0-9]:[0-5][0-9]:[0-5][0-9]Z' AND until_project='') OR (until_kind='tag' AND length(until_value) BETWEEN 1 AND 255 AND length(until_project) BETWEEN 1 AND 240) OR (until_kind='text' AND length(until_value) BETWEEN 1 AND 120 AND until_project=''));
+CREATE TABLE memory_ended (
+    memory_id TEXT PRIMARY KEY NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    ended_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    how TEXT NOT NULL CHECK(how IN ('tag','evidence')),
+    evidence TEXT NOT NULL CHECK(length(evidence) BETWEEN 1 AND 2000),
+    origin TEXT NOT NULL DEFAULT ''
+);
+CREATE TRIGGER memory_support_ended AFTER INSERT ON memory_ended BEGIN
+    UPDATE memories SET status='stale',updated_at=CURRENT_TIMESTAMP
+    WHERE status!='superseded' AND EXISTS (SELECT 1 FROM json_each(evidence_ids) WHERE value=NEW.memory_id);
+END;
+CREATE VIEW live_memories AS SELECT rowid AS rowid, * FROM memories
+WHERE status IN ('confirmed','tentative')
+    AND NOT (until_kind='date' AND until_value<=strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+    AND NOT EXISTS (SELECT 1 FROM memory_ended WHERE memory_id=memories.id);
+DROP TRIGGER memory_event_recorded;
+DROP TRIGGER memory_event_changed;
+DROP TRIGGER memory_event_forgotten;
+DROP TRIGGER memory_event_origin_removed;
+DROP TRIGGER memory_event_distinct;
+CREATE TABLE memory_events_v13 (
+    seq INTEGER PRIMARY KEY,
+    memory_id TEXT NOT NULL,
+    at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    count INTEGER NOT NULL DEFAULT 1 CHECK(count >= 1),
+    op TEXT NOT NULL CHECK(op IN ('record','confirm','update','supersede','merge','forget','import','revive','distinct','stale','move','origin_removed','ended','reopened')),
+    origin TEXT NOT NULL DEFAULT '',
+    client TEXT NOT NULL DEFAULT '',
+    before TEXT CHECK(before IS NULL OR json_valid(before)),
+    imported TEXT
+);
+INSERT INTO memory_events_v13 SELECT * FROM memory_events;
+DROP TABLE memory_events;
+ALTER TABLE memory_events_v13 RENAME TO memory_events;
+CREATE INDEX memory_events_by_memory ON memory_events(memory_id, seq);
+CREATE TRIGGER memory_event_recorded AFTER INSERT ON memories BEGIN
+    INSERT INTO memory_events(memory_id,op,origin,client)
+    VALUES (NEW.id,
+        CASE (SELECT op FROM memory_writer WHERE id=1) WHEN 'merge' THEN 'merge' WHEN 'import' THEN 'import' ELSE 'record' END,
+        coalesce((SELECT origin FROM memory_writer WHERE id=1),''),
+        coalesce((SELECT client FROM memory_writer WHERE id=1),''));
+END;
+CREATE TRIGGER memory_event_changed AFTER UPDATE ON memories BEGIN
+    UPDATE memory_events SET last_at=CURRENT_TIMESTAMP,count=count+1,
+        origin=coalesce(nullif((SELECT origin FROM memory_writer WHERE id=1),''),origin),
+        client=coalesce((SELECT client FROM memory_writer WHERE id=1),'')
+    WHERE seq=(SELECT max(seq) FROM memory_events WHERE memory_id=NEW.id) AND op='confirm' AND imported IS NULL
+    AND NOT EXISTS (SELECT 1 FROM memory_writer WHERE id=1 AND op='import')
+    AND (OLD.memory_type,OLD.category,OLD.context,OLD.title,OLD.content,OLD.reason,OLD.scope,OLD.project,OLD.source,OLD.status,OLD.evidence,OLD.evidence_ids,OLD.superseded_by,OLD.until_kind,OLD.until_value,OLD.until_project)
+        IS (NEW.memory_type,NEW.category,NEW.context,NEW.title,NEW.content,NEW.reason,NEW.scope,NEW.project,NEW.source,NEW.status,NEW.evidence,NEW.evidence_ids,NEW.superseded_by,NEW.until_kind,NEW.until_value,NEW.until_project)
+    AND (OLD.last_confirmed_at IS NOT NEW.last_confirmed_at OR EXISTS (SELECT 1 FROM memory_writer WHERE id=1 AND op IN ('update','confirm') AND subject=NEW.id));
+    INSERT INTO memory_events(memory_id,op,origin,client,before)
+    SELECT NEW.id,
+        CASE
+            WHEN (SELECT op FROM memory_writer WHERE id=1)='import' THEN 'import'
+            WHEN (OLD.memory_type,OLD.category,OLD.context,OLD.title,OLD.content,OLD.reason,OLD.scope,OLD.project,OLD.source,OLD.status,OLD.evidence,OLD.evidence_ids,OLD.superseded_by,OLD.until_kind,OLD.until_value,OLD.until_project)
+                IS (NEW.memory_type,NEW.category,NEW.context,NEW.title,NEW.content,NEW.reason,NEW.scope,NEW.project,NEW.source,NEW.status,NEW.evidence,NEW.evidence_ids,NEW.superseded_by,NEW.until_kind,NEW.until_value,NEW.until_project) THEN 'confirm'
+            WHEN NEW.status='stale' AND (OLD.memory_type,OLD.category,OLD.context,OLD.title,OLD.content,OLD.reason,OLD.scope,OLD.project,OLD.source,OLD.evidence,OLD.evidence_ids,OLD.superseded_by,OLD.until_kind,OLD.until_value,OLD.until_project)
+                IS (NEW.memory_type,NEW.category,NEW.context,NEW.title,NEW.content,NEW.reason,NEW.scope,NEW.project,NEW.source,NEW.evidence,NEW.evidence_ids,NEW.superseded_by,NEW.until_kind,NEW.until_value,NEW.until_project) THEN 'stale'
+            WHEN NEW.status='superseded' AND OLD.status IS NOT 'superseded' THEN 'supersede'
+            WHEN OLD.status='superseded' AND NEW.status IS NOT 'superseded' THEN 'revive'
+            WHEN (OLD.memory_type,OLD.category,OLD.context,OLD.title,OLD.content,OLD.reason,OLD.source,OLD.status,OLD.evidence,OLD.evidence_ids,OLD.superseded_by,OLD.until_kind,OLD.until_value,OLD.until_project)
+                IS (NEW.memory_type,NEW.category,NEW.context,NEW.title,NEW.content,NEW.reason,NEW.source,NEW.status,NEW.evidence,NEW.evidence_ids,NEW.superseded_by,NEW.until_kind,NEW.until_value,NEW.until_project)
+                AND NOT EXISTS (SELECT 1 FROM memory_writer WHERE id=1 AND op='update' AND subject=NEW.id) THEN 'move'
+            ELSE 'update'
+        END,
+        coalesce((SELECT origin FROM memory_writer WHERE id=1),''),
+        coalesce((SELECT client FROM memory_writer WHERE id=1),''),
+        CASE WHEN (OLD.memory_type,OLD.category,OLD.context,OLD.title,OLD.content,OLD.reason,OLD.scope,OLD.project,OLD.source,OLD.status,OLD.evidence,OLD.evidence_ids,OLD.superseded_by,OLD.until_kind,OLD.until_value,OLD.until_project)
+            IS (NEW.memory_type,NEW.category,NEW.context,NEW.title,NEW.content,NEW.reason,NEW.scope,NEW.project,NEW.source,NEW.status,NEW.evidence,NEW.evidence_ids,NEW.superseded_by,NEW.until_kind,NEW.until_value,NEW.until_project) THEN NULL
+        ELSE json_remove(json_object(
+            'type',OLD.memory_type,'category',OLD.category,'context',OLD.context,'title',OLD.title,
+            'content',OLD.content,'reason',OLD.reason,'scope',OLD.scope,'project',OLD.project,
+            'source',OLD.source,'status',OLD.status,'evidence',OLD.evidence,
+            'evidence_ids',CASE WHEN json_valid(OLD.evidence_ids) THEN json(OLD.evidence_ids) ELSE OLD.evidence_ids END,
+            'superseded_by',OLD.superseded_by,
+            'until',json_object('kind',OLD.until_kind,'value',OLD.until_value,'project',OLD.until_project)),
+            CASE WHEN OLD.memory_type IS NEW.memory_type THEN '$.type' ELSE '$._' END,
+            CASE WHEN OLD.category IS NEW.category THEN '$.category' ELSE '$._' END,
+            CASE WHEN OLD.context IS NEW.context THEN '$.context' ELSE '$._' END,
+            CASE WHEN OLD.title IS NEW.title THEN '$.title' ELSE '$._' END,
+            CASE WHEN OLD.content IS NEW.content THEN '$.content' ELSE '$._' END,
+            CASE WHEN OLD.reason IS NEW.reason THEN '$.reason' ELSE '$._' END,
+            CASE WHEN OLD.scope IS NEW.scope THEN '$.scope' ELSE '$._' END,
+            CASE WHEN OLD.project IS NEW.project THEN '$.project' ELSE '$._' END,
+            CASE WHEN OLD.source IS NEW.source THEN '$.source' ELSE '$._' END,
+            CASE WHEN OLD.status IS NEW.status THEN '$.status' ELSE '$._' END,
+            CASE WHEN OLD.evidence IS NEW.evidence THEN '$.evidence' ELSE '$._' END,
+            CASE WHEN OLD.evidence_ids IS NEW.evidence_ids THEN '$.evidence_ids' ELSE '$._' END,
+            CASE WHEN OLD.superseded_by IS NEW.superseded_by THEN '$.superseded_by' ELSE '$._' END,
+            CASE WHEN (OLD.until_kind,OLD.until_value,OLD.until_project) IS (NEW.until_kind,NEW.until_value,NEW.until_project) THEN '$.until' ELSE '$._' END)
+        END
+    WHERE (OLD.memory_type,OLD.category,OLD.context,OLD.title,OLD.content,OLD.reason,OLD.scope,OLD.project,OLD.source,OLD.status,OLD.evidence,OLD.evidence_ids,OLD.superseded_by,OLD.until_kind,OLD.until_value,OLD.until_project)
+        IS NOT (NEW.memory_type,NEW.category,NEW.context,NEW.title,NEW.content,NEW.reason,NEW.scope,NEW.project,NEW.source,NEW.status,NEW.evidence,NEW.evidence_ids,NEW.superseded_by,NEW.until_kind,NEW.until_value,NEW.until_project)
+    OR (OLD.last_confirmed_at IS NOT NEW.last_confirmed_at AND EXISTS (SELECT 1 FROM memory_writer WHERE id=1 AND op='import'))
+    OR ((OLD.last_confirmed_at IS NOT NEW.last_confirmed_at OR EXISTS (SELECT 1 FROM memory_writer WHERE id=1 AND op IN ('update','confirm') AND subject=NEW.id))
+        AND NOT EXISTS (SELECT 1 FROM memory_events WHERE seq=(SELECT max(seq) FROM memory_events WHERE memory_id=NEW.id) AND op='confirm' AND imported IS NULL));
+END;
+CREATE TRIGGER memory_event_forgotten AFTER DELETE ON memories BEGIN
+    UPDATE memory_events SET origin='',client='',before=NULL,imported=NULL WHERE memory_id=OLD.id;
+    INSERT INTO memory_events(memory_id,op,client) VALUES (OLD.id,'forget',coalesce((SELECT client FROM memory_writer WHERE id=1),''));
+END;
+CREATE TRIGGER memory_event_origin_removed AFTER DELETE ON memory_origins
+WHEN EXISTS (SELECT 1 FROM memories WHERE id=OLD.memory_id) BEGIN
+    INSERT INTO memory_events(memory_id,op,client) VALUES (OLD.memory_id,'origin_removed',coalesce((SELECT client FROM memory_writer WHERE id=1),''));
+END;
+CREATE TRIGGER memory_event_distinct AFTER INSERT ON memory_distinct BEGIN
+    INSERT INTO memory_events(memory_id,op,origin,client)
+    SELECT value,'distinct',coalesce((SELECT origin FROM memory_writer WHERE id=1),''),coalesce((SELECT client FROM memory_writer WHERE id=1),'')
+    FROM (SELECT NEW.a AS value UNION ALL SELECT NEW.b);
+END;
+CREATE TRIGGER memory_event_ended AFTER INSERT ON memory_ended BEGIN
+    INSERT INTO memory_events(memory_id,op,origin,client,before)
+    SELECT NEW.memory_id,'ended',coalesce(nullif((SELECT origin FROM memory_writer WHERE id=1),''),NEW.origin),coalesce((SELECT client FROM memory_writer WHERE id=1),''),
+        json_object('until',json_object('kind',until_kind,'value',until_value,'project',until_project),'how',NEW.how,'evidence',NEW.evidence)
+    FROM memories WHERE id=NEW.memory_id;
+END;
+CREATE TRIGGER memory_event_reopened AFTER DELETE ON memory_ended
+WHEN EXISTS (SELECT 1 FROM memories WHERE id=OLD.memory_id) BEGIN
+    INSERT INTO memory_events(memory_id,op,origin,client,before)
+    SELECT OLD.memory_id,'reopened',coalesce((SELECT origin FROM memory_writer WHERE id=1),''),coalesce((SELECT client FROM memory_writer WHERE id=1),''),
+        json_object('until',json_object('kind',until_kind,'value',until_value,'project',until_project),'ended_at',OLD.ended_at,'how',OLD.how,'evidence',OLD.evidence,'origin',OLD.origin)
+    FROM memories WHERE id=OLD.memory_id;
+END;
+DROP TRIGGER memory_change_updated;
+CREATE TRIGGER memory_change_updated AFTER UPDATE OF memory_type,category,context,title,content,reason,scope,project,source,status,evidence,evidence_ids,superseded_by,until_kind,until_value,until_project ON memories
+WHEN (OLD.memory_type,OLD.category,OLD.context,OLD.title,OLD.content,OLD.reason,OLD.scope,OLD.project,OLD.source,OLD.status,OLD.evidence,OLD.evidence_ids,OLD.superseded_by,OLD.until_kind,OLD.until_value,OLD.until_project) IS NOT (NEW.memory_type,NEW.category,NEW.context,NEW.title,NEW.content,NEW.reason,NEW.scope,NEW.project,NEW.source,NEW.status,NEW.evidence,NEW.evidence_ids,NEW.superseded_by,NEW.until_kind,NEW.until_value,NEW.until_project) BEGIN
+    UPDATE store_changes SET last_change=last_change+1 WHERE id=1;
+    INSERT INTO memory_changes(memory_id,change,removed_at) SELECT NEW.id,last_change,NULL FROM store_changes WHERE id=1 ON CONFLICT(memory_id) DO UPDATE SET change=excluded.change,removed_at=excluded.removed_at;
+END;
+CREATE TRIGGER memory_change_ended AFTER INSERT ON memory_ended BEGIN
+    UPDATE store_changes SET last_change=last_change+1 WHERE id=1;
+    INSERT INTO memory_changes(memory_id,change,removed_at) SELECT NEW.memory_id,last_change,NULL FROM store_changes WHERE id=1 ON CONFLICT(memory_id) DO UPDATE SET change=excluded.change,removed_at=excluded.removed_at;
+END;
+CREATE TRIGGER memory_change_reopened AFTER DELETE ON memory_ended
+WHEN EXISTS (SELECT 1 FROM memories WHERE id=OLD.memory_id) BEGIN
+    UPDATE store_changes SET last_change=last_change+1 WHERE id=1;
+    INSERT INTO memory_changes(memory_id,change,removed_at) SELECT OLD.memory_id,last_change,NULL FROM store_changes WHERE id=1 ON CONFLICT(memory_id) DO UPDATE SET change=excluded.change,removed_at=excluded.removed_at;
+END;",
+    )?;
+    Ok(())
+}
 
 /// Version 12 records which memories each session used (#123): the
 /// `memory_use` table and its index. No row is written: a migrated store
@@ -1081,6 +1243,11 @@ mod tests {
         conn.execute_batch(
             "DROP TRIGGER memory_origin_removed;
              DROP TRIGGER memory_event_origin_removed;
+             DROP TRIGGER memory_support_ended;
+             DROP TRIGGER memory_event_ended;
+             DROP TRIGGER memory_event_reopened;
+             DROP TRIGGER memory_change_reopened;
+             DROP VIEW live_memories;
              CREATE TABLE memories_new (id TEXT PRIMARY KEY NOT NULL, created_at, updated_at, memory_type, category, context, content, reason, scope, project, source, status, evidence, evidence_ids, superseded_by, last_confirmed_at);
              INSERT INTO memories_new SELECT id,created_at,updated_at,memory_type,category,context,content,reason,scope,project,source,status,evidence,evidence_ids,superseded_by,last_confirmed_at FROM memories;
              DROP TABLE memories;

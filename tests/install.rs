@@ -20,6 +20,8 @@ use std::{
 };
 #[path = "support/fake.rs"]
 mod fake;
+#[path = "support/older.rs"]
+mod older;
 #[path = "support/port.rs"]
 mod port;
 #[path = "support/releases.rs"]
@@ -1340,9 +1342,10 @@ fn local_modes_run_without_questions_and_refuse_a_busy_port_or_volume() {
     let out = native.install(&releases, &[], &["--titles", map.to_str().unwrap()]);
     assert!(out.status.success(), "{}", text(&out).1);
     assert!(
-        text(&out)
-            .0
-            .contains("No titles map was needed: the store is already at schema version 12."),
+        text(&out).0.contains(&format!(
+            "No titles map was needed: the store is already at schema version {}.",
+            older::current_version()
+        )),
         "{}",
         text(&out).0
     );

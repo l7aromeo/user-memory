@@ -14,6 +14,9 @@
 #[path = "support/sandbox.rs"]
 mod sandbox;
 use sandbox::Sandboxed;
+#[path = "support/older.rs"]
+mod older;
+use older::{back_to_v11, parse, snapshots};
 #[path = "support/damage.rs"]
 #[allow(dead_code, reason = "each test file uses part of the shared damage")]
 mod damage;
@@ -25,10 +28,6 @@ use std::{
     process::{Command, Output},
 };
 use tempfile::{TempDir, tempdir};
-
-fn snapshots() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/schema")
-}
 
 fn user_memory(home: &Path, db: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_user-memory"))
@@ -113,19 +112,6 @@ fn render(version: i64, statements: &[String]) -> String {
         text.push_str("\n;\n");
     }
     text
-}
-
-/// The statements of a snapshot file.
-fn parse(text: &str) -> Vec<String> {
-    let body: String = text
-        .lines()
-        .skip_while(|line| line.starts_with("--"))
-        .map(|line| format!("{line}\n"))
-        .collect();
-    body.split("\n;\n")
-        .filter(|s| !s.trim().is_empty())
-        .map(str::to_owned)
-        .collect()
 }
 
 /// A statement with layout and identifier quoting removed outside string
@@ -220,20 +206,33 @@ fn rows(conn: &Connection, sql: &str) -> Vec<String> {
     found
 }
 
-/// What a migration must keep of a store from schema version `version`.
-/// A step that renames or reshapes one of these columns updates the query
-/// here along with it.
+/// What a migration must keep of a store from schema version `version`,
+/// in the columns and tables that version has, so a store and its
+/// migration compare alike. A step that renames or reshapes one of these
+/// columns updates the query here along with it.
 fn data(db: &Path, version: i64) -> Vec<Vec<String>> {
     let conn = Connection::open(db).unwrap();
+    let until = if version >= UNTIL_VERSION {
+        ",until_kind,until_value,until_project"
+    } else {
+        ""
+    };
     let mut queries = vec![
-        "SELECT id,created_at,updated_at,memory_type,category,context,content,reason,scope,project,source,status,evidence,evidence_ids,superseded_by,last_confirmed_at FROM memories ORDER BY id",
-        "SELECT memory_id,origin,first_seen FROM memory_origins ORDER BY 1,2",
-        "SELECT a,b FROM memory_distinct ORDER BY 1,2",
-        "SELECT id,model,dimensions,source,hex(vector) FROM memory_vectors ORDER BY id",
+        format!(
+            "SELECT id,created_at,updated_at,memory_type,category,context,content,reason,scope,project,source,status,evidence,evidence_ids,superseded_by,last_confirmed_at{until} FROM memories ORDER BY id"
+        ),
+        "SELECT memory_id,origin,first_seen FROM memory_origins ORDER BY 1,2".to_owned(),
+        "SELECT a,b FROM memory_distinct ORDER BY 1,2".to_owned(),
+        "SELECT id,model,dimensions,source,hex(vector) FROM memory_vectors ORDER BY id".to_owned(),
     ];
     if version >= USE_VERSION {
         queries.push(
-            "SELECT memory,project,origin,at,read,recorded,shown,held,overridden,passage FROM memory_use ORDER BY 1,2,3",
+            "SELECT memory,project,origin,at,read,recorded,shown,held,overridden,passage FROM memory_use ORDER BY 1,2,3".to_owned(),
+        );
+    }
+    if version >= UNTIL_VERSION {
+        queries.push(
+            "SELECT memory_id,ended_at,how,evidence,origin FROM memory_ended ORDER BY 1".to_owned(),
         );
     }
     queries.iter().map(|sql| rows(&conn, sql)).collect()
@@ -242,7 +241,7 @@ fn data(db: &Path, version: i64) -> Vec<Vec<String>> {
 /// The first schema version that records which memories sessions used.
 const USE_VERSION: i64 = 12;
 /// The schema version this binary writes, which a migration reaches.
-const LATEST: i64 = 12;
+const LATEST: i64 = 13;
 
 /// How many use rows the store at `db` holds.
 fn use_rows(db: &Path) -> i64 {
@@ -256,6 +255,8 @@ fn use_rows(db: &Path) -> i64 {
 const HISTORY_VERSION: i64 = 7;
 /// The first schema version that counts the store's changes.
 const CHANGES_VERSION: i64 = 10;
+/// The first schema version that lets a memory hold until a condition.
+const UNTIL_VERSION: i64 = 13;
 
 /// The store's latest change and how many memories have a counted change.
 fn changes(db: &Path) -> (i64, i64) {
@@ -480,6 +481,18 @@ fn every_snapshot_migrates_to_the_current_schema_and_keeps_its_data() {
         // A store from before use was recorded gains none.
         if n < USE_VERSION {
             assert_eq!(use_rows(&db), 0, "v{n} gained use");
+        }
+        // A store from before conditions gets none, and no memory ends.
+        if n < UNTIL_VERSION {
+            let conn = Connection::open(&db).unwrap();
+            let held: (i64, i64) = conn
+                .query_row(
+                    "SELECT (SELECT COUNT(*) FROM memories WHERE until_kind!='' OR until_value!='' OR until_project!=''),(SELECT COUNT(*) FROM memory_ended)",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(held, (0, 0), "v{n} wrote a condition or an end");
         }
         // The migration writes no memory: a store reaching the counter's
         // version has counted no change yet.
@@ -930,9 +943,9 @@ fn trigger(db: &Path, name: &str) -> String {
         .unwrap()
 }
 
-/// Turns the store at `db` back into a version 10 store: version 11 only
-/// replaced `search_changed`, so its version 10 text and number are all
-/// that differ.
+/// Turns the store at `db` back into a version 10 store: back to version 11
+/// first, and version 11 only replaced `search_changed`, so its version 10
+/// text and number are all that differ then.
 fn back_to_v10(db: &Path) {
     back_to_v11(db);
     let snapshot = fs::read_to_string(snapshots().join("v10.sql")).unwrap();
@@ -1009,25 +1022,20 @@ fn migrating_to_version_11_writes_no_row() {
         assert_eq!(backups(dir.path()).len(), 1, "the backup is taken first");
         assert_eq!(version(&db), LATEST);
         assert_eq!(trigger(&db, "search_changed"), new_trigger);
+        // Later steps add columns and tables of their own; in version 11's
+        // shape, every row is as it was, and no use was recorded.
+        back_to_v11(&db);
         let mut after = every_row(&db);
         after.retain(|(table, _)| table != "memory_use");
         assert_eq!(after, before, "queued {queued}");
     }
 }
 
-/// Turns a store this binary made back to schema version 11: version 12
-/// only added `memory_use`.
-fn back_to_v11(db: &Path) {
-    let conn = Connection::open(db).unwrap();
-    conn.execute_batch("DROP TABLE memory_use;").unwrap();
-    conn.pragma_update(None, "user_version", 11).unwrap();
-}
-
-// Version 12 adds `memory_use` and writes no row: every table as before,
-// the store id included, and no use. The store is made by this binary and
-// turned back to version 11, which differs only by the table.
+// Versions 12 and 13 write no row: every table as before, the store id
+// included, no use and no end. The store is made by this binary and
+// turned back to version 11, then compared in that shape again.
 #[test]
-fn migrating_to_version_12_writes_no_row() {
+fn migrating_from_version_11_writes_no_row() {
     let (dir, db) = fresh();
     for title in ["Indent with tabs", "Wrap at 100"] {
         let out = user_memory(
@@ -1056,16 +1064,20 @@ fn migrating_to_version_12_writes_no_row() {
     let out = migrate(dir.path(), &db, 11);
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(
-        stdout(&out).contains("from schema version 11 to 12"),
+        stdout(&out).contains(&format!("from schema version 11 to {LATEST}")),
         "{}",
         stdout(&out)
     );
     assert_eq!(backups(dir.path()).len(), 1, "the backup is taken first");
-    assert_eq!(version(&db), 12);
-    let mut after = every_row(&db);
-    after.retain(|(table, _)| table != "memory_use");
-    assert_eq!(after, before);
+    assert_eq!(version(&db), LATEST);
     assert_eq!(use_rows(&db), 0);
+    let ended: i64 = Connection::open(&db)
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM memory_ended", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(ended, 0);
+    back_to_v11(&db);
+    assert_eq!(every_row(&db), before);
 }
 
 // A migration that fails after version 11's step has run, as one that
