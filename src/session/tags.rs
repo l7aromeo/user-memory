@@ -3,7 +3,9 @@
 //! has the tag. Session start always looks; a prompt asks the store again
 //! what is pending; a tool hook looks only when a tag is waited for and
 //! the refs' stamps changed, which costs no git spawn while they stay as
-//! they were. Each hook checks after choosing what it prints. A fork, a
+//! they were, and finds a new folder's checkout by its parents, with no
+//! git, leaving a checkout it doesn't know to the next prompt or start.
+//! Each hook checks after choosing what it prints. A fork, a
 //! vendored copy or another repository never decides: the checkout's own
 //! project (from its `origin` remote) must be the condition's. Never the
 //! network beyond the store.
@@ -11,7 +13,10 @@
 use super::recall::{self, State};
 use crate::{
     memory::{self, TagEnd},
-    project::{self, tags},
+    project::{
+        self,
+        tags::{self, Walked},
+    },
     remote::{
         Connection,
         tags::{Answer, Told},
@@ -116,14 +121,10 @@ fn check_on(
     let (project, common) = match state.tag_folder(&key)? {
         Some(kept) => kept,
         None => {
-            if Instant::now() >= deadline {
+            let Some((project, common, root)) = place(&state, folder, when, deadline)? else {
                 return Ok(());
-            }
-            let project = project::project_id(folder).unwrap_or_default();
-            let common = tags::common_dir(folder)
-                .map(|dir| dir.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            state.keep_tag_folder(&key, &project, &common)?;
+            };
+            state.keep_tag_folder(&key, &project, &common, &root)?;
             (project, common)
         }
     };
@@ -178,6 +179,43 @@ fn check_on(
     }
     state.keep_ends(&project, &ends)?;
     send_unwritten(&mut state, &ask)
+}
+
+/// The project, git folder and checkout top of `folder`, a folder this
+/// session has not placed yet: from a checkout it placed before when the
+/// walk up its parents reaches one, empty when the walk finds no checkout,
+/// and otherwise from git. A tool hook never runs git for it, whose limit
+/// can't hold two calls on Windows: a folder of a checkout this session
+/// hasn't placed is left to the next prompt or start. None when it is left.
+fn place(
+    state: &State,
+    folder: &Path,
+    when: When,
+    deadline: Instant,
+) -> anyhow::Result<Option<(String, String, String)>> {
+    match tags::walk_to_checkout(folder) {
+        Walked::Root(root) => {
+            let root = root.to_string_lossy().into_owned();
+            if let Some((project, common)) = state.checkout_at(&root)? {
+                return Ok(Some((project, common, root)));
+            }
+        }
+        Walked::Outside => return Ok(Some(Default::default())),
+        Walked::Unsure => {}
+    }
+    if when == When::Tool || Instant::now() >= deadline {
+        return Ok(None);
+    }
+    let project = project::project_id(folder).unwrap_or_default();
+    let (root, common) = tags::checkout_dirs(folder)
+        .map(|(root, common)| {
+            (
+                root.to_string_lossy().into_owned(),
+                common.to_string_lossy().into_owned(),
+            )
+        })
+        .unwrap_or_default();
+    Ok(Some((project, common, root)))
 }
 
 /// Sends every end kept but not yet written, by project: forgotten once
