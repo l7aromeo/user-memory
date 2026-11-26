@@ -733,10 +733,12 @@ slows down between rounds moves none of them); a tool hook that finds a
 change, process start included, once pushing nothing and once pushing the
 memory its command names (budget: `TOOL_HOOK_LIMIT`); the tool hook in a
 session whose project waits for a tag, in a folder the session never saw,
-pushing the memory its command names, then the tag check (budget: two
-`TOOL_HOOK_LIMIT`s, the push's and the check's own after it); the prompt
-hook pushing the memory its words name (budget: `PROMPT_LIMIT`); what a
-forget adds when three scopes' files hold the memory (budget: 400 ms);
+pushing the memory its command names, then the tag check, and the same
+after a ref change, when the check looks the tag up with git (budget: two
+`TOOL_HOOK_LIMIT`s each, the push's and the check's own after it); the
+prompt hook pushing the memory its words name (budget: `PROMPT_LIMIT`);
+what a forget adds when three scopes' files hold the memory (budget:
+400 ms);
 whether the prompt hook builds a missing base within `PROMPT_LIMIT`; and,
 with the store served by `host` on loopback to a client in a throwaway
 home, session start downloading its base against finding it (budget:

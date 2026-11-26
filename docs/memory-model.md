@@ -215,9 +215,12 @@ history, export and `read` with status `ended` or `all` still show it.
   never delays a push: the tool hook of a command that makes the tag ends
   the memory, and that hook's push may still name it once, since it was
   in force when the command ran; from the next hook on it is shown
-  nowhere. Only a checkout
-  whose `origin` remote is the project decides, and only a tag of exactly
-  that name: a fork, a vendored copy or a tag in another case decides
+  nowhere. A tool hook runs no git to find a folder's checkout: it walks
+  up the folder's parents, as git does, to a checkout the session already
+  knows. A tag made in a checkout the session hasn't been in at a prompt
+  or session start, such as another worktree, ends at that checkout's next
+  prompt or start, not its next tool hook. Only a checkout whose `origin`
+  remote is the project decides, and only a tag of exactly that name: a fork, a vendored copy or a tag in another case decides
   nothing. The end record names the tag, its commit and the project. On a
   memory server the hooks send it with `POST /tags`; a machine whose
   token is read-only sends nothing, and the memory counts as ended only in

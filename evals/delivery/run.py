@@ -504,7 +504,7 @@ def upkeep(binary, bench_binary, db, folder, drawn):
                             lambda session: hook("SessionStart", session, folders[0], source="startup"))
     for n, cwd in enumerate(folders):
         hook("SessionStart", f"s{n}", cwd, source="startup")
-    tag_session(binary, env, folders[1])
+    waited = tag_session(binary, env, folders[1])
 
     def record(n):
         """Records upkeep memory `n`, naming a command of its own in a code
@@ -562,6 +562,7 @@ def upkeep(binary, bench_binary, db, folder, drawn):
                 holding.append(took)
 
     tagged = tag_waited(hook_said, pushed, folders[1], delivery.parent / "sessions", named)
+    looked_up = tag_looked_up(binary, env, hook_said, pushed, folders[1], named, waited)
     held = [m["id"] for m in drawn["memories"] if m["scope"] == "global"]
     added = []
     for n in range(FORGETS):
@@ -579,30 +580,37 @@ def upkeep(binary, bench_binary, db, folder, drawn):
     built = len(list(delivery.glob("*.index"))) == 1
     holding.sort()
     return {"tool": statistics.median(tool), "push": statistics.median(push),
-            "tagged": tagged,
+            "tagged": tagged, "looked_up": looked_up,
             "hold": statistics.median(holding), "hold_p95": holding[int(len(holding) * 0.95) - 1],
             "prompted": statistics.median(prompted), "added": statistics.median(added),
             "built_at_prompt": built, "prompt": prompt, "rounds": rounds}
 
 
 def tag_session(binary, env, checkout):
-    """Starts #121's tag-waiting session `t0` in `checkout`, of
+    """Starts #121's tag-waiting sessions `t0` and `t1` in `checkout`, of
     `world.PROJECT`, whose memory waits for `PENDING_TAG`: in the
     checkout as a client runs the hook, since session start scopes the
     session by its own folder, and before any upkeep memory is recorded,
-    so its start prints none of them whole and its tool hooks push them."""
+    so their starts print none of them whole and their tool hooks push
+    them. Gives the checkout a commit, for tags. Returns the memory's id."""
+    subprocess.run(["git", "-c", "user.name=Bench", "-c", "user.email=bench@example.invalid",
+                    "commit", "-q", "--allow-empty", "-m", "start"],
+                   cwd=checkout, env=env, check=True, capture_output=True)
     out = subprocess.run([str(binary), "record", "--type", "procedure", "--category", "build",
                           "--title", "Release branch kept",
                           "--content", "Keep the release branch open until the next tag ships.",
                           "--scope", "project", "--project", world.PROJECT,
                           "--until-tag", PENDING_TAG],
                          env=env, check=True, capture_output=True, text=True)
-    if json.loads(out.stdout).get("stored") is not True:
+    stored = json.loads(out.stdout)
+    if stored.get("stored") is not True:
         raise SystemExit(f"recording the tag-waiting memory was refused: {out.stdout}")
-    subprocess.run([str(binary), "session-start", "--client", "claude"], cwd=checkout, env=env,
-                   input=json.dumps({"session_id": "t0", "cwd": str(checkout),
-                                     "hook_event_name": "SessionStart", "source": "startup"}),
-                   check=True, capture_output=True, text=True)
+    for session in ("t0", "t1"):
+        subprocess.run([str(binary), "session-start", "--client", "claude"], cwd=checkout, env=env,
+                       input=json.dumps({"session_id": session, "cwd": str(checkout),
+                                         "hook_event_name": "SessionStart", "source": "startup"}),
+                       check=True, capture_output=True, text=True)
+    return stored["id"]
 
 
 def tag_waited(hook_said, pushed, checkout, sessions, named):
@@ -635,6 +643,31 @@ def tag_waited(hook_said, pushed, checkout, sessions, named):
             conn.close()
     if looked < len(named):
         raise SystemExit(f"the tag check looked in {looked} of {len(named)} new folders")
+    return statistics.median(took)
+
+
+def tag_looked_up(binary, env, hook_said, pushed, checkout, named, waited):
+    """#121's tool hook after a ref change, with a tag waited for, in
+    `tag_session`'s session `t1`: before each of `named`'s commands
+    (command, short id) runs in `checkout`, a new tag changes its refs, so
+    after the push the check looks the waited-for tag up with git. The last
+    tag is the one waited for, which ends memory `waited`. Returns the median
+    time from process start, after the first run."""
+    took = []
+    for n, (command, short) in enumerate(named):
+        tag = PENDING_TAG if n == len(named) - 1 else f"bench-{n}"
+        subprocess.run(["git", "tag", tag], cwd=checkout, env=env, check=True, capture_output=True)
+        ms, said = hook_said("PostToolUse", "t1", checkout, tool_name="Bash",
+                             tool_input={"command": command}, tool_response={"stdout": ""})
+        pushed(said, short, "a tool hook after a ref change")
+        if n:
+            took.append(ms)
+    # The last lookup must have found the tag, or this timed hooks that
+    # looked nothing up.
+    out = subprocess.run([str(binary), "read", waited], env=env,
+                         check=True, capture_output=True, text=True)
+    if not all(m.get("ended") for m in json.loads(out.stdout)["memories"]):
+        raise SystemExit(f"the tag check never ended the memory waiting for {PENDING_TAG}")
     return statistics.median(took)
 
 
@@ -858,6 +891,9 @@ def cost(found, seed, size, keep):
         print(f"  tool hook   median {kept['tagged']:6.1f} ms with a tag waited for, in a folder "
               f"the session never saw, pushing the memory its command names ({HOOK_RUNS - 1} runs, "
               f"limit {TAG_CHECK_LIMITS * tool_limit} ms)")
+        print(f"  tool hook   median {kept['looked_up']:6.1f} ms with a tag waited for, after a ref "
+              f"change, pushing the memory its command names ({HOOK_RUNS - 1} runs, "
+              f"limit {TAG_CHECK_LIMITS * tool_limit} ms)")
         print(f"  pre-tool hook median {kept['hold']:6.1f} ms, 95th percentile {kept['hold_p95']:6.1f} ms "
               f"after a change, holding back the command a memory names ({HOOK_RUNS - 1} runs, "
               f"limit {tool_limit} ms)")
@@ -926,6 +962,8 @@ def main():
         for key, what, limit in (("tool", "the tool hook pushing nothing", tool_limit),
                                  ("push", "the tool hook pushing a memory", tool_limit),
                                  ("tagged", "the tool hook with a tag waited for",
+                                  TAG_CHECK_LIMITS * tool_limit),
+                                 ("looked_up", "the tool hook looking a tag up",
                                   TAG_CHECK_LIMITS * tool_limit),
                                  ("hold", "the pre-tool hook holding a command back", tool_limit),
                                  ("prompted", "the prompt hook pushing a memory", prompt_limit)):

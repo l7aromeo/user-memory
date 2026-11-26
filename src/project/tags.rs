@@ -11,7 +11,7 @@
 //! full ref name compared byte for byte.
 
 use std::{
-    fs,
+    env, fs,
     io::Write,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -29,19 +29,137 @@ pub struct Found {
     pub commit: String,
 }
 
-/// The git folder every worktree of `folder`'s repository shares, where
-/// its refs live; none outside git or without git.
-pub fn common_dir(folder: &Path) -> Option<PathBuf> {
+/// The top folder of `folder`'s checkout and the git folder every
+/// worktree of its repository shares, where its refs live, from one git
+/// call; none outside a checkout or without git.
+pub fn checkout_dirs(folder: &Path) -> Option<(PathBuf, PathBuf)> {
     let out = git(folder)
-        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .args([
+            "rev-parse",
+            "--path-format=absolute",
+            "--show-toplevel",
+            "--git-common-dir",
+        ])
         .stderr(Stdio::null())
         .output()
         .ok()?;
     if !out.status.success() {
         return None;
     }
-    let dir = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
-    Some(dunce::canonicalize(&dir).unwrap_or(dir))
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut lines = text.lines();
+    let (top, common) = (PathBuf::from(lines.next()?), PathBuf::from(lines.next()?));
+    Some((
+        dunce::canonicalize(&top).unwrap_or(top),
+        dunce::canonicalize(&common).unwrap_or(common),
+    ))
+}
+
+/// Environment variables that change where git finds a folder's
+/// repository, or that this walk does not follow: with any set, only git
+/// can say.
+const GIT_DISCOVERY_ENV: [&str; 4] = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+];
+
+/// What [`walk_to_checkout`] found.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Walked {
+    /// The folder holding the nearest `.git`, canonical: where git would
+    /// take the checkout to start, if that `.git` is a repository.
+    Root(PathBuf),
+    /// No `.git` before a ceiling, a file system's edge or the root: git
+    /// would find no repository.
+    Outside,
+    /// Only git can say: its environment changes the search, the folder
+    /// is inside a git folder or a bare repository, or it can't be read.
+    Unsure,
+}
+
+/// Where the checkout holding `folder` starts, by its parent folders alone,
+/// with no git spawned: the first that holds a `.git`, walking up as git
+/// does, which stops before a `GIT_CEILING_DIRECTORIES` folder and at
+/// another file system.
+pub fn walk_to_checkout(folder: &Path) -> Walked {
+    if GIT_DISCOVERY_ENV
+        .iter()
+        .any(|name| env::var_os(name).is_some())
+    {
+        return Walked::Unsure;
+    }
+    let Some(ceilings) = ceilings() else {
+        return Walked::Unsure;
+    };
+    let Ok(mut dir) = dunce::canonicalize(folder) else {
+        return Walked::Unsure;
+    };
+    if dir.components().any(|part| part.as_os_str() == ".git") {
+        return Walked::Unsure;
+    }
+    loop {
+        if bare_repository(&dir) {
+            return Walked::Unsure;
+        }
+        if dir.join(".git").symlink_metadata().is_ok() {
+            return Walked::Root(dir);
+        }
+        let Some(parent) = dir.parent() else {
+            return Walked::Outside;
+        };
+        if ceilings.iter().any(|ceiling| ceiling == parent) {
+            return Walked::Outside;
+        }
+        match same_file_system(&dir, parent) {
+            Some(true) => dir = parent.to_path_buf(),
+            Some(false) => return Walked::Outside,
+            None => return Walked::Unsure,
+        }
+    }
+}
+
+/// `GIT_CEILING_DIRECTORIES` as git reads it: its absolute entries,
+/// canonical, those that don't exist left out. None when it has an empty
+/// entry, after which git compares the later ones without resolving them.
+fn ceilings() -> Option<Vec<PathBuf>> {
+    let Some(value) = env::var_os("GIT_CEILING_DIRECTORIES") else {
+        return Some(Vec::new());
+    };
+    let mut found = Vec::new();
+    for entry in env::split_paths(&value) {
+        if entry.as_os_str().is_empty() {
+            return None;
+        }
+        if entry.is_absolute()
+            && let Ok(entry) = dunce::canonicalize(&entry)
+        {
+            found.push(entry);
+        }
+    }
+    Some(found)
+}
+
+/// Whether `dir` is itself a repository's git folder, as git tells one:
+/// `HEAD`, `objects` and `refs` in it.
+fn bare_repository(dir: &Path) -> bool {
+    dir.join("HEAD").is_file() && dir.join("objects").is_dir() && dir.join("refs").is_dir()
+}
+
+/// Whether `dir` and its `parent` are on one file system, as git compares
+/// them before walking up; none when either can't be read.
+#[cfg(unix)]
+fn same_file_system(dir: &Path, parent: &Path) -> Option<bool> {
+    use std::os::unix::fs::MetadataExt;
+    Some(fs::metadata(dir).ok()?.dev() == fs::metadata(parent).ok()?.dev())
+}
+
+/// Git for Windows gives every file device 0 (`st_dev` in its
+/// `compat/mingw.c`), so it walks across.
+#[cfg(not(unix))]
+fn same_file_system(_dir: &Path, _parent: &Path) -> Option<bool> {
+    Some(true)
 }
 
 /// The modification times, as text, of the files a new tag changes in the
@@ -226,7 +344,7 @@ mod tests {
     #[test]
     fn a_new_tag_changes_a_stamp() {
         let (_tmp, dir) = repo();
-        let common = common_dir(&dir).unwrap();
+        let (_, common) = checkout_dirs(&dir).unwrap();
         let before = stamps(&common, &["rel/v3"]);
         assert!(before.iter().any(|(path, _)| path == "refs/tags/rel"));
         // Whole-second file systems need the tag a moment later.

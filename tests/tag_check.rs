@@ -45,7 +45,19 @@ struct Home {
     remote: RefCell<Option<String>>,
     /// The token file the hooks send to it: the server's own when none.
     client_token: RefCell<Option<PathBuf>>,
+    /// Variables the hooks get beyond the sandbox's.
+    env: RefCell<Vec<(String, PathBuf)>>,
 }
+
+/// Variables that change where git finds a folder's repository: the hooks
+/// get none from the test's own environment, unless a test sets one.
+const GIT_DISCOVERY_ENV: [&str; 5] = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    "GIT_CEILING_DIRECTORIES",
+];
 
 /// A memory server on the home's store.
 struct Server {
@@ -66,6 +78,7 @@ impl Home {
             dir: tempdir().unwrap(),
             remote: RefCell::new(None),
             client_token: RefCell::new(None),
+            env: RefCell::new(Vec::new()),
         };
         let shim = home.shim();
         fs::create_dir(&shim).unwrap();
@@ -144,7 +157,21 @@ impl Home {
             .env("PATH", path)
             .env("USER_MEMORY_DB", self.db())
             .env(HOOK_ROOM.0, HOOK_ROOM.1);
+        for name in GIT_DISCOVERY_ENV {
+            command.env_remove(name);
+        }
+        for (name, value) in self.env.borrow().iter() {
+            command.env(name, value);
+        }
         command
+    }
+
+    /// A git checkout at `dir` whose `origin` is `remote`, with a commit.
+    fn repository(&self, dir: &Path, remote: &str) {
+        fs::create_dir_all(dir).unwrap();
+        self.git(dir, &["init", "-q", "-b", "main"]);
+        self.git(dir, &["commit", "-q", "--allow-empty", "-m", "start"]);
+        self.git(dir, &["remote", "add", "origin", remote]);
     }
 
     /// `record` of a project rule ending at `tag`, from `folder`; its reply.
@@ -808,17 +835,19 @@ fn a_push_never_waits_on_the_tag_check_s_git() {
     let checkout = home.checkout();
     let sub = checkout.join("crates");
     fs::create_dir(&sub).unwrap();
-    home.record("v9.0.0", &checkout);
+    let tag = home.record("v9.0.0", &checkout)["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let id = home.publish_note(&checkout);
-    let id = id.as_str();
     home.start("s1", &checkout);
-    // A tag is waited for, and the tool hook runs in a folder start never
-    // saw, where the check must ask git for its project and git folder.
+    // A tag is waited for and is made, so the tool hook looks it up, with
+    // git, in a folder start never saw.
+    home.git(&checkout, &["tag", "v9.0.0"]);
     fs::write(home.shim().join("git.delay"), SLOW_GIT_MS.to_string()).unwrap();
-    let before = home.git_calls();
     let pushed = home.ran("s1", &sub, "cargo publish");
     assert!(pushed.contains(&id[..8]), "the push arrives: {pushed:?}");
-    assert!(home.git_calls() > before, "the check still looked");
+    assert!(home.end(&tag).is_some(), "the check ran after it");
 }
 
 /// Milliseconds the tag check's call for the git folder waits: past the
@@ -832,16 +861,142 @@ const SLOW_GIT_DIR_MS: u64 = 11_000;
 fn a_prompt_s_push_never_waits_on_the_tag_check_s_git() {
     let home = Home::new();
     let checkout = home.checkout();
-    let sub = checkout.join("crates");
-    fs::create_dir(&sub).unwrap();
     home.record("v9.0.0", &checkout);
     let id = home.publish_note(&checkout);
     home.start("s1", &checkout);
+    // A worktree start never placed: the prompt places it with git.
+    let worktree = home.dir.path().join("app-release");
+    home.git(
+        &checkout,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            worktree.to_str().unwrap(),
+        ],
+    );
     fs::write(
         home.shim().join("git.delay"),
         format!("{SLOW_GIT_DIR_MS} --git-common-dir"),
     )
     .unwrap();
-    let printed = home.prompted("s1", &sub, "Run cargo publish for the new crate");
+    let printed = home.prompted("s1", &worktree, "Run cargo publish for the new crate");
     assert!(printed.contains(&id[..8]), "the push arrives: {printed:?}");
+}
+
+#[test]
+fn a_folder_of_a_placed_checkout_is_placed_with_no_git() {
+    let home = Home::new();
+    let checkout = home.checkout();
+    let sub = checkout.join("src").join("parser");
+    fs::create_dir_all(&sub).unwrap();
+    home.record("v9.0.0", &checkout);
+    home.start("s1", &checkout);
+    let before = home.git_calls();
+    home.ran("s1", &sub, "ls");
+    home.ran("s1", &checkout.join("src"), "ls");
+    assert_eq!(
+        home.git_calls(),
+        before,
+        "placed from the checkout start placed"
+    );
+}
+
+#[test]
+fn a_tool_hook_leaves_a_checkout_it_has_not_placed_to_the_next_prompt() {
+    let home = Home::new();
+    let checkout = home.checkout();
+    let id = home.record("v9.0.0", &checkout)["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    home.start("s1", &checkout);
+    // A worktree of the same repository, whose `.git` is a file: another
+    // checkout of the project, at a top folder start never placed.
+    let worktree = home.dir.path().join("app-release");
+    home.git(
+        &checkout,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    home.git(&checkout, &["tag", "v9.0.0"]);
+    let before = home.git_calls();
+    home.ran("s1", &worktree, "cargo build");
+    assert_eq!(home.git_calls(), before, "no git in a tool hook");
+    assert_eq!(home.end(&id), None);
+    home.prompted("s1", &worktree, "go on");
+    assert!(home.end(&id).is_some(), "the prompt places it and looks");
+}
+
+#[test]
+fn a_repository_inside_a_placed_checkout_is_not_taken_for_it() {
+    let home = Home::new();
+    let checkout = home.checkout();
+    let id = home.record("v9.0.0", &checkout)["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    home.start("s1", &checkout);
+    // A fork vendored inside the checkout has the tag; the checkout's refs
+    // change too, so a hook that took the fork for the checkout would look.
+    let vendored = checkout.join("vendor").join("app");
+    home.repository(&vendored, "git@github.com:fork/app.git");
+    home.git(&vendored, &["tag", "v9.0.0"]);
+    home.git(&checkout, &["tag", "v0.1.0"]);
+    home.ran("s1", &vendored, "cargo build");
+    home.prompted("s1", &vendored, "go on");
+    assert_eq!(home.end(&id), None);
+}
+
+#[test]
+fn a_checkout_above_a_git_ceiling_is_not_taken_for_a_folder_below_it() {
+    let home = Home::new();
+    let checkout = home.checkout();
+    let ceiling = checkout.join("work");
+    let below = ceiling.join("task");
+    fs::create_dir_all(&below).unwrap();
+    let id = home.record("v9.0.0", &checkout)["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    home.start("s1", &checkout);
+    home.env
+        .borrow_mut()
+        .push(("GIT_CEILING_DIRECTORIES".to_owned(), ceiling));
+    // Git finds no repository below the ceiling, so the tag the checkout
+    // now has decides nothing there.
+    home.git(&checkout, &["tag", "v9.0.0"]);
+    let before = home.git_calls();
+    home.ran("s1", &below, "cargo build");
+    assert_eq!(home.end(&id), None);
+    assert_eq!(home.git_calls(), before, "the walk honours the ceiling");
+}
+
+#[test]
+fn a_tool_hook_leaves_a_folder_to_git_when_git_dir_is_set() {
+    let home = Home::new();
+    let checkout = home.checkout();
+    let sub = checkout.join("src");
+    fs::create_dir(&sub).unwrap();
+    let id = home.record("v9.0.0", &checkout)["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    home.start("s1", &checkout);
+    // GIT_DIR names the repository whatever the folders say, so only git
+    // can place the folder: the tool hook leaves it, and the tag waits.
+    home.env
+        .borrow_mut()
+        .push(("GIT_DIR".to_owned(), checkout.join(".git")));
+    home.git(&checkout, &["tag", "v9.0.0"]);
+    let before = home.git_calls();
+    home.ran("s1", &sub, "cargo build");
+    assert_eq!(home.git_calls(), before, "no git in a tool hook");
+    assert_eq!(home.end(&id), None);
 }

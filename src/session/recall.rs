@@ -132,7 +132,8 @@ CREATE TABLE IF NOT EXISTS meta(
 CREATE TABLE IF NOT EXISTS tag_folders(
     folder TEXT PRIMARY KEY,
     project TEXT NOT NULL,
-    common TEXT NOT NULL
+    common TEXT NOT NULL,
+    root TEXT NOT NULL
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS tag_pending(
     memory TEXT PRIMARY KEY,
@@ -740,18 +741,33 @@ impl State {
             .optional()?)
     }
 
-    /// Keeps `folder`'s project and git folder.
+    /// Keeps `folder`'s project, git folder and the top folder of its
+    /// checkout (empty outside one).
     pub(super) fn keep_tag_folder(
         &mut self,
         folder: &str,
         project: &str,
         common: &str,
+        root: &str,
     ) -> Result<()> {
         self.conn.execute(
-            "INSERT OR REPLACE INTO tag_folders(folder, project, common) VALUES (?1, ?2, ?3)",
-            params![folder, project, common],
+            "INSERT OR REPLACE INTO tag_folders(folder, project, common, root) VALUES (?1, ?2, ?3, ?4)",
+            params![folder, project, common, root],
         )?;
         Ok(())
+    }
+
+    /// The project and git folder of the checkout whose top folder is
+    /// `root`, from any folder of it kept before.
+    pub(super) fn checkout_at(&self, root: &str) -> Result<Option<(String, String)>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT project, common FROM tag_folders WHERE root = ?1 AND root != '' LIMIT 1",
+                [root],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
     }
 
     /// Replaces the tag conditions pending for `project` with `pending`
