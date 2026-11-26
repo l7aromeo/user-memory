@@ -46,7 +46,7 @@ INSERT INTO memory_events (memory_id,at,last_at,count,op,origin,client,before,im
 ('1a2b3c4d-7777-4aaa-8aaa-000000000007','2026-10-08 09:00:00','2026-10-08 09:00:00',1,'forget','','cli',NULL,NULL),
 ('1a2b3c4d-4444-4aaa-8aaa-000000000004','2026-09-30 08:00:00','2026-09-30 08:00:00',1,'update','','host:codex','{"evidence":"Asked once"}','2026-10-10 08:00:00');
 INSERT INTO memory_changes (memory_id,change,removed_at) VALUES ('1a2b3c4d-7777-4aaa-8aaa-000000000007',7,'2026-10-08 09:00:00');
-INSERT INTO memory_use (memory,project,origin,at,read,recorded,shown,held,overridden) VALUES
-('1a2b3c4d-3333-4aaa-8aaa-000000000003','github.com/x/y','claude:session/x','2026-10-20 09:00:00',1,0,0,NULL,NULL),
-('1a2b3c4d-3333-4aaa-8aaa-000000000003','github.com/x/y','codex:thread/y','2026-10-21 09:00:00',0,0,1,NULL,NULL),
-('1a2b3c4d-1111-4aaa-8aaa-000000000001','github.com/x/y','codex:thread/y','2026-10-21 09:00:00',0,1,1,1,0);
+INSERT INTO memory_use (memory,project,origin,at,read,recorded,shown,held,overridden,passage) VALUES
+('1a2b3c4d-3333-4aaa-8aaa-000000000003','github.com/x/y','claude:session/x','2026-10-20 09:00:00',1,0,0,NULL,NULL,NULL),
+('1a2b3c4d-3333-4aaa-8aaa-000000000003','github.com/x/y','codex:thread/y','2026-10-21 09:00:00',0,0,1,NULL,NULL,2),
+('1a2b3c4d-1111-4aaa-8aaa-000000000001','github.com/x/y','codex:thread/y','2026-10-21 09:00:00',0,1,1,1,0,1);
