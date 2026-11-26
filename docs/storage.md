@@ -328,7 +328,8 @@ on Windows), each private to you:
   for each agent of the session, its last 30 steps as terms (stems in
   plain text and anchors as written, lowercased, never a sentence, a
   tool's result or a file's contents), the tasks of subagents not yet
-  started, and which passages of which memories were pushed at which step.
+  started, which passages of which memories were pushed at which step,
+  and which a hold showed or put off for a push after the command.
   A session's `startup` empties it in place, so another hook of the
   session may hold it open; a `/clear` or a compaction starts a new count
   in it; a resume keeps it. It goes with the 30-day clean-up.

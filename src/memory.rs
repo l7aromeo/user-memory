@@ -21,6 +21,7 @@ pub use changes::{marked, reconcile};
 pub(crate) use delivery::{format as delivery_format, stems as delivery_stems};
 pub mod embedding;
 mod history;
+pub(crate) mod hold;
 mod ids;
 mod index;
 mod links;

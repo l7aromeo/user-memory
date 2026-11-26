@@ -133,7 +133,7 @@ them once:
 | `SessionStart` (compact) | `working-set` | nothing at present |
 | `UserPromptSubmit` | `prompt-submit` | a notice when something changed, [below](#changes-during-a-session), then what the prompt matches ([recall](how-it-works.md#recall-during-the-task)) |
 | `SubagentStart` | `subagent-start` | the project rules, [below](#rules-for-subagents), then what the subagent's task matches |
-| `PreToolUse` | `pre-tool-use` | nothing; it keeps the task of a call that starts a subagent for that subagent's start |
+| `PreToolUse` | `pre-tool-use` | for a shell command that names a memory's passage strongly, a deny whose reason shows it, once ([held back](how-it-works.md#held-back-before-it-runs)); otherwise nothing. It keeps the task of a call that starts a subagent for that subagent's start |
 | `PostToolUse`, and Claude Code's `PostToolUseFailure` | `post-tool-use` | what the call matches ([recall](how-it-works.md#recall-during-the-task)) |
 
 Claude Code's `PreToolUse` hook runs for the tools it acts on:

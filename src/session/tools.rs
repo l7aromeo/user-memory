@@ -6,14 +6,16 @@
 //! printing nothing: in Codex it runs before every tool call. Both keep the
 //! session's delivery index current (#175); `post-tool-use` then matches
 //! the call against it and pushes what the agent context was not shown in
-//! this stretch (#117).
+//! this stretch (#117). Before a shell command, `pre-tool-use` holds it
+//! back once with the passages whose anchors it names (#118).
 
 use super::{
     HookClient,
-    recall::{self, Offer, State, Step},
+    recall::{self, Offer, State, Step, Use},
 };
 use crate::memory::{
     delivery_files,
+    hold::{self, HOLD_CHARS, HOLD_READ},
     matcher::{Action, Kind, Matched, Terms, Window, terms_of, word_spans},
     push,
 };
@@ -79,26 +81,53 @@ pub(crate) fn acts_on(client: HookClient, tool: &str) -> bool {
     }
 }
 
-/// What `client`'s pre-tool hook prints for the call on stdin: nothing. For
-/// a tool it acts on, it keeps the session's delivery index current, and a
-/// call that starts a subagent keeps its task for the subagent's start
-/// (#117).
+/// What `client`'s pre-tool hook prints for the call on stdin. For a tool
+/// it acts on, it keeps the session's delivery index current, and a call
+/// that starts a subagent keeps its task for the subagent's start (#117).
+/// A shell command that names a passage's anchor strongly enough, which
+/// this agent context was not shown or held in this stretch, is held back
+/// once: a deny whose reason shows the passages (#118). Anything else, and
+/// any error, missing state or overrun deadline, prints nothing, and the
+/// call runs.
 pub fn pre_tool_use(client: HookClient, _context_limit: Option<usize>) -> String {
     let started = Instant::now();
     let payload = payload();
     let Some(_tool) = tool_name(&payload).filter(|tool| acts_on(client, tool)) else {
         return String::new();
     };
-    if let Some(session) = Session::of(client, &payload, tool_deadline(started)) {
-        session.keep_current();
-        if let Ok(payload) = serde_json::from_slice::<Value>(&payload)
-            && let Some((key, task)) = spawned(client, &payload)
-        {
-            let _ = State::open(&recall::path(&session.snapshot), session.deadline)
-                .and_then(|mut state| state.spawn(&key, &terms_of(&task)));
-        }
+    let Some(session) = Session::of(client, &payload, tool_deadline(started)) else {
+        return String::new();
+    };
+    session.keep_current();
+    let Ok(payload) = serde_json::from_slice::<Value>(&payload) else {
+        return String::new();
+    };
+    if let Some((key, task)) = spawned(client, &payload) {
+        let _ = State::open(&recall::path(&session.snapshot), session.deadline)
+            .and_then(|mut state| state.spawn(&key, &terms_of(&task)));
+        return String::new();
     }
-    String::new()
+    let Some(action) = action(&payload).filter(|action| action.kind == Kind::Command) else {
+        return String::new();
+    };
+    match session.hold(&payload, terms_of(&action)) {
+        Ok(Some(reason)) => deny(client, &payload, &reason),
+        _ => String::new(),
+    }
+}
+
+/// The pre-tool hook's deny with `reason`, as both clients read it. Codex
+/// follows the reason with ". Command: <command>", so the reason's own
+/// last full stop is left off there.
+fn deny(client: HookClient, payload: &Value, reason: &str) -> String {
+    let reason = match client {
+        HookClient::Claude => reason,
+        HookClient::Codex => reason.strip_suffix('.').unwrap_or(reason),
+    };
+    let event = payload["hook_event_name"].as_str().unwrap_or("PreToolUse");
+    json!({"hookSpecificOutput": {"hookEventName": event, "permissionDecision": "deny",
+                                  "permissionDecisionReason": reason}})
+    .to_string()
 }
 
 /// The tools Claude Code starts a subagent with, its task in
@@ -289,11 +318,18 @@ impl Session {
         let mut lines = Vec::new();
         if let Some(view) = delivery_files::open(self.remote.as_deref(), &db, &self.projects) {
             let found = view.rank(&window)?;
-            let passing: Vec<&Matched> = found
-                .iter()
-                .filter(|m| push::passes(m, failed))
-                .take(push::READ_PER_EVENT)
-                .collect();
+            // What the context had in this stretch takes no read: a passage
+            // a hold deferred is among the next ones.
+            let handled = state.handled(agent, Use::Push)?;
+            let mut passing = Vec::new();
+            for matched in found.iter().filter(|m| push::passes(m, failed)) {
+                if passing.len() == push::READ_PER_EVENT {
+                    break;
+                }
+                if !handled.contains(view.id(matched.memory)?, matched.slot) {
+                    passing.push(matched);
+                }
+            }
             if !passing.is_empty() {
                 // The store is opened only for a match's text, and only here.
                 let conn = match self.remote {
@@ -320,6 +356,69 @@ impl Session {
         let room = push::RECALL_CHARS - push::header_chars(failed);
         let shown = state.record(agent, &step, &offers, room)?;
         Ok((!shown.is_empty()).then(|| push::text(shown.iter().map(|&i| &lines[i]), failed)))
+    }
+
+    /// The reason to hold back the shell command that gave `terms`, about
+    /// to run in its agent context, or none: the passages that hold it
+    /// ([`Matched::hold`]) that the context was not shown, held or
+    /// deferred in this stretch, whose memory may hold a command
+    /// ([`push::Voice::holds`]), strongest first, at most
+    /// [`hold::HOLD_PER_EVENT`] within [`HOLD_CHARS`]. The command is not added
+    /// to the window: the post-tool hook does that once it runs. A
+    /// server's store holds nothing: a hold shows a passage and its label,
+    /// which only this machine's store gives the hook. Past the deadline it
+    /// holds nothing and writes nothing.
+    pub(super) fn hold(&self, payload: &Value, terms: Terms) -> anyhow::Result<Option<String>> {
+        if self.remote.is_some() {
+            return Ok(None);
+        }
+        let mut state = State::open(&recall::path(&self.snapshot), self.deadline)?;
+        let agent = payload["agent_id"].as_str().unwrap_or(recall::MAIN);
+        let mut window = Window::default();
+        for step in state.window(agent)? {
+            window.push_terms(step.kind, step.terms, step.failed);
+        }
+        window.push_terms(Kind::Command, terms, false);
+        let db = super::db_path();
+        let Some(view) = delivery_files::open(None, &db, &self.projects) else {
+            return Ok(None);
+        };
+        let found = view.rank(&window)?;
+        let handled = state.handled(agent, Use::Hold)?;
+        let mut holding: Vec<&Matched> = Vec::new();
+        for matched in found.iter().filter(|m| m.hold()) {
+            if !handled.contains(view.id(matched.memory)?, matched.slot) {
+                holding.push(matched);
+            }
+        }
+        if holding.is_empty() {
+            return Ok(None);
+        }
+        let read = holding.len().min(HOLD_READ);
+        let conn = Connection::open_with_flags(
+            &db,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        let held = hold::lines(&conn, &view, &holding[..read], self.deadline)?;
+        let mut unread = Vec::with_capacity(holding.len() - read);
+        for matched in &holding[read..] {
+            unread.push((view.id(matched.memory)?, matched.slot));
+        }
+        let offers: Vec<Offer> = held
+            .iter()
+            .map(|one| Offer {
+                memory: &one.id,
+                passage: one.passage,
+                chars: one.chars(),
+            })
+            .collect();
+        let room = HOLD_CHARS - hold::frame_chars();
+        let shown = state.hold(agent, &offers, &unread, room, self.deadline)?;
+        if shown.is_empty() {
+            return Ok(None);
+        }
+        let shown: Vec<&hold::Held> = shown.iter().map(|&i| &held[i]).collect();
+        Ok(Some(hold::reason(&shown)))
     }
 }
 
