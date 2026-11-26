@@ -2673,6 +2673,16 @@
     "compiler/tools/lint.py": "import sys\nprint('lint ok')\n",
     "compiler/notes.txt": "start\n"
    },
+   "history": [
+    {
+     "cwd": "project:compiler",
+     "message": "Add the lexer\n\nSigned-off-by: Eval User <eval@example.invalid>"
+    },
+    {
+     "cwd": "project:compiler",
+     "message": "Add the parser\n\nSigned-off-by: Eval User <eval@example.invalid>"
+    }
+   ],
    "seed": [
     {
      "id": "full",
@@ -2728,18 +2738,30 @@
       "observed",
       "--evidence",
       "The user amended two commits to add -s"
-     ]
+     ],
+     "aged": true
     }
    ],
-   "bulk": {
-    "count": 60,
-    "type": "constraint",
-    "category": "style",
-    "scope": "project",
-    "project": "github.com/acme/compiler",
-    "title": "Compiler style rule {n}: keep module {n} under 400 lines",
-    "content": "Compiler style rule {n}: module {n} stays under 400 lines; split it before it grows past that."
-   },
+   "bulk": [
+    {
+     "count": 60,
+     "type": "constraint",
+     "category": "style",
+     "scope": "project",
+     "project": "github.com/acme/compiler",
+     "title": "Compiler style rule {n}: keep module {n} under 400 lines",
+     "content": "Compiler style rule {n}: module {n} stays under 400 lines; split it before it grows past that."
+    },
+    {
+     "count": 60,
+     "type": "fact",
+     "category": "workflow",
+     "scope": "project",
+     "project": "github.com/acme/compiler",
+     "title": "Module {n} has one owner",
+     "content": "Module {n} has one owner, named in its header comment."
+    }
+   ],
    "sessions": [
     {
      "prompt": "Append the line 'one' to notes.txt and commit it."
@@ -2896,6 +2918,9 @@
     "python3 tools/*",
     "git commit -s *"
    ],
+   "unlisted": [
+    "signoff"
+   ],
    "codex_escalations": true,
    "repeat": 2
   },
@@ -3036,7 +3061,7 @@
       "--title",
       "What each of the ten tools/step scripts checks by default",
       "--content",
-      "1. `python3 tools/step1.py` uses an empty default profile, so it checks nothing, unless given `--profile p1`.\n2. `python3 tools/step2.py` uses an empty default profile, so it checks nothing, unless given `--profile p2`.\n3. `python3 tools/step3.py` uses an empty default profile, so it checks nothing, unless given `--profile p3`.\n4. `python3 tools/step4.py` uses an empty default profile, so it checks nothing, unless given `--profile p4`.\n5. `python3 tools/step5.py` uses an empty default profile, so it checks nothing, unless given `--profile p5`.\n6. `python3 tools/step6.py` uses an empty default profile, so it checks nothing, unless given `--profile p6`.\n7. `python3 tools/step7.py` uses an empty default profile, so it checks nothing, unless given `--profile p7`.\n8. `python3 tools/step8.py` uses an empty default profile, so it checks nothing, unless given `--profile p8`.\n9. `python3 tools/step9.py` uses an empty default profile, so it checks nothing, unless given `--profile p9`.\n10. `python3 tools/step10.py` uses an empty default profile, so it checks nothing, unless given `--profile p10`.",
+      "- `python3 tools/step1.py` uses an empty default profile, so on its own it checks nothing and still prints a passing line; run it with `--profile p1`, the profile written for that script, which holds every check that script is meant to run on the build it is given.\n- `python3 tools/step2.py` uses an empty default profile, so on its own it checks nothing and still prints a passing line; run it with `--profile p2`, the profile written for that script, which holds every check that script is meant to run on the build it is given.\n- `python3 tools/step3.py` uses an empty default profile, so on its own it checks nothing and still prints a passing line; run it with `--profile p3`, the profile written for that script, which holds every check that script is meant to run on the build it is given.\n- `python3 tools/step4.py` uses an empty default profile, so on its own it checks nothing and still prints a passing line; run it with `--profile p4`, the profile written for that script, which holds every check that script is meant to run on the build it is given.\n- `python3 tools/step5.py` uses an empty default profile, so on its own it checks nothing and still prints a passing line; run it with `--profile p5`, the profile written for that script, which holds every check that script is meant to run on the build it is given.\n- `python3 tools/step6.py` uses an empty default profile, so on its own it checks nothing and still prints a passing line; run it with `--profile p6`, the profile written for that script, which holds every check that script is meant to run on the build it is given.\n- `python3 tools/step7.py` uses an empty default profile, so on its own it checks nothing and still prints a passing line; run it with `--profile p7`, the profile written for that script, which holds every check that script is meant to run on the build it is given.\n- `python3 tools/step8.py` uses an empty default profile, so on its own it checks nothing and still prints a passing line; run it with `--profile p8`, the profile written for that script, which holds every check that script is meant to run on the build it is given.\n- `python3 tools/step9.py` uses an empty default profile, so on its own it checks nothing and still prints a passing line; run it with `--profile p9`, the profile written for that script, which holds every check that script is meant to run on the build it is given.\n- `python3 tools/step10.py` uses an empty default profile, so on its own it checks nothing and still prints a passing line; run it with `--profile p10`, the profile written for that script, which holds every check that script is meant to run on the build it is given.",
       "--scope",
       "project",
       "--project",
@@ -3059,13 +3084,13 @@
      "pushed": {
       "memory": "{seed:steps}",
       "agent": "main",
-      "passage": 3
+      "passage": 4
      }
     },
     {
      "pushed_not": {
       "memory": "{seed:steps}",
-      "passage_not": 3
+      "passage_not": 4
      }
     },
     {
@@ -3085,7 +3110,7 @@
        {
         "memory": "{seed:steps}",
         "agent": "main",
-        "passage": 3
+        "passage": 4
        }
       ]
      }
@@ -3114,12 +3139,12 @@
         {
          "memory": "{seed:steps}",
          "agent": "main",
-         "passage": 3
+         "passage": 4
         },
         {
          "memory": "{seed:steps}",
          "agent": "main",
-         "passage": 4
+         "passage": 5
         }
        ]
       }
@@ -3135,7 +3160,7 @@
         {
          "memory": "{seed:steps}",
          "agent": "main",
-         "passage": 3
+         "passage": 4
         }
        ]
       }
@@ -3305,7 +3330,7 @@
     "count": 1000
    },
    "files": {
-    "compiler/docs/guide.md": "# Guide\n\nRun `compiler FILE` to compile a file.\n"
+    "compiler/docs/guide.md": "# Guide\n\nRun `compiler FILE` to compile a file.\n\nLast reviewed: 2026-09\n"
    },
    "seed": [
     {

@@ -544,14 +544,16 @@ class Sandbox:
         return path
 
     def commit_messages(self, path):
-        """Messages of the commits after the project's first one."""
+        """Messages of the commits the agent made: those after the project's
+        first one and its `history` (see `write_files`)."""
         if not (path / ".git").exists():
             return []
-        out = subprocess.run([GIT, "log", "--format=%B%x00", "main"], cwd=path, env={
+        start = getattr(self, "starts", {}).get(Path(path).resolve())
+        out = subprocess.run([GIT, "log", "--format=%B%x00", f"{start}..main" if start else "main"], cwd=path, env={
             **self.env, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null"},
             capture_output=True, text=True)
         messages = [m.strip() for m in out.stdout.split("\0") if m.strip()]
-        return messages[:-1]
+        return messages if start else messages[:-1]
 
     def memories(self):
         return json.loads(self.cli("search", "--scope", "all", "--status", "all", "--page-size", "200"))["memories"]
@@ -1869,8 +1871,10 @@ def server_step(step, servers, sandbox):
 
 def write_files(scenario, sandbox, projects):
     """The scenario's `files`, by trial path; one inside a project checkout
-    joins the project's first commit, so it is part of the project and the
-    `commits` checks count only what the agent committed."""
+    joins the project's first commit, so it is part of the project. Then
+    each `history` commit ({"cwd", "message"}, empty) is made after it, as
+    the project's earlier work. The `commits` checks count only what the
+    agent committed after both."""
     checkouts = {sandbox.workdir(spec, projects) for spec in project_specs(scenario)}
     for name, text in scenario.get("files", {}).items():
         path = sandbox.dir / name
@@ -1887,13 +1891,24 @@ def write_files(scenario, sandbox, projects):
             subprocess.run([GIT, "add", relative], cwd=checkout, env=git, check=True, capture_output=True)
             subprocess.run([GIT, "commit", "-q", "--amend", "--no-edit"], cwd=checkout, env=git,
                            check=True, capture_output=True)
+    if not checkouts:
+        return
+    git = {**sandbox.env, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null"}
+    for commit in scenario.get("history", []):
+        subprocess.run([GIT, "commit", "-q", "--allow-empty", "-m", commit["message"]],
+                       cwd=sandbox.workdir(commit["cwd"], projects), env=git, check=True, capture_output=True)
+    sandbox.starts = {
+        checkout.resolve(): subprocess.run([GIT, "rev-parse", "HEAD"], cwd=checkout, env=git, check=True,
+                                           capture_output=True, text=True).stdout.strip()
+        for checkout in checkouts}
 
 
 def project_specs(scenario):
     """Every `project:` working directory a scenario names."""
     turns = steps(scenario) if "steps" in scenario or "sessions" in scenario else []
     specs = [scenario.get("cwd", "plain"), *scenario.get("folders", []),
-             *[step.get("cwd", "plain") for step in turns]]
+             *[step.get("cwd", "plain") for step in turns],
+             *[commit["cwd"] for commit in scenario.get("history", [])]]
     return list(dict.fromkeys(s for s in specs if s.startswith("project:")))
 
 
@@ -1923,15 +1938,23 @@ def age(sandbox, memory_id):
     conn.close()
 
 
-def bulk_export(spec):
-    """An export of `spec["count"]` memories made from `spec`'s fields, with
-    `{n}` in the title and content replaced by each one's number, so many
-    alike memories are stored in one import instead of one `record` each,
-    which would refuse them as similar."""
+def bulk_groups(scenario):
+    """A scenario's `bulk`: one group, or a list of them."""
+    bulk = scenario.get("bulk", [])
+    return bulk if isinstance(bulk, list) else [bulk]
+
+
+def bulk_export(groups):
+    """An export of each group's `count` memories made from its fields, with
+    `{n}` in the title and content replaced by each one's number in its
+    group, so many alike memories are stored in one import instead of one
+    `record` each, which would refuse them as similar. Ids are numbered
+    across the groups, so no two collide."""
     memories = []
-    for n in range(1, spec["count"] + 1):
+    numbered = [(spec, n) for spec in groups for n in range(1, spec["count"] + 1)]
+    for i, (spec, n) in enumerate(numbered, start=1):
         memories.append({
-            "id": f"{0xb0000000 + n:08x}-0000-4000-8000-{n:012x}",
+            "id": f"{0xb0000000 + i:08x}-0000-4000-8000-{i:012x}",
             "type": spec["type"], "category": spec["category"],
             "title": spec["title"].replace("{n}", str(n)),
             "content": spec["content"].replace("{n}", str(n)),
@@ -2001,7 +2024,7 @@ def filler_count(scenario):
     scenario's seeds and bulk memories, so the store holds `count` in all."""
     if "seed_many" not in scenario:
         return 0
-    named = len(scenario.get("seed", [])) + scenario.get("bulk", {}).get("count", 0)
+    named = len(scenario.get("seed", [])) + sum(group["count"] for group in bulk_groups(scenario))
     count = scenario["seed_many"]["count"]
     if count < named:
         raise ValueError(f"seed_many count {count} is under the scenario's {named} named memories")
@@ -2030,7 +2053,7 @@ def prepare(scenario, client, base, source, projects):
             if seed.get("aged"):
                 age(sandbox, saved["id"])
         if "bulk" in scenario:
-            import_export(sandbox, "bulk.json", bulk_export(scenario["bulk"]))
+            import_export(sandbox, "bulk.json", bulk_export(bulk_groups(scenario)))
         if filler := filler_count(scenario):
             import_export(sandbox, "many.json", many_export(filler))
         sandbox.setup_output = sandbox.setup(scenario.get("hooks", True))
