@@ -1225,3 +1225,94 @@ fn a_mark_that_cannot_be_rewritten_after_the_commit_still_names_the_files_left()
     );
     assert!(home.files(".void").is_empty(), "and the mark");
 }
+
+/// How many times [`a_read_while_hooks_replace_the_files_finds_them_or_nothing`]
+/// has the hooks replace the scope's files: enough for reads to land on
+/// many replaces and deletes, within a minute of debug hooks on Windows.
+#[cfg(windows)]
+const REPLACES: usize = 40;
+
+/// How many threads read the scope's files meanwhile, as hooks of several
+/// sessions would.
+#[cfg(windows)]
+const READERS: usize = 2;
+
+// On Windows, a read of a scope's base, its overlay or the void mark while
+// hooks and removals replace and delete them finds the file, or finds
+// none, and is never refused: a refused open would leave a hook with
+// nothing to deliver at that step, and nothing said (#218).
+#[cfg(windows)]
+#[test]
+fn a_read_while_hooks_replace_the_files_finds_them_or_nothing() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    let home = Home::new();
+    home.record("deploy", "quokka-deploy");
+    home.hook("SessionStart", "s0", &[]);
+    // The base, its overlay, and the void mark a removal writes before its
+    // commit and deletes once nothing is voided: the files a hook reads.
+    let base = home.base();
+    let name = base.file_name().unwrap().to_str().unwrap().to_owned();
+    let key = name.split('-').next().unwrap();
+    let files = [
+        base.clone(),
+        home.overlay(),
+        home.delivery().join(format!("{key}.void")),
+    ];
+    let stop = Arc::new(AtomicBool::new(false));
+    let readers: Vec<_> = (0..READERS)
+        .map(|_| {
+            let (files, stop) = (files.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let (mut read, mut missing, mut refused) = (0, 0, Vec::new());
+                while !stop.load(Ordering::SeqCst) {
+                    for file in &files {
+                        match fs::read(file) {
+                            Ok(_) => read += 1,
+                            Err(err) if err.kind() == std::io::ErrorKind::NotFound => missing += 1,
+                            Err(err) => refused.push(format!(
+                                "{}: os error {:?}, {err}",
+                                file.file_name().unwrap().to_string_lossy(),
+                                err.raw_os_error()
+                            )),
+                        }
+                    }
+                }
+                (read, missing, refused)
+            })
+        })
+        .collect();
+    // Each round replaces the overlay (a tool hook folds in a new memory),
+    // then the base (a new session starts on a base with every change
+    // folded in), then deletes them (a removal takes that memory out, so
+    // the next round can record it again).
+    for n in 0..REPLACES {
+        let id = home.record("lint", "wombat-lint");
+        home.hook("PostToolUse", "s0", &[]);
+        home.hook("SessionStart", &format!("s{}", n + 1), &[]);
+        let reply = home.cli(&["forget", id.as_str()]);
+        assert_eq!(reply["deleted"], true, "{reply}");
+    }
+    stop.store(true, Ordering::SeqCst);
+    let (mut read, mut missing, mut refused) = (0, 0, Vec::new());
+    for reader in readers {
+        let (r, m, f) = reader.join().unwrap();
+        read += r;
+        missing += m;
+        refused.extend(f);
+    }
+    eprintln!(
+        "{REPLACES} rounds: {read} reads found a file, {missing} found none, {} were refused",
+        refused.len()
+    );
+    assert!(read > 0, "the readers read");
+    assert!(
+        refused.is_empty(),
+        "{} of {} reads refused:\n{}",
+        refused.len(),
+        read + missing + refused.len(),
+        refused.join("\n")
+    );
+}
