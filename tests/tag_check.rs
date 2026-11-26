@@ -101,6 +101,14 @@ impl Home {
         self.shim().join("git.calls")
     }
 
+    /// Every git call the hooks made.
+    fn git_calls(&self) -> usize {
+        fs::read_to_string(self.log())
+            .unwrap_or_default()
+            .lines()
+            .count()
+    }
+
     /// The lookups the hooks made: `cat-file` calls.
     fn lookups(&self) -> usize {
         fs::read_to_string(self.log())
@@ -172,6 +180,40 @@ impl Home {
             .unwrap();
         assert!(out.status.success(), "{out:?}");
         serde_json::from_slice(&out.stdout).unwrap()
+    }
+
+    /// `record` of an observed note that `cargo publish` names, from
+    /// `folder`: not a rule, which session start prints whole and no hook
+    /// pushes again. Its id.
+    fn publish_note(&self, folder: &Path) -> String {
+        let out = self
+            .command(
+                &[
+                    "record",
+                    "--type",
+                    "fact",
+                    "--source",
+                    "observed",
+                    "--evidence",
+                    "Seen in two sessions",
+                    "--category",
+                    "workflow",
+                    "--scope",
+                    "project",
+                    "--project",
+                    PROJECT,
+                    "--title",
+                    "Dry run before publishing",
+                    "--content",
+                    "Run `cargo publish --dry-run` before `cargo publish`.",
+                ],
+                folder,
+            )
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let note: Value = serde_json::from_slice(&out.stdout).unwrap();
+        note["id"].as_str().unwrap().to_owned()
     }
 
     /// Starts a memory server on the home's store, with `env`; from then on
@@ -268,23 +310,23 @@ impl Home {
         );
     }
 
-    /// The prompt hook in `folder`.
-    fn prompted(&self, session: &str, folder: &Path, prompt: &str) {
+    /// The prompt hook in `folder`; what it printed.
+    fn prompted(&self, session: &str, folder: &Path, prompt: &str) -> String {
         self.hook(
             "prompt-submit",
             folder,
             &json!({"session_id": session, "cwd": folder, "hook_event_name": "UserPromptSubmit", "prompt": prompt}),
-        );
+        )
     }
 
-    /// The tool hook after a shell command in `folder`.
-    fn ran(&self, session: &str, folder: &Path, command: &str) {
+    /// The tool hook after a shell command in `folder`; what it printed.
+    fn ran(&self, session: &str, folder: &Path, command: &str) -> String {
         self.hook(
             "post-tool-use",
             folder,
             &json!({"session_id": session, "cwd": folder, "hook_event_name": "PostToolUse",
                     "tool_name": "Bash", "tool_input": {"command": command}, "tool_response": {"stdout": ""}}),
-        );
+        )
     }
 
     /// The end record of memory `id`: how, evidence and origin.
@@ -740,4 +782,66 @@ fn a_read_only_session_never_sends_its_end() {
     assert_eq!(home.ended(&id), None, "not sent again that session");
     home.start("s2", &app);
     assert!(home.ended(&id).is_some(), "a writing session ends it");
+}
+
+/// Milliseconds each call of the slow git waits: past the tool hook's limit
+/// as the tests scale it (100 ms times `HOOK_ROOM`'s 10), so a push that
+/// waited on git would come too late to be printed.
+const SLOW_GIT_MS: u64 = 1_500;
+
+#[test]
+fn a_tool_hook_with_no_tag_waited_for_spawns_no_git_in_a_new_folder() {
+    let home = Home::new();
+    let checkout = home.checkout();
+    let sub = checkout.join("docs");
+    fs::create_dir(&sub).unwrap();
+    home.start("s1", &checkout);
+    let before = home.git_calls();
+    home.ran("s1", &sub, "ls");
+    home.ran("s1", home.dir.path(), "ls");
+    assert_eq!(home.git_calls(), before, "no tag is waited for");
+}
+
+#[test]
+fn a_push_never_waits_on_the_tag_check_s_git() {
+    let home = Home::new();
+    let checkout = home.checkout();
+    let sub = checkout.join("crates");
+    fs::create_dir(&sub).unwrap();
+    home.record("v9.0.0", &checkout);
+    let id = home.publish_note(&checkout);
+    let id = id.as_str();
+    home.start("s1", &checkout);
+    // A tag is waited for, and the tool hook runs in a folder start never
+    // saw, where the check must ask git for its project and git folder.
+    fs::write(home.shim().join("git.delay"), SLOW_GIT_MS.to_string()).unwrap();
+    let before = home.git_calls();
+    let pushed = home.ran("s1", &sub, "cargo publish");
+    assert!(pushed.contains(&id[..8]), "the push arrives: {pushed:?}");
+    assert!(home.git_calls() > before, "the check still looked");
+}
+
+/// Milliseconds the tag check's call for the git folder waits: past the
+/// prompt hook's limit as the tests scale it (1 s times `HOOK_ROOM`'s 10).
+/// Only that call is slow: the prompt hook finds a new folder's project
+/// with git of its own before its push, which the tag check does not
+/// change.
+const SLOW_GIT_DIR_MS: u64 = 11_000;
+
+#[test]
+fn a_prompt_s_push_never_waits_on_the_tag_check_s_git() {
+    let home = Home::new();
+    let checkout = home.checkout();
+    let sub = checkout.join("crates");
+    fs::create_dir(&sub).unwrap();
+    home.record("v9.0.0", &checkout);
+    let id = home.publish_note(&checkout);
+    home.start("s1", &checkout);
+    fs::write(
+        home.shim().join("git.delay"),
+        format!("{SLOW_GIT_DIR_MS} --git-common-dir"),
+    )
+    .unwrap();
+    let printed = home.prompted("s1", &sub, "Run cargo publish for the new crate");
+    assert!(printed.contains(&id[..8]), "the push arrives: {printed:?}");
 }

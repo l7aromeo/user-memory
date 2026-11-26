@@ -832,6 +832,13 @@ impl State {
         Ok(())
     }
 
+    /// Whether any tag is waited for, in any project.
+    pub(super) fn waits_for_tags(&self) -> Result<bool> {
+        Ok(self
+            .conn
+            .query_row("SELECT EXISTS(SELECT 1 FROM tag_pending)", [], |r| r.get(0))?)
+    }
+
     /// The ends not yet in the store (project, memory, tag, commit).
     pub(super) fn unwritten_ends(&self) -> Result<Vec<(String, String, String, String)>> {
         let mut statement = self

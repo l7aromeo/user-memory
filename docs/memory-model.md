@@ -210,8 +210,12 @@ history, export and `read` with status `ended` or `all` still show it.
   project; a global memory's names the project whose tags count. The
   session hooks check, in the session's folder: session start and each
   prompt ask the store which tags its project waits for, and a tool hook
-  looks again only when the checkout's refs changed, so a command that
-  makes the tag ends the memory at the next tool call. Only a checkout
+  looks again only when a tag is waited for and the checkout's refs
+  changed. Each hook checks after choosing what it prints, so the check
+  never delays a push: the tool hook of a command that makes the tag ends
+  the memory, and that hook's push may still name it once, since it was
+  in force when the command ran; from the next hook on it is shown
+  nowhere. Only a checkout
   whose `origin` remote is the project decides, and only a tag of exactly
   that name: a fork, a vendored copy or a tag in another case decides
   nothing. The end record names the tag, its commit and the project. On a

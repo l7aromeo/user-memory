@@ -203,31 +203,15 @@ pub fn post_tool_use(client: HookClient, _context_limit: Option<usize>) -> Strin
         return String::new();
     };
     session.keep_current();
-    session.check_tags(client, &payload);
-    let origin = super::origin(client, &payload);
-    let Ok(payload) = serde_json::from_slice::<Value>(&payload) else {
-        return String::new();
-    };
-    super::used::note(
-        session.snapshot(),
-        &payload,
-        origin.as_deref(),
-        session.deadline(),
-    );
-    let Some(mut action) = action(&payload) else {
-        return String::new();
-    };
-    action.failed = failed(client, &payload);
-    session
-        .recall(&payload, action.kind, terms_of(&action), action.failed)
-        .ok()
-        .flatten()
-        .map(|text| {
-            let event = payload["hook_event_name"].as_str().unwrap_or("PostToolUse");
-            json!({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}})
-                .to_string()
-        })
-        .unwrap_or_default()
+    let pushed = session.push(client, &payload);
+    // The tag check (#121) runs once the push is chosen, on a deadline of
+    // its own, so its git and its request to a server never take the
+    // push's time. The prompt hook and session start run theirs within
+    // what their own work leaves of their limits; this limit is too short
+    // to leave the check anything on a loaded machine, and a tag a command
+    // made would then wait for the next prompt.
+    session.check_tags(client, &payload, tool_deadline(Instant::now()));
+    pushed
 }
 
 /// A tool hook's deadline: [`TOOL_HOOK_LIMIT`] after it `started`.
@@ -299,9 +283,34 @@ impl Session {
         }
     }
 
-    /// The tag check after a tool call (#121), in the payload's folder: a
-    /// look only when its refs changed. Prints nothing.
-    fn check_tags(&self, client: HookClient, payload: &[u8]) {
+    /// What the hook prints for the result in `payload`: the push of what
+    /// the call matches that its agent context was not shown in this
+    /// stretch, or nothing. Notes what the call used first.
+    fn push(&self, client: HookClient, payload: &[u8]) -> String {
+        let origin = super::origin(client, payload);
+        let Ok(payload) = serde_json::from_slice::<Value>(payload) else {
+            return String::new();
+        };
+        super::used::note(&self.snapshot, &payload, origin.as_deref(), self.deadline);
+        let Some(mut action) = action(&payload) else {
+            return String::new();
+        };
+        action.failed = failed(client, &payload);
+        self.recall(&payload, action.kind, terms_of(&action), action.failed)
+            .ok()
+            .flatten()
+            .map(|text| {
+                let event = payload["hook_event_name"].as_str().unwrap_or("PostToolUse");
+                json!({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}})
+                    .to_string()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The tag check after a tool call (#121), in the payload's folder, by
+    /// `deadline`: a look only when a tag is waited for and its refs
+    /// changed. Prints nothing.
+    fn check_tags(&self, client: HookClient, payload: &[u8], deadline: Instant) {
         let Some(origin) = super::origin(client, payload) else {
             return;
         };
@@ -325,7 +334,7 @@ impl Session {
             remote.as_ref(),
             &super::db_path(),
             super::tags::When::Tool,
-            self.deadline,
+            deadline,
         );
     }
 

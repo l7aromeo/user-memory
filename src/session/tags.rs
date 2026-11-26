@@ -1,8 +1,9 @@
 //! The tag check (#121), run only by the hooks on the client: a memory whose
 //! condition is a tag of a project ends once a checkout of that project
 //! has the tag. Session start always looks; a prompt asks the store again
-//! what is pending; a tool hook looks only when the refs' stamps changed,
-//! which costs no git spawn while they stay as they were. A fork, a
+//! what is pending; a tool hook looks only when a tag is waited for and
+//! the refs' stamps changed, which costs no git spawn while they stay as
+//! they were. Each hook checks after choosing what it prints. A fork, a
 //! vendored copy or another repository never decides: the checkout's own
 //! project (from its `origin` remote) must be the condition's. Never the
 //! network beyond the store.
@@ -83,18 +84,6 @@ fn check_on(
     if state.tag_flag(OFF)? {
         return Ok(());
     }
-    let key = folder.to_string_lossy().into_owned();
-    let (project, common) = match state.tag_folder(&key)? {
-        Some(kept) => kept,
-        None => {
-            let project = project::project_id(folder).unwrap_or_default();
-            let common = tags::common_dir(folder)
-                .map(|dir| dir.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            state.keep_tag_folder(&key, &project, &common)?;
-            (project, common)
-        }
-    };
     let runtime = remote
         .map(|_| {
             tokio::runtime::Builder::new_current_thread()
@@ -118,6 +107,26 @@ fn check_on(
         }
     };
     send_unwritten(&mut state, &ask)?;
+    // A tool hook asks the store nothing, so with no tag waited for it has
+    // nothing to look for and spawns no git, in any folder.
+    if when == When::Tool && !state.waits_for_tags()? {
+        return Ok(());
+    }
+    let key = folder.to_string_lossy().into_owned();
+    let (project, common) = match state.tag_folder(&key)? {
+        Some(kept) => kept,
+        None => {
+            if Instant::now() >= deadline {
+                return Ok(());
+            }
+            let project = project::project_id(folder).unwrap_or_default();
+            let common = tags::common_dir(folder)
+                .map(|dir| dir.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            state.keep_tag_folder(&key, &project, &common)?;
+            (project, common)
+        }
+    };
     if project.is_empty() || common.is_empty() {
         return Ok(());
     }
