@@ -264,7 +264,15 @@ a trial whose session start names one of them by id is void, since an
 agent that reads a memory from the index needs no push; the rehearsal
 fails such a scenario. A scenario keeps a project note out of the index
 by aging it and adding newer `bulk` memories of its project, which the
-index lists first. It
+index lists first. An agent may also find a note with its own memory
+search, by words it reads. A scenario compared against main whose note
+the work finds (W1, E1) keeps every word of the note outside its code
+spans out of its files and prompts, which `evals/test_run.py` checks; its
+code spans name paths and commands the checkout shows by design, so a
+search by a file's name still finds it (W1's `tools/publish.py`). A1 is
+the listed exception: its note shares `tools/package.py`'s own words, but
+its prompt and `RELEASING.md` give no search word, and on main its agents
+never found the note. It
 then runs its `sessions` (one turn each) or `steps` (turns
 naming their `session`, kept open until its last turn) in a working directory
 (`cwd`: `plain`, `folder:<path>` without git, or `project:<path>`, a checkout
