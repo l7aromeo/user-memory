@@ -3594,26 +3594,67 @@ const MARKER_POLL: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// A TCP relay to a host that counts the connections it takes and keeps
 /// what clients send, so a test sees from the server's side whether a
-/// client asked it anything, and what, and when each marker poll ran.
+/// client asked it anything, and what, and when each request came in and
+/// its reply went out.
 struct Counting {
     address: String,
     taken: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     sent: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
-    polls: std::sync::Arc<std::sync::Mutex<Vec<PollSpan>>>,
+    requests: std::sync::Arc<std::sync::Mutex<Vec<Request>>>,
+    broken: std::sync::Arc<std::sync::Mutex<Option<Break>>>,
 }
 
-/// One MCP session as the server's side sees it, a marker poll when it asks
-/// for `stamps_since`: when its `initialize` request came in (just after
-/// the connector took the claim), and when the `stamps_since` reply went
-/// out (just before it writes the marker); none while it is on the way.
+/// One HTTP request a relay passed on.
+#[derive(Clone, Debug)]
+struct Request {
+    /// When its first bytes came in.
+    began: std::time::Instant,
+    /// Its request line, headers and the start of its body.
+    head: String,
+    /// When its reply began to go out; none while it is on the way.
+    answered: Option<std::time::Instant>,
+}
+
+impl Request {
+    fn method(&self) -> &str {
+        self.head.split(' ').next().unwrap_or_default()
+    }
+    fn session(&self) -> Option<String> {
+        header(&self.head, "mcp-session-id")
+    }
+    /// Whether it is a marker poll: the connector's call for the stamps
+    /// since a position, which asks nothing else; a hook's index call asks
+    /// for stamps too, beside its projects.
+    fn polls(&self) -> bool {
+        self.head
+            .contains("\"arguments\":{\"stamps\":true,\"stamps_since\"")
+    }
+    fn initializes(&self) -> bool {
+        self.head.contains("\"method\":\"initialize\"")
+    }
+    /// Whether it is a request to the MCP endpoint: not a delivery file's
+    /// or the token's own route.
+    fn mcp(&self) -> bool {
+        self.head.split(' ').nth(1) == Some("/mcp")
+    }
+}
+
+/// One marker poll as the server's side sees it: when its call came in,
+/// just after the connector took the claim, and when its reply went out,
+/// just before it writes the marker; none while it is on the way.
 #[derive(Clone, Debug)]
 struct PollSpan {
-    session: String,
     began: std::time::Instant,
-    /// Whether the session asked for `stamps_since`: a hook's session asks
-    /// other things and is no poll.
-    polled: bool,
     answered: Option<std::time::Instant>,
+}
+
+/// How a relay breaks the next POST in a session, so the server refuses
+/// it: as a session it no longer knows (one a restart or an idle timeout
+/// ended), or as a token it does not take.
+#[derive(Clone, Copy, Debug)]
+enum Break {
+    Session,
+    Token,
 }
 
 /// The bytes of a request a relay keeps to tell what it was: its headers
@@ -3630,17 +3671,48 @@ fn header(text: &str, name: &str) -> Option<String> {
     })
 }
 
+/// `chunk`, the start of a request, with the value of the header `name`
+/// replaced by as many `fill` bytes, so its length and the body's stay.
+fn blot(chunk: &mut [u8], name: &str, fill: u8) {
+    let text = String::from_utf8_lossy(chunk).into_owned();
+    let mut at = 0;
+    for line in text.split_inclusive('\n') {
+        if let Some((key, value)) = line.split_once(':')
+            && key.trim().eq_ignore_ascii_case(name)
+        {
+            let start = at + key.len() + 1 + (value.len() - value.trim_start().len());
+            let len = value.trim().len();
+            chunk[start..start + len].fill(fill);
+            return;
+        }
+        at += line.len();
+    }
+}
+
+/// What a relay knows of the request a connection is on.
+#[derive(Default)]
+struct OnConnection {
+    /// The request's place in the relay's list.
+    request: Option<usize>,
+    /// Whether its reply began to go out: the next bytes from the client
+    /// are a new request.
+    replied: bool,
+    /// Whether its reply is held back.
+    slow: bool,
+}
+
 impl Counting {
     fn to(host: &str) -> Self {
         Self::slowed(host, std::time::Duration::ZERO)
     }
-    /// A relay that holds each connection's reply back by `delay` before
-    /// passing it on, as a slow server or network does.
+    /// A relay that holds each request's reply back by `delay` before
+    /// passing it on, as a slow server or network does, on a connection
+    /// kept for many requests too.
     fn slowed(host: &str, delay: std::time::Duration) -> Self {
         Self::slowed_for(host, delay, b"")
     }
-    /// [`Counting::slowed`], for the connections whose request starts with
-    /// `request` only.
+    /// [`Counting::slowed`], for the requests that start with `request`
+    /// only.
     fn slowed_for(host: &str, delay: std::time::Duration, request: &'static [u8]) -> Self {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap().to_string();
@@ -3648,8 +3720,10 @@ impl Counting {
         let count = taken.clone();
         let sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let kept = sent.clone();
-        let polls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let spans = polls.clone();
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let listed = requests.clone();
+        let broken = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let breaks = broken.clone();
         let host = host.to_owned();
         std::thread::spawn(move || {
             for client in listener.incoming() {
@@ -3658,57 +3732,77 @@ impl Counting {
                 let Ok(server) = TcpStream::connect(&host) else {
                     continue;
                 };
-                let slow = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                // The connection's first request: when it began, and its
-                // first bytes.
-                let asked = std::sync::Arc::new(std::sync::Mutex::new((
-                    None::<std::time::Instant>,
-                    Vec::new(),
-                )));
-                for (mut from, mut to, keep, mut wait, asks) in [
+                let on = std::sync::Arc::new(std::sync::Mutex::new(OnConnection::default()));
+                for (mut from, mut to, asks) in [
                     (
                         client.try_clone().unwrap(),
                         server.try_clone().unwrap(),
-                        Some(kept.clone()),
-                        std::time::Duration::ZERO,
                         true,
                     ),
-                    (server, client, None, delay, false),
+                    (server, client, false),
                 ] {
-                    let slow = slow.clone();
-                    let asked = asked.clone();
-                    let spans = spans.clone();
+                    let on = on.clone();
+                    let (kept, listed, breaks) = (kept.clone(), listed.clone(), breaks.clone());
                     std::thread::spawn(move || {
                         let mut buffer = [0; 8192];
-                        let mut first = true;
                         while let Ok(n) = from.read(&mut buffer)
                             && n > 0
                         {
+                            let chunk = &mut buffer[..n];
                             if asks {
-                                let (began, bytes) = &mut *asked.lock().unwrap();
-                                began.get_or_insert_with(std::time::Instant::now);
-                                let room = REQUEST_KEPT.saturating_sub(bytes.len());
-                                bytes.extend_from_slice(&buffer[..n.min(room)]);
-                                note_ask(&spans, bytes);
+                                let mut on = on.lock().unwrap();
+                                let mut listed = listed.lock().unwrap();
+                                if on.request.is_none() || on.replied {
+                                    let text = String::from_utf8_lossy(chunk).into_owned();
+                                    if text.starts_with("POST ")
+                                        && header(&text, "mcp-session-id").is_some()
+                                    {
+                                        match breaks.lock().unwrap().take() {
+                                            Some(Break::Session) => {
+                                                blot(chunk, "mcp-session-id", b'0');
+                                            }
+                                            Some(Break::Token) => {
+                                                blot(chunk, "authorization", b'x');
+                                            }
+                                            None => {}
+                                        }
+                                    }
+                                    let size = chunk.len().min(REQUEST_KEPT);
+                                    listed.push(Request {
+                                        began: std::time::Instant::now(),
+                                        head: String::from_utf8_lossy(&chunk[..size]).into_owned(),
+                                        answered: None,
+                                    });
+                                    *on = OnConnection {
+                                        request: Some(listed.len() - 1),
+                                        replied: false,
+                                        slow: chunk.starts_with(request),
+                                    };
+                                } else if let Some(at) = on.request {
+                                    let head = &mut listed[at].head;
+                                    let room = REQUEST_KEPT.saturating_sub(head.len());
+                                    head.push_str(&String::from_utf8_lossy(&chunk[..n.min(room)]));
+                                }
+                                kept.lock().unwrap().extend_from_slice(chunk);
+                            } else {
+                                let first = {
+                                    let on = on.lock().unwrap();
+                                    (!on.replied).then_some(on.slow)
+                                };
+                                if first == Some(true) {
+                                    std::thread::sleep(delay);
+                                }
+                                if first.is_some() {
+                                    let mut on = on.lock().unwrap();
+                                    on.replied = true;
+                                    if let Some(at) = on.request {
+                                        listed.lock().unwrap()[at].answered =
+                                            Some(std::time::Instant::now());
+                                    }
+                                }
                             }
-                            if asks && std::mem::take(&mut first) {
-                                slow.store(
-                                    buffer[..n].starts_with(request),
-                                    std::sync::atomic::Ordering::SeqCst,
-                                );
-                            }
-                            let wait = std::mem::take(&mut wait);
-                            if slow.load(std::sync::atomic::Ordering::SeqCst) {
-                                std::thread::sleep(wait);
-                            }
-                            if let Some(keep) = &keep {
-                                keep.lock().unwrap().extend_from_slice(&buffer[..n]);
-                            }
-                            if to.write_all(&buffer[..n]).is_err() {
+                            if to.write_all(chunk).is_err() {
                                 break;
-                            }
-                            if !asks && std::mem::take(&mut first) {
-                                note_poll(&spans, &asked, &buffer[..n]);
                             }
                         }
                         let _ = to.shutdown(std::net::Shutdown::Write);
@@ -3720,7 +3814,8 @@ impl Counting {
             address,
             taken,
             sent,
-            polls,
+            requests,
+            broken,
         }
     }
     fn taken(&self) -> usize {
@@ -3730,58 +3825,24 @@ impl Counting {
     fn sent(&self) -> String {
         String::from_utf8_lossy(&self.sent.lock().unwrap()).into_owned()
     }
+    /// The requests so far, in the order they came in.
+    fn requests(&self) -> Vec<Request> {
+        self.requests.lock().unwrap().clone()
+    }
     /// The marker polls so far, in the order they began.
     fn poll_spans(&self) -> Vec<PollSpan> {
-        let mut spans = self.polls.lock().unwrap().clone();
-        spans.retain(|span| span.polled);
-        spans.sort_by_key(|span| span.began);
-        spans
+        self.requests()
+            .into_iter()
+            .filter(Request::polls)
+            .map(|request| PollSpan {
+                began: request.began,
+                answered: request.answered,
+            })
+            .collect()
     }
-}
-
-/// Marks the session of `request`, the start of a request, as a marker
-/// poll once it asks for `stamps_since`.
-fn note_ask(spans: &std::sync::Mutex<Vec<PollSpan>>, request: &[u8]) {
-    let asked = String::from_utf8_lossy(request);
-    if asked.contains("\"stamps_since\"")
-        && let Some(session) = header(&asked, "mcp-session-id")
-        && let Some(span) = spans
-            .lock()
-            .unwrap()
-            .iter_mut()
-            .find(|span| span.session == session)
-    {
-        span.polled = true;
-    }
-}
-
-/// Notes what a connection's first reply, `reply`, tells of a marker poll:
-/// an `initialize` answered with a session begins one, at the time its
-/// request came in, and a `stamps_since` call in that session is its
-/// answer, at the time the reply went out.
-fn note_poll(
-    spans: &std::sync::Mutex<Vec<PollSpan>>,
-    request: &std::sync::Mutex<(Option<std::time::Instant>, Vec<u8>)>,
-    reply: &[u8],
-) {
-    let (began, bytes) = &*request.lock().unwrap();
-    let asked = String::from_utf8_lossy(bytes);
-    let mut spans = spans.lock().unwrap();
-    if asked.contains("\"initialize\"")
-        && let Some(began) = *began
-        && let Some(session) = header(&String::from_utf8_lossy(reply), "mcp-session-id")
-    {
-        spans.push(PollSpan {
-            session,
-            began,
-            polled: false,
-            answered: None,
-        });
-    } else if asked.contains("\"stamps_since\"")
-        && let Some(session) = header(&asked, "mcp-session-id")
-        && let Some(span) = spans.iter_mut().find(|span| span.session == session)
-    {
-        span.answered = Some(std::time::Instant::now());
+    /// Has the server refuse the next POST in a session, as `how` says.
+    fn break_next(&self, how: Break) {
+        *self.broken.lock().unwrap() = Some(how);
     }
 }
 
@@ -4010,7 +4071,10 @@ fn connectors_on_one_machine_share_their_polls() {
 #[test]
 fn connectors_wait_for_a_poll_a_slow_server_has_not_answered() {
     let poll = std::time::Duration::from_millis(500);
-    let slow = poll * 2;
+    // Every reply takes `slow`, past the three polls after which a claim
+    // whose connector stopped renewing it counts as gone, even for a poll
+    // in a session its connector kept.
+    let slow = poll * 4;
     let host = Host::start(root());
     let proxy = Counting::slowed(&host.address, slow);
     let machine = Machine {
@@ -4020,11 +4084,12 @@ fn connectors_wait_for_a_poll_a_slow_server_has_not_answered() {
         env: vec![("USER_MEMORY_MARKER_POLL_MS", poll.as_millis().to_string())],
     };
     machine.hook("session-start");
-    // A poll opens two connections the relay holds back, one for its
-    // session's handshake and one for its call, so it takes twice `slow`:
-    // past the three polls after which a claim's connector counts as gone.
-    // One poll at a time: each waits for its answer, then a poll's interval.
-    let window = poll * 12;
+    // One poll at a time: each waits for its answer, one request in the
+    // session its connector kept, then a poll's interval. The connectors
+    // take the claim in turn, and one's first poll first opens its session,
+    // three replies long: the window is long enough to hold a poll's call
+    // even then.
+    let window = poll * 24;
     let five = polls(&machine, &proxy, 5, poll, window);
     let spans = proxy.poll_spans();
     let first = spans.first().map(|span| span.began);
@@ -4057,10 +4122,257 @@ fn connectors_wait_for_a_poll_a_slow_server_has_not_answered() {
     }
     assert!(five > 0);
     assert!(
-        five <= window.as_millis() / (slow * 2 + poll).as_millis() + POLL_SLACK,
+        five <= window.as_millis() / (slow + poll).as_millis() + POLL_SLACK,
         "five connectors in {window:?}, answers taking {slow:?}: {five}"
     );
 }
+
+/// Waits until `proxy` has seen `polls` marker polls in all; the MCP
+/// requests from the first of them on.
+fn polled(proxy: &Counting, polls: usize) -> Vec<Request> {
+    time::until("the polls", || {
+        proxy.requests().iter().filter(|r| r.polls()).count() >= polls
+    });
+    let requests: Vec<Request> = proxy.requests().into_iter().filter(Request::mcp).collect();
+    let first = requests.iter().position(Request::polls).unwrap();
+    requests[first..].to_vec()
+}
+
+/// What `requests` were, one per line, for a failure's message.
+fn told(requests: &[Request]) -> String {
+    requests
+        .iter()
+        .map(|r| {
+            let what = if r.polls() {
+                "poll"
+            } else if r.initializes() {
+                "initialize"
+            } else {
+                ""
+            };
+            let called = r
+                .head
+                .split("\"name\":\"")
+                .nth(1)
+                .and_then(|rest| rest.split('"').next())
+                .or_else(|| {
+                    r.head
+                        .split("\"method\":\"")
+                        .nth(1)
+                        .and_then(|rest| rest.split('"').next())
+                })
+                .unwrap_or_default();
+            format!("{} {what} {called} session={:?}", r.method(), r.session())
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+// A connector keeps the session its poll was answered in, so each later
+// poll is one request; a session the server no longer knows is made again
+// within the poll that met it, with no poll lost.
+#[test]
+fn a_connector_keeps_its_session_and_makes_a_dropped_one_again() {
+    let poll = std::time::Duration::from_millis(300);
+    let host = Host::start(root());
+    let proxy = Counting::to(&host.address);
+    let machine = Machine {
+        home: tempdir().unwrap(),
+        url: format!("http://{}/mcp", proxy.address),
+        token: host.root.path().join("token"),
+        env: vec![("USER_MEMORY_MARKER_POLL_MS", poll.as_millis().to_string())],
+    };
+    machine.hook("session-start");
+    let _connector = machine.connector();
+    let kept = polled(&proxy, 4);
+    let session = kept[0].session();
+    assert!(
+        kept.iter().all(|r| r.polls() && r.session() == session),
+        "polls after the first in its session, one request each:\n{}",
+        told(&kept)
+    );
+    // The server takes the next call as one in a session it no longer
+    // knows, as after a restart.
+    let before = proxy.requests().len();
+    proxy.break_next(Break::Session);
+    time::until("three polls after the break", || {
+        proxy.requests()[before..]
+            .iter()
+            .filter(|r| r.polls())
+            .count()
+            >= 3
+    });
+    let after: Vec<Request> = proxy.requests()[before..]
+        .iter()
+        .filter(|r| r.mcp())
+        .cloned()
+        .collect();
+    let refused = after.iter().position(Request::polls).unwrap();
+    let again = refused
+        + 1
+        + after[refused + 1..]
+            .iter()
+            .position(Request::polls)
+            .unwrap();
+    let made = &after[refused + 1..again];
+    assert!(
+        made.iter().any(Request::initializes) && !made.iter().any(|r| r.method() == "DELETE"),
+        "the call made again in a new session within the same poll:\n{}",
+        told(&after)
+    );
+    let new = after[again].session();
+    assert_ne!(new, session);
+    assert!(
+        after[again..]
+            .iter()
+            .all(|r| r.polls() && r.session() == new),
+        "then one request a poll in the new session:\n{}",
+        told(&after)
+    );
+}
+
+// A poll the server refuses ends its session, and the next poll opens a
+// new one rather than asking again in the refused one.
+#[test]
+fn a_refused_poll_starts_a_new_session() {
+    let poll = std::time::Duration::from_millis(300);
+    let host = Host::start(root());
+    let proxy = Counting::to(&host.address);
+    let machine = Machine {
+        home: tempdir().unwrap(),
+        url: format!("http://{}/mcp", proxy.address),
+        token: host.root.path().join("token"),
+        env: vec![("USER_MEMORY_MARKER_POLL_MS", poll.as_millis().to_string())],
+    };
+    machine.hook("session-start");
+    let mut connector = machine.connector();
+    time::until("two polls", || {
+        proxy.requests().iter().filter(|r| r.polls()).count() >= 2
+    });
+    let kept = files_under(machine.home.path());
+    let before = proxy.requests().len();
+    proxy.break_next(Break::Token);
+    time::until("two polls after the refusal", || {
+        proxy.requests()[before..]
+            .iter()
+            .filter(|r| r.polls())
+            .count()
+            >= 2
+    });
+    let after: Vec<Request> = proxy.requests()[before..]
+        .iter()
+        .filter(|r| r.mcp())
+        .cloned()
+        .collect();
+    let refused = after.iter().position(Request::polls).unwrap();
+    let next = refused
+        + 1
+        + after[refused + 1..]
+            .iter()
+            .position(Request::polls)
+            .unwrap();
+    // Beside the new session, the refusal changes nothing: the connector
+    // keeps no new file, says nothing, and a prompt is told nothing.
+    assert_eq!(files_under(machine.home.path()), kept);
+    let (quiet, log) = machine.hook("prompt-submit");
+    assert_eq!(quiet, "", "{log}");
+    drop(connector.0.stdin.take());
+    let mut said = String::new();
+    connector
+        .0
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut said)
+        .unwrap();
+    assert_eq!(said, "");
+    assert!(
+        after[refused + 1..next].iter().any(Request::initializes)
+            && after[next].session() != after[refused].session(),
+        "a new session after the refusal:\n{}",
+        told(&after)
+    );
+}
+
+/// The files under `dir`, by their paths within it, sorted; a file being
+/// written in place of another (`<name>.<pid>`) is left out, as it is
+/// there only for a moment.
+fn files_under(dir: &Path) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut dirs = vec![dir.to_path_buf()];
+    while let Some(at) = dirs.pop() {
+        for entry in fs::read_dir(&at).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if let Ok(inner) = path.strip_prefix(dir)
+                && !path
+                    .extension()
+                    .is_some_and(|e| e.to_string_lossy().bytes().all(|b| b.is_ascii_digit()))
+            {
+                found.push(inner.to_string_lossy().into_owned());
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+// A connector whose session ends stops as soon with a kept session on a
+// server slow to end it as on one that ends it at once: it does not wait
+// for the session's end.
+#[test]
+fn a_stopping_connector_does_not_wait_for_its_kept_session_to_end() {
+    let poll = std::time::Duration::from_millis(300);
+    let host = Host::start(root());
+    // How long it takes a connector with a kept session to exit once its
+    // input closes, through `proxy`; the fastest of a few, as the machine
+    // can be busy.
+    let exit = |proxy: &Counting| {
+        (0..STOP_RUNS)
+            .map(|_| {
+                let machine = Machine {
+                    home: tempdir().unwrap(),
+                    url: format!("http://{}/mcp", proxy.address),
+                    token: host.root.path().join("token"),
+                    env: vec![("USER_MEMORY_MARKER_POLL_MS", poll.as_millis().to_string())],
+                };
+                let before = proxy.requests().iter().filter(|r| r.polls()).count();
+                let mut connector = machine.connector();
+                time::until("a poll kept its session", || {
+                    proxy.requests().iter().filter(|r| r.polls()).count() >= before + 2
+                });
+                drop(connector.0.stdin.take());
+                let stopping = std::time::Instant::now();
+                assert!(connector.0.wait().unwrap().success());
+                stopping.elapsed()
+            })
+            .min()
+            .unwrap()
+    };
+    let at_once = exit(&Counting::to(&host.address));
+    // Only the session's end is slow, as on a server that answers late.
+    let late = exit(&Counting::slowed_for(
+        &host.address,
+        std::time::Duration::from_secs(5),
+        b"DELETE",
+    ));
+    assert!(
+        late < at_once + STOP_ROOM,
+        "{late:?} with a slow end against {at_once:?}"
+    );
+}
+
+/// Connectors [`a_stopping_connector_does_not_wait_for_its_kept_session_to_end`]
+/// stops each way, keeping the fastest, so one slowed by a busy machine
+/// does not decide.
+const STOP_RUNS: usize = 3;
+
+/// How much later a connector may stop with a session slow to end: half the
+/// connector's own bound on ending it (`POLLER_STOP_WAIT` in
+/// src/remote/marker.rs, 500 ms), so a connector that waited out that bound
+/// fails.
+const STOP_ROOM: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Polls that may start beyond the window's share: one under way as the
 /// window opens, and one starting as it closes.
@@ -4077,13 +4389,26 @@ fn polls(
     window: std::time::Duration,
 ) -> u128 {
     let running: Vec<ChildGuard> = (0..connectors).map(|_| machine.connector()).collect();
+    // The machine stays active, as while its sessions run hooks: else the
+    // connectors slow to the quiet interval once the session-start hook is
+    // old, which a slow server makes it soon.
+    let wanted = find(machine.home.path(), "wanted").unwrap();
+    let active = || {
+        let file = fs::OpenOptions::new().write(true).open(&wanted).unwrap();
+        file.set_modified(std::time::SystemTime::now()).unwrap();
+    };
+    active();
     machine.marker();
     // Counting starts once every connector is past its start and a poll
     // begun then has its answer, so the window holds the polls' steady pace.
     std::thread::sleep(poll * 2);
-    let asked = || proxy.sent().matches("\"stamps_since\"").count();
+    let asked = || proxy.requests().iter().filter(|r| r.polls()).count();
     let start = asked();
-    std::thread::sleep(window);
+    let opened = std::time::Instant::now();
+    while opened.elapsed() < window {
+        active();
+        std::thread::sleep(poll.min(window.saturating_sub(opened.elapsed())));
+    }
     let taken = asked() - start;
     drop(running);
     taken as u128
@@ -4187,10 +4512,49 @@ fn a_server_without_positions_is_asked_only_for_its_version_until_it_changes() {
     let quiet = proxy.sent()[first..].to_owned();
     assert_eq!(count(&quiet, "\"name\":\"index\""), 0, "{quiet}");
     assert!(find(machine.home.path(), "changed").is_none(), "no marker");
+    // No session of a server without positions is kept: each one the
+    // connector opened is ended, so the next handshake names the server's
+    // version as it is then.
+    let sessions = |method: Option<&str>| -> std::collections::BTreeSet<String> {
+        proxy
+            .requests()
+            .iter()
+            .filter(|r| r.mcp() && method.is_none_or(|m| r.method() == m))
+            .filter_map(Request::session)
+            .collect()
+    };
+    time::until("every session the connector opened ended", || {
+        sessions(None) == sessions(Some("DELETE"))
+    });
     host.child.kill().unwrap();
     host.child.wait().unwrap();
     host.restart_as(Some("0.10.0"));
     machine.marker();
+    // The upgraded server's positions come at each poll, and the session
+    // they came in is kept: the server is met as it is now, not as the
+    // first handshake named it.
+    let before = proxy.requests().len();
+    time::until("three polls with positions", || {
+        proxy.requests()[before..]
+            .iter()
+            .filter(|r| r.polls())
+            .count()
+            >= 3
+    });
+    let after: Vec<Request> = proxy.requests()[before..]
+        .iter()
+        .filter(|r| r.mcp())
+        .cloned()
+        .collect();
+    let first = after.iter().position(Request::polls).unwrap();
+    let session = after[first].session();
+    assert!(
+        after[first..]
+            .iter()
+            .all(|r| r.polls() && r.session() == session),
+        "{}",
+        told(&after)
+    );
 }
 
 /// A memory server sends every tool's hints over HTTP too, with

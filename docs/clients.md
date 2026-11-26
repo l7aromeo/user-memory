@@ -434,6 +434,17 @@ as moved: the prompt asks the server itself, and the connector goes back to
 polling every 5 seconds. A server too old to give positions gets no
 marker, and every prompt asks it, as before.
 
+A connector keeps the MCP session its last poll was answered in, so a
+poll is one request to the server rather than a new session each time.
+A session the server no longer knows, as after a restart or once the
+server ended it as idle, is made again within the poll that meets it.
+Any other failure ends the session, and the next poll starts a new one,
+which also meets an upgraded server as it now is. While a connector runs,
+the server holds its session and one idle connection. A connector that
+stops does not wait to end its session: one the server is not told of
+ends there once idle, which on a user-memory server is after five minutes
+(its default idle timeout).
+
 - Setup only touches its own entries, refuses a file that is not valid JSON,
   writes atomically, keeps key order, and migrates hooks written by earlier
   versions. Codex's `config.toml` is never edited; `doctor` warns when it also
