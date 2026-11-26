@@ -622,11 +622,17 @@ def tag_waited(hook_said, pushed, checkout, sessions, named):
             took.append(ms)
     # The check must have looked in every new folder, or this timed a hook
     # that skipped it.
+    # Each connection is closed here: `with` on one only ends its
+    # transaction, and on Windows an open file can't be deleted with the
+    # throwaway home.
     looked = 0
     for state in sessions.glob("*.recall"):
-        with sqlite3.connect(state) as conn:
+        conn = sqlite3.connect(state)
+        try:
             looked += conn.execute("SELECT count(*) FROM tag_folders WHERE folder LIKE ?",
                                    (f"%{os.sep}new%",)).fetchone()[0]
+        finally:
+            conn.close()
     if looked < len(named):
         raise SystemExit(f"the tag check looked in {looked} of {len(named)} new folders")
     return statistics.median(took)
