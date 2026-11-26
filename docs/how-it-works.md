@@ -202,7 +202,9 @@ Other memories
   same memories: up to 15 that at least half of its last 40 sessions read,
   recorded or were shown, the most used first. Each line says whose it is
   (yours, or an agent's note and from how many sessions) and holds the
-  memory whole when it is short, or its title and first passage. It never
+  memory whole when it is short, or its title and the passage most of
+  those sessions were shown since the memory last changed (its first when
+  none was). It never
   holds a rule, which the part before shows, an inference, or an agent's
   observation about you.
 - **The index** lists every other memory in scope, one line each: an

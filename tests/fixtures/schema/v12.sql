@@ -197,6 +197,7 @@ CREATE TABLE memory_use (
     shown INTEGER NOT NULL CHECK(shown IN (0,1)),
     held INTEGER CHECK(held IN (0,1)),
     overridden INTEGER CHECK(overridden IN (0,1)),
+    passage INTEGER CHECK(passage >= 0),
     PRIMARY KEY(memory, project, origin)
 ) WITHOUT ROWID
 ;

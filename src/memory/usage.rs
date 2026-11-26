@@ -6,7 +6,9 @@
 /// One row per memory, the project it counted for and the session (its
 /// origin): when the store last wrote it, and whether the session read it,
 /// recorded or confirmed it, or was shown a passage of it. `held` and
-/// `overridden` are for #118, null until known. No trigger and no change
+/// `overridden` are for #118, null until known. `passage` is the slot of
+/// the passage pushed most in that session (see `index::passages::SLOTS`),
+/// null when none was. No trigger and no change
 /// counter: use changes nothing a session reads. A forgotten memory's rows
 /// go with it. Part of the stored schema since version 12.
 pub(super) const TABLE: &str = "CREATE TABLE IF NOT EXISTS memory_use (
@@ -19,6 +21,7 @@ pub(super) const TABLE: &str = "CREATE TABLE IF NOT EXISTS memory_use (
     shown INTEGER NOT NULL CHECK(shown IN (0,1)),
     held INTEGER CHECK(held IN (0,1)),
     overridden INTEGER CHECK(overridden IN (0,1)),
+    passage INTEGER CHECK(passage >= 0),
     PRIMARY KEY(memory, project, origin)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS memory_use_by_project ON memory_use(project, origin);";
@@ -62,6 +65,10 @@ pub struct Use {
     /// For #118: whether the agent ran the held command again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overridden: Option<bool>,
+    /// The slot of the memory's passage shown most in the session; absent
+    /// when none was. A request that names one replaces the stored one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passage: Option<u32>,
 }
 
 /// One session's use, as `POST /use` takes it and the hooks write it.
@@ -142,10 +149,11 @@ pub fn write_uses(db: &Path, uses: &Uses) -> Result<Written> {
     let tx = write(&conn)?;
     let mut place = tx.prepare("SELECT scope,project FROM memories WHERE id=?1")?;
     let mut upsert = tx.prepare(
-        "INSERT INTO memory_use (memory,project,origin,at,read,recorded,shown,held,overridden) VALUES (?1,?2,?3,CURRENT_TIMESTAMP,?4,?5,?6,?7,?8)
+        "INSERT INTO memory_use (memory,project,origin,at,read,recorded,shown,held,overridden,passage) VALUES (?1,?2,?3,CURRENT_TIMESTAMP,?4,?5,?6,?7,?8,?9)
          ON CONFLICT(memory,project,origin) DO UPDATE SET at=excluded.at,read=max(read,excluded.read),recorded=max(recorded,excluded.recorded),shown=max(shown,excluded.shown),
          held=CASE WHEN excluded.held IS NULL THEN held ELSE max(coalesce(held,0),excluded.held) END,
-         overridden=CASE WHEN excluded.overridden IS NULL THEN overridden ELSE max(coalesce(overridden,0),excluded.overridden) END",
+         overridden=CASE WHEN excluded.overridden IS NULL THEN overridden ELSE max(coalesce(overridden,0),excluded.overridden) END,
+         passage=coalesce(excluded.passage,passage)",
     )?;
     let (mut written, mut skipped) = (0, 0);
     let mut projects = BTreeSet::new();
@@ -168,6 +176,7 @@ pub fn write_uses(db: &Path, uses: &Uses) -> Result<Written> {
             row.given.shown,
             row.given.held,
             row.given.overridden,
+            row.given.passage,
         ])?;
         written += 1;
         projects.insert(row.project.clone());
@@ -272,19 +281,81 @@ fn label(m: &super::Memory) -> String {
     }
 }
 
+/// The slot of each of `chosen`'s passages shown in most of `projects`'
+/// kept sessions, counting only sessions written since the memory last
+/// changed, since an edit renumbers its passages. A memory none of them
+/// was shown a passage of has none. Ties go to the earlier passage.
+fn delivered(
+    conn: &rusqlite::Connection,
+    projects: &[String],
+    chosen: &[super::Memory],
+) -> Result<std::collections::HashMap<Uuid, i64>> {
+    let mut statement = conn.prepare(
+        "SELECT passage,origin,at FROM memory_use WHERE memory=?1 AND passage IS NOT NULL AND project IN (SELECT value FROM json_each(?2))",
+    )?;
+    let projects = serde_json::to_string(projects)?;
+    let mut found = std::collections::HashMap::new();
+    for m in chosen {
+        let mut sessions: std::collections::BTreeMap<i64, BTreeSet<String>> =
+            std::collections::BTreeMap::new();
+        let rows = statement.query_map(params![m.id.to_string(), projects], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (passage, origin, at) = row?;
+            // Both are the store's `YYYY-MM-DD HH:MM:SS`: compared as text.
+            if at >= m.updated_at {
+                sessions.entry(passage).or_default().insert(origin);
+            }
+        }
+        // The earliest passage among the most shown: max_by_key keeps the
+        // last of equals, so the slots are walked from the last.
+        if let Some((passage, _)) = sessions
+            .iter()
+            .rev()
+            .max_by_key(|(_, origins)| origins.len())
+        {
+            found.insert(m.id, *passage);
+        }
+    }
+    Ok(found)
+}
+
+/// The text of `m`'s passage in `slot`, as the keyword index numbers them
+/// (`index::passages::SLOTS`): a content passage or the context. Empty for
+/// a slot that names neither.
+fn passage_text(m: &super::Memory, slot: i64) -> String {
+    if slot == super::index::passages::CONTEXT_SLOT {
+        return super::clean(&m.context, usize::MAX);
+    }
+    usize::try_from(slot - 1)
+        .ok()
+        .and_then(|at| {
+            super::index::passages::split(&m.content)
+                .into_iter()
+                .nth(at)
+        })
+        .map(|place| super::clean(&m.content[place], usize::MAX))
+        .unwrap_or_default()
+}
+
 /// `m` as the part prints it: whole up to [`ESSENTIAL_WHOLE_CHARS`], else
-/// its title and its first passage, marked when that is part of its text.
-fn printed(m: &super::Memory) -> String {
+/// its title and the passage `slot` names, its first when `slot` is none
+/// or names no passage of it, marked as part of its text.
+fn printed(m: &super::Memory, slot: Option<i64>) -> String {
     let short = &m.id.to_string()[..super::read::SHORT_ID];
     let text = super::clean(&m.content, usize::MAX);
     if text.chars().count() <= ESSENTIAL_WHOLE_CHARS {
         return format!("- {short} {}: {text}", label(m));
     }
-    let passage = super::index::passages::split(&m.content)
-        .into_iter()
-        .next()
-        .map(|place| super::clean(&m.content[place], usize::MAX))
-        .unwrap_or_default();
+    let passage = slot
+        .map(|slot| passage_text(m, slot))
+        .filter(|text| !text.is_empty())
+        .unwrap_or_else(|| passage_text(m, 1));
     format!("- {short} {}: {} — {passage} …", label(m), m.title)
 }
 
@@ -329,10 +400,11 @@ pub(super) fn most_used(
             .then_with(|| super::read::group_order(a, b))
     });
     chosen.truncate(ESSENTIALS_MAX);
+    let slots = delivered(conn, &filter.projects, &chosen)?;
     let mut lines = vec![MOST_USED_HEADER.to_owned()];
     let mut used_room = unit.len(MOST_USED_HEADER) + 1;
     for m in &chosen {
-        let line = printed(m);
+        let line = printed(m, slots.get(&m.id).copied());
         let size = unit.len(&line) + 1;
         if used_room + size > room {
             break;

@@ -25,9 +25,9 @@ own changes, since schema version 10: the store's id, the number of its
 latest change, and for each memory changed since the number of its latest
 change, with the time it was removed for a forgotten one; no text),
 `memory_use` (since schema version 12: for each of a project's newest 40
-conversations, which memories it read, recorded or was shown, whether it
-held to or set aside each, and when; no text; a memory's rows are deleted
-with it), and
+conversations, which memories it read, recorded or was shown, the number
+of the passage it was shown most, whether it held to or set aside each,
+and when; no text; a memory's rows are deleted with it), and
 derived search tables that `reindex` can always rebuild: the
 [keyword index](#the-keyword-index) (`search_keys`, `search_words`,
 `search_pending`, `search_state` and `search_changes`, since schema version

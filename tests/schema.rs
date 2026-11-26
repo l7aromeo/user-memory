@@ -233,7 +233,7 @@ fn data(db: &Path, version: i64) -> Vec<Vec<String>> {
     ];
     if version >= USE_VERSION {
         queries.push(
-            "SELECT memory,project,origin,at,read,recorded,shown,held,overridden FROM memory_use ORDER BY 1,2,3",
+            "SELECT memory,project,origin,at,read,recorded,shown,held,overridden,passage FROM memory_use ORDER BY 1,2,3",
         );
     }
     queries.iter().map(|sql| rows(&conn, sql)).collect()

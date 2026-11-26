@@ -946,3 +946,86 @@ fn a_most_used_part_takes_at_most_its_floor_from_the_rules() {
     );
     assert!(text.contains(INDEX_HEADER), "{text}");
 }
+
+/// A long memory's text: three paragraphs of about 300 characters, each
+/// its own passage, the first word of each naming it.
+fn three_passages(names: [&str; 3]) -> String {
+    names
+        .iter()
+        .map(|name| {
+            let words: Vec<String> = (0..36).map(|i| format!("{name}{i}")).collect();
+            format!("{name} {}.", words.join(" "))
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// One session's row showing `memory`'s passage in `slot`, or none.
+fn shown_passage(memory: &str, slot: Option<u32>) -> Value {
+    let mut row = used(memory, PROJECT, false, false, true);
+    if let Some(slot) = slot {
+        row["passage"] = json!(slot);
+    }
+    row
+}
+
+// A long memory prints with the passage shown in most of the project's
+// kept sessions, the earlier on a tie; a request naming a passage replaces
+// the session's, one naming none keeps it; after an edit only sessions
+// since count, and with none the first passage prints.
+#[test]
+fn the_most_used_part_prints_the_passage_most_sessions_were_shown() {
+    let host = Host::start(&[]);
+    let app = host.repository("app", "git@github.com:example/app.git");
+    let id = host.noted(
+        PROJECT,
+        "Release steps",
+        &three_passages(["alpha", "bravo", "charlie"]),
+        &[],
+    );
+    let full = host.full(&id);
+    let post = |session: &str, slot: Option<u32>| {
+        let body = json!({"origin": format!("claude:session/{session}"), "uses": [shown_passage(&full, slot)]});
+        let (status, reply) = host.post(SHARED, &body.to_string());
+        assert_eq!(status, 200, "{reply}");
+    };
+    let line = |host: &Host| {
+        let text = host.started(&app, &[]);
+        let part = most_used(&text);
+        assert_eq!(part.len(), 1, "{text}");
+        part[0].to_owned()
+    };
+    post("s1", Some(1));
+    post("s2", Some(2));
+    // A tie goes to the earlier passage.
+    assert!(line(&host).contains("— alpha "), "{}", line(&host));
+    post("s3", Some(3));
+    post("s3", Some(2));
+    post("s3", None);
+    let stored: i64 = Connection::open(host.db())
+        .unwrap()
+        .query_row(
+            "SELECT passage FROM memory_use WHERE origin='claude:session/s3'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, 2, "replaced by a passage, kept without one");
+    let printed = line(&host);
+    assert!(
+        printed.contains("Release steps — bravo ") && !printed.contains("alpha"),
+        "{printed}"
+    );
+    // The store's times have whole seconds: the edit is a second later
+    // than every row.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    host.cli(&[
+        "update",
+        &id,
+        "--content",
+        &three_passages(["delta", "echo", "foxtrot"]),
+    ]);
+    assert!(line(&host).contains("— delta "), "{}", line(&host));
+    post("s4", Some(3));
+    assert!(line(&host).contains("— foxtrot "), "{}", line(&host));
+}
