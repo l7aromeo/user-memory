@@ -38,9 +38,13 @@ const LATE: Duration = Duration::from_millis(100);
 /// read a refused request's body, each of them resets.
 const LATE_ROUNDS: usize = 5;
 
+/// How long the server waits for a refused request's body. A refused
+/// request without a body is answered sooner than this, so a client with a
+/// bad token is not slowed.
+const BODY_WAIT: Duration = Duration::from_secs(2);
+
 /// The longest a refused request whose body never comes waits for its
-/// answer: the server's wait for the body (2 s), and room on a loaded
-/// machine.
+/// answer: [`BODY_WAIT`], and room on a loaded machine.
 const NO_BODY_ANSWER: Duration = Duration::from_secs(10);
 
 /// The shared token file's token.
@@ -1742,4 +1746,33 @@ fn a_refused_request_whose_body_never_comes_is_answered_after_the_wait() {
     assert!(answer.starts_with("HTTP/1.1 401"), "{answer}");
     let waited = started.elapsed();
     assert!(waited < NO_BODY_ANSWER, "{waited:?}");
+}
+
+#[test]
+fn a_refused_request_without_a_body_is_answered_at_once() {
+    let host = Host::start();
+    let started = std::time::Instant::now();
+    let empty = host.send("POST", "/mcp", "not-a-token", "");
+    assert_eq!(empty.status, 401);
+    let waited = started.elapsed();
+    assert!(waited < BODY_WAIT, "Content-Length: 0 waited {waited:?}");
+    // No Content-Length at all, as a GET sends.
+    let started = std::time::Instant::now();
+    let mut socket = TcpStream::connect(&host.address).unwrap();
+    socket.set_read_timeout(Some(STUCK)).unwrap();
+    socket
+        .write_all(
+            format!(
+                "GET /mcp HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer not-a-token\r\nConnection: close\r\n\r\n",
+                host.address
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    let mut response = Vec::new();
+    socket.read_to_end(&mut response).unwrap();
+    let answer = String::from_utf8_lossy(&response);
+    assert!(answer.starts_with("HTTP/1.1 401"), "{answer}");
+    let waited = started.elapsed();
+    assert!(waited < BODY_WAIT, "no Content-Length waited {waited:?}");
 }
