@@ -1003,7 +1003,8 @@ mod tests {
     }
 
     // A backup made inside a tool call, at its write's commit, gives up on a
-    // store another program locks when the call's budget runs out.
+    // store another program locks when the call's budget runs out: both its
+    // look for memories and its copy.
     #[test]
     fn a_backup_in_a_call_waits_for_a_locked_store_no_longer_than_its_budget() {
         let dir = tempdir().unwrap();
@@ -1014,9 +1015,12 @@ mod tests {
             .pragma_update(None, "journal_mode", "DELETE")
             .unwrap();
         holder.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        let partial = dir.path().join("copy");
         let started = Instant::now();
         super::super::budget::until(Some(Instant::now() + Duration::from_millis(300)), || {
             assert!(has_memories(&db).is_err());
+            create_private(&partial).unwrap();
+            assert!(copy_into(&db, &partial).is_err());
         });
         let took = started.elapsed();
         holder.execute_batch("ROLLBACK").unwrap();
