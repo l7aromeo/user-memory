@@ -333,7 +333,10 @@ on Windows), each private to you:
   plain text and anchors as written, lowercased, never a sentence, a
   tool's result or a file's contents), the tasks of subagents not yet
   started, which passages of which memories were pushed at which step,
-  and which a hold showed or put off for a push after the command.
+  which a hold showed or put off for a push after the command, and which
+  memories each agent read, recorded or was pushed, with how often each
+  passage was pushed, the session's origin and what of it was sent to
+  `memory_use` yet.
   A session's `startup` empties it in place, so another hook of the
   session may hold it open; a `/clear` or a compaction starts a new count
   in it; a resume keeps it. A file an earlier release wrote is upgraded

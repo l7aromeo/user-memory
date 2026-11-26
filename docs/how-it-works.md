@@ -204,9 +204,13 @@ Other memories
   (yours, or an agent's note and from how many sessions) and holds the
   memory whole when it is short, or its title and the passage most of
   those sessions were shown since the memory last changed (its first when
-  none was). It never
-  holds a rule, which the part before shows, an inference, or an agent's
-  observation about you.
+  none was). It never holds a rule, which the part before shows, an
+  inference, or an agent's observation about you. What it prints whole
+  isn't pushed again in that context. A session's hooks note what
+  user-memory's `read` returned, what `record` stored or confirmed and
+  what was pushed, and write it at the next prompt or session start; a
+  new session also writes what up to 20 other sessions left after their
+  last prompt. What session start itself printed never counts.
 - **The index** lists every other memory in scope, one line each: an
   8-character id and the title. Marks: `[project]` for a project memory,
   `(learned in N sessions)` for an agent's observation seen in N

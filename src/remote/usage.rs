@@ -4,7 +4,6 @@
 
 use super::Connection;
 use crate::memory::{self, USE_REQUEST_BYTES, USES_PER_REQUEST, Use, Uses, Written};
-use anyhow::Result;
 use axum::{
     Json, Router,
     body::to_bytes,
@@ -133,16 +132,4 @@ impl Connection {
         }
         Sent::Written
     }
-}
-
-/// [`Connection::send_uses`], for the hooks' synchronous code.
-#[allow(
-    dead_code,
-    reason = "the hooks that send use arrive with #196 (#123 step 8)"
-)]
-pub(crate) fn send_blocking(connection: &Connection, origin: &str, uses: &[Use]) -> Result<Sent> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    Ok(runtime.block_on(connection.send_uses(origin, uses)))
 }

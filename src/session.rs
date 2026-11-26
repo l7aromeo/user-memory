@@ -11,6 +11,7 @@ mod recall;
 mod seen;
 mod subagent;
 mod tools;
+mod used;
 
 pub use subagent::subagent_start;
 #[cfg(test)]
@@ -347,11 +348,31 @@ pub async fn start(
         .ok()
         .flatten()
     };
-    let (seen, index, versions, _) = tokio::join!(
+    // The use this session, or on a startup others, left unsent (#123),
+    // beside the index and before recall's state starts anew.
+    let remote = setup::configured_remote().ok().flatten();
+    let send_use = async {
+        let (client, payload) = client.zip(payload.as_deref())?;
+        let snapshot = session_file(client, payload)?;
+        let startup = recall::Source::of(payload) == Some(recall::Source::Startup);
+        let until = (tokio::time::Instant::now() + hook_time(used::USE_FLUSH_LIMIT)).min(deadline);
+        used::at_start(
+            &snapshot,
+            origin.as_deref(),
+            startup,
+            remote.as_ref(),
+            &db_path(),
+            until,
+        )
+        .await;
+        Some(())
+    };
+    let (seen, index, versions, _, _) = tokio::join!(
         tokio::time::timeout_at(deadline, snapshot),
         tokio::time::timeout_at(deadline, start_index(&looking, client, context_limit)),
         tokio::time::timeout_at(deadline, version_line()),
-        tokio::time::timeout_at(deadline, deliver_at_start(&looking, deadline))
+        tokio::time::timeout_at(deadline, deliver_at_start(&looking, deadline)),
+        send_use
     );
     if let Some(reconcile) = reconcile {
         // Never past the hook's limit: by then the repair has had all of it.
@@ -370,7 +391,14 @@ pub async fn start(
         };
         let until = std::time::Instant::now()
             + deadline.saturating_duration_since(tokio::time::Instant::now());
-        let _ = recall::State::start(&recall::path(&snapshot), source, &whole, until);
+        // The origin stays with the state, so a later startup's sweep sends
+        // this session's use under it.
+        let _ = recall::State::start(&recall::path(&snapshot), source, &whole, until).and_then(
+            |mut state| match &origin {
+                Some(origin) => state.set_origin(origin),
+                None => Ok(()),
+            },
+        );
     }
     let (limit, unit) = hook_limit(client, context_limit);
     let found = match (seen.ok().flatten(), &index) {
@@ -470,6 +498,19 @@ pub async fn start(
         Some(line) => format!("{line}\n{index}"),
         None => index,
     };
+    // What the most-used part prints whole counts as shown, as the rules
+    // in full do: taken from the text as printed, after every cut.
+    if let Some((client, payload)) = client.zip(payload.as_deref())
+        && let Some(snapshot) = session_file(client, payload)
+    {
+        let whole = memory::most_used_in_full(memory::most_used_part(&text));
+        if !whole.is_empty() {
+            let until = std::time::Instant::now()
+                + deadline.saturating_duration_since(tokio::time::Instant::now());
+            let _ = recall::State::open(&recall::path(&snapshot), until)
+                .and_then(|mut state| state.show_whole(recall::MAIN, &whole));
+        }
+    }
     // The user hears of rules that don't fit once, when the session starts.
     let overflow = if startup(payload.as_deref()) {
         overflow_message(&left_out)
@@ -872,15 +913,31 @@ pub async fn prompt_submit(client: HookClient) -> String {
     // is left of the limit, on the store read above.
     let until =
         std::time::Instant::now() + deadline.saturating_duration_since(tokio::time::Instant::now());
-    let recalled = match (asked, remote) {
+    let recalled = match (&asked, &remote) {
         (Some(payload), Ok(remote)) => recall_prompt(
             client,
-            &payload,
-            remote.map(|connection| connection.url),
+            payload,
+            remote.as_ref().map(|connection| connection.url.clone()),
             until,
         ),
         _ => None,
     };
+    // The session's use since its last prompt or start (#123), with what
+    // is left of the limit, at most USE_FLUSH_LIMIT.
+    if let (Some(payload), Ok(remote)) = (&asked, &remote)
+        && let Some(snapshot) = session_file(client, payload)
+    {
+        let until = (tokio::time::Instant::now() + hook_time(used::USE_FLUSH_LIMIT)).min(deadline);
+        let origin = origin(client, payload);
+        used::flush(
+            &snapshot,
+            origin.as_deref(),
+            remote.as_ref(),
+            &db_path(),
+            until,
+        )
+        .await;
+    }
     let (limit, unit) = hook_limit(Some(client), None);
     let text = prompt_text(notice, recalled, limit, unit);
     if text.is_empty() {

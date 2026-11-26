@@ -61,8 +61,11 @@ const WHOLE: i64 = -1;
 /// binary keeps its state: that holds only while each layout change adds
 /// tables (`CREATE TABLE IF NOT EXISTS`); a change that alters or drops a
 /// table needs a step of its own here. A newer layout is refused, never
-/// read: the file is rebuilt at the session's next `startup`.
-const VERSION: i64 = 2;
+/// read: the file is rebuilt at the session's next `startup`. A change to
+/// [`SCHEMA`] takes the next number free on `main` when it lands; a branch
+/// still open takes the next after whichever lands before it, at its
+/// rebase, and adds its layout's entry to the upgrade test.
+const VERSION: i64 = 3;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS contexts(
@@ -102,7 +105,76 @@ CREATE TABLE IF NOT EXISTS held(
     shown INTEGER NOT NULL,
     PRIMARY KEY(agent, memory, passage)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS worked(
+    agent TEXT NOT NULL,
+    memory TEXT NOT NULL,
+    read INTEGER NOT NULL DEFAULT 0,
+    recorded INTEGER NOT NULL DEFAULT 0,
+    found INTEGER NOT NULL DEFAULT 0,
+    shown INTEGER NOT NULL DEFAULT 0,
+    held INTEGER NOT NULL DEFAULT 0,
+    at INTEGER NOT NULL,
+    epoch INTEGER NOT NULL,
+    sent INTEGER NOT NULL DEFAULT 0,
+    changed INTEGER NOT NULL,
+    PRIMARY KEY(agent, memory)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS pushed(
+    memory TEXT NOT NULL,
+    passage INTEGER NOT NULL,
+    times INTEGER NOT NULL,
+    PRIMARY KEY(memory, passage)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS meta(
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+) WITHOUT ROWID;
 ";
+
+/// What an agent context did with a memory, as `worked` keeps it: one row
+/// per context and memory (its full id), its flags only ever set. `read`:
+/// the `read` tool returned it; `recorded`: `record` stored or confirmed
+/// it; `found`: `search` returned it (#118); `shown`: a push showed a
+/// passage of it, which `pushed` counts by passage; `held`: a hold showed
+/// it (#118). `at` and `epoch` are the context's action count and epoch
+/// at its last use, which #118 reads its working set by and moves to a new
+/// epoch when it restores the memory: that is not a use. `sent` says the
+/// session's use flush has sent the row's flags; any use sets it back to 0
+/// and takes the next `changed`, so the flush marks sent only what it read.
+/// The flush decides on the flags and `sent` alone, never on `at` or
+/// `epoch`.
+const WORKED: &str =
+    "INSERT INTO worked(agent, memory, read, recorded, shown, at, epoch, sent, changed)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, (SELECT coalesce(max(changed), 0) + 1 FROM worked))
+     ON CONFLICT(agent, memory) DO UPDATE SET read = max(read, excluded.read),
+     recorded = max(recorded, excluded.recorded), shown = max(shown, excluded.shown),
+     at = excluded.at, epoch = excluded.epoch, sent = 0, changed = excluded.changed";
+
+/// How a tool call used a memory, as the post-tool hook reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum How {
+    Read,
+    Recorded,
+}
+
+/// One memory the session used and has not sent, its flags joined over
+/// every agent context, with the passage pushed most often (the earlier on
+/// a tie), if any was.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Unsent {
+    pub(super) memory: String,
+    pub(super) read: bool,
+    pub(super) recorded: bool,
+    pub(super) shown: bool,
+    pub(super) passage: Option<i64>,
+}
+
+/// The `meta` key of the session's conversation origin, which a sweep
+/// sends another session's use under.
+const ORIGIN: &str = "origin";
+/// The `meta` key set when the session's server takes no use from it:
+/// nothing is sent again this session.
+const NO_USE: &str = "no_use";
 
 /// How a session (re)started, as the client's session-start payload says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -333,7 +405,7 @@ impl State {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (_, actions, mut chars) = context(&tx, agent)?;
+        let (epoch, actions, mut chars) = context(&tx, agent)?;
         let at = actions + 1;
         tx.execute(
             "INSERT INTO window(agent, seq, kind, failed, stems, anchors) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -383,6 +455,12 @@ impl State {
                 chars += offer.chars;
                 event += offer.chars;
                 shown.push(position);
+                tx.execute(WORKED, params![agent, offer.memory, 0, 0, 1, at, epoch])?;
+                tx.execute(
+                    "INSERT INTO pushed(memory, passage, times) VALUES (?1, ?2, 1)
+                     ON CONFLICT(memory, passage) DO UPDATE SET times = times + 1",
+                    params![offer.memory, offer.passage],
+                )?;
             }
         }
         tx.execute(
@@ -508,6 +586,111 @@ impl Handled {
             .iter()
             .any(|short| id.starts_with(short.as_str()))
             || self.passages.contains(&(id.to_owned(), passage))
+    }
+}
+
+impl State {
+    /// Counts `memories` (full ids) as used by `agent`'s context, as `how`
+    /// says, at its current action.
+    pub(super) fn used(&mut self, agent: &str, memories: &[String], how: How) -> Result<()> {
+        if memories.is_empty() {
+            return Ok(());
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (epoch, actions, _) = context(&tx, agent)?;
+        for memory in memories {
+            tx.execute(
+                WORKED,
+                params![
+                    agent,
+                    memory,
+                    how == How::Read,
+                    how == How::Recorded,
+                    0,
+                    actions,
+                    epoch
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Keeps the session's conversation origin, which its use is sent under.
+    pub(super) fn set_origin(&mut self, origin: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)",
+            params![ORIGIN, origin],
+        )?;
+        Ok(())
+    }
+
+    /// The session's conversation origin, when a hook kept it.
+    pub(super) fn origin(&self) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key = ?1", [ORIGIN], |r| {
+                r.get(0)
+            })
+            .optional()?)
+    }
+
+    /// The memories used and not sent, and the `changed` mark they were
+    /// read at, which [`State::sent`] takes; none when the session's server
+    /// takes no use from it.
+    pub(super) fn unsent(&self) -> Result<(Vec<Unsent>, i64)> {
+        let refused: bool = self
+            .conn
+            .query_row("SELECT 1 FROM meta WHERE key = ?1", [NO_USE], |_| Ok(true))
+            .optional()?
+            .unwrap_or(false);
+        let mark: i64 =
+            self.conn
+                .query_row("SELECT coalesce(max(changed), 0) FROM worked", [], |r| {
+                    r.get(0)
+                })?;
+        if refused {
+            return Ok((Vec::new(), mark));
+        }
+        let mut statement = self.conn.prepare(
+            "SELECT memory, max(read), max(recorded), max(shown),
+             (SELECT passage FROM pushed WHERE pushed.memory = worked.memory ORDER BY times DESC, passage LIMIT 1)
+             FROM worked WHERE memory IN (SELECT memory FROM worked WHERE sent = 0 AND changed <= ?1)
+             AND (read OR recorded OR shown)
+             GROUP BY memory ORDER BY memory",
+        )?;
+        let rows = statement.query_map([mark], |r| {
+            Ok(Unsent {
+                memory: r.get(0)?,
+                read: r.get(1)?,
+                recorded: r.get(2)?,
+                shown: r.get(3)?,
+                passage: r.get(4)?,
+            })
+        })?;
+        Ok((rows.collect::<rusqlite::Result<_>>()?, mark))
+    }
+
+    /// Marks sent what [`State::unsent`] read at `mark`: a use since then
+    /// stays unsent.
+    pub(super) fn sent(&mut self, mark: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE worked SET sent = 1 WHERE sent = 0 AND changed <= ?1",
+            [mark],
+        )?;
+        Ok(())
+    }
+
+    /// Notes that the session's server takes no use from it (a read-only
+    /// token, or a server from before the route): nothing more is sent.
+    pub(super) fn refuse_use(&mut self) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, '1')",
+            [NO_USE],
+        )?;
+        Ok(())
     }
 }
 
@@ -1200,9 +1383,10 @@ mod tests {
 
     /// Every layout before [`VERSION`], as the release that used it wrote
     /// the file, with one row in each table.
-    const LAYOUTS: &[(i64, &str)] = &[(
-        1,
-        "CREATE TABLE contexts(
+    const LAYOUTS: &[(i64, &str)] = &[
+        (
+            1,
+            "CREATE TABLE contexts(
              agent TEXT PRIMARY KEY, epoch INTEGER NOT NULL,
              actions INTEGER NOT NULL, chars INTEGER NOT NULL
          ) WITHOUT ROWID;
@@ -1223,7 +1407,38 @@ mod tests {
          INSERT INTO window VALUES ('main', 1, 'command', 0, 'cargo', 'cargo build');
          INSERT INTO spawns(key, stems, anchors) VALUES ('k', 'cargo', 'cargo build');
          INSERT INTO shown VALUES ('main', 'e0000001', 0, 3);",
-    )];
+        ),
+        (
+            2,
+            "CREATE TABLE contexts(
+             agent TEXT PRIMARY KEY, epoch INTEGER NOT NULL,
+             actions INTEGER NOT NULL, chars INTEGER NOT NULL
+         ) WITHOUT ROWID;
+         CREATE TABLE window(
+             agent TEXT NOT NULL, seq INTEGER NOT NULL, kind TEXT NOT NULL,
+             failed INTEGER NOT NULL, stems TEXT NOT NULL, anchors TEXT NOT NULL,
+             PRIMARY KEY(agent, seq)
+         ) WITHOUT ROWID;
+         CREATE TABLE spawns(
+             seq INTEGER PRIMARY KEY, key TEXT NOT NULL, stems TEXT NOT NULL,
+             anchors TEXT NOT NULL, claimed INTEGER NOT NULL DEFAULT 0
+         );
+         CREATE TABLE shown(
+             agent TEXT NOT NULL, memory TEXT NOT NULL, passage INTEGER NOT NULL,
+             at INTEGER NOT NULL, PRIMARY KEY(agent, memory, passage)
+         ) WITHOUT ROWID;
+         CREATE TABLE held(
+             agent TEXT NOT NULL, memory TEXT NOT NULL, passage INTEGER NOT NULL,
+             at INTEGER NOT NULL, shown INTEGER NOT NULL,
+             PRIMARY KEY(agent, memory, passage)
+         ) WITHOUT ROWID;
+         INSERT INTO contexts VALUES ('main', 0, 3, 0);
+         INSERT INTO window VALUES ('main', 1, 'command', 0, 'cargo', 'cargo build');
+         INSERT INTO spawns(key, stems, anchors) VALUES ('k', 'cargo', 'cargo build');
+         INSERT INTO shown VALUES ('main', 'e0000001', 0, 3);
+         INSERT INTO held VALUES ('main', 'e0000003', 0, 2, 0);",
+        ),
+    ];
 
     /// The tables of `conn`'s file, each with its row count.
     fn tables(conn: &Connection) -> Vec<(String, i64)> {
@@ -1293,6 +1508,15 @@ mod tests {
                     .hold(MAIN, &[offer("e0000002", 0)], &[], ROOM_CHARS, soon())
                     .unwrap(),
                 [0],
+                "layout {layout}"
+            );
+            // Use (#123) is kept in tables layout 3 added.
+            state
+                .used(MAIN, &["e0000004".to_owned()], How::Read)
+                .unwrap();
+            let (unsent, _) = state.unsent().unwrap();
+            assert!(
+                unsent.iter().any(|u| u.memory == "e0000004" && u.read),
                 "layout {layout}"
             );
         }
