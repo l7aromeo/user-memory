@@ -9,6 +9,7 @@ pub mod compose;
 pub mod tokens;
 
 pub use compose::Compose;
+use compose::Shown;
 
 use crate::{
     private,
@@ -350,10 +351,9 @@ fn install(install: &Install) -> Result<()> {
         // new server starts, as the repository's upgrade does. It checks the
         // store first, so a store that needs titles leaves the running
         // server untouched.
-        if !store_check(&compose, install.titles.as_deref())? {
-            bail!(
-                "the store cannot be upgraded yet, and the server keeps running the previous version; when the message above lists memories without titles, write the titles map the user approves and run the installer again with --titles FILE"
-            );
+        let check = store_check(&compose, install.titles.as_deref())?;
+        if !check.status.success() {
+            return Err(check_refused(&check));
         }
         compose.run(&["stop", "memory"])?;
         let migrated = match &install.titles {
@@ -629,20 +629,45 @@ fn titles_input(titles: &Path) -> Result<Stdio> {
         .into())
 }
 
-/// The new image's `migrate --check`, with the titles map when given.
-fn store_check(compose: &Compose, titles: Option<&Path>) -> Result<bool> {
+/// The new image's `migrate --check`, with the titles map when given; its
+/// output is shown as it comes, and kept to tell why it refused.
+fn store_check(compose: &Compose, titles: Option<&Path>) -> Result<Shown> {
     match titles {
-        Some(titles) => compose.status(
+        Some(titles) => compose.shown(
             &[
                 "run", "--rm", "-T", "memory", "migrate", "--check", "--titles", "-",
             ],
             titles_input(titles)?,
         ),
-        None => compose.status(
+        None => compose.shown(
             &["run", "--rm", "memory", "migrate", "--check"],
             Stdio::inherit(),
         ),
     }
+}
+
+/// The start of what `migrate` says when memories need titles
+/// (`memory::titles`): the one refusal a titles map answers.
+const NEEDS_TITLES: &str = "needs a title for every memory";
+
+/// Whether a store check's output says that memories need titles.
+fn needs_titles(said: &str) -> bool {
+    said.contains(NEEDS_TITLES)
+}
+
+/// Why the check before the stop refused the upgrade: memories that need
+/// titles, or else Docker or the store failing, named by how the check
+/// ended. The old server keeps running either way.
+fn check_refused(check: &Shown) -> anyhow::Error {
+    if needs_titles(&check.said) {
+        return anyhow::anyhow!(
+            "the store cannot be upgraded yet, and the server keeps running the previous version; when the message above lists memories without titles, write the titles map the user approves and run the installer again with --titles FILE"
+        );
+    }
+    anyhow::anyhow!(
+        "checking the store ended with {}, so Docker or the store may be failing; the server keeps running the previous version; fix that, then run the installer again",
+        check.status
+    )
 }
 
 /// Why the migration failed. The new image refuses the old store, so
@@ -676,7 +701,7 @@ fn migrate_failed(compose: &Compose, titles: Option<&Path>) -> anyhow::Error {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    if said.contains("needs a title for every memory") {
+    if needs_titles(&said) {
         return anyhow::anyhow!(
             "memories recorded after the check and before the server stopped need titles too (listed above); the store was not upgraded and the server stays stopped; add them to the titles map the user approves and run the installer again with --titles FILE"
         );

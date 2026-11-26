@@ -24,6 +24,8 @@ The store is from an older version that this one can upgrade.
 2. Ask the user for the line ``Backed up … to …`` that setup prints, and tell them where the backup is: `<store>.v<old version>-<UTC time>.bak` beside the store, mode 0600. Setup never replaces an existing backup.
 3. The user restarts their clients, then runs `user-memory doctor`.
 
+If the installer's Docker upgrade says ``checking the store ended with …, so Docker or the store may be failing``, no titles are needed: Docker or the store failed before anything changed, and the old server keeps running. The user fixes what Docker printed above it, or what the exit code or signal it names points to, then runs the installer again.
+
 If the migration fails, it rolls back: the store is unchanged and the message names the backup. If it refuses because the store ``is damaged``, nothing was changed or backed up: the user runs `user-memory repair` (Docker: `docker compose run --rm memory repair`), which backs it up and rebuilds its indexes, then upgrades again.
 
 Docker server: `migrate` upgrades `/data/memories.sqlite3`, and the backup lands beside it in the user-memory-data volume.
