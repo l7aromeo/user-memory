@@ -70,15 +70,25 @@ LOOKUP_LIMIT_MS = 100
 # Lookups timed per action for the cost, after one warm-up.
 LOOKUPS = 21
 # How much of its build a session start that builds its scope's delivery
-# index may add over one that finds it, on the same machine (#175):
-# (building - finding) / the build's median. Session start builds on its
+# index may add over one that finds it, on the same machine (#175): the
+# median over rounds of (building - finding) / the build alone, each round
+# timing the three one after the other (#194). Session start builds on its
 # own thread beside its own index of the store, so a build that finishes
 # first adds little of itself: 0 to 51 % on CI's runners, 17 to 20 % on
 # macOS. One awaited before that index adds all of it, measured on macOS at
 # 100 %. The bar sits between the two ends.
 SESSION_BUILD_SHARE = 0.75
-# Session starts timed for it: pairs of one that builds (its base deleted)
-# and one that finds it, alternating so drift falls on both.
+# Rounds timed for it. Each times the build alone, a session start that
+# builds its base (deleted first) and one that finds it, in an order that
+# rotates from round to round, so no step always runs first and a runner's
+# speed during the round cancels out of its share. Over ten runs on each CI
+# runner, the highest share at 21 rounds was 54 % (Windows x64), 21 points
+# under the bar, and 58 % over the same runs' first 11 rounds; the 10 more
+# rounds add about 5 s.
+SESSION_ROUNDS = 21
+# A server's client's session starts timed: pairs of one that downloads its
+# base (deleted first) and one that finds it, alternating so drift falls on
+# both.
 SESSION_PAIRS = 11
 # Builds timed for the cost, after one warm-up.
 BUILDS = 11
@@ -431,15 +441,15 @@ def hook_env(home):
     return env
 
 
-def upkeep(binary, folder, drawn):
+def upkeep(binary, bench_binary, db, folder, drawn):
     """#175's, #117's and #118's costs through the real binary on the store
-    in `folder`, from process start: a tool hook that finds a change, pushing
-    nothing and pushing the memory its command names; the pre-tool hook
-    holding back the command a memory names; the prompt hook pushing the
-    memory its words name; what a forget adds when three
+    at `db` in `folder`, from process start: a tool hook that finds a change,
+    pushing nothing and pushing the memory its command names; the pre-tool
+    hook holding back the command a memory names; the prompt hook pushing
+    the memory its words name; what a forget adds when three
     scopes' files hold the memory; and the prompt hook building a missing
     base. Returns their medians by name, whether the prompt hook built its
-    base, and session start's medians building its base and finding it."""
+    base, and session start's rounds (see `session_rounds`)."""
     home = folder / "home"
     env = hook_env(home)
     delivery = home / ".local/state/user-memory/delivery"
@@ -477,13 +487,8 @@ def upkeep(binary, folder, drawn):
     env["GIT_CEILING_DIRECTORIES"] = str(folder)
     # Session start in the first scope, building its base and finding it,
     # before any other scope has files.
-    starts = {"built": [], "found": []}
-    for n in range(SESSION_PAIRS):
-        for path in delivery.glob("*") if delivery.exists() else []:
-            if path.suffix != ".lock":
-                path.unlink()
-        starts["built"].append(hook("SessionStart", f"build{n}", folders[0], source="startup"))
-        starts["found"].append(hook("SessionStart", f"find{n}", folders[0], source="startup"))
+    rounds = session_rounds(bench_binary, db, folder / "alone.index", delivery,
+                            lambda session: hook("SessionStart", session, folders[0], source="startup"))
     for n, cwd in enumerate(folders):
         hook("SessionStart", f"s{n}", cwd, source="startup")
 
@@ -560,9 +565,42 @@ def upkeep(binary, folder, drawn):
     return {"tool": statistics.median(tool), "push": statistics.median(push),
             "hold": statistics.median(holding), "hold_p95": holding[int(len(holding) * 0.95) - 1],
             "prompted": statistics.median(prompted), "added": statistics.median(added),
-            "built_at_prompt": built, "prompt": prompt,
-            "start_built": statistics.median(starts["built"]),
-            "start_found": statistics.median(starts["found"])}
+            "built_at_prompt": built, "prompt": prompt, "rounds": rounds}
+
+
+def session_rounds(bench_binary, db, alone, delivery, start):
+    """#194's rounds for session start's build share: each times the build
+    alone of the scope session start builds (the store's global memories,
+    into `alone`), `start(session)` building its base, its files in
+    `delivery` deleted first, and `start` finding it, one after the other.
+    The order rotates by one step a round; a round that finds first finds
+    the base the round before left. Returns each round's times in ms, by
+    step."""
+    steps = ("alone", "building", "finding")
+    rounds = []
+    for n in range(SESSION_ROUNDS):
+        took = {}
+        for k in range(len(steps)):
+            step = steps[(n + k) % len(steps)]
+            if step == "alone":
+                took[step] = json.loads(bench(bench_binary, "index", "--db", db, "--out", alone))["build_ms"]
+                continue
+            if step == "building":
+                for path in delivery.glob("*") if delivery.exists() else []:
+                    if path.suffix != ".lock":
+                        path.unlink()
+            took[step] = start(f"{step}{n}")
+        rounds.append(took)
+    return rounds
+
+
+def session_share(rounds):
+    """Session start's build share over `rounds`: its median, the middle
+    half's ends, and the steps' medians."""
+    shares = sorted((r["building"] - r["finding"]) / r["alone"] for r in rounds)
+    low, _, high = statistics.quantiles(shares, n=4, method="inclusive")
+    medians = {step: statistics.median(r[step] for r in rounds) for step in rounds[0]}
+    return statistics.median(shares), low, high, medians
 
 
 # Windows' share modes (winnt.h). A reader that shares all three never stops
@@ -735,14 +773,14 @@ def cost(found, seed, size, keep):
         build_median = statistics.median(build_ms)
         print(f"  build       median {build_median:6.1f} ms, largest {build_ms[-1]:6.1f} ms "
               f"({BUILDS - 1} builds)")
-        kept = upkeep(found["user-memory"], folder, drawn)
-        start_built, start_found = kept["start_built"], kept["start_found"]
+        kept = upkeep(found["user-memory"], found["bench"], db, folder, drawn)
+        share, low, high, steps = session_share(kept["rounds"])
         tool_limit = rust_ms("src/session/tools.rs", "TOOL_HOOK_LIMIT")
         prompt_limit = rust_ms("src/session.rs", "PROMPT_LIMIT")
-        print(f"  session start median {start_built:6.1f} ms building its base, "
-              f"{start_found:6.1f} ms finding it ({SESSION_PAIRS} pairs): "
-              f"{(start_built - start_found) / build_median:.0%} of the build added "
-              f"(limit {SESSION_BUILD_SHARE:.0%})")
+        print(f"  session start median {steps['building']:6.1f} ms building its base, "
+              f"{steps['finding']:6.1f} ms finding it, build {steps['alone']:.1f} ms "
+              f"({SESSION_ROUNDS} rounds): {share:.0%} of the build added "
+              f"(middle half {low:.0%} to {high:.0%}; limit {SESSION_BUILD_SHARE:.0%})")
         print(f"  tool hook   median {kept['tool']:6.1f} ms after a change, nothing pushed, process "
               f"start included ({HOOK_RUNS - 1} runs, limit {tool_limit} ms)")
         print(f"  tool hook   median {kept['push']:6.1f} ms after a change, pushing the memory "
@@ -775,8 +813,7 @@ def cost(found, seed, size, keep):
                   f"largest {samples[-1]:6.1f} ms")
         served_ok = (downloading <= rust_ms("src/session.rs", "LIMIT")
                      and left is not None and left <= FORGET_LEFT_POLLS * poll)
-        return (worst, (start_built - start_found) / build_median, kept, tool_limit, prompt_limit,
-                served_ok)
+        return (worst, share, kept, tool_limit, prompt_limit, served_ok)
 
 
 def main():

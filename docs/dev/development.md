@@ -721,9 +721,12 @@ Commands:
 from the store, which it reports. Through the release binary, in the same
 throwaway home, it also times the delivery index's upkeep: session start
 building its scope's base against session start finding it (budget: the
-difference is at most 75 % of the build's own time on the same machine,
-since the build runs beside session start's own index and one that finishes
-first adds little of itself); a tool hook that finds a
+difference is at most 75 % of the build's own time, since the build runs
+beside session start's own index and one that finishes first adds little
+of itself; each of 21 rounds times the build alone and the two session
+starts one after the other, in an order that rotates from round to round,
+and the check takes the median of the rounds' shares, so a runner that
+slows down between rounds moves none of them); a tool hook that finds a
 change, process start included, once pushing nothing and once pushing the
 memory its command names (budget: `TOOL_HOOK_LIMIT`); the prompt hook
 pushing the memory its words name (budget: `PROMPT_LIMIT`); what a forget
