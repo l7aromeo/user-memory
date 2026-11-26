@@ -4,7 +4,7 @@
 //! no copy of the server's memories; which ones a session sees is decided by
 //! the server alone.
 
-use super::Connection;
+use super::{Connection, Session};
 use crate::{
     memory::{Position, parse_stamps_reply},
     paths, private,
@@ -448,7 +448,17 @@ fn touch(path: &Path) -> io::Result<()> {
 /// memories, and none) gets no marker, so the hooks ask it as before; it is
 /// asked again only at the quiet interval, and then only for its version
 /// in a handshake, until that version changes.
-pub async fn poll(connection: Connection) {
+///
+/// A poll answered with a position keeps its session for the next poll, so
+/// a poll is one request rather than a handshake and a request; a session
+/// the server dropped is made again by the transport within the poll
+/// (`Connection::transport`). Any other outcome ends the session, so the
+/// next poll's handshake names the server's version afresh: a server that
+/// gave no positions and was then upgraded is met as it is now.
+///
+/// The poller stops once `stop` turns true, ending its kept session within
+/// [`POLLER_STOP_WAIT`].
+pub async fn poll(connection: Connection, mut stop: tokio::sync::watch::Receiver<bool>) {
     let Some(files) = Files::of(&connection.url) else {
         return;
     };
@@ -462,10 +472,13 @@ pub async fn poll(connection: Connection) {
     // The version of a server that answered with no position.
     let mut without_positions: Option<serde_json::Value> = None;
     let mut last_asked: Option<tokio::time::Instant> = None;
+    // The session of the last poll answered with a position.
+    let mut kept: Option<Session> = None;
     loop {
         let woken = tokio::select! {
             () = tokio::time::sleep(poll_every() / TICKS_PER_POLL) => false,
             () = WROTE.notified() => true,
+            _ = stop.wait_for(|stopped| *stopped) => break,
         };
         // Never sooner than a poll after its own last ask, answered or not,
         // so an unreachable server is not asked at every tick; a write this
@@ -483,25 +496,30 @@ pub async fn poll(connection: Connection) {
             continue;
         };
         last_asked = Some(tokio::time::Instant::now());
-        let asked = holding(&files, &claim, async {
+        let session = kept.take().filter(|session| !session.is_closed());
+        let work = holding(&files, &claim, async {
             if let Some(old) = &without_positions {
                 if version(&connection).await.is_none_or(|now| &now == old) {
                     return Polled::Unchanged;
                 }
                 without_positions = None;
             }
-            let input = serde_json::json!({
-                "stamps": true,
-                "stamps_since": files.position().unwrap_or_default(),
-            });
-            let Some(reply) = connection
-                .call("index", input)
+            let session = match session {
+                Some(session) => session,
+                None => match connection.open().await {
+                    Ok(session) => session,
+                    // Unreachable for now: the marker ages out and the
+                    // hooks ask the server themselves.
+                    Err(_) => return Polled::Unanswered,
+                },
+            };
+            let reply = connection
+                .call_in(&session, "index", poll_input(files.position()))
                 .await
                 .ok()
-                .and_then(|text| parse_stamps_reply(&text))
-            else {
-                // Unreachable for now: the marker ages out and the hooks
-                // ask the server themselves.
+                .and_then(|text| parse_stamps_reply(&text));
+            let Some(reply) = reply else {
+                end(session).await;
                 return Polled::Unanswered;
             };
             match reply.since {
@@ -514,15 +532,24 @@ pub async fn poll(connection: Connection) {
                     if moved || behind {
                         behind = !super::delivery::upkeep(&connection, &position).await;
                     }
-                    Polled::At(position)
+                    Polled::At(position, session)
                 }
-                None => Polled::WithoutPositions(version(&connection).await.unwrap_or_default()),
+                None => {
+                    end(session).await;
+                    Polled::WithoutPositions(version(&connection).await.unwrap_or_default())
+                }
             }
-        })
-        .await;
+        });
+        // A poll under way when the connector stops is left: its claim goes
+        // unrenewed, and another connector polls once it counts as gone.
+        let asked = tokio::select! {
+            asked = work => asked,
+            _ = stop.wait_for(|stopped| *stopped) => break,
+        };
         match asked {
-            Polled::At(position) => {
+            Polled::At(position, session) => {
                 let _ = files.answer(&claim, &position);
+                kept = Some(session);
             }
             Polled::WithoutPositions(version) => {
                 let _ = fs::remove_file(&files.marker);
@@ -531,12 +558,49 @@ pub async fn poll(connection: Connection) {
             Polled::Unchanged | Polled::Unanswered => {}
         }
     }
+    if let Some(session) = kept {
+        end(session).await;
+    }
+}
+
+/// How long ending a session may take: the one request that tells the
+/// server it can let the session go, which a server that answers at all
+/// answers well within half a second. Nothing waits on it at a stop, so it
+/// bounds only how long a stopped poller lingers; a session not ended in
+/// time is let go by the server once idle, as one cut off is.
+pub(super) const POLLER_STOP_WAIT: Duration = Duration::from_millis(500);
+
+/// How long a stopped poller has to end on its own before it is stopped
+/// outright. Longer than [`POLLER_STOP_WAIT`], which it must hold whole:
+/// the poller first sees the stop at its next tick or as a poll's await
+/// gives way, then spends up to that wait ending its session; twice it
+/// leaves that room on a loaded machine.
+pub(super) const POLLER_END_WAIT: Duration = Duration::from_millis(1000);
+
+/// Ends `session`, telling the server, for at most [`POLLER_STOP_WAIT`].
+async fn end(session: Session) {
+    let _ = tokio::time::timeout(POLLER_STOP_WAIT, session.cancel()).await;
+}
+
+/// The poll's `index` input: the stamps changed since `position`. No
+/// server version refuses it, since none of its fields has a floor, so the
+/// version a kept session's first handshake named, stale after the server
+/// is upgraded or rolled back, decides nothing for it. A server rolled back
+/// to a release without positions ignores `stamps_since` and answers
+/// without a position; the poll then ends the session, and the next
+/// handshake reads the version afresh.
+fn poll_input(position: Option<Position>) -> serde_json::Value {
+    serde_json::json!({
+        "stamps": true,
+        "stamps_since": position.unwrap_or_default(),
+    })
 }
 
 /// What one poll found.
 enum Polled {
-    /// The server's position, with the delivery files brought up to it.
-    At(Position),
+    /// The server's position, with the delivery files brought up to it, and
+    /// the session it came in, kept for the next poll.
+    At(Position, Session),
     /// A server that keeps no positions, at this version.
     WithoutPositions(serde_json::Value),
     /// A server without positions whose version has not changed.
@@ -556,6 +620,16 @@ mod tests {
     use super::*;
 
     const URL: &str = "https://memory.example.test:8765/mcp";
+
+    /// A kept session keeps the version its first handshake named, so the
+    /// poll is safe only while no server version would refuse its input.
+    #[test]
+    fn no_server_version_refuses_the_polls_input() {
+        let input = poll_input(Some(Position::kept("1.0123456789abcdef.7".into())));
+        let refused =
+            crate::setup::versions::refused_option(URL, "0.0.0", "index", &input).map(|r| r.0);
+        assert_eq!(refused, None);
+    }
 
     #[test]
     fn a_marker_is_private_and_named_by_a_hash_alone() {

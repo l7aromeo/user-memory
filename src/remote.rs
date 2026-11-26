@@ -123,8 +123,14 @@ impl Connection {
             .connect_timeout(Duration::from_secs(5))
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
+        // A session the server no longer knows (it restarted, or ended the
+        // session as idle) is answered 404: the transport then makes a new
+        // session and sends the refused request once more, which keeps the
+        // marker poller's kept session working (marker::poll). The default,
+        // set here so the poller does not depend on it.
         let config = StreamableHttpClientTransportConfig::with_uri(self.url.clone())
-            .auth_header(read_token(&self.token_file)?);
+            .auth_header(read_token(&self.token_file)?)
+            .reinit_on_expired_session(true);
         Ok(StreamableHttpClientTransport::with_client(client, config))
     }
     pub async fn probe(&self) -> Result<()> {
@@ -195,16 +201,39 @@ impl Connection {
         asked.await.unwrap_or(false)
     }
 
+    /// Calls the tool `name` with `arguments` in a session of its own,
+    /// opened for the call and ended after it.
     pub async fn call(&self, name: &'static str, arguments: serde_json::Value) -> Result<String> {
-        let service = tokio::time::timeout(Duration::from_secs(10), ().serve(self.transport()?))
+        let session = self.open().await?;
+        let result = self.call_in(&session, name, arguments).await;
+        let _ = session.cancel().await;
+        result
+    }
+
+    /// Opens an MCP session with the server: its handshake, which names the
+    /// server's version for [`Connection::call_in`].
+    pub(crate) async fn open(&self) -> Result<Session> {
+        tokio::time::timeout(Duration::from_secs(10), ().serve(self.transport()?))
             .await
             .context("Memory server connection timed out")?
-            .map_err(|err| {
-                refused::told(err, &self.url, Some("Cannot connect to memory server"))
-            })?;
-        // An input the server is too old for is refused, not sent: it would
-        // be ignored and the reply would look complete.
-        let handshake = service.peer_info().map(serde_json::to_value).transpose()?;
+            .map_err(|err| refused::told(err, &self.url, Some("Cannot connect to memory server")))
+    }
+
+    /// Calls the tool `name` with `arguments` in `session`, which stays
+    /// open. An input the server is too old for is refused, not sent: it
+    /// would be ignored and the reply would look complete. The version is
+    /// the one the session's first handshake named. A session the transport
+    /// made again after the server dropped it keeps that version, which is
+    /// stale when the server was upgraded or rolled back meanwhile; only
+    /// the marker poll keeps a session, and no server version refuses its
+    /// input, so the stale version decides nothing there.
+    pub(crate) async fn call_in(
+        &self,
+        session: &Session,
+        name: &'static str,
+        arguments: serde_json::Value,
+    ) -> Result<String> {
+        let handshake = session.peer_info().map(serde_json::to_value).transpose()?;
         if let Some(server) = handshake
             .as_ref()
             .and_then(crate::setup::versions::server_version)
@@ -212,14 +241,12 @@ impl Connection {
             && let Some((refusal, _)) =
                 crate::setup::versions::refused_option(&self.url, server, name, &arguments)
         {
-            let _ = service.cancel().await;
             bail!("{refusal}");
         }
         let request = rmcp::model::CallToolRequestParams::new(name)
             .with_arguments(arguments.as_object().cloned().unwrap_or_default());
         let result =
-            tokio::time::timeout(Duration::from_secs(10), service.call_tool(request)).await;
-        let _ = service.cancel().await;
+            tokio::time::timeout(Duration::from_secs(10), session.call_tool(request)).await;
         let result = serde_json::to_value(
             result
                 .context("Memory server request timed out")?
@@ -239,6 +266,9 @@ impl Connection {
         Ok(text)
     }
 }
+
+/// An MCP session with a memory server, as this machine's client.
+pub(crate) type Session = rmcp::service::RunningService<RoleClient, ()>;
 
 /// Why the server's `name` call failed, from the text it sent with
 /// `isError`: the `error` of a JSON reply, else the text itself without
@@ -537,7 +567,8 @@ pub async fn connect_over(
     let token_file = connection.token_file.clone();
     // Beside the relay, never in it: the hooks on this machine read the
     // server's position from the marker it keeps.
-    let poller = tokio::spawn(marker::poll(connection.clone()));
+    let (stop, stopping) = tokio::sync::watch::channel(false);
+    let mut poller = tokio::spawn(marker::poll(connection.clone(), stopping));
     let relayed = forward(
         local,
         remote,
@@ -547,7 +578,18 @@ pub async fn connect_over(
         behind_front,
     )
     .await;
-    poller.abort();
+    // The poller ends its kept session on its own time, so a hand-over or
+    // the session's end waits for none of it; one still running past its
+    // wait is stopped.
+    let _ = stop.send(true);
+    tokio::spawn(async move {
+        if tokio::time::timeout(marker::POLLER_END_WAIT, &mut poller)
+            .await
+            .is_err()
+        {
+            poller.abort();
+        }
+    });
     relayed
 }
 
