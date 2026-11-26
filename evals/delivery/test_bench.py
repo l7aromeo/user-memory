@@ -4,13 +4,16 @@ worked out by hand.
     python3 -I evals/delivery/test_bench.py
 """
 
+import json
 import sys
+import tempfile
 import unittest
 from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import metrics  # noqa: E402
+import run  # noqa: E402
 import world  # noqa: E402
 
 BARS = {"push": 2.0, "failure": 1.0, "hold": 3.0}
@@ -463,6 +466,66 @@ class Generator(unittest.TestCase):
             self.assertEqual([n["action"] for n in task["needs"]], [0] * len(task["needs"]))
         kinds = Counter(t["kind"] for t in drawn["tasks"])
         self.assertEqual(set(kinds), set(world.KINDS))
+
+
+class SessionShare(unittest.TestCase):
+    def test_each_round_is_its_own_share_so_a_slow_round_moves_nothing(self):
+        # Every round adds a quarter of its build; one runs three times slower.
+        rounds = [{"alone": 40.0, "building": 90.0, "finding": 80.0} for _ in range(10)]
+        rounds.append({"alone": 120.0, "building": 270.0, "finding": 240.0})
+        share, low, high, steps = run.session_share(rounds)
+        self.assertAlmostEqual(share, 0.25)
+        self.assertAlmostEqual(low, 0.25)
+        self.assertAlmostEqual(high, 0.25)
+        self.assertEqual(steps, {"alone": 40.0, "building": 90.0, "finding": 80.0})
+
+    def test_the_share_is_the_median_of_the_rounds_and_the_middle_half_their_quartiles(self):
+        # Shares 10, 90, 20, 30 and 50 %; the difference of the steps'
+        # medians, 160 - 140 ms, would give 20 %.
+        pairs = [(150, 140), (300, 210), (120, 100), (250, 220), (160, 110)]
+        rounds = [{"alone": 100.0, "building": float(b), "finding": float(f)} for b, f in pairs]
+        share, low, high, _ = run.session_share(rounds)
+        self.assertAlmostEqual(share, 0.3)
+        self.assertAlmostEqual(low, 0.2)
+        self.assertAlmostEqual(high, 0.5)
+
+    def test_a_build_awaited_in_full_is_over_the_bar(self):
+        rounds = [{"alone": 40.0, "building": 120.0, "finding": 80.0} for _ in range(run.SESSION_ROUNDS)]
+        self.assertGreater(run.session_share(rounds)[0], run.SESSION_BUILD_SHARE)
+
+
+class SessionRounds(unittest.TestCase):
+    def test_the_order_rotates_and_a_building_start_finds_no_base(self):
+        steps, saved = [], run.bench
+        with tempfile.TemporaryDirectory() as tmp:
+            delivery = Path(tmp)
+            (delivery / "store.lock").write_text("")
+
+            def bench(_binary, *args):
+                steps.append("alone")
+                return json.dumps({"build_ms": 40.0})
+
+            def start(session):
+                files = sorted(p.name for p in delivery.iterdir())
+                if session.startswith("building"):
+                    self.assertEqual(files, ["store.lock"], session)
+                else:
+                    self.assertIn("store-scope.index", files, session)
+                steps.append(session.rstrip("0123456789"))
+                (delivery / "store-scope.index").write_text("")
+                return 90.0 if session.startswith("building") else 80.0
+
+            run.bench = bench
+            try:
+                rounds = run.session_rounds("bench", "db", delivery / "alone.index", delivery, start)
+            finally:
+                run.bench = saved
+        self.assertEqual(len(rounds), run.SESSION_ROUNDS)
+        self.assertEqual(rounds[0], {"alone": 40.0, "building": 90.0, "finding": 80.0})
+        orders = [tuple(steps[3 * n:3 * n + 3]) for n in range(run.SESSION_ROUNDS)]
+        self.assertEqual(orders[:3], [("alone", "building", "finding"), ("building", "finding", "alone"),
+                                      ("finding", "alone", "building")])
+        self.assertEqual({o[0] for o in orders}, {"alone", "building", "finding"})
 
 
 if __name__ == "__main__":
