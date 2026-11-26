@@ -4391,6 +4391,157 @@
     "content": "Module {n} has one owner, named in its header comment."
    },
    "repeat": 2
+  },
+  {
+   "name": "a_note_earlier_sessions_used_is_at_hand_before_the_first_command",
+   "summary": "At 1,000 memories, an agent's note that tools/package.py's default mirror was retired and uploads go to eu-2, which three earlier sessions of the project read, is at hand at session start, so the agent cutting a release runs tools/package.py with `--mirror eu-2` from its first upload, before any push could bring it (#123's V1).",
+   "shell": true,
+   "cwd": "project:compiler",
+   "seed_many": {
+    "count": 1000
+   },
+   "files": {
+    "compiler/tools/package.py": "import argparse\nparser = argparse.ArgumentParser(description='Package the compiler and upload the archive.')\nparser.add_argument('--mirror', default='dl-1', help='where the archive is uploaded (default: dl-1)')\nargs = parser.parse_args()\nprint('uploaded dist/compiler-' + open('VERSION').read().strip() + '.tar.gz to ' + args.mirror)\n",
+    "compiler/VERSION": "1.4.0\n",
+    "compiler/RELEASING.md": "# Releasing\n\nTo cut a release: set VERSION, run `python3 tools/package.py`, then tag the commit with `git tag vX.Y.Z`.\n"
+   },
+   "seed": [
+    {
+     "id": "note",
+     "args": [
+      "--type",
+      "fact",
+      "--category",
+      "workflow",
+      "--title",
+      "tools/package.py uploads to a retired mirror unless told another",
+      "--content",
+      "`python3 tools/package.py` uploads to its default mirror, dl-1, which was retired: an archive sent there is lost. Uploads go to `--mirror eu-2`.",
+      "--scope",
+      "project",
+      "--project",
+      "github.com/acme/compiler",
+      "--source",
+      "observed",
+      "--evidence",
+      "An archive uploaded to dl-1 never reached the download page, and the user uploaded it again to eu-2"
+     ],
+     "aged": true
+    }
+   ],
+   "used": [
+    {
+     "memory": "note",
+     "project": "github.com/acme/compiler",
+     "sessions": 3
+    }
+   ],
+   "sessions": [
+    {
+     "prompt": "Cut the 1.4.0 release."
+    }
+   ],
+   "checks": [
+    {
+     "commands": {
+      "matches": "package\\.py[^\\n]*--mirror[ =]eu-2"
+     }
+    },
+    {
+     "commands_not": {
+      "matches": "package\\.py(?![^\\n]*(--mirror[ =]eu-2|--help|-h\\b))"
+     }
+    },
+    {
+     "hook_context": {
+      "event": "SessionStart",
+      "matches": "Most used in this project's recent sessions[^\\n]*\\n(- [^\\n]*\\n)*- {seed:note} "
+     },
+     "informational": true
+    }
+   ],
+   "obeyed": {
+    "steps": [
+     {
+      "commands": [
+       "python3 tools/package.py --mirror eu-2",
+       "git tag v1.4.0"
+      ],
+      "hook_context": [
+       {
+        "event": "SessionStart",
+        "text": "Most used in this project's recent sessions (read one for the rest before applying it):\n- {seed:note} An agent's note from an earlier session (fact): `python3 tools/package.py` uploads to its default mirror, dl-1, which was retired.\n"
+       }
+      ]
+     }
+    ]
+   },
+   "planted": [
+    {
+     "steps": [
+      {
+       "commands": [
+        "python3 tools/package.py",
+        "python3 tools/package.py --mirror eu-2",
+        "git tag v1.4.0"
+       ],
+       "hook_context": [
+        {
+         "event": "SessionStart",
+         "text": "Most used in this project's recent sessions (read one for the rest before applying it):\n- {seed:note} An agent's note from an earlier session (fact): `python3 tools/package.py` uploads to its default mirror, dl-1, which was retired.\n"
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "steps": [
+      {
+       "commands": [
+        "python3 tools/package.py",
+        "git tag v1.4.0"
+       ],
+       "hook_context": [
+        {
+         "event": "SessionStart",
+         "text": "Most used in this project's recent sessions (read one for the rest before applying it):\n- {seed:note} An agent's note from an earlier session (fact): `python3 tools/package.py` uploads to its default mirror, dl-1, which was retired.\n"
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "steps": [
+      {
+       "commands": [
+        "python3 tools/package.py --mirror eu-2",
+        "git tag v1.4.0"
+       ],
+       "hook_context": [
+        {
+         "event": "SessionStart",
+         "text": "USER MEMORY INDEX\n"
+        }
+       ]
+      }
+     ]
+    }
+   ],
+   "allow": [
+    "git tag *",
+    "python3 tools/*"
+   ],
+   "bulk": {
+    "count": 60,
+    "type": "fact",
+    "category": "workflow",
+    "scope": "project",
+    "project": "github.com/acme/compiler",
+    "title": "Module {n} has one owner",
+    "content": "Module {n} has one owner, named in its header comment."
+   },
+   "codex_escalations": true,
+   "repeat": 5
   }
  ]
 }

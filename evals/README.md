@@ -257,7 +257,12 @@ all with generated filler, after the seeds and bulk memories: made-up
 words with a few common ones, no code span, path or name a step could
 match, no rule type, and a tenth in projects no scenario loads. The same
 filler in every trial, so a scenario's named memories are tested at a
-store's size without anything else to push. `unlisted` names seeds that
+store's size without anything else to push. `used`
+(`[{"memory": NAME, "project": KEY, "sessions": N}]`) says N earlier
+sessions read the seed NAME for that project, as their hooks would have
+written it to `memory_use` (#123), so session start's index order and
+most-used part see that history; a store from before the table, as
+main's binary makes, gets none. `unlisted` names seeds that
 session start must not list: before any session, the harness runs the
 trial's session-start hook on copies of its home, store and checkouts, and
 a trial whose session start names one of them by id is void, since an
