@@ -405,8 +405,6 @@ impl State {
     }
 }
 
-/// `agent`'s context row, made when missing: its epoch, the actions it has
-/// taken and the characters pushed to it in this epoch.
 /// A connection to the state file at `path`, made private when missing,
 /// that waits for another hook's write until `deadline`.
 fn connect(path: &Path, deadline: Instant) -> Result<Connection> {
@@ -436,6 +434,8 @@ fn not_a_database(err: &anyhow::Error) -> bool {
         })
 }
 
+/// `agent`'s context row, made when missing: its epoch, the actions it has
+/// taken and the characters pushed to it in this epoch.
 fn context(conn: &Connection, agent: &str) -> Result<(i64, i64, usize)> {
     conn.execute(
         "INSERT OR IGNORE INTO contexts(agent, epoch, actions, chars) VALUES (?1, 1, 0, 0)",
