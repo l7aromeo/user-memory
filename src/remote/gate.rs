@@ -15,6 +15,7 @@ use std::{
     collections::HashMap,
     path::PathBuf,
     sync::{Arc, Mutex, PoisonError},
+    time::Duration,
 };
 use subtle::ConstantTimeEq;
 
@@ -238,8 +239,30 @@ fn challenge(refusal: Refusal) -> &'static str {
 pub const UNREADABLE: &str =
     "The server's token registry cannot be read; the server's log says why and what to do.";
 
+/// The most of a refused request's body read before the answer (#226):
+/// far more than any MCP call sends, so a client that sends its body
+/// after its headers reads the 401 rather than a reset, and little enough
+/// that a caller without a token cannot make the server read on.
+const REFUSED_BODY_BYTES: usize = 64 * 1024;
+
+/// How long reading a refused request's body may take before the answer
+/// goes out anyway: a client sends its body at once, and a caller without
+/// a token cannot hold the connection longer.
+const REFUSED_BODY_WAIT: Duration = Duration::from_secs(2);
+
+/// Reads what is left of a refused request's body, within
+/// [`REFUSED_BODY_BYTES`] and [`REFUSED_BODY_WAIT`]. The server closes the
+/// connection after its answer, and closing it on unread bytes, or on bytes
+/// still arriving, makes the system send a reset that can reach the client
+/// before the answer does.
+async fn drain(request: Request) {
+    let body = axum::body::to_bytes(request.into_body(), REFUSED_BODY_BYTES);
+    let _ = tokio::time::timeout(REFUSED_BODY_WAIT, body).await;
+}
+
 /// Lets a request through with its [`Access`], or answers 401 saying why,
-/// or 503 while the registry cannot be read.
+/// or 503 while the registry cannot be read, after reading the refused
+/// request's body ([`drain`]).
 pub async fn authenticate(State(gate): State<Gate>, mut request: Request, next: Next) -> Response {
     let provided = request
         .headers()
@@ -253,13 +276,19 @@ pub async fn authenticate(State(gate): State<Gate>, mut request: Request, next: 
             request.extensions_mut().insert(access);
             next.run(request).await
         }
-        Ok(Err(refusal)) => (
-            StatusCode::UNAUTHORIZED,
-            [(header::WWW_AUTHENTICATE, challenge(refusal))],
-            "Authentication required",
-        )
-            .into_response(),
-        Err(_) => (StatusCode::SERVICE_UNAVAILABLE, UNREADABLE).into_response(),
+        Ok(Err(refusal)) => {
+            drain(request).await;
+            (
+                StatusCode::UNAUTHORIZED,
+                [(header::WWW_AUTHENTICATE, challenge(refusal))],
+                "Authentication required",
+            )
+                .into_response()
+        }
+        Err(_) => {
+            drain(request).await;
+            (StatusCode::SERVICE_UNAVAILABLE, UNREADABLE).into_response()
+        }
     }
 }
 

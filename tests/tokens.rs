@@ -29,6 +29,20 @@ use tempfile::{TempDir, tempdir};
 const UNREADABLE: &str =
     "The server's token registry cannot be read; the server's log says why and what to do.";
 
+/// How long a client here waits between a request's headers and its body,
+/// and after the body before reading: long enough for a server answering
+/// from the headers alone to have closed the connection first (#226).
+const LATE: Duration = Duration::from_millis(100);
+
+/// How many late requests the reset test sends; on a server that does not
+/// read a refused request's body, each of them resets.
+const LATE_ROUNDS: usize = 5;
+
+/// The longest a refused request whose body never comes waits for its
+/// answer: the server's wait for the body (2 s), and room on a loaded
+/// machine.
+const NO_BODY_ANSWER: Duration = Duration::from_secs(10);
+
 /// The shared token file's token.
 const SHARED: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -191,6 +205,33 @@ impl Host {
     fn initialize(&self, token: &str) -> Answer {
         let message = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}});
         self.send("POST", "/mcp", token, &message.to_string())
+    }
+
+    /// An MCP `initialize` with `token` whose body comes [`LATE`] after its
+    /// headers, or never when `send_body` is false, read [`LATE`] after the body: the
+    /// answer's bytes, or the error reading them.
+    fn late_initialize(&self, token: &str, send_body: bool) -> Result<String, String> {
+        let message = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}).to_string();
+        let head = format!(
+            "POST /mcp HTTP/1.1\r\nHost: {}\r\nAccept: application/json, text/event-stream\r\nContent-Type: application/json\r\nMCP-Protocol-Version: 2025-06-18\r\nAuthorization: Bearer {token}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+            self.address,
+            message.len()
+        );
+        let mut socket = TcpStream::connect(&self.address).unwrap();
+        socket.set_read_timeout(Some(STUCK)).unwrap();
+        socket.write_all(head.as_bytes()).unwrap();
+        if send_body {
+            std::thread::sleep(LATE);
+            // A server that closed already may refuse the body: what counts
+            // is what the client reads next.
+            let _ = socket.write_all(message.as_bytes());
+            std::thread::sleep(LATE);
+        }
+        let mut response = Vec::new();
+        socket
+            .read_to_end(&mut response)
+            .map_err(|error| error.to_string())?;
+        Ok(String::from_utf8_lossy(&response).into_owned())
     }
 
     /// Stops the server and returns what it wrote to stderr.
@@ -435,6 +476,12 @@ fn a_damaged_or_newer_registry_refuses_every_request_until_moved_aside() {
         assert_eq!(answer.body, UNREADABLE);
         let own = host.send("DELETE", "/auth/token", "umt_anything", "");
         assert_eq!((own.status, own.body.as_str()), (503, UNREADABLE));
+        // Its body read first, so a body sent late reads the answer too.
+        let late = host.late_initialize(SHARED, true);
+        assert!(
+            late.as_deref().is_ok_and(|a| a.starts_with("HTTP/1.1 503")),
+            "{late:?}"
+        );
     }
     // A client is told its server answered and where the reason is.
     let out = client(&host, &shared, &["index"], b"");
@@ -1672,4 +1719,27 @@ fn no_output_or_log_shows_a_token() {
     for (path, said) in &seen {
         assert!(!said.contains(start), "{path} shows the token:\n{said}");
     }
+}
+
+#[test]
+fn a_refused_request_whose_body_comes_late_still_reads_its_401() {
+    let host = Host::start();
+    let mut failed = Vec::new();
+    for round in 0..LATE_ROUNDS {
+        match host.late_initialize("not-a-token", true) {
+            Ok(answer) if answer.starts_with("HTTP/1.1 401") => {}
+            other => failed.push(format!("{round}: {other:?}")),
+        }
+    }
+    assert!(failed.is_empty(), "{failed:#?}");
+}
+
+#[test]
+fn a_refused_request_whose_body_never_comes_is_answered_after_the_wait() {
+    let host = Host::start();
+    let started = std::time::Instant::now();
+    let answer = host.late_initialize("not-a-token", false).unwrap();
+    assert!(answer.starts_with("HTTP/1.1 401"), "{answer}");
+    let waited = started.elapsed();
+    assert!(waited < NO_BODY_ANSWER, "{waited:?}");
 }
