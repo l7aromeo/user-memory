@@ -10,6 +10,8 @@
 //! `POST /tags` lists what is pending and writes the ends its clients'
 //! checkouts found.
 
+#[path = "support/fake.rs"]
+mod fake;
 #[path = "support/sandbox.rs"]
 mod sandbox;
 use sandbox::Sandboxed;
@@ -21,7 +23,7 @@ use rusqlite::Connection;
 use serde_json::{Value, json};
 use std::{
     cell::RefCell,
-    fs,
+    env, fs,
     io::{BufRead, BufReader, Read, Write},
     net::TcpStream,
     path::{Path, PathBuf},
@@ -35,7 +37,8 @@ const PROJECT: &str = "github.com/example/app";
 const SHARED: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 /// A sandboxed home with its own store, a checkout of [`PROJECT`] and a
-/// `git` on PATH that logs each call before running the real one.
+/// `git` on PATH that logs each call before running the real one: the
+/// fake of tests/fake/cli.rs, so it runs on Windows too.
 struct Home {
     dir: TempDir,
     /// The memory server the hooks use, once [`Home::serve`] started one.
@@ -64,20 +67,10 @@ impl Home {
             remote: RefCell::new(None),
             client_token: RefCell::new(None),
         };
-        let shim = home.dir.path().join("shim");
+        let shim = home.shim();
         fs::create_dir(&shim).unwrap();
-        let real = which_git();
-        let script = format!(
-            "#!/bin/sh\necho \"$*\" >> '{}'\nexec '{}' \"$@\"\n",
-            home.log().display(),
-            real.display()
-        );
-        fs::write(shim.join("git"), script).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(shim.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        fake::fake(&shim, "git");
+        fs::write(shim.join("git.real"), which_git().to_str().unwrap()).unwrap();
         fs::create_dir(home.checkout()).unwrap();
         home.git(&home.checkout(), &["init", "-q", "-b", "main"]);
         home.git(
@@ -99,8 +92,13 @@ impl Home {
         self.dir.path().join("memory.sqlite3")
     }
 
+    /// The folder of the logging git, first on the hooks' PATH.
+    fn shim(&self) -> PathBuf {
+        self.dir.path().join("shim")
+    }
+
     fn log(&self) -> PathBuf {
-        self.dir.path().join("git.log")
+        self.shim().join("git.calls")
     }
 
     /// The lookups the hooks made: `cat-file` calls.
@@ -126,11 +124,11 @@ impl Home {
 
     fn command(&self, args: &[&str], folder: &Path) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_user-memory"));
-        let path = format!(
-            "{}:{}",
-            self.dir.path().join("shim").display(),
-            std::env::var("PATH").unwrap_or_default()
-        );
+        let path = env::join_paths(
+            std::iter::once(self.shim())
+                .chain(env::split_paths(&env::var_os("PATH").unwrap_or_default())),
+        )
+        .unwrap();
         command
             .args(args)
             .current_dir(folder)
@@ -314,12 +312,11 @@ impl Home {
     }
 }
 
-/// The real git, outside the shim.
+/// The real git, outside the shim: `git.exe` on Windows.
 fn which_git() -> PathBuf {
-    std::env::var("PATH")
-        .unwrap_or_default()
-        .split(':')
-        .map(|dir| Path::new(dir).join("git"))
+    let name = format!("git{}", env::consts::EXE_SUFFIX);
+    env::split_paths(&env::var_os("PATH").unwrap_or_default())
+        .map(|dir| dir.join(&name))
         .find(|path| path.is_file())
         .unwrap()
 }

@@ -40,6 +40,7 @@ fn main() -> ExitCode {
         "ollama" => ollama(&args),
         "uname" => uname(&args),
         "gh" => gh(&exe.with_file_name("gh.calls"), &args),
+        "git" => git(&exe, &args),
         "cargo" => cargo(&args),
         "cargo-about" => 0,
         "rustc" => say("host: aarch64-apple-darwin"),
@@ -767,6 +768,21 @@ fn uname(args: &[String]) -> u8 {
 fn gh(calls: &Path, args: &[String]) -> u8 {
     log(calls, args);
     1
+}
+
+/// git for tests/tag_check.rs: logs each call to `git.calls` beside this
+/// copy, then runs the real git that `git.real` beside it names, with the
+/// same standard streams, and exits with its code.
+fn git(exe: &Path, args: &[String]) -> u8 {
+    log(&exe.with_file_name("git.calls"), args);
+    let real = fs::read_to_string(exe.with_file_name("git.real")).unwrap();
+    Command::new(real.trim())
+        .args(args)
+        .status()
+        .unwrap()
+        .code()
+        .and_then(|code| u8::try_from(code).ok())
+        .unwrap_or(1)
 }
 
 /// The Rust toolchain for scripts/client-release: `cargo build` writes a
