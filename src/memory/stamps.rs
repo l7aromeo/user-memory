@@ -20,7 +20,9 @@ pub const STAMPS: &str = "user-memory stamps v1";
 /// `delta` when it lists only those changed since, with `-` and the id of
 /// each changed memory no longer in scope. Each memory's line holds the
 /// conversation origin of its latest change, so a session is not told of
-/// its own.
+/// its own. The opening line ends with the earliest date a memory in scope
+/// holds until, empty when none has one; a client from before dates reads
+/// no further than `full` or `delta`.
 pub const STAMPS_SINCE: &str = "user-memory stamps v2";
 
 /// Opens a [`STAMPS_SINCE`] reply to a client that also asked for rule
@@ -246,6 +248,13 @@ pub(super) fn stamps_since(
         None => LATEST_ORIGIN.replace("{id}", id),
     };
     let (condition, mut values) = condition(filter)?;
+    // The earliest date among the memories in scope, so a session's hook
+    // sees a date pass that moves no marker (#121).
+    let until: Option<String> = read.query_row(
+        &format!("SELECT min(until_value) FROM memories WHERE until_kind='date' AND ({condition})"),
+        params_from_iter(values.iter()),
+        |r| r.get(0),
+    )?;
     // A rule's print and writer are read for rules alone, so the other
     // memories pay only for their kind.
     let rule = super::read::rule_condition();
@@ -273,7 +282,11 @@ pub(super) fn stamps_since(
     let kind = if delta { "delta" } else { "full" };
     let now = Position::at(&store_id, last, seq);
     let head = if prints { STAMPS_RULES } else { STAMPS_SINCE };
-    let mut lines = vec![format!("{head}\t{}\t{kind}", now.0)];
+    let mut lines = vec![format!(
+        "{head}\t{}\t{kind}\t{}",
+        now.0,
+        until.unwrap_or_default()
+    )];
     let mut listed = BTreeSet::new();
     let mut statement = read.prepare(&sql)?;
     let mut rows = statement.query(params_from_iter(values))?;
@@ -346,6 +359,10 @@ pub struct StampsReply {
     /// The project of each memory listed that an agent recorded, by id;
     /// empty for a global one.
     pub agents: BTreeMap<String, String>,
+    /// The earliest date a memory in scope holds until, listed or not, in
+    /// the stored form; none when no memory in scope has a date, or from a
+    /// server from before dates, whose sessions see no date pass.
+    pub until: Option<String>,
 }
 
 /// What a [`STAMPS_RULES`] reply says of a standing rule.
@@ -388,10 +405,15 @@ pub fn parse_stamps_reply(text: &str) -> Option<StampsReply> {
         "full" => false,
         _ => return None,
     };
+    let until = fields
+        .next()
+        .filter(|until| !until.is_empty())
+        .map(str::to_owned);
     let mut reply = StampsReply {
         since: Some(since),
         delta,
         prints,
+        until,
         ..StampsReply::default()
     };
     let fields_per_line = if prints { 10 } else { 5 };

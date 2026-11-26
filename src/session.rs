@@ -1192,8 +1192,15 @@ async fn snapshot(
         None => memory::marked(&db_path()),
         Some(remote) => crate::remote::marker::position(&remote.url),
     };
+    // A date passed since: it moved no marker, so every memory is read
+    // again and the notice lists the one it ended.
+    let now = memory::until::stored_now(jiff::Timestamp::now());
+    let passed = before
+        .and_then(|b| b.until.as_deref())
+        .is_some_and(|until| until <= now.as_str());
     let still = before.filter(|b| {
-        b.projects.is_some()
+        !passed
+            && b.projects.is_some()
             && b.changes
                 .as_ref()
                 .zip(marked.as_ref())
@@ -1224,9 +1231,10 @@ async fn snapshot(
     // A snapshot of the same projects asks only for what changed since.
     let since = before
         .filter(|b| {
-            b.projects
-                .as_deref()
-                .is_some_and(|was| was.iter().map(|p| &p.key).eq(keys.iter()))
+            !passed
+                && b.projects
+                    .as_deref()
+                    .is_some_and(|was| was.iter().map(|p| &p.key).eq(keys.iter()))
         })
         .and_then(|b| b.changes.clone());
     let unchanged = since
@@ -1234,9 +1242,11 @@ async fn snapshot(
         .zip(marked.as_ref())
         .is_some_and(|(since, marked)| since.same_change(marked));
     let reply = if unchanged {
+        // Nothing read: the earliest date is the one kept.
         memory::StampsReply {
             since,
             delta: true,
+            until: before.and_then(|b| b.until.clone()),
             ..memory::StampsReply::default()
         }
     } else {
@@ -1271,6 +1281,7 @@ async fn snapshot(
         stamps,
         projects: Some(projects),
         changes: reply.since.clone(),
+        until: reply.until.clone(),
     };
     Ok((snapshot, reply))
 }
@@ -1980,6 +1991,7 @@ mod tests {
             projects: Some(Vec::new()),
             stamps: memory::Stamps::new(),
             changes: None,
+            until: None,
         };
         let deadline = tokio::time::Instant::now() + LIMIT;
         for (prints, delta) in [(true, true), (false, false)] {

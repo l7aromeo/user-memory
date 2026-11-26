@@ -23,8 +23,8 @@ pub(in crate::memory) fn prefix(anchor: bool) -> u8 {
 }
 
 /// The file the delivery index is written to starts with this, its format
-/// in the last byte: 2 added the header of [`Header`].
-const MAGIC: &[u8; 8] = b"UMDELIV2";
+/// in the last byte: 2 added the header of [`Header`], 3 its dates.
+const MAGIC: &[u8; 8] = b"UMDELIV3";
 
 /// The file format this code writes and reads, as a client names it to a
 /// server (#180).
@@ -74,6 +74,24 @@ pub(crate) struct Header {
     /// The base's memories an overlay hides: each memory changed since the
     /// base's position, by id only. A base hides none.
     pub(crate) skip: Vec<String>,
+    /// The date each of the file's memories with one holds until, in the
+    /// stored form, by id in order: a hook drops a match once its date
+    /// passes, which moves no marker (#121).
+    pub(crate) dates: Vec<(String, String)>,
+}
+
+/// A stored date's length, `YYYY-MM-DDTHH:MM:SSZ`.
+const DATE_BYTES: usize = 20;
+
+/// The dates of the memories of `ids` that have one, by id in order.
+fn dates_of(conn: &Connection, ids: &[String]) -> Result<Vec<(String, String)>, Error> {
+    let mut statement = conn.prepare(concat!(
+        "SELECT id,until_value FROM memories WHERE until_kind='date' AND ",
+        live!("memories"),
+        " AND id IN (SELECT value FROM json_each(?1)) ORDER BY id"
+    ))?;
+    let rows = statement.query_map([json_array(ids)], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
 /// A memory id as the store writes it: a hyphenated UUID.
@@ -287,6 +305,14 @@ impl Builder {
             }
             bytes.extend(id.as_bytes());
         }
+        put(&mut bytes, header.dates.len())?;
+        for (id, date) in &header.dates {
+            if id.len() != ID_BYTES || date.len() != DATE_BYTES {
+                return Err(Error::Format);
+            }
+            bytes.extend(id.as_bytes());
+            bytes.extend(date.as_bytes());
+        }
         put(&mut bytes, ids.len())?;
         for id in ids {
             if id.len() != ID_BYTES {
@@ -391,6 +417,7 @@ impl DeliveryIndex {
             made_for: String::new(),
             projects: Vec::new(),
             skip: Vec::new(),
+            dates: Vec::new(),
         };
         Self::write_with(&header, memories)
     }
@@ -448,12 +475,25 @@ impl DeliveryIndex {
             skip.push(id.to_owned());
             at += ID_BYTES;
         }
+        let count = u32_at(&bytes, at)? as usize;
+        at += 4;
+        let mut dates = Vec::new();
+        for _ in 0..count {
+            let entry = bytes
+                .get(at..at + ID_BYTES + DATE_BYTES)
+                .and_then(|entry| std::str::from_utf8(entry).ok())
+                .ok_or(Error::Format)?;
+            let (id, date) = entry.split_at(ID_BYTES);
+            dates.push((id.to_owned(), date.to_owned()));
+            at += ID_BYTES + DATE_BYTES;
+        }
         let header = Header {
             part,
             position,
             made_for,
             projects,
             skip,
+            dates,
         };
         let memories = u32_at(&bytes, at)? as usize;
         let ids_at = at + 4;
@@ -782,6 +822,7 @@ fn overlay_file(
         made_for,
         projects: projects.to_vec(),
         skip,
+        dates: dates_of(conn, &ids)?,
     };
     built
         .bytes(&header, ids.iter().map(String::as_str))
@@ -953,12 +994,22 @@ pub(crate) fn fold(base: &DeliveryIndex, overlay: &DeliveryIndex) -> Result<Vec<
             }
         }
     }
+    let mut dates: Vec<(String, String)> = base
+        .header
+        .dates
+        .iter()
+        .filter(|(id, _)| !skipped.contains(id.as_str()))
+        .chain(&overlay.header.dates)
+        .cloned()
+        .collect();
+    dates.sort();
     let header = Header {
         part: Part::Base,
         position: overlay.header.position.clone(),
         made_for: overlay.header.position.clone(),
         projects: base.header.projects.clone(),
         skip: Vec::new(),
+        dates,
     };
     built.bytes(&header, ids.into_iter())
 }
@@ -1014,6 +1065,7 @@ pub(crate) fn empty_overlay(base: &Header) -> Result<Vec<u8>, Error> {
         made_for: base.position.clone(),
         projects: base.projects.clone(),
         skip: Vec::new(),
+        dates: Vec::new(),
     };
     Builder::default().bytes(&header, std::iter::empty())
 }
@@ -1130,6 +1182,7 @@ pub(crate) fn build(
         position,
         projects: projects.to_vec(),
         skip: Vec::new(),
+        dates: dates_of(&conn, &ids)?,
     };
     built.bytes(&header, ids.iter().map(String::as_str))
 }
