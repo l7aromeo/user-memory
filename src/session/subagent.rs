@@ -38,7 +38,7 @@ pub async fn subagent_start(client: HookClient, context_limit: Option<usize>) ->
         .await
         .ok()
         .flatten();
-    let rules = tokio::time::timeout_at(
+    let Rules { text: rules, whole } = tokio::time::timeout_at(
         deadline,
         subagent_rules(client, context_limit, payload.as_deref()),
     )
@@ -46,6 +46,9 @@ pub async fn subagent_start(client: HookClient, context_limit: Option<usize>) ->
     .ok()
     .flatten()
     .unwrap_or_default();
+    if let Some(payload) = payload.as_deref() {
+        show_whole(client, payload, &whole, std::time::Instant::now());
+    }
     // The task, after the rules: what its words match, pushed to the
     // subagent as after its own action.
     let recalled = payload
@@ -83,16 +86,27 @@ struct SubagentContext {
     additional_context: String,
 }
 
+/// The project rules a starting subagent gets, and those it then holds in
+/// full.
+#[derive(Default)]
+pub struct Rules {
+    /// What the hook prints: empty when there are none or a forked Codex
+    /// sub-agent already carries them.
+    pub text: String,
+    /// The ids, as printed, of the rules the subagent holds in full, printed
+    /// now or carried from its parent's session start.
+    pub whole: Vec<String>,
+}
+
 /// The project rules a subagent starting with `payload` gets, within
 /// `client`'s room for them: the rules part session start would print, and
-/// its line counting the rules left out; empty when there are none or a
-/// forked Codex sub-agent already carries them. `None` when the store does
-/// not answer.
+/// its line counting the rules left out. `None` when the store does not
+/// answer.
 pub async fn subagent_rules(
     client: HookClient,
     context_limit: Option<usize>,
     payload: Option<&[u8]>,
-) -> Option<String> {
+) -> Option<Rules> {
     let origin = payload.and_then(|payload| origin(client, payload));
     let folder = payload
         .and_then(|payload| serde_json::from_slice::<Value>(payload).ok())
@@ -106,23 +120,53 @@ pub async fn subagent_rules(
         .ok()?;
     let part = memory::rules_part(&text);
     if part.is_empty() {
-        return Some(String::new());
+        return Some(Rules::default());
     }
     let headings = memory::rules_headings(part);
     if client == HookClient::Codex
         && let Some(transcript) = payload.and_then(transcript_path)
         && carried(&transcript, &headings)
     {
-        return Some(String::new());
+        return Some(Rules {
+            text: String::new(),
+            whole: owned(memory::rules_in_full(part)),
+        });
     }
     let (limit, unit) = hook_limit(Some(client), context_limit);
     let overflow = super::overflow_line(&memory::rules_left_out(part));
-    Some(super::capped(
-        format!("{part}{overflow}"),
-        limit,
-        unit,
-        super::NOTICE_CUT,
-    ))
+    let text = super::capped(format!("{part}{overflow}"), limit, unit, super::NOTICE_CUT);
+    // A rule is one line, and the cap keeps whole lines: those still
+    // printed are the rules the subagent holds in full.
+    let whole = owned(memory::rules_in_full(&text));
+    Some(Rules { text, whole })
+}
+
+/// The ids a rules part prints, kept past the text they borrow from.
+fn owned(ids: Vec<&str>) -> Vec<String> {
+    ids.into_iter().map(str::to_owned).collect()
+}
+
+/// Counts `whole`, the rules a starting subagent holds in full, as shown to
+/// its own context, so neither the push of its task nor a later step
+/// repeats one: session start does the same for the session's context.
+/// Nothing for a payload without the subagent's id or a session without
+/// recall state.
+fn show_whole(client: HookClient, payload: &[u8], whole: &[String], started: std::time::Instant) {
+    if whole.is_empty() {
+        return;
+    }
+    let Some(agent) = serde_json::from_slice::<Value>(payload)
+        .ok()
+        .and_then(|payload| payload["agent_id"].as_str().map(str::to_owned))
+    else {
+        return;
+    };
+    let Some(snapshot) = super::session_file(client, payload) else {
+        return;
+    };
+    let whole: Vec<&str> = whole.iter().map(String::as_str).collect();
+    let _ = State::open(&recall::path(&snapshot), tool_deadline(started))
+        .and_then(|mut state| state.show_whole(&agent, &whole));
 }
 
 /// The type Claude Code gives a subagent its parent's call names none of.
