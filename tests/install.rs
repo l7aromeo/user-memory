@@ -1135,12 +1135,55 @@ fn the_questions_set_up_a_docker_server_and_a_rerun_upgrades_it() {
         "{stderr}"
     );
     assert!(stderr.contains("again with --titles FILE"), "{stderr}");
+    assert!(
+        !stderr.contains("Docker or the store may be failing"),
+        "{stderr}"
+    );
     assert_eq!(
         compose_calls(),
         ["compose build", "compose run --rm memory migrate --check"]
     );
     fs::remove_file(c.path("migrate-fails")).unwrap();
     fs::remove_file(c.path("docker.log")).unwrap();
+
+    // Any other failure of that check is Docker's or the store's: the
+    // refusal names how the check ended and asks for no titles, Docker's
+    // own message stays above it, and the old server keeps running.
+    let exited = if cfg!(windows) {
+        "exit code: 1"
+    } else {
+        "exit status: 1"
+    };
+    let mut failures = vec![(
+        "docker-broken",
+        exited,
+        "Error response from daemon: cannot start container",
+    )];
+    if cfg!(unix) {
+        // Killed with nothing to say, as a process the system ends.
+        failures.push(("check-killed", "signal: 9 (SIGKILL)", ""));
+    }
+    for (marker, ended, docker_said) in failures {
+        fs::write(c.path(marker), "").unwrap();
+        let refused = c.install(&releases, &[], &[]);
+        let (stdout, stderr) = text(&refused);
+        assert!(!refused.status.success(), "{marker}: {stdout}\n{stderr}");
+        assert!(
+            stderr.contains(&format!(
+                "user-memory install: checking the store ended with {ended}, so Docker or the store may be failing; the server keeps running the previous version"
+            )),
+            "{marker}: {stderr}"
+        );
+        assert!(stderr.contains(docker_said), "{marker}: {stderr}");
+        assert!(!stderr.contains("--titles FILE"), "{marker}: {stderr}");
+        assert_eq!(
+            compose_calls(),
+            ["compose build", "compose run --rm memory migrate --check"],
+            "{marker}"
+        );
+        fs::remove_file(c.path(marker)).unwrap();
+        fs::remove_file(c.path("docker.log")).unwrap();
+    }
     let map = c.path("titles.json");
     fs::write(
         &map,

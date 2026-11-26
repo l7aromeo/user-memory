@@ -3,12 +3,50 @@
 
 use anyhow::{Context, Result, bail};
 use std::{
+    io::{self, Read, Write},
     path::PathBuf,
-    process::{Command, Output, Stdio},
+    process::{Command, ExitStatus, Output, Stdio},
+    thread,
 };
 
 /// The server's service in compose.yaml.
 pub const SERVICE: &str = "memory";
+
+/// A Docker command that ran with its output shown: how it ended and what
+/// it printed, stdout then stderr.
+pub struct Shown {
+    pub status: ExitStatus,
+    pub said: String,
+}
+
+/// Copies `from` to `to` as it comes, and returns what it copied.
+fn kept(mut from: impl Read, to: impl Write) -> String {
+    let mut copy = Tee {
+        to,
+        kept: Vec::new(),
+    };
+    let _ = io::copy(&mut from, &mut copy);
+    String::from_utf8_lossy(&copy.kept).into_owned()
+}
+
+/// A writer that passes what it is given to `to` and keeps a copy. A
+/// failed write to `to`, such as a closed terminal, still keeps it.
+struct Tee<W> {
+    to: W,
+    kept: Vec<u8>,
+}
+
+impl<W: Write> Write for Tee<W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.kept.extend_from_slice(bytes);
+        let _ = self.to.write_all(bytes).and_then(|()| self.to.flush());
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        let _ = self.to.flush();
+        Ok(())
+    }
+}
 
 /// The Docker command the installers and the user's shell run: the first
 /// `docker` on PATH, or the bare name, which then fails as not found.
@@ -56,6 +94,26 @@ impl Compose {
             bail!("docker compose {} failed (above)", args.join(" "));
         }
         Ok(())
+    }
+
+    /// Runs `args` with `input` as stdin, showing Docker's output as it
+    /// comes and keeping it: how the command ended and what it printed.
+    pub fn shown(&self, args: &[&str], input: Stdio) -> Result<Shown> {
+        let mut child = self
+            .command(args)
+            .stdin(input)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("Cannot run docker")?;
+        let out = child.stdout.take().expect("stdout is piped");
+        let err = child.stderr.take().expect("stderr is piped");
+        let out = thread::spawn(move || kept(out, io::stdout()));
+        let err = thread::spawn(move || kept(err, io::stderr()));
+        let status = child.wait().context("Cannot run docker")?;
+        let mut said = out.join().expect("showing Docker's output does not panic");
+        said += &err.join().expect("showing Docker's output does not panic");
+        Ok(Shown { status, said })
     }
 
     /// Runs `args` with `input` as stdin and Docker's errors shown; returns

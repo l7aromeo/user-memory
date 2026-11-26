@@ -537,6 +537,12 @@ fn compose(args: &[String]) -> u8 {
         }
         thread::sleep(Duration::from_millis(300));
     } else if all.contains(" migrate ") {
+        // A check the system kills before it says anything.
+        if all.contains(" --check ") && at("check-killed").exists() {
+            let _ = Command::new("kill")
+                .args(["-9", &std::process::id().to_string()])
+                .status();
+        }
         if at("docker-broken").exists() {
             eprintln!("Error response from daemon: cannot start container");
             return 1;

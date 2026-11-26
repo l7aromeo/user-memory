@@ -71,7 +71,10 @@ On a machine that is already set up, it asks nothing:
   too old for it and says to update the server.
 - With the installer's Docker server, it builds the new image, checks the
   store, stops the server, upgrades the store and starts the server again. It
-  keeps the port, the embedding choice and the token.
+  keeps the port, the embedding choice and the token. If the check fails, the
+  old server keeps running, and the installer says why: memories that need
+  titles ([titles](#upgrade-from-03-titles)), or Docker or the store failing,
+  with how the check ended (its exit code, or the signal that stopped it).
 - With a native store, setup upgrades the store in place.
 
 Before any change to the store's format, the upgrade copies the store to a
