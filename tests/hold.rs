@@ -496,3 +496,31 @@ fn a_session_whose_state_the_release_before_holds_wrote_holds_and_pushes() {
     );
     assert!(home.after("s1", None, "ember sync").contains(short(&after)));
 }
+
+#[test]
+fn a_rule_on_a_script_holds_however_the_script_is_run() {
+    let home = Home::new();
+    let rule = home.record(
+        "preference",
+        "Dry run before releasing",
+        "Run `tools/release.sh --dry-run` before `tools/release.sh`.",
+        false,
+    );
+    for (n, command) in [
+        "tools/release.sh",
+        "./tools/release.sh",
+        "bash tools/release.sh",
+        "sh -e ./tools/release.sh",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let session = format!("s{n}");
+        home.start(&session);
+        let reason = home.before(&session, None, command);
+        assert!(
+            reason.as_deref().is_some_and(|r| r.contains(short(&rule))),
+            "{command}: {reason:?}"
+        );
+    }
+}
