@@ -1294,3 +1294,35 @@ fn a_note_on_the_interpreter_still_comes_when_it_runs_a_script() {
     let pushed = home.run("s1", "python3 tools/build.py");
     assert!(pushed.contains(short(&note)), "{pushed:?}");
 }
+
+/// Seconds a test date lies ahead of now: long enough for the record,
+/// session start and one call before it passes, on a loaded machine.
+const DATE_AHEAD_SECS: i64 = 4;
+
+#[test]
+fn a_memory_whose_date_passed_mid_session_is_never_pushed() {
+    let home = Home::new();
+    let until = (jiff::Timestamp::now() + jiff::SignedDuration::from_secs(DATE_AHEAD_SECS))
+        .strftime("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    let note = home.record(
+        "Dry run before publishing",
+        "Run `cargo publish --dry-run` before `cargo publish`.",
+        &["--until-date", &until],
+    );
+    home.start("s1", "startup");
+    assert!(home.run("s1", "cargo publish").contains(short(&note)));
+    // A passed date writes nothing, so the delivery index still holds the
+    // memory; the push reads it in force or not at all.
+    std::thread::sleep(std::time::Duration::from_secs(
+        DATE_AHEAD_SECS.unsigned_abs() + 1,
+    ));
+    let sub = home.call(
+        "s1",
+        Some("a1"),
+        "Bash",
+        json!({"command": "cargo publish"}),
+        json!({}),
+    );
+    assert_eq!(sub, "");
+}
