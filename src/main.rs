@@ -688,14 +688,19 @@ fn incomplete(flag: Option<&str>) -> Reply {
 /// each commit's flush. On the async workers it would hold them all once
 /// the calls in flight outnumber them, and the server could neither read a
 /// request nor write a reply, even to a read that needs no turn, until the
-/// writes were done.
+/// writes were done. The call's waits share one budget
+/// ([`memory::budget`]), counted from here, so a call queued for a
+/// blocking thread spends its own.
 async fn blocking(
     flag: Option<&'static str>,
     work: impl FnOnce() -> Reply + Send + 'static,
 ) -> Reply {
-    tokio::task::spawn_blocking(move || guarded(flag, work))
-        .await
-        .unwrap_or_else(|_| incomplete(flag))
+    let deadline = std::time::Instant::now() + memory::budget::tool_call_budget();
+    tokio::task::spawn_blocking(move || {
+        memory::budget::until(Some(deadline), || guarded(flag, work))
+    })
+    .await
+    .unwrap_or_else(|_| incomplete(flag))
 }
 
 /// `result`, with the clients' instruction files brought in line with the
@@ -815,7 +820,17 @@ async fn serve_here(
     output: impl tokio::io::AsyncWrite + Send + Unpin + 'static,
 ) -> Result<()> {
     let backups = memory::backups::watch(&db);
-    let held = memory::hold(&db);
+    // Opened beside the server, never before it: after a hand-over the open
+    // waits for the store's migration, which each call waits for itself,
+    // within its own budget. A thread of its own, which the runtime does not
+    // wait for as it shuts down.
+    let (opened, held) = std::sync::mpsc::channel();
+    std::thread::spawn({
+        let db = db.clone();
+        move || {
+            let _ = opened.send(memory::hold(&db));
+        }
+    });
     let service = UserMemoryServer {
         db,
         in_client_folder: true,
@@ -827,8 +842,10 @@ async fn serve_here(
     // check runs either way.
     service.waiting().await?;
     // Closed first: the last connection copies the log into the store,
-    // which the last check must not take for a later change.
-    drop(held);
+    // which the last check must not take for a later change. One still
+    // opening, waiting for a store another process locks or migrates, holds
+    // nothing yet, so the server exits without waiting for it.
+    drop(held.try_recv().ok().flatten());
     setup::finish_background_syncs().await;
     drop(backups);
     Ok(())

@@ -93,7 +93,14 @@ keeps every write durable and on a slow, busy disk can take seconds. Past
 the 30 seconds a write fails with "database is locked: another process kept
 its write turn on the store for 30 s", or, when it is still queued behind
 another write of its own process, "database is locked: another write in this
-process kept its write turn on the store for 30 s". Once the log passes
+process kept its write turn on the store for 30 s". A server's tool call
+waits 90 seconds at most in all, counted from when the server received it:
+its write's stages, an embedding request, the delivery index's lock and a
+store being migrated share that time. A wait still under way when it runs
+out gives up as it would at its own bound, with the shorter time and the
+budget in its message, such as "database is locked: another process kept
+its write turn on the store for 12 s, the rest of this tool call's 90 s".
+A search keeps its keyword results. Once the log passes
 about 4 MB, the commit that finds it so copies it into the store after
 passing its turn on, so that copy never holds up other writers; SQLite's own
 copy inside the commit is off. A copy that fails is reported on stderr and

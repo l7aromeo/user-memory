@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 use std::{
     io::{BufRead, BufReader, Write},
     process::{Command, Stdio},
+    time::{Duration, Instant},
 };
 
 /// The reply of tool `name` called with `arguments`, parsed as JSON or else
@@ -22,7 +23,14 @@ pub fn call(serve: Command, name: &str, arguments: Value) -> Value {
 
 /// The whole result of tool `name` called with `arguments`: its `content`
 /// and its `isError` flag.
-pub fn result(mut serve: Command, name: &str, arguments: Value) -> Value {
+pub fn result(serve: Command, name: &str, arguments: Value) -> Value {
+    timed_result(serve, name, arguments).0
+}
+
+/// [`result`], and how long the server took to answer from its start, not
+/// counting how long it then took to exit.
+pub fn timed_result(mut serve: Command, name: &str, arguments: Value) -> (Value, Duration) {
+    let started = Instant::now();
     let mut child = serve
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -50,7 +58,8 @@ pub fn result(mut serve: Command, name: &str, arguments: Value) -> Value {
             break message;
         }
     };
+    let took = started.elapsed();
     drop(input);
     child.wait().unwrap();
-    reply["result"].clone()
+    (reply["result"].clone(), took)
 }

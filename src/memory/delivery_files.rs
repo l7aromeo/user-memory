@@ -107,16 +107,18 @@ fn overlay_memories() -> usize {
 pub(crate) const DELIVERY_LOCK_WAIT: Duration = Duration::from_secs(10);
 
 /// [`DELIVERY_LOCK_WAIT`], which debug builds take in seconds from
-/// `USER_MEMORY_TEST_DELIVERY_LOCK_WAIT`, so a test of a refusal is short.
+/// `USER_MEMORY_TEST_DELIVERY_LOCK_WAIT`, so a test of a refusal is short;
+/// within a tool call, at most what is left of its budget
+/// ([`super::budget`]).
 fn delivery_lock_wait() -> Duration {
     #[cfg(debug_assertions)]
     if let Some(secs) = std::env::var("USER_MEMORY_TEST_DELIVERY_LOCK_WAIT")
         .ok()
         .and_then(|secs| secs.parse().ok())
     {
-        return Duration::from_secs(secs);
+        return super::budget::wait(Duration::from_secs(secs));
     }
-    DELIVERY_LOCK_WAIT
+    super::budget::wait(DELIVERY_LOCK_WAIT)
 }
 
 /// Names, in debug builds only, a switch that makes a removing write leave
@@ -1428,15 +1430,17 @@ impl Removing {
 }
 
 /// Who kept a store's delivery lock for all of `wait`: `holder`, the
-/// process id the lock file names, or another process when it names none.
+/// process id the lock file names, or another process when it names none;
+/// and whether the tool call's budget cut `wait` short.
 fn held_by(holder: Option<u32>, wait: Duration) -> String {
     let who = holder.map_or_else(
         || "another user-memory process".to_owned(),
         |pid| format!("user-memory process {pid}"),
     );
     format!(
-        "{who} has held this machine's delivery index for {} s",
-        wait.as_secs()
+        "{who} has held this machine's delivery index for {} s{}",
+        wait.as_secs(),
+        super::budget::ran_out()
     )
 }
 
@@ -1549,17 +1553,12 @@ impl Removal {
     /// again; then names in the void mark only what is still on disk and
     /// voided, which it returns, and lets the lock go.
     pub(crate) fn rebuild(self, db: &Path) -> Left {
-        let built: Vec<Option<(Vec<u8>, Vec<u8>)>> = std::thread::scope(|threads| {
-            let builds: Vec<_> = self
-                .scopes
-                .iter()
-                .map(|scope| threads.spawn(move || base_and_overlay(db, scope)))
-                .collect();
-            builds
+        // Each build's store waits count against the call's budget too.
+        let built: Vec<Option<(Vec<u8>, Vec<u8>)>> =
+            super::budget::scoped(&self.scopes, |scope| base_and_overlay(db, scope))
                 .into_iter()
-                .map(|build| build.join().ok().flatten())
-                .collect()
-        });
+                .map(Option::flatten)
+                .collect();
         let mut done = HashSet::new();
         for (scope, built) in self.scopes.iter().zip(built) {
             let (base, overlay) = (self.files.base(scope), self.files.overlay(scope));
