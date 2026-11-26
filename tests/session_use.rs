@@ -201,7 +201,7 @@ impl Home {
 
     /// The recall state file of `session`.
     fn state(&self, session: &str) -> PathBuf {
-        let dir = self.dir.path().join(".local/state/user-memory/sessions");
+        let dir = sandbox::folder(self.dir.path(), "state").join("sessions");
         std::fs::read_dir(&dir)
             .unwrap()
             .flatten()

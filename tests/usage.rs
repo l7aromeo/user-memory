@@ -1149,7 +1149,7 @@ fn a_server_s_client_sends_its_use_at_the_next_prompt() {
     assert_eq!(older.rows(), []);
     // The session keeps that the server takes no use, so it never asks
     // again.
-    let state = fs::read_dir(home.path().join(".local/state/user-memory/sessions"))
+    let state = fs::read_dir(sandbox::folder(home.path(), "state").join("sessions"))
         .unwrap()
         .flatten()
         .map(|entry| entry.path())
