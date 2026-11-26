@@ -153,6 +153,17 @@ ROOT_FOLDER = "/work/ledger"
 # of the spelled commands that can take one (`npx` before a package's
 # binary, a proxy before `git push`).
 PREFIXES = ["npx", "bunx", "proxychains", "caffeinate -i", "dotenv --", "nice -n 5"]
+# Commands run in one line with others, as a share of those spelled as
+# written: agents chain and pipe often, and in #117's Claude Code trials
+# 184 of 344 shell commands (0.53) were chained with or piped to another.
+# What runs beside them is no memory's subject.
+CHAINED_SHARE = 0.5
+CHAINS = ["cd ledger && {}", "{} 2>&1 | tail -20", "echo start; {}; echo done", "mkdir -p out && {} | tee out/log"]
+# Files read in a shell command beside others, as a share of the files a
+# task reads: in the same trials 35 of 71 shell reads (0.49) named two or
+# more paths. The others are no memory's subject.
+READ_TOGETHER_SHARE = 0.5
+READ_BESIDE = ["notes.txt", "data.csv", "LICENSE", "out/log"]
 # Commands whose arguments include a subcommand word of another command
 # the world has notes on (`cargo run --bin test` beside notes on `cargo
 # test`): a share of tasks run one, which no memory is about, so whatever
@@ -602,6 +613,9 @@ class World:
                 if ways:
                     spelled, said = rng.choice(ways)
                     text = " ".join(part for part in [said, flags] if part)
+            elif rng.random() < CHAINED_SHARE:
+                spelled = "chained"
+                text = rng.choice(CHAINS).format(text)
         actions.append({"kind": "command", "failed": failed, "about": ["command", program, sub],
                         "text": text, "spelled": spelled, "busy": (program, sub) in self.busy,
                         "repeat": repeat})
@@ -621,12 +635,18 @@ class World:
                 line = text if r % 2 == 0 else f"{text} {rng.choice(REPEAT_ARGUMENTS)}"
                 self._command(actions, needs, program, sub, rng.random() < FAILURE_SHARE, line, r)
 
-    def _file(self, actions, needs, component):
-        path, spelled = self.files[component], None
+    def _file(self, actions, needs, component, read=False):
+        path, spelled, kind = self.files[component], None, "file"
         if self.rng.random() < SPELLED_SHARE:
             spelled = self.rng.choice(["relative", "from the root"])
             path = f"./{path}" if spelled == "relative" else f"{ROOT_FOLDER}/{path}"
-        actions.append({"kind": "file", "text": path, "failed": False, "about": ["file", component],
+        elif read and self.rng.random() < READ_TOGETHER_SHARE:
+            # Read in the shell, its path among others.
+            spelled, kind = "read with others", "command"
+            beside = self.rng.sample(READ_BESIDE, self.rng.randint(1, 3))
+            beside.insert(self.rng.randint(0, len(beside)), path)
+            path = "cat " + " ".join(beside)
+        actions.append({"kind": kind, "text": path, "failed": False, "about": ["file", component],
                         "spelled": spelled})
         self._needs_at(needs, len(actions) - 1, ("file", component))
 
@@ -683,12 +703,12 @@ class World:
                         self._command(actions, needs, program, sub, fail())
                 elif kind == "review":
                     self._command(actions, needs, "gh", "pr", False)
-                    self._file(actions, needs, component)
+                    self._file(actions, needs, component, read=True)
                     actions.append({"kind": "message", "failed": False,
                                     "text": f"The {name} change looks right; one question on the error path."})
                 elif kind == "research":
                     actions.append({"kind": "search", "text": f"{name} {rng.choice(COMMON)}", "failed": False})
-                    self._file(actions, needs, component)
+                    self._file(actions, needs, component, read=True)
                     program, sub = rng.choice(self.commands)
                     self._command(actions, needs, program, sub, fail())
                     actions.append({"kind": "message", "failed": False,

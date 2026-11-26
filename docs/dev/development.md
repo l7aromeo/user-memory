@@ -694,7 +694,8 @@ essentials; long merged memories; filler from `evals/scale`'s vocabulary;
 and whole tasks of five kinds of work, each action with the memories it
 needs then. A stated share of actions spell their command or path another
 way (an alias, a wrapper, a flag before the subcommand, a path from the
-root). It writes the memories into a throwaway store, indexes them with
+root), run their command in a line with others (a chain or a pipe), or
+read their file in one shell command beside other files. It writes the memories into a throwaway store, indexes them with
 `user-memory reindex`, builds the delivery index, runs every task through
 `user-memory-bench match` and reports what the bars deliver, at most three
 pushes an action (`evals/delivery/metrics.py`):
