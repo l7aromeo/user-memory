@@ -51,7 +51,11 @@ pub(crate) const WINDOW_HALF_LIFE: f64 = 5.0;
 
 /// The share of what a command could score at most that a passage needs
 /// to be pushed after it (#117). 0.6 keeps a busy command's notes (band 6+
-/// recall 0.98) where a bar on `mixed` loses them.
+/// recall 0.98) where a bar on `mixed` loses them. It holds for a line of
+/// several parts, as each part is tested as if it ran alone: with half
+/// the commands chained and half the reads beside other files, it finds
+/// 1.00 of the chained needs and 0.91 of the read ones at 1,000 memories,
+/// and the single commands' figures stay as they were.
 pub(crate) const COMMAND_PUSH_BAR: f64 = 0.6;
 
 /// The share a passage needs to be pushed after a command that failed
@@ -90,6 +94,21 @@ pub(crate) const FAILURE_BAR: f64 = 0.4;
 /// Programs that run the command after them, which is the one a memory
 /// names: `sudo cargo publish` is `cargo publish`.
 const WRAPPERS: &[&str] = &["sudo", "env", "time", "nohup", "exec", "command"];
+
+/// Programs that read each path they are given on its own, so a line that
+/// reads several files is a part per file: a note on one of them is as
+/// much about the line as about a lone read of it.
+const READERS: &[&str] = &[
+    "bat", "cat", "file", "grep", "head", "less", "ls", "more", "nl", "rg", "stat", "tail", "wc",
+];
+
+/// Shells whose `-c` script is the command line they run.
+const SHELLS: &[&str] = &["bash", "sh", "zsh"];
+
+/// The most parts of one command line scored apart, one bit of a `u64`
+/// each; parts past the last are scored together as the last, which can
+/// only lower their share.
+const MAX_PARTS: usize = u64::BITS as usize;
 
 /// File extensions and the language a memory names them by, so editing
 /// `parse.rs` adds "rust" to the window.
@@ -154,6 +173,12 @@ pub(crate) struct Action {
 pub(crate) struct Terms {
     pub(crate) stems: BTreeSet<String>,
     pub(crate) anchors: BTreeSet<String>,
+    /// A command line's parts, each scored as a step of its own when the
+    /// line fires: each command of a chain, pipe or subshell, and each
+    /// file a reading command reads. `stems` and `anchors` are their
+    /// union. Empty for every other action and for one read back from a
+    /// hook's state, which only the action that fires needs.
+    pub(crate) parts: Vec<Terms>,
 }
 
 impl Terms {
@@ -162,9 +187,10 @@ impl Terms {
     }
 }
 
-/// The segments of a command line: the commands of a chain or pipe,
-/// split at `&&`, `||`, `;`, `|` and line ends outside quotes, each as its
-/// words without quotes.
+/// The segments of a command line: the commands of a chain, pipe or
+/// subshell, split at `&&`, `||`, `;`, `|`, `&`, parentheses, backticks
+/// and line ends outside quotes, each as its words without quotes. A
+/// redirection's `&` (`2>&1`, `&>log`) is part of its word.
 fn segments(line: &str) -> Vec<Vec<String>> {
     let mut segments = Vec::new();
     let mut words: Vec<String> = Vec::new();
@@ -181,6 +207,17 @@ fn segments(line: &str) -> Vec<Vec<String>> {
             (Some(q), c) if c == q => quote = None,
             (Some(_), c) => word.push(c),
             (None, '\'' | '"') => quote = Some(c),
+            (None, '&') if word.ends_with(['>', '<']) || chars.peek() == Some(&'>') => {
+                word.push(c);
+            }
+            (None, '(' | ')' | '`') => {
+                // `$(` opens a command substitution: the `$` is no word.
+                if word.ends_with('$') {
+                    word.pop();
+                }
+                end_word(&mut word, &mut words);
+                segments.push(std::mem::take(&mut words));
+            }
             (None, '&' | '|') => {
                 // `&&`, `||`, a pipe, or a command sent to the background.
                 if chars.peek() == Some(&c) {
@@ -212,52 +249,112 @@ fn assignment(word: &str) -> bool {
     })
 }
 
-/// A shell command's terms: each segment's program with its subcommand,
-/// as a memory's code span names them (`cargo publish`), and its path
-/// arguments, as anchors and as words. The subcommand is the first word
-/// argument after the program and its flags that is no path, so
-/// `cargo --locked test` names `cargo test` and `git -C ../repo push`
-/// names `git push`. A flag's word value is taken for the subcommand
-/// (`kubectl -n prod apply` names `kubectl prod`): the delivery benchmark
-/// (#125) found this rule's deliveries 0.90 needed then and 0.98 about the
-/// action at 1,000 memories, against 0.85 and 0.92 for taking the first
-/// word some memory names, and 0.86 and 0.94 for the word after a flag,
-/// which mistake a later argument for the subcommand more often than they
-/// find a flag's value.
+/// A shell command line's terms, as parts (see [`Terms::parts`]): each
+/// segment is one, except that a reading command ([`READERS`]) with
+/// several path arguments is one per path, and a shell's `-c` script is
+/// split as a line of its own.
 fn command_terms(line: &str, stems: &mut Stems, terms: &mut Terms) {
     for words in segments(line) {
-        let mut rest = words
+        let Some(start) = words
             .iter()
-            .map(String::as_str)
-            .skip_while(|word| assignment(word) || WRAPPERS.contains(word));
-        let Some(program) = rest.next() else {
+            .position(|word| !assignment(word) && !WRAPPERS.contains(&word.as_str()))
+        else {
             continue;
         };
-        let name = program.rsplit('/').next().unwrap_or(program);
-        let args: Vec<&str> = rest.collect();
-        let sub = args.first().filter(|arg| !arg.starts_with('-'));
-        terms.anchors.insert(name.to_lowercase());
-        terms.anchors.extend(passages::anchors(program));
-        terms.words(stems, program);
-        if let Some(sub) = sub {
-            terms.words(stems, sub);
-        }
-        if let Some(word) = args
-            .iter()
-            .find(|arg| word_argument(arg) && !arg.contains('/'))
+        let (program, args) = (words[start].as_str(), &words[start + 1..]);
+        let name = program.rsplit('/').next().unwrap_or(program).to_lowercase();
+        if SHELLS.contains(&name.as_str())
+            && let Some(script) = shell_script(args)
         {
-            terms
-                .anchors
-                .insert(format!("{name} {word}").to_lowercase());
+            command_terms(script, stems, terms);
+            continue;
         }
-        for arg in args.iter().filter(|arg| !arg.starts_with('-')) {
-            let found = passages::anchors(arg);
-            if !found.is_empty() {
-                terms.words(stems, arg);
-                terms.anchors.extend(found);
-            }
+        let paths: Vec<usize> = if READERS.contains(&name.as_str()) {
+            (0..args.len())
+                .filter(|&i| path_argument(&args[i]))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if paths.len() < 2 {
+            part_terms(program, args.iter().map(String::as_str), stems, terms);
+            continue;
+        }
+        for &path in &paths {
+            let own = (0..args.len())
+                .filter(|i| *i == path || !paths.contains(i))
+                .map(|i| args[i].as_str());
+            part_terms(program, own, stems, terms);
         }
     }
+}
+
+/// The script a shell's arguments run: the word after its first short
+/// flags that hold `c` (`-c`, `-lc`), before any other argument.
+fn shell_script(args: &[String]) -> Option<&str> {
+    let flags = args
+        .iter()
+        .take_while(|arg| arg.starts_with('-') && !arg.starts_with("--"));
+    let at = flags.clone().position(|flag| flag.contains('c'))?;
+    args.get(at + 1).map(String::as_str)
+}
+
+/// Whether a reading command's argument is a path it reads: no flag, no
+/// quoted text, and an anchor of its own.
+fn path_argument(arg: &str) -> bool {
+    !arg.starts_with('-')
+        && !arg.contains(char::is_whitespace)
+        && !passages::anchors(arg).is_empty()
+}
+
+/// One part's terms, added to `terms` and kept as one of its parts: the
+/// program with its subcommand, as a memory's code span names them
+/// (`cargo publish`), and its path arguments, as anchors and as words.
+/// The subcommand is the first word argument after the program and its
+/// flags that is no path, so `cargo --locked test` names `cargo test` and
+/// `git -C ../repo push` names `git push`. A flag's word value is taken
+/// for the subcommand (`kubectl -n prod apply` names `kubectl prod`): the
+/// delivery benchmark (#125) found this rule's deliveries 0.90 needed then
+/// and 0.98 about the action at 1,000 memories, against 0.85 and 0.92 for
+/// taking the first word some memory names, and 0.86 and 0.94 for the word
+/// after a flag, which mistake a later argument for the subcommand more
+/// often than they find a flag's value. An argument holding a space is
+/// quoted text, such as a commit message, and adds nothing: its words and
+/// any path it mentions are no part of the step.
+fn part_terms<'a>(
+    program: &str,
+    args: impl Iterator<Item = &'a str>,
+    stems: &mut Stems,
+    terms: &mut Terms,
+) {
+    let args: Vec<&str> = args
+        .filter(|arg| !arg.contains(char::is_whitespace))
+        .collect();
+    let mut part = Terms::default();
+    let name = program.rsplit('/').next().unwrap_or(program);
+    let sub = args.first().filter(|arg| !arg.starts_with('-'));
+    part.anchors.insert(name.to_lowercase());
+    part.anchors.extend(passages::anchors(program));
+    part.words(stems, program);
+    if let Some(sub) = sub {
+        part.words(stems, sub);
+    }
+    if let Some(word) = args
+        .iter()
+        .find(|arg| word_argument(arg) && !arg.contains('/'))
+    {
+        part.anchors.insert(format!("{name} {word}").to_lowercase());
+    }
+    for arg in args.iter().filter(|arg| !arg.starts_with('-')) {
+        let found = passages::anchors(arg);
+        if !found.is_empty() {
+            part.words(stems, arg);
+            part.anchors.extend(found);
+        }
+    }
+    terms.stems.extend(part.stems.iter().cloned());
+    terms.anchors.extend(part.anchors.iter().cloned());
+    terms.parts.push(part);
 }
 
 /// Whether a command's argument is a word a subcommand could be: it starts
@@ -413,6 +510,10 @@ struct Wanted {
     /// The fewest memories holding an anchor of the action that fired that
     /// this match holds; 0 for none.
     fewest: usize,
+    /// The parts of the action that fired holding it, a bit each.
+    parts: u64,
+    /// The parts of the action that fired holding it as an anchor.
+    anchor_parts: u64,
 }
 
 /// One passage the window matched, with the memory's best score.
@@ -432,7 +533,11 @@ pub(crate) struct Matched {
     /// `1/holders`.
     pub(crate) mixed: f64,
     /// The score as a share of what the action that fired could score at
-    /// most, which a command's bars test.
+    /// most, which a command's bars test. For a line of several parts, the
+    /// best share among the parts whose anchors it holds (else whose terms
+    /// it holds), each counting the window's other actions and the part's
+    /// own terms against what that part could score at most: as if the
+    /// part had run alone.
     pub(crate) share: f64,
     /// The fewest memories holding an anchor of the action that fired that
     /// this match holds; 0 for none.
@@ -695,6 +800,23 @@ fn ranked(source: &impl Lookup, window: &Window) -> Result<Vec<Matched>, Error> 
         .actions
         .back()
         .is_some_and(|(kind, _, _)| *kind == Kind::Command);
+    let fired_parts = window
+        .actions
+        .back()
+        .map_or(&[][..], |(_, terms, _)| terms.parts.as_slice());
+    let parts = fired_parts.len().clamp(1, MAX_PARTS);
+    let mut part_of: HashMap<Vec<u8>, u64> = HashMap::new();
+    for (i, part) in fired_parts.iter().enumerate() {
+        let bit = 1u64 << i.min(MAX_PARTS - 1);
+        let keys = part
+            .stems
+            .iter()
+            .map(|stem| key(false, stem))
+            .chain(part.anchors.iter().map(|anchor| key(true, anchor)));
+        for key in keys {
+            *part_of.entry(key).or_default() |= bit;
+        }
+    }
     for (i, (kind, terms, failed)) in window.actions.iter().enumerate() {
         let age = (newest - i) as f64;
         let fired = i == newest;
@@ -705,30 +827,44 @@ fn ranked(source: &impl Lookup, window: &Window) -> Result<Vec<Matched>, Error> 
             .map(|stem| (key(false, stem), false))
             .chain(terms.anchors.iter().map(|anchor| (key(true, anchor), true)));
         for (key, anchor) in keys {
+            // An action of one part, or read back, is all part 0.
+            let bits = if fired {
+                part_of.get(&key).copied().unwrap_or(1)
+            } else {
+                0
+            };
             let w = wanted.entry(key).or_default();
             w.weight = w.weight.max(weight);
             w.fired |= fired;
             w.failed |= fired && *failed;
             w.anchored |= fired && anchor;
             w.command |= fired && anchor && *kind == Kind::Command;
+            w.parts |= bits;
+            if anchor {
+                w.anchor_parts |= bits;
+            }
         }
     }
     let all = source.memories() as f64;
     let rarest = rarity(all, 1.0);
-    /// One passage's hits: its row, its gain and what it holds of the
-    /// firing action.
-    type Passage = (Row, Gain, Wanted);
-    /// One memory's hits: slot 0's score and flags, and each passage's.
+    /// One passage's hits: its row, its gain, what it holds of the firing
+    /// action and its score split by part.
+    type Passage = (Row, Gain, Wanted, Split);
+    /// One memory's hits: slot 0's score, flags and split, and each
+    /// passage's.
     #[derive(Default)]
     struct Hits {
         whole: Gain,
         whole_wanted: Wanted,
+        whole_split: Split,
         passages: BTreeMap<u16, Passage>,
     }
     let mut found: HashMap<u32, Hits> = HashMap::new();
-    // What the action that fired could score at most: each of its terms
-    // once as text, a term no memory holds as rare as one memory's.
+    // What the action that fired could score at most, as a whole and by
+    // part: each of its terms once as text, a term no memory holds as rare
+    // as one memory's.
     let mut possible = 0.0;
+    let mut possible_parts = vec![0.0; parts];
     for (key, want) in &wanted {
         let postings = source.postings(key)?;
         let anchor = key.first() == Some(&b'a');
@@ -739,7 +875,13 @@ fn ranked(source: &impl Lookup, window: &Window) -> Result<Vec<Matched>, Error> 
             } else {
                 weight(Field::Body)
             };
-            possible += base * rarity(all, holders as f64) / rarest;
+            let most = base * rarity(all, holders as f64) / rarest;
+            possible += most;
+            for (part, sum) in possible_parts.iter_mut().enumerate() {
+                if want.parts & (1 << part) != 0 {
+                    *sum += most;
+                }
+            }
         }
         let Some(Found {
             holders,
@@ -767,17 +909,26 @@ fn ranked(source: &impl Lookup, window: &Window) -> Result<Vec<Matched>, Error> 
         let want = &want;
         for (row, field) in list {
             let hits = found.entry(row.memory).or_default();
-            if row.slot == 0 {
-                hits.whole.add(worth(field));
-                merge(&mut hits.whole_wanted, want);
+            let gain = worth(field);
+            let (total, flags, split) = if row.slot == 0 {
+                (
+                    &mut hits.whole,
+                    &mut hits.whole_wanted,
+                    &mut hits.whole_split,
+                )
             } else {
                 let entry = hits.passages.entry(row.slot).or_insert((
                     row,
                     Gain::default(),
                     Wanted::default(),
+                    Split::default(),
                 ));
-                entry.1.add(worth(field));
-                merge(&mut entry.2, want);
+                (&mut entry.1, &mut entry.2, &mut entry.3)
+            };
+            total.add(gain);
+            merge(flags, want);
+            if parts > 1 {
+                split.add(want.parts, gain.store);
             }
         }
     }
@@ -790,10 +941,10 @@ fn ranked(source: &impl Lookup, window: &Window) -> Result<Vec<Matched>, Error> 
                 Some(b) if b.1.store >= candidate.1.store => Some(b),
                 _ => Some(candidate),
             });
-        let (row, gain, own) = match best {
-            Some((row, gain, own)) => (*row, *gain, *own),
+        let (row, gain, own, own_split) = match best {
+            Some((row, gain, own, split)) => (*row, *gain, *own, split.clone()),
             None => match source.first_passage(memory)? {
-                Some(row) => (row, Gain::default(), Wanted::default()),
+                Some(row) => (row, Gain::default(), Wanted::default(), Split::default()),
                 None => continue,
             },
         };
@@ -801,6 +952,8 @@ fn ranked(source: &impl Lookup, window: &Window) -> Result<Vec<Matched>, Error> 
         merge(&mut flags, &own);
         let mut total = hits.whole;
         total.add(gain);
+        let mut split = hits.whole_split;
+        split.join(own_split);
         matched.push(Matched {
             memory: memory as usize,
             slot: i64::from(row.slot),
@@ -808,7 +961,14 @@ fn ranked(source: &impl Lookup, window: &Window) -> Result<Vec<Matched>, Error> 
             length: row.length as usize,
             score: total.store,
             mixed: total.mixed,
-            share: if possible > 0.0 {
+            share: if parts > 1 && flags.parts != 0 {
+                let held = if flags.anchor_parts != 0 {
+                    flags.anchor_parts
+                } else {
+                    flags.parts
+                };
+                split.best_share(held, &possible_parts)
+            } else if possible > 0.0 {
                 total.store / possible
             } else {
                 0.0
@@ -840,9 +1000,56 @@ impl Gain {
     }
 }
 
+/// A match's score by the store's rarity, split by the parts of the line
+/// that fired: what the window's other actions add, and what each term of
+/// the line adds with the parts holding it. Kept only for a line of
+/// several parts.
+#[derive(Clone, Default)]
+struct Split {
+    others: f64,
+    terms: Vec<(u64, f64)>,
+}
+
+impl Split {
+    fn add(&mut self, parts: u64, store: f64) {
+        if parts == 0 {
+            self.others += store;
+        } else {
+            self.terms.push((parts, store));
+        }
+    }
+
+    fn join(&mut self, other: Split) {
+        self.others += other.others;
+        self.terms.extend(other.terms);
+    }
+
+    /// The best share among the parts in `held`: the window's other
+    /// actions and the part's own terms against `possible`, its most.
+    fn best_share(&self, held: u64, possible: &[f64]) -> f64 {
+        let mut best = 0.0f64;
+        for (part, most) in possible.iter().enumerate() {
+            let bit = 1u64 << part;
+            if held & bit == 0 || *most <= 0.0 {
+                continue;
+            }
+            let own: f64 = self
+                .terms
+                .iter()
+                .filter(|(parts, _)| parts & bit != 0)
+                .map(|(_, store)| store)
+                .sum();
+            best = best.max((self.others + own) / most);
+        }
+        best
+    }
+}
+
 /// Adds what `other` holds of the firing action to `into`.
 fn merge(into: &mut Wanted, other: &Wanted) {
     into.fired |= other.fired;
+    into.parts |= other.parts;
+    into.anchor_parts |= other.anchor_parts;
     into.failed |= other.failed;
     into.anchored |= other.anchored;
     into.command |= other.command;
@@ -1383,5 +1590,106 @@ mod tests {
         let passage = &content[hit.start..hit.start + hit.length];
         assert!(passage.contains("zeppelin"), "{passage:?}");
         assert!(!passage.contains("aardvark"), "{passage:?}");
+    }
+
+    #[test]
+    fn a_line_is_a_part_per_command_and_per_file_a_reader_reads() {
+        let parts = |line: &str| -> Vec<BTreeSet<String>> {
+            of(Kind::Command, line)
+                .parts
+                .into_iter()
+                .map(|part| part.anchors)
+                .collect()
+        };
+        let chained = parts("cat RELEASING.md; echo ---; cat tools/package.py");
+        assert_eq!(chained.len(), 3, "{chained:?}");
+        assert!(chained[2].contains("tools/package.py") && !chained[2].contains("releasing.md"));
+        // A reader's paths are a part each, with the program in each; any
+        // other command's paths stay together.
+        let read = parts("head -n 50 README.md src/a.py tools/package.py");
+        assert_eq!(read.len(), 3, "{read:?}");
+        assert!(read.iter().all(|part| part.contains("head")), "{read:?}");
+        assert!(read[2].contains("tools/package.py") && !read[2].contains("readme.md"));
+        assert_eq!(parts("cp README.md src/a.py tools/").len(), 1);
+        // Subshells, substitutions and backticks split; a redirection's `&`
+        // does not.
+        for (line, count) in [
+            ("(cd tools && python3 package.py)", 2),
+            ("echo $(cat VERSION) `git rev-parse HEAD`", 3),
+            ("cargo test 2>&1 | tail -5", 2),
+            ("cargo build &> build.log", 1),
+        ] {
+            assert_eq!(parts(line).len(), count, "{line}: {:?}", parts(line));
+        }
+        // A shell's script is split as a line of its own.
+        let shell = parts("bash -lc 'cargo publish && git push'");
+        assert_eq!(shell.len(), 2, "{shell:?}");
+        assert!(shell[0].contains("cargo publish") && shell[1].contains("git push"));
+        // Every part's terms are in the line's.
+        let terms = of(Kind::Command, "cat RELEASING.md; cat tools/package.py");
+        for part in &terms.parts {
+            assert!(terms.anchors.is_superset(&part.anchors));
+            assert!(terms.stems.is_superset(&part.stems));
+        }
+    }
+
+    #[test]
+    fn quoted_text_in_a_command_adds_nothing() {
+        let terms = of(
+            Kind::Command,
+            "git commit -m \"Add one to notes.txt\n\nCo-Authored-By: someone\"",
+        );
+        assert!(terms.anchors.contains("git commit"), "{terms:?}");
+        assert!(!terms.anchors.contains("notes.txt"), "{terms:?}");
+        for word in ["add", "note", "author"] {
+            assert!(!terms.stems.contains(word), "{word}: {terms:?}");
+        }
+        // A quoted path holds no space, and stays a path.
+        let quoted = of(Kind::Command, "cat 'docs/notes.md'");
+        assert!(quoted.anchors.contains("docs/notes.md"), "{quoted:?}");
+    }
+
+    #[test]
+    fn a_note_on_one_part_of_a_long_line_is_pushed_as_after_that_part_alone() {
+        let note = (
+            "Packaging needs the key",
+            "Run `python3 tools/package.py --key 4QF7`; without the key it builds an unsigned archive.",
+        );
+        let other = (
+            "Cache layout",
+            "src/store/cache.py keeps one file per entry under the cache folder.",
+        );
+        let index = store("deploy", &[note, other]);
+        let lines = [
+            "python3 tools/package.py",
+            "cat RELEASING.md; echo ---; cat tools/package.py",
+            "cat README.md src/a.py src/b.py src/c.py tools/package.py",
+            "echo one >> notes.txt && python3 tools/package.py --dry-run",
+            "git add notes.txt && git commit -m \"Add one\" && python3 tools/package.py",
+            "(cd build && make) && python3 tools/package.py 2>&1 | tail -20",
+        ];
+        for line in lines {
+            let found = rank(&index, &[action(Kind::Command, line)]);
+            let hit = by_id(&index, &found, 40).unwrap();
+            assert!(hit.push(), "{line}: {hit:?}");
+            // A path the line never names pushes nothing.
+            assert!(
+                by_id(&index, &found, 41).is_none_or(|m| !m.push()),
+                "{line}: {found:?}"
+            );
+        }
+        // Reading the other note's file pushes it, and not the first.
+        let found = rank(
+            &index,
+            &[action(
+                Kind::Command,
+                "cat README.md src/store/cache.py tests/test_store.py",
+            )],
+        );
+        assert!(by_id(&index, &found, 41).unwrap().push(), "{found:?}");
+        assert!(
+            by_id(&index, &found, 40).is_none_or(|m| !m.push()),
+            "{found:?}"
+        );
     }
 }
