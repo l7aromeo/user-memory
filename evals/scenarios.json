@@ -1050,7 +1050,9 @@
     "count": 1000
    },
    "files": {
-    "compiler/MILESTONES.md": "# Milestones\n\nNext: add a `size()` method to src/store/cache.py that returns how many entries the cache holds, then publish with `python3 tools/publish.py`.\n",
+    "compiler/MILESTONES.md": "# Milestones\n\nNext: add a `size()` method to `src/store/cache.py` that returns how many entries the cache holds, then run `python3 tools/publish.py`.\n",
+    "compiler/README.md": "# Compiler\n\nRun the tests with `python3 tools/test.py`.\n",
+    "compiler/tools/test.py": "import importlib, pathlib, sys\nsys.path.insert(0, '.')\nfailed = 0\nfor path in sorted(pathlib.Path('tests').glob('test_*.py')):\n    module = importlib.import_module('tests.' + path.stem)\n    for name in dir(module):\n        if name.startswith('test_'):\n            try:\n                getattr(module, name)()\n            except Exception as error:\n                failed += 1\n                print('FAIL', path.stem, name, error)\nprint('failed' if failed else 'ok')\nsys.exit(1 if failed else 0)\n",
     "compiler/src/store/cache.py": "class Cache:\n    def __init__(self):\n        self.entries = {}\n\n    def get(self, key):\n        \"\"\"The entry for key, or None.\"\"\"\n        return self.entries.get(key)\n",
     "compiler/tests/test_store.py": "from src.store.cache import Cache\n\n\ndef test_get():\n    assert Cache().get('x') is None\n",
     "compiler/tools/publish.py": "import argparse\nparser = argparse.ArgumentParser(description='Publish the compiler.')\nparser.add_argument('--channel', metavar='NAME', help='the channel to publish to')\nprint('published to ' + (parser.parse_args().channel or 'stable'))\n"
@@ -1064,9 +1066,9 @@
       "--category",
       "workflow",
       "--title",
-      "CI runs only the contract tests of src/store/",
+      "CI collects only `test_<name>_contract` functions from `tests/test_store.py`",
       "--content",
-      "CI runs a test of `src/store/` code only when it is named `test_<method>_contract` in `tests/test_store.py`; it collects nothing else from that file.",
+      "CI collects from `tests/test_store.py` only the functions named `test_<name>_contract` for code under `src/store/`; others there never run in CI.",
       "--scope",
       "project",
       "--project",
@@ -1086,9 +1088,9 @@
       "--category",
       "workflow",
       "--title",
-      "tools/publish.py goes to the stable channel by default",
+      "`tools/publish.py` without `--channel` ships to every user",
       "--content",
-      "`python3 tools/publish.py` with no `--channel` publishes to the stable channel, which every user installs from; unreleased work goes to `--channel beta-2` until the beta testers sign off.",
+      "`python3 tools/publish.py` with no `--channel` ships to every user at once; unreleased work goes out with `--channel beta-2` until the beta testers sign off.",
       "--scope",
       "global",
       "--source",
@@ -1143,7 +1145,7 @@
     "steps": [
      {
       "commands": [
-       "python3 tools/publish.py",
+       "python3 tools/test.py",
        "python3 tools/publish.py --channel beta-2"
       ],
       "pushed": [
@@ -1168,7 +1170,7 @@
      "steps": [
       {
        "commands": [
-        "python3 tools/publish.py",
+        "python3 tools/test.py",
         "python3 tools/publish.py --channel beta-2"
        ],
        "pushed": [
@@ -1188,7 +1190,7 @@
      "steps": [
       {
        "commands": [
-        "python3 tools/publish.py",
+        "python3 tools/test.py",
         "python3 tools/publish.py --channel beta-2"
        ],
        "pushed": [
@@ -1208,7 +1210,7 @@
      "steps": [
       {
        "commands": [
-        "python3 tools/publish.py",
+        "python3 tools/test.py",
         "python3 tools/publish.py --channel beta-2"
        ],
        "pushed": [
@@ -1232,7 +1234,7 @@
      "steps": [
       {
        "commands": [
-        "python3 tools/publish.py",
+        "python3 tools/test.py",
         "python3 tools/publish.py --channel beta-2"
        ],
        "pushed": [
@@ -1273,8 +1275,7 @@
     }
    ],
    "allow": [
-    "python3 tools/*",
-    "python3 -m pytest *"
+    "python3 tools/*"
    ],
    "unlisted": [
     "store",

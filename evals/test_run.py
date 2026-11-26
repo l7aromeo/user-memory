@@ -1895,6 +1895,43 @@ class Discoverable(unittest.TestCase):
                          for s in scenario.get("seed", []) if "observed" in s["args"])
         return sorted(cls.words(prompts) & cls.words(notes))
 
+    # The scenarios compared against main whose notes the work finds, not
+    # the prompt: an agent on main may search memory with any word it reads
+    # there, which would find the note without a push.
+    SEARCHLESS = ("a_whole_milestone_gets_each_note_at_its_first_step",
+                  "after_a_failed_command_only_the_note_naming_it_comes")
+    # A1 is compared against main too, but its note keeps the words of
+    # tools/package.py's own description and output: its prompt and
+    # RELEASING.md give no search word, and main's agents never found it.
+    SEARCHABLE_IN_CHECKOUT = ("a_note_on_a_command_the_task_runs_is_pushed_at_a_thousand_memories",)
+
+    @classmethod
+    def checkout_leaks(cls, scenario):
+        """The terms the files and prompts of a scenario share with the
+        prose of an agent's note it pushes: its title and content without
+        their code spans, which name paths and commands the push matches
+        on, and which an agent sees in the checkout by design."""
+        pushed = {re.fullmatch(r"\{seed:(\w+)\}", c["pushed"]["memory"]).group(1)
+                  for c in scenario["checks"] if "pushed" in c and "memory" in c["pushed"]}
+        visible = " ".join([*scenario.get("files", {}).values(),
+                            *[st.get("prompt", "") for st in scenario.get("sessions") or scenario.get("steps") or []]])
+        notes = " ".join(" ".join([s["args"][s["args"].index("--title") + 1],
+                                   s["args"][s["args"].index("--content") + 1]])
+                         for s in scenario.get("seed", []) if s["id"] in pushed and "observed" in s["args"])
+        return sorted(cls.words(visible) & cls.words(re.sub(r"`[^`]*`", " ", notes)))
+
+    def test_a_checkout_gives_no_word_to_search_memory_for_its_note(self):
+        scenarios = {s["name"]: s for s in json.loads((HERE / "scenarios.json").read_text())["scenarios"]}
+        for name in self.SEARCHLESS:
+            self.assertEqual(self.checkout_leaks(scenarios[name]), [], name)
+        for name in self.SEARCHABLE_IN_CHECKOUT:
+            self.assertNotEqual(self.checkout_leaks(scenarios[name]), [], f"{name} is no longer an exception")
+        # W1's milestone naming what the publish note says leaks it.
+        w1 = scenarios[self.SEARCHLESS[0]]
+        told = {**w1, "files": {**w1["files"], "compiler/MILESTONES.md":
+                                w1["files"]["compiler/MILESTONES.md"] + "Then hand it to the beta testers.\n"}}
+        self.assertEqual(self.checkout_leaks(told), ["beta", "teste"])
+
     def test_a_prompt_gives_no_word_to_search_memory_for_its_note(self):
         scenarios = json.loads((HERE / "scenarios.json").read_text())["scenarios"]
         recall = [s for s in scenarios if any("pushed" in c for c in s["checks"])
