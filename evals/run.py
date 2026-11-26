@@ -976,10 +976,11 @@ class CodexSession:
         if self.resume:
             started = self.request("thread/resume", {**thread, "threadId": self.resume})
         else:
-            # A thread a scenario resumes is kept in the trial's CODEX_HOME.
-            started = self.request("thread/start", {
-                **thread, "ephemeral": not options.get("resumes"),
-            })
+            # Every thread is kept in the trial's CODEX_HOME, as a user's is:
+            # a scenario may resume it, and the post-tool hook reads a
+            # call's result from its transcript, which an ephemeral thread
+            # never writes.
+            started = self.request("thread/start", {**thread, "ephemeral": False})
         result = started.get("result") or {}
         self.thread = (result.get("thread") or {}).get("id")
         self.model = result.get("model") or CODEX_MODEL
@@ -1341,10 +1342,15 @@ def hook_context(client, events):
 
 
 # Each client's own tool that starts a subagent: Claude Code's tool use, and
-# the collab tool Codex's app-server reports as a thread item.
+# the thread item Codex's app-server reports for it: up to 0.163.0 a collab
+# tool call with the prompt, from 0.171.0 the sub-agent's activity, whose
+# `kind` is "started" when it is spawned and "interacted" for each message
+# sent to it, and which holds no prompt.
 CLAUDE_SUBAGENT_TOOLS = {"Agent", "Task"}
 CODEX_SUBAGENT_ITEM = "collabAgentToolCall"
 CODEX_SUBAGENT_SPAWN = "spawnAgent"
+CODEX_SUBAGENT_ACTIVITY = "subAgentActivity"
+CODEX_SUBAGENT_STARTED = "started"
 
 
 def subagents(client, events):
@@ -1353,9 +1359,13 @@ def subagents(client, events):
     if client == "claude":
         return [{"tool": part["name"], "prompt": str((part.get("input") or {}).get("prompt", ""))}
                 for part in tool_uses(events) if part.get("name") in CLAUDE_SUBAGENT_TOOLS]
-    return [{"tool": item["tool"], "prompt": str(item.get("prompt") or "")}
-            for item in items(events)
-            if item.get("type") == CODEX_SUBAGENT_ITEM and item.get("tool") == CODEX_SUBAGENT_SPAWN]
+    started = []
+    for item in items(events):
+        if item.get("type") == CODEX_SUBAGENT_ITEM and item.get("tool") == CODEX_SUBAGENT_SPAWN:
+            started.append({"tool": item["tool"], "prompt": str(item.get("prompt") or "")})
+        elif item.get("type") == CODEX_SUBAGENT_ACTIVITY and item.get("kind") == CODEX_SUBAGENT_STARTED:
+            started.append({"tool": CODEX_SUBAGENT_ACTIVITY, "prompt": ""})
+    return started
 
 
 def origins(record):

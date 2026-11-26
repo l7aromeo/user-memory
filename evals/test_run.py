@@ -438,6 +438,30 @@ class CodexStart(unittest.TestCase):
             run.subprocess.Popen, run.codex_binary = original
         self.assertEqual((seen["env"], seen["cwd"]), (sandbox.env, home))
 
+    def test_every_codex_thread_is_kept_so_its_transcript_is_written(self):
+        home = Path(tempfile.mkdtemp())
+        sandbox = types.SimpleNamespace(env={"HOME": str(home)}, codex_home=home)
+        sandbox.client_env = lambda: sandbox.env
+        started = []
+        for options in ({}, {"resumes": True}, {"shell": True}):
+            session = run.CodexSession.__new__(run.CodexSession)
+            session.sandbox, session.resume, session.child = sandbox, None, None
+            session.send = lambda message: None
+
+            def request(method, params, events=None):
+                started.append((method, params))
+                return {"result": {"thread": {"id": "t1"}}}
+            session.request = request
+            original = run.subprocess.Popen, run.codex_binary
+            run.subprocess.Popen = lambda *a, **k: types.SimpleNamespace(stdout=io.StringIO(""), stderr=io.StringIO(""))
+            run.codex_binary = lambda: "codex"
+            try:
+                session.start(home, options)
+            finally:
+                run.subprocess.Popen, run.codex_binary = original
+        threads = [params for method, params in started if method == "thread/start"]
+        self.assertEqual([params["ephemeral"] for params in threads], [False, False, False])
+
 
 class TrialPruning(unittest.TestCase):
     def setUp(self):
@@ -1402,6 +1426,15 @@ class ClientToolsAndHooks(unittest.TestCase):
             {"type": "commandExecution", "command": "cat docs/guide.md"}]]
         self.assertEqual(run.subagents("codex", codex), [{"tool": "spawnAgent", "prompt": "edit the guide"}])
         self.assertEqual(run.subagents("codex", codex[1:]), [])
+        # Codex 0.171.0's shape, as its app-server sent it: the activity
+        # starts and completes, once when the sub-agent is spawned and once
+        # for each message sent to it.
+        activity = [{"method": method, "params": {"item": {
+            "type": "subAgentActivity", "id": f"call_{n}", "kind": kind, "agentThreadId": "t1",
+            "agentPath": "/root/worker", "model": None, "reasoningEffort": None}}}
+            for n, kind in enumerate(["started", "interacted"]) for method in ("item/started", "item/completed")]
+        self.assertEqual(run.subagents("codex", activity), [{"tool": "subAgentActivity", "prompt": ""}])
+        self.assertEqual(run.subagents("codex", activity[2:]), [], "a message starts no sub-agent")
 
     def test_the_subagent_check_passes_only_when_one_was_started(self):
         started = [{**run.blank_record(0), "subagents": [{"tool": "Agent", "prompt": "x"}]}]

@@ -162,9 +162,11 @@ current hashes are recorded as trusted in the trial's `config.toml`.
   refused. Claude runs with `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`, which
   strips credentials, the eval token among them, from every command, hook
   and MCP server it starts.
-- Codex runs `codex app-server` with the trial's `CODEX_HOME`: one ephemeral
-  thread, plugins and web search off, no shell unless a scenario needs one,
-  no approval asked for unless a scenario allows escalations (below), and
+- Codex runs `codex app-server` with the trial's `CODEX_HOME`: one thread,
+  kept there as a user's is (the post-tool hook reads a failed call from
+  its transcript), plugins and web search off, no shell unless a scenario
+  needs one, no approval asked for unless a scenario allows escalations
+  (below), and
   the memory tools approved. The thread's `instructionSources` and the
   context hooks add are kept in each step's record.
 - The Codex CLI is the one on `PATH`, else one inside ChatGPT.app or
