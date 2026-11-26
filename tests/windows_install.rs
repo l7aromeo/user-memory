@@ -25,6 +25,8 @@ use std::{
 use tempfile::{TempDir, tempdir};
 #[path = "support/port.rs"]
 mod port;
+#[path = "support/pwsh.rs"]
+mod pwsh;
 #[path = "support/releases.rs"]
 mod releases;
 use port::closed_port;
@@ -56,29 +58,11 @@ fn powershell() -> String {
         .unwrap_or_else(|| "pwsh".into())
 }
 
-/// Whether the checks must run rather than skip: in CI, or with
-/// REQUIRE_PWSH set.
-fn required() -> bool {
-    let set = |name| std::env::var(name).is_ok_and(|value| !value.is_empty() && value != "false");
-    set("CI") || set("REQUIRE_PWSH")
-}
-
-/// Whether the PowerShell the tests run is installed; the tests skip
-/// without it, unless it is required.
+/// Whether the PowerShell the tests run runs; the tests skip without it,
+/// unless it is required.
+#[track_caller]
 fn has_powershell() -> bool {
-    let program = powershell();
-    let found = Command::new(&program)
-        .args(["-NoProfile", "-NonInteractive", "-Command", "exit 0"])
-        .output()
-        .is_ok_and(|out| out.status.success());
-    assert!(
-        found || !required(),
-        "{program} is required here (CI or REQUIRE_PWSH is set), but it does not run"
-    );
-    if !found {
-        eprintln!("{program} is not installed: skipping the Windows installer script checks");
-    }
-    found
+    pwsh::available(&powershell(), "the Windows installer script checks")
 }
 
 /// A run of a script as `-File`, with no input, the local app data folder
@@ -173,11 +157,7 @@ fn the_powershell_scripts_parse_and_pass_the_script_analyzer() {
             ))
             .output()
             .unwrap();
-        assert!(
-            parse.status.success(),
-            "{name} does not parse:\n{}",
-            text(&parse).0
-        );
+        pwsh::assert_exit(&parse, 0, &format!("{name} does not parse"));
 
         // PSScriptAnalyzer is a separate module; where it is not required
         // and missing, only the parse is checked. Its default rules apply;
@@ -195,17 +175,13 @@ fn the_powershell_scripts_parse_and_pass_the_script_analyzer() {
             .unwrap();
         if lint.status.code() == Some(255) {
             assert!(
-                !required(),
+                !pwsh::required(),
                 "PSScriptAnalyzer is required here (CI or REQUIRE_PWSH is set), but it is not installed"
             );
             eprintln!("PSScriptAnalyzer is not installed: {name} is only parsed");
             continue;
         }
-        assert!(
-            lint.status.success(),
-            "{name}: PSScriptAnalyzer findings:\n{}",
-            text(&lint).0
-        );
+        pwsh::assert_exit(&lint, 0, &format!("{name}: PSScriptAnalyzer findings"));
     }
 }
 
@@ -222,7 +198,7 @@ fn the_powershell_scripts_print_their_help() {
         ("uninstall.ps1", "-InstallDir DIR"),
     ] {
         let out = run(name, &["-Help"], home.path(), &nowhere());
-        assert_eq!(out.status.code(), Some(0), "{name}: {}", text(&out).1);
+        pwsh::assert_exit(&out, 0, &format!("{name} -Help"));
         assert!(text(&out).0.contains(option), "{name} -Help names {option}");
     }
 }
@@ -318,7 +294,7 @@ fn install_ps1_refuses_bad_options_before_any_download() {
         let home = home();
         let out = run("install.ps1", args, home.path(), &nowhere());
         let (stdout, stderr) = text(&out);
-        assert_eq!(out.status.code(), Some(1), "{args:?}: {stdout}{stderr}");
+        pwsh::assert_exit(&out, 1, &format!("install.ps1 {args:?}"));
         assert!(
             stderr.contains(&format!("user-memory install: {message}")),
             "{args:?}: {stderr}"
@@ -367,8 +343,8 @@ fn install_ps1_downloads_the_build_for_the_real_processor() {
             None => command.env_remove("PROCESSOR_ARCHITEW6432"),
         };
         let out = command.output().unwrap();
-        let (stdout, stderr) = text(&out);
-        assert_eq!(out.status.code(), Some(1), "{machine}: {stdout}{stderr}");
+        let stderr = text(&out).1;
+        pwsh::assert_exit(&out, 1, &format!("install.ps1 on {machine}/{wow:?}"));
         let build = if forced.as_deref() == Some("ARM64") {
             Some("aarch64-pc-windows-msvc")
         } else {
@@ -436,7 +412,7 @@ fn install_ps1_installs_nothing_that_fails_its_checksum() {
             &releases.base,
         );
         let (stdout, stderr) = text(&out);
-        assert_eq!(out.status.code(), Some(1), "{stdout}{stderr}");
+        pwsh::assert_exit(&out, 1, &format!("install.ps1 that fails with {message:?}"));
         assert!(
             stderr.contains(&format!("user-memory install: {message}")),
             "{stderr}"
@@ -469,7 +445,7 @@ fn install_ps1_goes_on_past_an_installed_binary_that_does_not_run() {
         &nowhere(),
     );
     let (stdout, stderr) = text(&out);
-    assert_eq!(out.status.code(), Some(1), "{stdout}{stderr}");
+    pwsh::assert_exit(&out, 1, "install.ps1 past a binary that does not run");
     assert!(
         stderr.contains("user-memory install: cannot download "),
         "{stdout}{stderr}"
@@ -494,7 +470,7 @@ fn install_ps1_exits_only_where_exit_closes_no_console() {
         .stdin(Stdio::null())
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(1), "{}", text(&out).1);
+    pwsh::assert_exit(&out, 1, "install.ps1 -Local vm under -Command");
     assert!(
         text(&out)
             .1
@@ -512,7 +488,7 @@ fn install_ps1_exits_only_where_exit_closes_no_console() {
         .stdin(Stdio::null())
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out).1);
+    pwsh::assert_exit(&out, 0, "install.ps1 -Local vm under -NoExit");
     assert!(text(&out).0.contains("still here 1"), "{}", text(&out).0);
 }
 
@@ -535,7 +511,7 @@ fn uninstall_ps1_refuses_bad_options_before_any_change() {
     ] {
         let home = home();
         let out = run("uninstall.ps1", args, home.path(), &nowhere());
-        assert_eq!(out.status.code(), Some(2), "{args:?}: {}", text(&out).1);
+        pwsh::assert_exit(&out, 2, &format!("uninstall.ps1 {args:?}"));
         assert!(
             text(&out)
                 .1
@@ -547,7 +523,7 @@ fn uninstall_ps1_refuses_bad_options_before_any_change() {
     // Nothing installed: nothing to remove, and a clean exit.
     let home = home();
     let out = run("uninstall.ps1", &["-DryRun"], home.path(), &nowhere());
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out).1);
+    pwsh::assert_exit(&out, 0, "uninstall.ps1 -DryRun");
     assert!(
         text(&out).0.contains("Nothing to remove"),
         "{}",
@@ -588,8 +564,12 @@ fn uninstall_ps1_falls_back_to_a_verified_release_binary() {
                 fs::write(bin.join("user-memory.exe"), "not a program").unwrap();
             }
             let out = run("uninstall.ps1", &[], home.path(), &server);
-            let (stdout, stderr) = text(&out);
-            assert_eq!(out.status.code(), Some(1), "{stdout}{stderr}");
+            let stdout = text(&out).0;
+            pwsh::assert_exit(
+                &out,
+                1,
+                &format!("uninstall.ps1 when {reason}, broken: {broken}"),
+            );
             assert!(
                 stdout.contains("using the latest release to remove what is left"),
                 "{stdout}"
@@ -640,4 +620,83 @@ fn both_installers_offer_the_same_semantic_search_choices() {
         "2) Another OpenAI-compatible endpoint: memory text and searches are sent to it"
     );
     assert_eq!(semantic_choices("install.ps1"), unix);
+}
+
+/// A stand-in for a PowerShell that crashes: it prints what pwsh printed
+/// when it did, then runs `end`. A shell script on Unix, a batch file on
+/// Windows.
+fn crashing(dir: &Path, end: &str) -> String {
+    #[cfg(unix)]
+    let path = {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("pwsh");
+        fs::write(
+            &path,
+            format!("#!/bin/sh\necho 'Stack overflow.' >&2\n{end}\n"),
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    };
+    #[cfg(windows)]
+    let path = {
+        let path = dir.join("pwsh.cmd");
+        fs::write(&path, format!("@echo Stack overflow. 1>&2\r\n@{end}\r\n")).unwrap();
+        path
+    };
+    path.display().to_string()
+}
+
+// A PowerShell that is required and does not run says how: the probe's
+// exit code and what it printed, or why it did not start.
+#[test]
+fn a_powershell_that_fails_the_probe_is_named_with_how_it_ended() {
+    let dir = tempdir().unwrap();
+    let end = if cfg!(windows) { "exit /b 3" } else { "exit 3" };
+    let program = crashing(dir.path(), end);
+    let why = pwsh::probe(&program).unwrap_err();
+    let code = if cfg!(windows) {
+        "exit code: 3"
+    } else {
+        "exit status: 3"
+    };
+    assert!(
+        why.starts_with(&format!(
+            "`{program} -NoProfile -NonInteractive -Command exit 0` ended with {code}\n"
+        )),
+        "{why}"
+    );
+    assert!(why.ends_with("stderr:\nStack overflow."), "{why}");
+
+    let missing = dir.path().join("no-pwsh").display().to_string();
+    let why = pwsh::probe(&missing).unwrap_err();
+    assert!(
+        why.starts_with(&format!(
+            "`{missing} -NoProfile -NonInteractive -Command exit 0` does not start: "
+        )),
+        "{why}"
+    );
+}
+
+// A PowerShell killed by a signal, as pwsh was by its stack overflow, has
+// no exit code: the probe and the tests' exit checks name the signal.
+#[cfg(unix)]
+#[test]
+fn a_powershell_ended_by_a_signal_is_named_with_the_signal() {
+    let dir = tempdir().unwrap();
+    let program = crashing(dir.path(), "kill -ABRT $$");
+    let why = pwsh::probe(&program).unwrap_err();
+    assert!(why.contains(" ended with signal: 6 (SIGABRT)"), "{why}");
+    assert!(why.ends_with("stderr:\nStack overflow."), "{why}");
+
+    let out = Command::new(&program).output().unwrap();
+    let failed = std::panic::catch_unwind(|| pwsh::assert_exit(&out, 1, "the crash"))
+        .expect_err("a run with no exit code fails the check");
+    let message = failed.downcast_ref::<String>().unwrap();
+    assert!(
+        message
+            .starts_with("the crash: expected exit code 1, but it ended with signal: 6 (SIGABRT)"),
+        "{message}"
+    );
+    assert!(message.ends_with("stderr:\nStack overflow."), "{message}");
 }

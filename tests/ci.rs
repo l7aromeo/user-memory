@@ -10,6 +10,9 @@ use std::{fs, path::Path, process::Command};
 
 use yaml_rust2::YamlLoader;
 
+#[path = "support/pwsh.rs"]
+mod pwsh;
+
 fn repo_file(name: &str) -> String {
     fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(name)).unwrap()
 }
@@ -828,14 +831,6 @@ fn every_release_build_refuses_the_debug_only_commands() {
     }
 }
 
-/// Whether pwsh must run rather than skip: in CI, or with REQUIRE_PWSH set,
-/// as for the install.ps1 tests.
-#[cfg(unix)]
-fn pwsh_required() -> bool {
-    let set = |name| std::env::var(name).is_ok_and(|value| !value.is_empty() && value != "false");
-    set("CI") || set("REQUIRE_PWSH")
-}
-
 // The Windows build step ends as GitHub runs it: GitHub's pwsh wrapper
 // exits with $LASTEXITCODE when the script returns, so the debug-paths
 // refusal (exit 2) that the step requires must not end it. Its checks run
@@ -845,16 +840,7 @@ fn pwsh_required() -> bool {
 #[test]
 fn the_windows_build_step_ends_well_after_the_refusal_it_requires() {
     use std::os::unix::fs::PermissionsExt;
-    let found = Command::new("pwsh")
-        .args(["-NoProfile", "-NonInteractive", "-Command", "exit 0"])
-        .output()
-        .is_ok_and(|out| out.status.success());
-    assert!(
-        found || !pwsh_required(),
-        "pwsh is required here, but it does not run"
-    );
-    if !found {
-        eprintln!("pwsh is not installed: skipping the Windows build step's run");
+    if !pwsh::available("pwsh", "the Windows build step's checks") {
         return;
     }
     let text = repo_file(".github/workflows/release.yml");
@@ -899,11 +885,8 @@ fn the_windows_build_step_ends_well_after_the_refusal_it_requires() {
         .arg(format!(". '{}'", script.display()))
         .output()
         .unwrap();
-    let (stdout, stderr) = (
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
-    );
-    assert!(out.status.success(), "{}\n{stdout}\n{stderr}", out.status);
+    pwsh::assert_exit(&out, 0, "the Windows build step");
+    let stdout = String::from_utf8_lossy(&out.stdout);
     let sum = fs::read_to_string(dir.path().join(format!("{name}.sha256"))).unwrap();
     let hash = sum
         .strip_suffix(&format!("  {name}\n"))
