@@ -1972,6 +1972,43 @@ class Discoverable(unittest.TestCase):
         self.assertEqual(self.prompt_leaks(old), ["packa", "pytho", "tools"])
 
 
+class SeededUse(unittest.TestCase):
+    """A scenario's `used` entries become earlier sessions' `memory_use`
+    rows on a store that has the table, and nothing on one from before it."""
+    NOTE = "e0000001-0000-4000-8000-000000000001"
+
+    def sandbox(self, table):
+        folder = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, folder)
+        db = folder / "memory.sqlite3"
+        conn = sqlite3.connect(db)
+        if table:
+            conn.execute("CREATE TABLE memory_use (memory TEXT, project TEXT, origin TEXT, at TEXT, "
+                         "read INTEGER, recorded INTEGER, shown INTEGER, held INTEGER, "
+                         "overridden INTEGER, passage INTEGER)")
+        conn.commit()
+        conn.close()
+        return types.SimpleNamespace(db=db, ids={"note": self.NOTE})
+
+    def test_each_earlier_session_reads_the_seed_for_its_project(self):
+        sandbox = self.sandbox(True)
+        run.seed_use(sandbox, {"memory": "note", "project": "github.com/acme/compiler", "sessions": 3})
+        conn = sqlite3.connect(sandbox.db)
+        rows = conn.execute("SELECT memory, project, origin, read, recorded, shown FROM memory_use "
+                            "ORDER BY origin").fetchall()
+        conn.close()
+        self.assertEqual(rows, [(self.NOTE, "github.com/acme/compiler", f"claude:session/earlier-{n}", 1, 0, 0)
+                                for n in (1, 2, 3)])
+
+    def test_a_store_from_before_the_table_gets_nothing(self):
+        sandbox = self.sandbox(False)
+        run.seed_use(sandbox, {"memory": "note", "project": "github.com/acme/compiler", "sessions": 3})
+        conn = sqlite3.connect(sandbox.db)
+        tables = conn.execute("SELECT name FROM sqlite_master").fetchall()
+        conn.close()
+        self.assertEqual(tables, [])
+
+
 class Unlisted(unittest.TestCase):
     """A seed session start lists by id makes a trial void before any
     session opens, and a rehearsal fail."""

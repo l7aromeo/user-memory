@@ -1953,6 +1953,27 @@ def age(sandbox, memory_id):
     conn.close()
 
 
+# The conversations a scenario's `used` entries say used a memory before
+# the trial: made-up origins, so no trial session is one of them.
+EARLIER_SESSION = "claude:session/earlier-{n}"
+
+
+def seed_use(sandbox, use):
+    """Writes the `memory_use` rows of `use`: its `sessions` earlier
+    sessions each read the seed `memory` for `project`, as their hooks would
+    have sent it (#123). A store from before the table, as main's binary
+    makes, gets nothing: it never reads use."""
+    conn = sqlite3.connect(sandbox.db)
+    with conn:
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE name='memory_use'").fetchone():
+            conn.executemany(
+                "INSERT INTO memory_use (memory,project,origin,at,read,recorded,shown) "
+                "VALUES (?1,?2,?3,datetime('now'),1,0,0)",
+                [(sandbox.ids[use["memory"]], use["project"], EARLIER_SESSION.format(n=n))
+                 for n in range(1, use["sessions"] + 1)])
+    conn.close()
+
+
 def bulk_groups(scenario):
     """A scenario's `bulk`: one group, or a list of them."""
     bulk = scenario.get("bulk", [])
@@ -2067,6 +2088,8 @@ def prepare(scenario, client, base, source, projects):
             sandbox.ids[seed["id"]] = saved["id"]
             if seed.get("aged"):
                 age(sandbox, saved["id"])
+        for use in scenario.get("used", []):
+            seed_use(sandbox, use)
         if "bulk" in scenario:
             import_export(sandbox, "bulk.json", bulk_export(bulk_groups(scenario)))
         if filler := filler_count(scenario):
