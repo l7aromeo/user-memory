@@ -953,6 +953,20 @@ class FilesAndServers(unittest.TestCase):
                                     capture_output=True, text=True).stdout
         self.assertEqual(status, "")
 
+    def test_a_file_the_project_ignores_is_written_but_never_committed(self):
+        trial = Path(tempfile.mkdtemp()).resolve()
+        sandbox = types.SimpleNamespace(dir=trial, env={"PATH": "/usr/bin:/bin", "HOME": str(trial)})
+        sandbox.workdir = lambda spec, projects: run.Sandbox.workdir(sandbox, spec, projects)
+        scenario = {"cwd": "project:notebooks", "files": {
+            "notebooks/.gitignore": "build/\n", "notebooks/build/BRANCH": "feature\n", "notebooks/tool.py": "x\n"}}
+        run.write_files(scenario, sandbox, {"notebooks": "git@github.com:acme/notebooks.git"})
+        checkout = trial / "notebooks"
+        self.assertEqual((checkout / "build/BRANCH").read_text(), "feature\n")
+        tracked = run.subprocess.run([run.GIT, "ls-files"], cwd=checkout, capture_output=True, text=True).stdout.split()
+        self.assertEqual(sorted(tracked), [".gitignore", "README.md", "tool.py"])
+        status = run.subprocess.run([run.GIT, "status", "--short"], cwd=checkout, capture_output=True, text=True).stdout
+        self.assertEqual(status, "")
+
     def test_history_commits_come_after_the_first_and_only_the_agents_are_counted(self):
         trial = Path(tempfile.mkdtemp()).resolve()
         sandbox = types.SimpleNamespace(dir=trial, env={"PATH": "/usr/bin:/bin", "HOME": str(trial)})

@@ -2020,8 +2020,11 @@
     "count": 1000
    },
    "files": {
-    "compiler/tools/build.py": "import argparse, sys\nparser = argparse.ArgumentParser(description='Build the compiler into build/.')\nparser.add_argument('--clean', nargs='?', const='yes', metavar='MODE', help='clear build/ first')\nif parser.parse_args().clean:\n    print('built')\nelse:\n    sys.exit('error: stale cache in build/')\n",
-    "compiler/README.md": "# Compiler\n\nRun `python3 tools/build.py` to produce the binary.\n"
+    "compiler/.gitignore": "build/\n",
+    "compiler/tools/build.py": "import argparse, hashlib, pathlib, subprocess, sys\nparser = argparse.ArgumentParser(description='Build the compiler into build/.')\nparser.add_argument('--clean', nargs='?', const='', metavar='MODE', help='empty build/ first')\nmode = parser.parse_args().clean\nbuild = pathlib.Path('build')\nif mode is not None and hashlib.sha256(mode.encode()).hexdigest().startswith('74611c1d6455b534'):\n    for path in build.glob('*'):\n        path.unlink()\nelif mode is not None:\n    for path in build.glob('*.tmp'):\n        path.unlink()\nbranch = subprocess.run(['git', 'branch', '--show-current'], capture_output=True, text=True).stdout.strip()\nstamp = build / 'BRANCH'\nif stamp.exists() and stamp.read_text().strip() != branch:\n    sys.exit('error: stale cache in build/')\nbuild.mkdir(exist_ok=True)\nstamp.write_text(branch + '\\n')\n(build / 'compiler').write_text('0\\n')\nprint('built build/compiler')\n",
+    "compiler/README.md": "# Compiler\n\nRun `python3 tools/build.py` to produce the binary.\n",
+    "compiler/build/BRANCH": "feature/parser-rewrite\n",
+    "compiler/build/parser.o": "0\n"
    },
    "seed": [
     {
@@ -2032,9 +2035,9 @@
       "--category",
       "workflow",
       "--title",
-      "tools/build.py keeps other branches' objects with plain --clean",
+      "Plain `--clean` leaves another worktree's objects in `build/`",
       "--content",
-      "`python3 tools/build.py` fails with 'stale cache' when build/ holds objects from another branch; `python3 tools/build.py --clean=deep` clears them, while plain `--clean` keeps them.",
+      "`python3 tools/build.py` fails while `build/` holds objects made in a different worktree; plain `--clean` leaves them, and `python3 tools/build.py --clean=deep` clears them.",
       "--scope",
       "project",
       "--project",
@@ -2042,7 +2045,7 @@
       "--source",
       "observed",
       "--evidence",
-      "Twice a stale-cache failure came back after --clean and went away with --clean=deep"
+      "Twice the failure came back after --clean and went away with --clean=deep"
      ],
      "aged": true
     },
@@ -4271,8 +4274,11 @@
     "count": 1000
    },
    "files": {
-    "compiler/tools/build.py": "import argparse, sys\nparser = argparse.ArgumentParser(description='Build the compiler into build/.')\nparser.add_argument('--clean', nargs='?', const='yes', metavar='MODE', help='clear build/ first')\nif parser.parse_args().clean:\n    print('built')\nelse:\n    sys.exit('error: stale cache in build/')\n",
-    "compiler/README.md": "# Compiler\n\nRun `python3 tools/build.py` to produce the binary.\n"
+    "compiler/.gitignore": "build/\n",
+    "compiler/tools/build.py": "import argparse, hashlib, pathlib, subprocess, sys\nparser = argparse.ArgumentParser(description='Build the compiler into build/.')\nparser.add_argument('--clean', nargs='?', const='', metavar='MODE', help='empty build/ first')\nmode = parser.parse_args().clean\nbuild = pathlib.Path('build')\nif mode is not None and hashlib.sha256(mode.encode()).hexdigest().startswith('74611c1d6455b534'):\n    for path in build.glob('*'):\n        path.unlink()\nelif mode is not None:\n    for path in build.glob('*.tmp'):\n        path.unlink()\nbranch = subprocess.run(['git', 'branch', '--show-current'], capture_output=True, text=True).stdout.strip()\nstamp = build / 'BRANCH'\nif stamp.exists() and stamp.read_text().strip() != branch:\n    sys.exit('error: stale cache in build/')\nbuild.mkdir(exist_ok=True)\nstamp.write_text(branch + '\\n')\n(build / 'compiler').write_text('0\\n')\nprint('built build/compiler')\n",
+    "compiler/README.md": "# Compiler\n\nRun `python3 tools/build.py` to produce the binary.\n",
+    "compiler/build/BRANCH": "feature/parser-rewrite\n",
+    "compiler/build/parser.o": "0\n"
    },
    "seed": [
     {
@@ -4283,9 +4289,9 @@
       "--category",
       "workflow",
       "--title",
-      "tools/build.py keeps other branches' objects with plain --clean",
+      "Plain `--clean` leaves another worktree's objects in `build/`",
       "--content",
-      "`python3 tools/build.py` fails with 'stale cache' when build/ holds objects from another branch; `python3 tools/build.py --clean=deep` clears them, while plain `--clean` keeps them.",
+      "`python3 tools/build.py` fails while `build/` holds objects made in a different worktree; plain `--clean` leaves them, and `python3 tools/build.py --clean=deep` clears them.",
       "--scope",
       "project",
       "--project",
@@ -4293,7 +4299,7 @@
       "--source",
       "observed",
       "--evidence",
-      "Twice a stale-cache failure came back after --clean and went away with --clean=deep"
+      "Twice the failure came back after --clean and went away with --clean=deep"
      ],
      "aged": true
     }

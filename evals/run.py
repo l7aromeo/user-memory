@@ -1881,7 +1881,8 @@ def server_step(step, servers, sandbox):
 
 def write_files(scenario, sandbox, projects):
     """The scenario's `files`, by trial path; one inside a project checkout
-    joins the project's first commit, so it is part of the project. Then
+    joins the project's first commit, so it is part of the project, unless
+    the project ignores it (its `.gitignore`, written first). Then
     each `history` commit ({"cwd", "message"}, empty) is made after it, as
     the project's earlier work. The `commits` checks count only what the
     agent committed after both."""
@@ -1898,6 +1899,10 @@ def write_files(scenario, sandbox, projects):
         if checkout is not None:
             git = {**sandbox.env, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null"}
             relative = str(path.resolve().relative_to(checkout.resolve()))
+            # A file the project ignores, as a build folder, is there but
+            # never committed.
+            if subprocess.run([GIT, "check-ignore", "-q", relative], cwd=checkout, env=git).returncode == 0:
+                continue
             subprocess.run([GIT, "add", relative], cwd=checkout, env=git, check=True, capture_output=True)
             subprocess.run([GIT, "commit", "-q", "--amend", "--no-edit"], cwd=checkout, env=git,
                            check=True, capture_output=True)
