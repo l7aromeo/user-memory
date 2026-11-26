@@ -3602,6 +3602,7 @@ struct Counting {
     sent: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
     requests: std::sync::Arc<std::sync::Mutex<Vec<Request>>>,
     broken: std::sync::Arc<std::sync::Mutex<Option<Break>>>,
+    holds_streams: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// One HTTP request a relay passed on.
@@ -3724,6 +3725,8 @@ impl Counting {
         let listed = requests.clone();
         let broken = std::sync::Arc::new(std::sync::Mutex::new(None));
         let breaks = broken.clone();
+        let holds_streams = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let holds = holds_streams.clone();
         let host = host.to_owned();
         std::thread::spawn(move || {
             for client in listener.incoming() {
@@ -3743,11 +3746,25 @@ impl Counting {
                 ] {
                     let on = on.clone();
                     let (kept, listed, breaks) = (kept.clone(), listed.clone(), breaks.clone());
+                    let holds = holds.clone();
                     std::thread::spawn(move || {
                         let mut buffer = [0; 8192];
                         while let Ok(n) = from.read(&mut buffer)
                             && n > 0
                         {
+                            if asks && holds.load(std::sync::atomic::Ordering::SeqCst) {
+                                let fresh = {
+                                    let on = on.lock().unwrap();
+                                    on.request.is_none() || on.replied
+                                };
+                                let text = String::from_utf8_lossy(&buffer[..n]).into_owned();
+                                if fresh
+                                    && text.starts_with("GET ")
+                                    && let Some(session) = header(&text, "mcp-session-id")
+                                {
+                                    hold_until_polled(&listed, &session);
+                                }
+                            }
                             let chunk = &mut buffer[..n];
                             if asks {
                                 let mut on = on.lock().unwrap();
@@ -3816,6 +3833,7 @@ impl Counting {
             sent,
             requests,
             broken,
+            holds_streams,
         }
     }
     fn taken(&self) -> usize {
@@ -3843,6 +3861,29 @@ impl Counting {
     /// Has the server refuse the next POST in a session, as `how` says.
     fn break_next(&self, how: Break) {
         *self.broken.lock().unwrap() = Some(how);
+    }
+    /// Holds each session's GET stream back until a poll in that session
+    /// has been answered, so the stream opens after the calls rather than
+    /// before them: an order the transport allows, as it opens the stream
+    /// on a task of its own.
+    fn hold_streams(&self) {
+        self.holds_streams
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Waits until a marker poll in `session` among `listed` has been
+/// answered, or [`STUCK`] has passed.
+fn hold_until_polled(listed: &std::sync::Mutex<Vec<Request>>, session: &str) {
+    let polled =
+        || {
+            listed.lock().unwrap().iter().any(|r| {
+                r.polls() && r.session().as_deref() == Some(session) && r.answered.is_some()
+            })
+        };
+    let deadline = std::time::Instant::now() + STUCK;
+    while !polled() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
 }
 
@@ -4138,6 +4179,26 @@ fn polled(proxy: &Counting, polls: usize) -> Vec<Request> {
     requests[first..].to_vec()
 }
 
+/// The calls among `requests`: the POSTs, without each session's GET
+/// stream, which the transport opens on a task of its own, so it comes at
+/// no fixed point among them.
+fn calls(requests: &[Request]) -> Vec<Request> {
+    requests
+        .iter()
+        .filter(|r| r.method() == "POST")
+        .cloned()
+        .collect()
+}
+
+/// How many GET streams `proxy` saw opened in `session`.
+fn streams(proxy: &Counting, session: Option<&str>) -> usize {
+    proxy
+        .requests()
+        .iter()
+        .filter(|r| r.mcp() && r.method() == "GET" && r.session().as_deref() == session)
+        .count()
+}
+
 /// What `requests` were, one per line, for a failure's message.
 fn told(requests: &[Request]) -> String {
     requests
@@ -4173,9 +4234,26 @@ fn told(requests: &[Request]) -> String {
 // within the poll that met it, with no poll lost.
 #[test]
 fn a_connector_keeps_its_session_and_makes_a_dropped_one_again() {
+    keeps_its_session(false);
+}
+
+// The same when each session's stream opens only after its first poll is
+// answered: the transport opens the stream on a task of its own, so it
+// comes at no fixed point among the calls.
+#[test]
+fn a_kept_session_s_stream_may_open_after_its_polls() {
+    keeps_its_session(true);
+}
+
+/// The kept session and the one made again, with each session's stream
+/// `held` until its first poll is answered, or as it comes.
+fn keeps_its_session(held: bool) {
     let poll = std::time::Duration::from_millis(300);
     let host = Host::start(root());
     let proxy = Counting::to(&host.address);
+    if held {
+        proxy.hold_streams();
+    }
     let machine = Machine {
         home: tempdir().unwrap(),
         url: format!("http://{}/mcp", proxy.address),
@@ -4184,7 +4262,7 @@ fn a_connector_keeps_its_session_and_makes_a_dropped_one_again() {
     };
     machine.hook("session-start");
     let _connector = machine.connector();
-    let kept = polled(&proxy, 4);
+    let kept = calls(&polled(&proxy, 4));
     let session = kept[0].session();
     assert!(
         kept.iter().all(|r| r.polls() && r.session() == session),
@@ -4202,11 +4280,17 @@ fn a_connector_keeps_its_session_and_makes_a_dropped_one_again() {
             .count()
             >= 3
     });
-    let after: Vec<Request> = proxy.requests()[before..]
+    let sent: Vec<Request> = proxy.requests()[before..]
         .iter()
         .filter(|r| r.mcp())
         .cloned()
         .collect();
+    assert!(
+        !sent.iter().any(|r| r.method() == "DELETE"),
+        "the dropped session is not ended again:\n{}",
+        told(&sent)
+    );
+    let after = calls(&sent);
     let refused = after.iter().position(Request::polls).unwrap();
     let again = refused
         + 1
@@ -4216,9 +4300,9 @@ fn a_connector_keeps_its_session_and_makes_a_dropped_one_again() {
             .unwrap();
     let made = &after[refused + 1..again];
     assert!(
-        made.iter().any(Request::initializes) && !made.iter().any(|r| r.method() == "DELETE"),
+        made.iter().any(Request::initializes),
         "the call made again in a new session within the same poll:\n{}",
-        told(&after)
+        told(&sent)
     );
     let new = after[again].session();
     assert_ne!(new, session);
@@ -4227,7 +4311,22 @@ fn a_connector_keeps_its_session_and_makes_a_dropped_one_again() {
             .iter()
             .all(|r| r.polls() && r.session() == new),
         "then one request a poll in the new session:\n{}",
-        told(&after)
+        told(&sent)
+    );
+    // Each session has one stream, whenever it opened: the new session
+    // its own, and the dropped one's not opened again.
+    time::until("the new session's stream", || {
+        streams(&proxy, new.as_deref()) > 0
+    });
+    let all: Vec<Request> = proxy.requests().into_iter().filter(Request::mcp).collect();
+    assert_eq!(
+        (
+            streams(&proxy, session.as_deref()),
+            streams(&proxy, new.as_deref())
+        ),
+        (1, 1),
+        "one stream in each session:\n{}",
+        told(&all)
     );
 }
 
@@ -4541,11 +4640,12 @@ fn a_server_without_positions_is_asked_only_for_its_version_until_it_changes() {
             .count()
             >= 3
     });
-    let after: Vec<Request> = proxy.requests()[before..]
+    let sent: Vec<Request> = proxy.requests()[before..]
         .iter()
         .filter(|r| r.mcp())
         .cloned()
         .collect();
+    let after = calls(&sent);
     let first = after.iter().position(Request::polls).unwrap();
     let session = after[first].session();
     assert!(
@@ -4553,7 +4653,7 @@ fn a_server_without_positions_is_asked_only_for_its_version_until_it_changes() {
             .iter()
             .all(|r| r.polls() && r.session() == session),
         "{}",
-        told(&after)
+        told(&sent)
     );
 }
 
