@@ -491,16 +491,26 @@ fn a_windows_path_read_through_the_shell_reaches_what_a_read_of_it_reaches() {
         json!({"file_path": r"C:\Users\dev\proj\src\store\cache.py"}),
     );
     assert!(read.contains(short(&store)), "a read: {read:?}");
-    for (n, line) in [
-        r"Get-Content C:\Users\dev\proj\src\store\cache.py",
-        r"type c:\users\dev\proj\src\store\cache.py",
-        r"Get-Content src\store\cache.py",
-        "cat C:/Users/dev/proj/src/store/cache.py",
+    // Claude Code's Bash tool on Windows runs Git Bash, which writes the
+    // drive as a folder.
+    for (n, (tool, line)) in [
+        (
+            "PowerShell",
+            r"Get-Content C:\Users\dev\proj\src\store\cache.py",
+        ),
+        ("PowerShell", r"type c:\users\dev\proj\src\store\cache.py"),
+        ("PowerShell", r"Get-Content src\store\cache.py"),
+        (
+            "PowerShell",
+            r"& C:\tools\rg.exe contract src\store\cache.py",
+        ),
+        ("Bash", "cat C:/Users/dev/proj/src/store/cache.py"),
+        ("Bash", "cat /c/Users/dev/proj/src/store/cache.py"),
     ]
     .iter()
     .enumerate()
     {
-        let pushed = call(&format!("p{n}"), "PowerShell", json!({"command": line}));
+        let pushed = call(&format!("p{n}"), tool, json!({"command": line}));
         assert!(pushed.contains(short(&store)), "{line}: {pushed:?}");
     }
     let other = call(

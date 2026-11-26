@@ -338,8 +338,9 @@ From user-memory, matching this step (read one for the rest before applying it):
   `Get-Content` and the like) is matched once for each file it names, as a
   read of that file. A path in a command names what a read of it does: its
   folders and its file name, taken relative to the session's folder. On
-  Windows a path matches whichever of `\` and `/` it is written with, and
-  the session's folder in any case. Quoted text, such as a commit message,
+  Windows a path matches whichever of `\` and `/` it is written with,
+  with its drive as Git Bash writes it (`/c/`) too, and the session's
+  folder in any case; a program is its file name without `.exe`. Quoted text, such as a commit message,
   is no part of the command.
 - **What is pushed:** a passage that holds an anchor the step names (a
   command with its next word, a path, a code span) and matches the work of

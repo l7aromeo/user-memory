@@ -581,11 +581,18 @@ impl<'a> Folder<'a> {
     /// How many bytes the folder and the separators after it take at the
     /// start of `path`, when `path` names something inside the folder.
     fn prefix(&self, path: &str) -> Option<usize> {
-        let mut rest = path.trim_start_matches(|c| self.separator(c));
-        if path.len() - rest.len() != self.root {
-            return None;
-        }
-        for name in &self.names {
+        let mut names = self.names.iter();
+        let mut rest = if let Some(rest) = self.git_bash_drive(path) {
+            names.next();
+            rest
+        } else {
+            let rest = path.trim_start_matches(|c| self.separator(c));
+            if path.len() - rest.len() != self.root {
+                return None;
+            }
+            rest
+        };
+        for name in names {
             let end = rest.find(|c| self.separator(c))?;
             if !self.same(&rest[..end], name) {
                 return None;
@@ -593,6 +600,20 @@ impl<'a> Folder<'a> {
             rest = rest[end..].trim_start_matches(|c| self.separator(c));
         }
         (!rest.is_empty()).then(|| path.len() - rest.len())
+    }
+
+    /// What follows the drive in `path` when it is Git Bash's spelling of
+    /// a path on the folder's drive, `/c/Users` for `C:\Users`: Claude
+    /// Code's shell on Windows is Git Bash, and a path there may be either.
+    fn git_bash_drive<'p>(&self, path: &'p str) -> Option<&'p str> {
+        let drive = self.names.first()?.strip_suffix(':')?;
+        if !self.windows || self.root != 0 {
+            return None;
+        }
+        let rest = path.strip_prefix('/')?;
+        let after = rest.get(drive.len()..)?;
+        (self.same(&rest[..drive.len()], drive) && after.starts_with('/'))
+            .then(|| after.trim_start_matches(|c| self.separator(c)))
     }
 
     /// Whether two names name the same folder.
@@ -835,6 +856,29 @@ mod tests {
                 "{line}"
             );
         }
+    }
+
+    /// Git Bash, the shell of Claude Code's Bash tool on Windows, writes the
+    /// folder's drive as a folder: `/c/Users/dev` is `C:\Users\dev`.
+    #[test]
+    fn git_bash_names_the_folders_drive_as_a_folder() {
+        let payload = json!({"cwd": r"C:\Users\dev\proj"});
+        for (line, relative) in [
+            (
+                "cat /c/Users/dev/proj/src/store/cache.py",
+                "cat src/store/cache.py",
+            ),
+            ("cat /C/users/dev/proj/src/a.py", "cat src/a.py"),
+            ("cat /d/Users/dev/proj/a.py", "cat /d/Users/dev/proj/a.py"),
+            ("cat /cd/Users/dev/proj/a.py", "cat /cd/Users/dev/proj/a.py"),
+        ] {
+            assert_eq!(relative_line(&payload, line), relative, "{line}");
+        }
+        // A Unix folder has no drive.
+        assert_eq!(
+            relative_line(&json!({"cwd": "/c/proj"}), "cat /c/proj/a.py"),
+            "cat a.py"
+        );
     }
 
     /// Only a word that starts with the session's folder is taken off it:
