@@ -203,6 +203,7 @@ pub fn post_tool_use(client: HookClient, _context_limit: Option<usize>) -> Strin
         return String::new();
     };
     session.keep_current();
+    session.check_tags(client, &payload);
     let origin = super::origin(client, &payload);
     let Ok(payload) = serde_json::from_slice::<Value>(&payload) else {
         return String::new();
@@ -298,6 +299,36 @@ impl Session {
         }
     }
 
+    /// The tag check after a tool call (#121), in the payload's folder: a
+    /// look only when its refs changed. Prints nothing.
+    fn check_tags(&self, client: HookClient, payload: &[u8]) {
+        let Some(origin) = super::origin(client, payload) else {
+            return;
+        };
+        let Some(folder) = serde_json::from_slice::<Value>(payload)
+            .ok()
+            .and_then(|payload| payload["cwd"].as_str().map(PathBuf::from))
+        else {
+            return;
+        };
+        let remote = match &self.remote {
+            Some(_) => match crate::setup::configured_remote() {
+                Ok(Some(connection)) => Some(connection),
+                _ => return,
+            },
+            None => None,
+        };
+        let _ = super::tags::check(
+            &self.snapshot,
+            &folder,
+            &origin,
+            remote.as_ref(),
+            &super::db_path(),
+            super::tags::When::Tool,
+            self.deadline,
+        );
+    }
+
     /// Adds an action of `kind` that gave `terms` to its agent context's
     /// window and returns the push of what it matches that the context was
     /// not shown in this stretch; none when nothing passes, or the hook
@@ -352,6 +383,10 @@ impl Session {
         if Instant::now() >= self.deadline {
             return Ok(None);
         }
+        // A memory a tag ended here, whose end the store doesn't have yet,
+        // is ended for this session.
+        let ended = state.ended_here()?;
+        lines.retain(|line| !ended.contains(&line.id));
         let offers: Vec<Offer> = lines
             .iter()
             .map(|line| Offer {

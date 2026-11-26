@@ -13,6 +13,7 @@ use std::{
 };
 
 mod rekey;
+pub mod tags;
 
 pub use rekey::move_project;
 

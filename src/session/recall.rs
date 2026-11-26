@@ -65,7 +65,7 @@ const WHOLE: i64 = -1;
 /// [`SCHEMA`] takes the next number free on `main` when it lands; a branch
 /// still open takes the next after whichever lands before it, at its
 /// rebase, and adds its layout's entry to the upgrade test.
-const VERSION: i64 = 3;
+const VERSION: i64 = 4;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS contexts(
@@ -128,6 +128,31 @@ CREATE TABLE IF NOT EXISTS pushed(
 CREATE TABLE IF NOT EXISTS meta(
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS tag_folders(
+    folder TEXT PRIMARY KEY,
+    project TEXT NOT NULL,
+    common TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS tag_pending(
+    memory TEXT PRIMARY KEY,
+    tag TEXT NOT NULL,
+    project TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS tag_stamps(
+    common TEXT NOT NULL,
+    path TEXT NOT NULL,
+    stamp TEXT NOT NULL,
+    PRIMARY KEY(common, path)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS tag_ends(
+    memory TEXT PRIMARY KEY,
+    tag TEXT NOT NULL,
+    head TEXT NOT NULL,
+    project TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS tag_flags(
+    flag TEXT PRIMARY KEY
 ) WITHOUT ROWID;
 ";
 
@@ -691,6 +716,172 @@ impl State {
             [NO_USE],
         )?;
         Ok(())
+    }
+}
+
+/// What the tag check (#121) keeps of a session's checkouts: per working
+/// folder, its project and git folder (`tag_folders`, looked up once); the
+/// tag conditions pending for each project, as the store last listed them
+/// (`tag_pending`); the stamps of each git folder's refs at the last
+/// lookup (`tag_stamps`); ends found but not yet written to the store
+/// (`tag_ends`), which count as ended here until they are; and what the
+/// session's server said of the check (`tag_flags`).
+impl State {
+    /// The project and git folder kept for `folder`; `common` is empty for
+    /// a folder outside git.
+    pub(super) fn tag_folder(&self, folder: &str) -> Result<Option<(String, String)>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT project, common FROM tag_folders WHERE folder = ?1",
+                [folder],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
+    }
+
+    /// Keeps `folder`'s project and git folder.
+    pub(super) fn keep_tag_folder(
+        &mut self,
+        folder: &str,
+        project: &str,
+        common: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO tag_folders(folder, project, common) VALUES (?1, ?2, ?3)",
+            params![folder, project, common],
+        )?;
+        Ok(())
+    }
+
+    /// Replaces the tag conditions pending for `project` with `pending`
+    /// (memory, tag).
+    pub(super) fn keep_pending(
+        &mut self,
+        project: &str,
+        pending: &[(String, String)],
+    ) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute("DELETE FROM tag_pending WHERE project = ?1", [project])?;
+        for (memory, tag) in pending {
+            tx.execute(
+                "INSERT OR REPLACE INTO tag_pending(memory, tag, project) VALUES (?1, ?2, ?3)",
+                params![memory, tag, project],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The tag conditions pending for `project` with no end found yet
+    /// (memory, tag).
+    pub(super) fn pending(&self, project: &str) -> Result<Vec<(String, String)>> {
+        let mut statement = self.conn.prepare(
+            "SELECT memory, tag FROM tag_pending WHERE project = ?1
+             AND memory NOT IN (SELECT memory FROM tag_ends) ORDER BY memory",
+        )?;
+        let rows = statement.query_map([project], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Whether the stamps of `common`'s refs are `stamps`, as at the last
+    /// lookup.
+    pub(super) fn same_stamps(&self, common: &str, stamps: &[(String, String)]) -> Result<bool> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT path, stamp FROM tag_stamps WHERE common = ?1 ORDER BY path")?;
+        let kept: Vec<(String, String)> = statement
+            .query_map([common], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut given = stamps.to_vec();
+        given.sort();
+        Ok(kept == given)
+    }
+
+    /// Keeps `stamps` as `common`'s refs at this lookup.
+    pub(super) fn keep_stamps(&mut self, common: &str, stamps: &[(String, String)]) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute("DELETE FROM tag_stamps WHERE common = ?1", [common])?;
+        for (path, stamp) in stamps {
+            tx.execute(
+                "INSERT INTO tag_stamps(common, path, stamp) VALUES (?1, ?2, ?3)",
+                params![common, path, stamp],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Keeps ends found in a checkout of `project` (memory, tag, commit)
+    /// until the store has them.
+    pub(super) fn keep_ends(
+        &mut self,
+        project: &str,
+        ends: &[(String, String, String)],
+    ) -> Result<()> {
+        for (memory, tag, head) in ends {
+            self.conn.execute(
+                "INSERT OR IGNORE INTO tag_ends(memory, tag, head, project) VALUES (?1, ?2, ?3, ?4)",
+                params![memory, tag, head, project],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The ends not yet in the store (project, memory, tag, commit).
+    pub(super) fn unwritten_ends(&self) -> Result<Vec<(String, String, String, String)>> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT project, memory, tag, head FROM tag_ends ORDER BY project, memory")?;
+        let rows = statement.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Forgets the ends of `project` the store now has, and their pending
+    /// conditions.
+    pub(super) fn written_ends(&mut self, project: &str) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "DELETE FROM tag_pending WHERE memory IN (SELECT memory FROM tag_ends WHERE project = ?1)",
+            [project],
+        )?;
+        tx.execute("DELETE FROM tag_ends WHERE project = ?1", [project])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Whether the session's server said `flag` of the tag check.
+    pub(super) fn tag_flag(&self, flag: &str) -> Result<bool> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT 1 FROM tag_flags WHERE flag = ?1",
+                [flag],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    /// Keeps `flag` for the rest of the session.
+    pub(super) fn keep_tag_flag(&mut self, flag: &str) -> Result<()> {
+        self.conn
+            .execute("INSERT OR IGNORE INTO tag_flags(flag) VALUES (?1)", [flag])?;
+        Ok(())
+    }
+
+    /// The memories ended here by a tag whose end the store doesn't have
+    /// yet: no push names them.
+    pub(super) fn ended_here(&self) -> Result<Vec<String>> {
+        let mut statement = self.conn.prepare("SELECT memory FROM tag_ends")?;
+        let rows = statement.query_map([], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 }
 
@@ -1438,6 +1629,53 @@ mod tests {
          INSERT INTO shown VALUES ('main', 'e0000001', 0, 3);
          INSERT INTO held VALUES ('main', 'e0000003', 0, 2, 0);",
         ),
+        (
+            3,
+            "CREATE TABLE contexts(
+             agent TEXT PRIMARY KEY, epoch INTEGER NOT NULL,
+             actions INTEGER NOT NULL, chars INTEGER NOT NULL
+         ) WITHOUT ROWID;
+         CREATE TABLE window(
+             agent TEXT NOT NULL, seq INTEGER NOT NULL, kind TEXT NOT NULL,
+             failed INTEGER NOT NULL, stems TEXT NOT NULL, anchors TEXT NOT NULL,
+             PRIMARY KEY(agent, seq)
+         ) WITHOUT ROWID;
+         CREATE TABLE spawns(
+             seq INTEGER PRIMARY KEY, key TEXT NOT NULL, stems TEXT NOT NULL,
+             anchors TEXT NOT NULL, claimed INTEGER NOT NULL DEFAULT 0
+         );
+         CREATE TABLE shown(
+             agent TEXT NOT NULL, memory TEXT NOT NULL, passage INTEGER NOT NULL,
+             at INTEGER NOT NULL, PRIMARY KEY(agent, memory, passage)
+         ) WITHOUT ROWID;
+         CREATE TABLE held(
+             agent TEXT NOT NULL, memory TEXT NOT NULL, passage INTEGER NOT NULL,
+             at INTEGER NOT NULL, shown INTEGER NOT NULL,
+             PRIMARY KEY(agent, memory, passage)
+         ) WITHOUT ROWID;
+         CREATE TABLE worked(
+             agent TEXT NOT NULL, memory TEXT NOT NULL,
+             read INTEGER NOT NULL DEFAULT 0, recorded INTEGER NOT NULL DEFAULT 0,
+             found INTEGER NOT NULL DEFAULT 0, shown INTEGER NOT NULL DEFAULT 0,
+             held INTEGER NOT NULL DEFAULT 0, at INTEGER NOT NULL,
+             epoch INTEGER NOT NULL, sent INTEGER NOT NULL DEFAULT 0,
+             changed INTEGER NOT NULL, PRIMARY KEY(agent, memory)
+         ) WITHOUT ROWID;
+         CREATE TABLE pushed(
+             memory TEXT NOT NULL, passage INTEGER NOT NULL, times INTEGER NOT NULL,
+             PRIMARY KEY(memory, passage)
+         ) WITHOUT ROWID;
+         CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
+         INSERT INTO contexts VALUES ('main', 0, 3, 0);
+         INSERT INTO window VALUES ('main', 1, 'command', 0, 'cargo', 'cargo build');
+         INSERT INTO spawns(key, stems, anchors) VALUES ('k', 'cargo', 'cargo build');
+         INSERT INTO shown VALUES ('main', 'e0000001', 0, 3);
+         INSERT INTO held VALUES ('main', 'e0000003', 0, 2, 0);
+         INSERT INTO worked(agent, memory, read, at, epoch, changed)
+             VALUES ('main', 'e0000005', 1, 2, 0, 2);
+         INSERT INTO pushed VALUES ('e0000001', 0, 1);
+         INSERT INTO meta VALUES ('origin', 'claude:session/s1');",
+        ),
     ];
 
     /// The tables of `conn`'s file, each with its row count.
@@ -1517,6 +1755,28 @@ mod tests {
             let (unsent, _) = state.unsent().unwrap();
             assert!(
                 unsent.iter().any(|u| u.memory == "e0000004" && u.read),
+                "layout {layout}"
+            );
+            // Tag ends (#121) are kept in tables layout 4 added.
+            let project = "github.com/example/app";
+            state
+                .keep_ends(
+                    project,
+                    &[(
+                        "e0000006".to_owned(),
+                        "v1.0.0".to_owned(),
+                        "1a2b3c4".to_owned(),
+                    )],
+                )
+                .unwrap();
+            assert_eq!(
+                state.unwritten_ends().unwrap(),
+                [(
+                    project.to_owned(),
+                    "e0000006".to_owned(),
+                    "v1.0.0".to_owned(),
+                    "1a2b3c4".to_owned()
+                )],
                 "layout {layout}"
             );
         }
