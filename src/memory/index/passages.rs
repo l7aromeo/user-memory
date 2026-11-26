@@ -240,7 +240,7 @@ pub(in crate::memory) fn split(text: &str) -> Vec<Range<usize>> {
 
 /// Whether `word`, trimmed, is shaped like a path: it holds a `/`, starts
 /// with `.` or `~` before more, or is a file name with an extension.
-fn path_like(word: &str) -> bool {
+pub(in crate::memory) fn path_like(word: &str) -> bool {
     if word.chars().count() < 2 {
         return false;
     }

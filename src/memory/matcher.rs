@@ -96,10 +96,13 @@ pub(crate) const FAILURE_BAR: f64 = 0.4;
 const WRAPPERS: &[&str] = &["sudo", "env", "time", "nohup", "exec", "command"];
 
 /// Programs that read each path they are given on its own, so a line that
-/// reads several files is a part per file: a note on one of them is as
-/// much about the line as about a lone read of it.
+/// reads several files is a part per file, each a read of its file as the
+/// read tool's is: a note on one of them is as much about the line as
+/// about a lone read of it. A `sed` script that looks like a path is a
+/// part no memory holds, which pushes nothing.
 const READERS: &[&str] = &[
-    "bat", "cat", "file", "grep", "head", "less", "ls", "more", "nl", "rg", "stat", "tail", "wc",
+    "bat", "cat", "file", "grep", "head", "less", "ls", "more", "nl", "rg", "sed", "stat", "tail",
+    "wc",
 ];
 
 /// Shells whose `-c` script is the command line they run.
@@ -179,11 +182,28 @@ pub(crate) struct Terms {
     /// union. Empty for every other action and for one read back from a
     /// hook's state, which only the action that fires needs.
     pub(crate) parts: Vec<Terms>,
+    /// Each path a command names, as the anchors that spell it: as written,
+    /// its tails and its folders. A path is one term of what the command
+    /// could score at most, at its best spelling some memory holds, or as
+    /// rare as one memory's when none does: a spelling no memory uses says
+    /// nothing of the command. Kept, as `parts`, for the action that fires.
+    pub(crate) paths: Vec<BTreeSet<String>>,
+    /// The part is a reading command's read of one file, tested as a read
+    /// with the read tool is (see [`Matched::on_command`]).
+    pub(crate) read: bool,
 }
 
 impl Terms {
     fn words(&mut self, stems: &mut Stems, text: &str) {
         self.stems.extend(stems.all(text));
+    }
+
+    /// Adds `part` as one of a command line's parts, its terms to the line's.
+    fn add_part(&mut self, part: Terms) {
+        self.stems.extend(part.stems.iter().cloned());
+        self.anchors.extend(part.anchors.iter().cloned());
+        self.paths.extend(part.paths.iter().cloned());
+        self.parts.push(part);
     }
 }
 
@@ -250,9 +270,9 @@ fn assignment(word: &str) -> bool {
 }
 
 /// A shell command line's terms, as parts (see [`Terms::parts`]): each
-/// segment is one, except that a reading command ([`READERS`]) with
-/// several path arguments is one per path, and a shell's `-c` script is
-/// split as a line of its own.
+/// segment is one, except that a reading command ([`READERS`]) is one per
+/// path it names, each a read of that path alone, and a shell's `-c`
+/// script is split as a line of its own.
 fn command_terms(line: &str, stems: &mut Stems, terms: &mut Terms) {
     for words in segments(line) {
         let Some(start) = words
@@ -276,15 +296,18 @@ fn command_terms(line: &str, stems: &mut Stems, terms: &mut Terms) {
         } else {
             Vec::new()
         };
-        if paths.len() < 2 {
+        if paths.is_empty() {
             part_terms(program, args.iter().map(String::as_str), stems, terms);
             continue;
         }
+        // Reading a file is a read of it, as the read tool's is.
         for &path in &paths {
-            let own = (0..args.len())
-                .filter(|i| *i == path || !paths.contains(i))
-                .map(|i| args[i].as_str());
-            part_terms(program, own, stems, terms);
+            let mut part = Terms {
+                read: true,
+                ..Terms::default()
+            };
+            path_terms(&args[path], stems, &mut part);
+            terms.add_part(part);
         }
     }
 }
@@ -346,15 +369,30 @@ fn part_terms<'a>(
         part.anchors.insert(format!("{name} {word}").to_lowercase());
     }
     for arg in args.iter().filter(|arg| !arg.starts_with('-')) {
-        let found = passages::anchors(arg);
-        if !found.is_empty() {
-            part.words(stems, arg);
-            part.anchors.extend(found);
-        }
+        path_terms(arg, stems, &mut part);
     }
-    terms.stems.extend(part.stems.iter().cloned());
-    terms.anchors.extend(part.anchors.iter().cloned());
-    terms.parts.push(part);
+    terms.add_part(part);
+}
+
+/// An argument's terms, added to `part`: its anchors and words, and for a
+/// path what a read of it names too, its tails, its folders and its
+/// language, all spelling one path (see [`Terms::paths`]).
+fn path_terms(arg: &str, stems: &mut Stems, part: &mut Terms) {
+    let found = passages::anchors(arg);
+    if found.is_empty() {
+        return;
+    }
+    part.words(stems, arg);
+    part.anchors.extend(found.iter().cloned());
+    if passages::path_like(arg) {
+        let mut read = Terms::default();
+        file_terms(arg, stems, &mut read);
+        part.stems.extend(read.stems);
+        let mut spelled = found;
+        spelled.extend(read.anchors);
+        part.anchors.extend(spelled.iter().cloned());
+        part.paths.push(spelled);
+    }
 }
 
 /// Whether a command's argument is a word a subcommand could be: it starts
@@ -548,9 +586,13 @@ pub(crate) struct Matched {
     pub(crate) failed: bool,
     /// It holds an anchor of the action that fired.
     pub(crate) anchored: bool,
-    /// It holds an anchor of the command that fired.
+    /// It holds an anchor of the command that fired, other than a read of
+    /// a file, which holds nothing back.
     pub(crate) command: bool,
-    /// The action that fired is a shell command, so the command bars apply.
+    /// The action that fired is a shell command and the passage holds an
+    /// anchor of a part of it that is no read of a file, so the command
+    /// bars apply; a passage only reads reach is tested as after the read
+    /// tool, on `mixed`.
     pub(crate) on_command: bool,
 }
 
@@ -805,9 +847,26 @@ fn ranked(source: &impl Lookup, window: &Window) -> Result<Vec<Matched>, Error> 
         .back()
         .map_or(&[][..], |(_, terms, _)| terms.parts.as_slice());
     let parts = fired_parts.len().clamp(1, MAX_PARTS);
+    let fired_paths = window
+        .actions
+        .back()
+        .map_or(&[][..], |(_, terms, _)| terms.paths.as_slice());
+    let mut path_of: HashMap<Vec<u8>, usize> = HashMap::new();
+    for (p, spelled) in fired_paths.iter().enumerate() {
+        for anchor in spelled {
+            path_of.entry(key(true, anchor)).or_insert(p);
+        }
+    }
+    // Each path's best spelling some memory holds, and its parts.
+    let mut paths: Vec<(Option<f64>, u64)> = vec![(None, 0); fired_paths.len()];
     let mut part_of: HashMap<Vec<u8>, u64> = HashMap::new();
+    // The parts that read a file.
+    let mut reads = 0u64;
     for (i, part) in fired_parts.iter().enumerate() {
         let bit = 1u64 << i.min(MAX_PARTS - 1);
+        if part.read {
+            reads |= bit;
+        }
         let keys = part
             .stems
             .iter()
@@ -862,7 +921,7 @@ fn ranked(source: &impl Lookup, window: &Window) -> Result<Vec<Matched>, Error> 
     let mut found: HashMap<u32, Hits> = HashMap::new();
     // What the action that fired could score at most, as a whole and by
     // part: each of its terms once as text, a term no memory holds as rare
-    // as one memory's.
+    // as one memory's, and each path it names once (see `Terms::paths`).
     let mut possible = 0.0;
     let mut possible_parts = vec![0.0; parts];
     for (key, want) in &wanted {
@@ -876,10 +935,18 @@ fn ranked(source: &impl Lookup, window: &Window) -> Result<Vec<Matched>, Error> 
                 weight(Field::Body)
             };
             let most = base * rarity(all, holders as f64) / rarest;
-            possible += most;
-            for (part, sum) in possible_parts.iter_mut().enumerate() {
-                if want.parts & (1 << part) != 0 {
-                    *sum += most;
+            if let Some(&p) = path_of.get(key) {
+                let (best, bits) = &mut paths[p];
+                *bits |= want.parts;
+                if postings.is_some() {
+                    *best = Some(best.map_or(most, |b| b.max(most)));
+                }
+            } else {
+                possible += most;
+                for (part, sum) in possible_parts.iter_mut().enumerate() {
+                    if want.parts & (1 << part) != 0 {
+                        *sum += most;
+                    }
                 }
             }
         }
@@ -932,6 +999,16 @@ fn ranked(source: &impl Lookup, window: &Window) -> Result<Vec<Matched>, Error> 
             }
         }
     }
+    for (best, bits) in paths {
+        // As written, a path no memory holds is as rare as one memory's.
+        let most = best.unwrap_or(ANCHOR_WEIGHT * rarity(all, 1.0) / rarest);
+        possible += most;
+        for (part, sum) in possible_parts.iter_mut().enumerate() {
+            if bits & (1 << part) != 0 {
+                *sum += most;
+            }
+        }
+    }
     let mut matched = Vec::with_capacity(found.len());
     for (memory, hits) in found {
         let best = hits
@@ -954,6 +1031,8 @@ fn ranked(source: &impl Lookup, window: &Window) -> Result<Vec<Matched>, Error> 
         total.add(gain);
         let mut split = hits.whole_split;
         split.join(own_split);
+        // Reached through reads of files alone, as after the read tool.
+        let read_only = flags.anchor_parts != 0 && flags.anchor_parts & !reads == 0;
         matched.push(Matched {
             memory: memory as usize,
             slot: i64::from(row.slot),
@@ -976,8 +1055,8 @@ fn ranked(source: &impl Lookup, window: &Window) -> Result<Vec<Matched>, Error> 
             fired: flags.fired,
             failed: flags.failed,
             anchored: flags.anchored,
-            command: flags.command,
-            on_command,
+            command: flags.command && !read_only,
+            on_command: on_command && !read_only,
             fewest: flags.fewest,
         });
     }
@@ -1608,7 +1687,8 @@ mod tests {
         // other command's paths stay together.
         let read = parts("head -n 50 README.md src/a.py tools/package.py");
         assert_eq!(read.len(), 3, "{read:?}");
-        assert!(read.iter().all(|part| part.contains("head")), "{read:?}");
+        // Each a read of its file alone, with no term of the program.
+        assert!(read.iter().all(|part| !part.contains("head")), "{read:?}");
         assert!(read[2].contains("tools/package.py") && !read[2].contains("readme.md"));
         assert_eq!(parts("cp README.md src/a.py tools/").len(), 1);
         // Subshells, substitutions and backticks split; a redirection's `&`
@@ -1691,5 +1771,88 @@ mod tests {
             by_id(&index, &found, 40).is_none_or(|m| !m.push()),
             "{found:?}"
         );
+    }
+
+    #[test]
+    fn a_path_a_command_names_reaches_what_a_read_of_it_reaches() {
+        let folder = (
+            "Store contract tests",
+            "CI collects only `test_<name>_contract` functions for code under `src/store/`.",
+        );
+        let script = (
+            "Packaging needs the key",
+            "Run `python3 tools/package.py --key 4QF7`; without the key it builds an unsigned archive.",
+        );
+        let index = store("deploy", &[folder, script]);
+        let read = rank(&index, &[action(Kind::File, "src/store/cache.py")]);
+        assert!(by_id(&index, &read, 40).unwrap().push(), "{read:?}");
+        for line in [
+            // A file in the folder the note names, as a read of it finds.
+            "cat src/store/cache.py",
+            "head -20 ./src/store/cache.py",
+            "sed -n 1,40p src/store/cache.py",
+        ] {
+            let found = rank(&index, &[action(Kind::Command, line)]);
+            let hit = by_id(&index, &found, 40).unwrap();
+            assert!(hit.push(), "{line}: {hit:?}");
+        }
+        // A path from elsewhere ends with the one the note names.
+        for line in [
+            "python3 ../ledger/tools/package.py",
+            "cat README.md ../ledger/tools/package.py",
+        ] {
+            let found = rank(&index, &[action(Kind::Command, line)]);
+            let hit = by_id(&index, &found, 41).unwrap();
+            assert!(hit.push(), "{line}: {hit:?}");
+        }
+        // Another folder's file reaches neither.
+        let found = rank(&index, &[action(Kind::Command, "cat src/parse/lexer.py")]);
+        assert!(
+            by_id(&index, &found, 40).is_none_or(|m| !m.push()),
+            "{found:?}"
+        );
+        // Its tails and folders spell the one path it names.
+        let terms = of(Kind::Command, "cat src/store/cache.py");
+        assert_eq!(terms.paths.len(), 1, "{terms:?}");
+        for anchor in [
+            "src/store/cache.py",
+            "store/cache.py",
+            "cache.py",
+            "src/store/",
+            "src",
+        ] {
+            assert!(terms.paths[0].contains(anchor), "{anchor}: {terms:?}");
+        }
+    }
+
+    #[test]
+    fn a_read_through_the_shell_is_tested_as_a_read_and_holds_nothing_back() {
+        let docs = (
+            "Docs review line",
+            "The docs site build rejects any page under `docs/` whose last line is not its review month.",
+        );
+        let publish = (
+            "Dry run before publishing",
+            "Run `cargo publish --dry-run` before `cargo publish`; a failed upload burns the version number.",
+        );
+        let index = store("deploy", &[docs, publish]);
+        let read = rank(&index, &[action(Kind::File, "docs/guide.md")]);
+        let by_read = by_id(&index, &read, 40).unwrap();
+        assert!(by_read.push() && !by_read.hold(), "{by_read:?}");
+        let found = rank(
+            &index,
+            &[action(Kind::Command, "cat docs/guide.md && cargo publish")],
+        );
+        // The read's passage, as after the read tool: pushed on `mixed`,
+        // never held.
+        let hit = by_id(&index, &found, 40).unwrap();
+        assert!(
+            hit.push() && !hit.on_command && !hit.command && !hit.hold(),
+            "{hit:?}"
+        );
+        assert_eq!(hit.mixed, by_read.mixed, "{hit:?} {by_read:?}");
+        // The command beside it keeps the command bars and may hold.
+        let hit = by_id(&index, &found, 41).unwrap();
+        assert!(hit.on_command && hit.push() && hit.hold(), "{hit:?}");
     }
 }

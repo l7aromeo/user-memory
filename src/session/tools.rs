@@ -330,7 +330,10 @@ impl Session {
 fn action(payload: &Value) -> Option<Action> {
     let input = &payload["tool_input"];
     let (kind, text) = match payload["tool_name"].as_str()? {
-        "Bash" | "PowerShell" | "Monitor" => (Kind::Command, command_line(&input["command"])?),
+        "Bash" | "PowerShell" | "Monitor" => (
+            Kind::Command,
+            relative_line(payload, &command_line(&input["command"])?),
+        ),
         "Read" | "Edit" | "MultiEdit" | "Write" => {
             (Kind::File, relative(payload, input["file_path"].as_str()?))
         }
@@ -495,6 +498,17 @@ fn relative(payload: &Value, path: &str) -> String {
         .as_str()
         .and_then(|cwd| Path::new(path).strip_prefix(cwd).ok())
         .map_or_else(|| path.to_owned(), |p| p.to_string_lossy().into_owned())
+}
+
+/// A command line with the session's folder (the payload's `cwd`) taken off
+/// the paths inside it, so a path names what a read of the same file does.
+fn relative_line(payload: &Value, line: &str) -> String {
+    match payload["cwd"].as_str() {
+        Some(cwd) if !cwd.is_empty() => {
+            line.replace(&format!("{}/", cwd.trim_end_matches('/')), "")
+        }
+        _ => line.to_owned(),
+    }
 }
 
 /// The files a patch adds, updates, deletes or moves, one per line; its

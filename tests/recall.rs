@@ -428,6 +428,46 @@ fn each_command_of_a_line_and_each_file_it_reads_is_matched_as_its_own_step() {
 }
 
 #[test]
+fn a_file_read_through_the_shell_reaches_what_a_read_of_it_reaches() {
+    let home = Home::new();
+    let store = home.record(
+        "Store contract tests",
+        "CI collects only `test_<name>_contract` functions for code under `src/store/`.",
+        &[],
+    );
+    let read = |session: &str| {
+        home.start(session, "startup");
+        home.call(
+            session,
+            None,
+            "Read",
+            json!({"file_path": home.path().join("src/store/cache.py")}),
+            json!({}),
+        )
+    };
+    assert!(read("r1").contains(short(&store)), "a read");
+    // By its path relative to the session's folder, or from the root, as a
+    // read takes it.
+    let absolute = format!("cat {}", home.path().join("src/store/cache.py").display());
+    for (n, line) in [
+        "cat src/store/cache.py",
+        "sed -n 1,40p src/store/cache.py",
+        "cat MILESTONES.md src/store/cache.py",
+        absolute.as_str(),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let session = format!("s{n}");
+        home.start(&session, "startup");
+        let pushed = home.run(&session, line);
+        assert!(pushed.contains(short(&store)), "{line}: {pushed:?}");
+    }
+    home.start("other", "startup");
+    assert_eq!(home.run("other", "cat src/parse/lexer.py"), "");
+}
+
+#[test]
 fn an_agents_note_is_labelled_as_one() {
     let home = Home::new();
     let note = home.record(
