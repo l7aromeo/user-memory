@@ -8,13 +8,15 @@ use super::{
     titles::{self, Titles},
 };
 use anyhow::{Context, Result, bail};
-use rusqlite::{Connection, OpenFlags, TransactionBehavior, backup::Backup};
+use rusqlite::{
+    Connection, OpenFlags, TransactionBehavior,
+    backup::{Backup, StepResult},
+};
 use std::{
     collections::BTreeMap,
     fs,
     io::ErrorKind,
     path::{Path, PathBuf},
-    time::Duration,
 };
 
 /// Pages copied per step of a backup. Our write lock keeps the store from
@@ -882,7 +884,20 @@ pub(crate) fn copy_into(db: &Path, backup: &Path) -> Result<i64> {
     let source = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     source.busy_timeout(super::budget::wait(super::schema::BUSY))?;
     let mut copy = Connection::open(backup)?;
-    Backup::new(&source, &mut copy)?.run_to_completion(COPY_PAGES, Duration::ZERO, None)?;
+    let copying = Backup::new(&source, &mut copy)?;
+    // A step waits for the store's lock as long as the source's busy
+    // timeout. One that still finds it locked gives up: stepping again
+    // would spin for as long as another program keeps the store locked.
+    loop {
+        match copying.step(COPY_PAGES)? {
+            StepResult::Done => break,
+            StepResult::More => {}
+            _ => bail!(
+                "database is locked: another connection kept the store locked while it was copied"
+            ),
+        }
+    }
+    drop(copying);
     // The copy takes the store's write-ahead log mode. The rollback
     // journal keeps the backup one whole file, with no -wal or -shm
     // beside it, so copying it back restores everything.
