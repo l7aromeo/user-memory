@@ -362,7 +362,8 @@ From user-memory, matching this step (read one for the rest before applying it):
   folders and its file name, taken relative to the session's folder. On
   Windows a path matches whichever of `\` and `/` it is written with,
   with its drive as Git Bash writes it (`/c/`) too, and the session's
-  folder in any case; a program is its file name without `.exe`. A script
+  folder in any case; a program is its file name, and matches a memory
+  that writes it with `.exe` or without (`rg.exe` and `rg`). A script
   run through its interpreter (`bash tools/release.sh`,
   `python3 tools/build.py`) is also matched as if the script ran alone,
   and a program run by its path matches a memory that writes it with or
