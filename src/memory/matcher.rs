@@ -346,7 +346,7 @@ fn command_terms(line: &str, stems: &mut Stems, terms: &mut Terms) {
             continue;
         };
         let (program, args) = (words[start].as_str(), &words[start + 1..]);
-        let name = program.rsplit('/').next().unwrap_or(program).to_lowercase();
+        let name = program_name(program);
         if SHELLS.contains(&name.as_str())
             && let Some(script) = shell_script(args)
         {
@@ -386,6 +386,25 @@ fn shell_script(args: &[String]) -> Option<&str> {
     args.get(at + 1).map(String::as_str)
 }
 
+/// A program's name as a memory names it: the file name of its path,
+/// split at `/` or `\`, lowercased and without [`WINDOWS_PROGRAM`], so
+/// `C:\tools\rg.exe` is `rg` and reads as `rg` does.
+fn program_name(program: &str) -> String {
+    let name = program
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(program)
+        .to_lowercase();
+    match name.strip_suffix(WINDOWS_PROGRAM) {
+        Some(stem) if !stem.is_empty() => stem.to_owned(),
+        _ => name,
+    }
+}
+
+/// The extension a Windows program's file has, which a command may write
+/// and a memory leaves out (`cargo.exe publish` is `cargo publish`).
+const WINDOWS_PROGRAM: &str = ".exe";
+
 /// Whether a reading command's argument is a path it reads: no flag, no
 /// quoted text, and an anchor of its own.
 fn path_argument(arg: &str) -> bool {
@@ -418,9 +437,9 @@ fn part_terms<'a>(
         .filter(|arg| !arg.contains(char::is_whitespace))
         .collect();
     let mut part = Terms::default();
-    let name = program.rsplit('/').next().unwrap_or(program);
+    let name = program_name(program);
     let sub = args.first().filter(|arg| !arg.starts_with('-'));
-    part.anchors.insert(name.to_lowercase());
+    part.anchors.insert(name.clone());
     part.anchors.extend(passages::anchors(program));
     part.words(stems, program);
     if let Some(sub) = sub {
@@ -1774,6 +1793,26 @@ mod tests {
         for part in &terms.parts {
             assert!(terms.anchors.is_superset(&part.anchors));
             assert!(terms.stems.is_superset(&part.stems));
+        }
+    }
+
+    /// A program given by its path, with either separator and Windows'
+    /// `.exe`, is the program its file name names.
+    #[test]
+    fn a_program_given_by_its_path_is_named_by_its_file_name() {
+        let read = of(
+            Kind::Command,
+            "C:/tools/rg.exe store src/store/cache.py tools/package.py",
+        );
+        assert_eq!(read.parts.len(), 2, "{read:?}");
+        assert!(read.parts.iter().all(|part| part.read), "{read:?}");
+        for line in [
+            "C:/tools/cargo.exe publish",
+            r"C:\tools\cargo.exe publish",
+            "/usr/local/bin/cargo publish",
+        ] {
+            let terms = of(Kind::Command, line);
+            assert!(terms.anchors.contains("cargo publish"), "{line}: {terms:?}");
         }
     }
 
