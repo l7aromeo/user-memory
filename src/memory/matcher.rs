@@ -72,13 +72,6 @@ pub(crate) const COMMAND_FAILURE_BAR: f64 = 0.6;
 /// [`COMMAND_PUSH_BAR`], as a hold interrupts the agent. At 0.75 a task
 /// sees 1.69 holds at 1,000 memories, 0.91 of held passages needed then;
 /// at 1.0 it would see 1.14 and lose 0.09 of anchored recall.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "measured by the delivery benchmark; no hook holds a command yet (#118)"
-    )
-)]
 pub(crate) const HOLD_BAR: f64 = 0.75;
 
 /// The `mixed` score a passage needs to be pushed after any action but a
@@ -694,13 +687,6 @@ impl Matched {
     }
     /// Holds the command: one of its anchors, and past [`HOLD_BAR`].
     /// Stems alone never hold.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "measured by the delivery benchmark; no hook holds a command yet (#118)"
-        )
-    )]
     pub(crate) fn hold(&self) -> bool {
         self.command && self.share >= HOLD_BAR
     }

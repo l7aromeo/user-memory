@@ -380,8 +380,43 @@ From user-memory, matching this step (read one for the rest before applying it):
   it is comes from the store:
   `- e0000005 matches this step; read it before applying it`.
 
-Each session's steps and what was pushed are kept beside its snapshot
-([storage](storage.md#the-state-folder)).
+### Held back before it runs
+
+A push comes after the step, which is too late for a command that deletes
+or publishes. So when a shell command names a passage's anchor strongly,
+the pre-tool hook holds the command back once, and the passage is the
+reason the agent sees before the command runs:
+
+```output
+Held back once by user-memory to show <the user's rule> before this runs (not an error, and not the user's refusal): <the passage> (<its id>) If the command keeps to it, run the same command again; it will not be held again.
+```
+
+An agent's note reads `Held back once by user-memory to show an agent's
+note before this runs (not an error, not the user's refusal, and not the
+user's rule: weigh it)`, then the passage, and `If it does not apply
+here, run the same command again`. Several passages are listed one to a
+line, as in a push.
+
+- **Running it anyway:** the same command again runs. A passage holds
+  each agent once, on the same terms as a push, and a passage held counts
+  as pushed.
+- **What holds:** the user's rules and other stated memories, and an
+  agent's note about the work. An agent's note of a rule's type and an
+  inference never hold. Words alone never hold, nor an anchor that many
+  memories share, unless the steps around it match too.
+- **How much:** at most five passages within 2,000 characters. The rest
+  the command names are pushed after it runs.
+- **How it reads:** Claude Code shows the reason as
+  `PreToolUse:Bash hook error: …`, and Codex as
+  `Command blocked by PreToolUse hook: …`. The text says the hold is
+  deliberate and not your refusal.
+- **When in doubt, it runs:** an error, a session with no state, or a
+  hook past its 100 ms lets the command run. A memory server's store
+  holds nothing back: a hold shows the passage and whose word it is, and
+  only this machine's store gives the hook those.
+
+Each session's steps, what was pushed and what was held are kept beside
+its snapshot ([storage](storage.md#the-state-folder)).
 
 On a memory server's store, the hooks match against the index its
 connector keeps on this machine, and only while it keeps it current: a

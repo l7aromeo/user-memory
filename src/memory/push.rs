@@ -90,7 +90,7 @@ pub(crate) fn lines(
         let short = id.get(..SHORT_ID).unwrap_or(&id);
         let text = match conn.filter(|_| Instant::now() < deadline) {
             Some(conn) => match labelled(conn, &id, matched)? {
-                Some((label, passage)) => format!("- {short} {label}: {passage}"),
+                Some(Labelled { label, passage, .. }) => format!("- {short} {label}: {passage}"),
                 None => continue,
             },
             None => format!("- {short} {POINTER}"),
@@ -119,14 +119,46 @@ pub(crate) fn header_chars(failed: bool) -> usize {
     if failed { FAILED_HEADER } else { HEADER }.chars().count()
 }
 
+/// Whose word a memory is, as its label says: what a hold may show.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Voice {
+    /// The user's rule.
+    Rule,
+    /// Any other memory the user stated: a decision, a fact.
+    User,
+    /// An agent's note about the work: a fact, decision, goal or lesson.
+    Note,
+    /// An agent's note that reads as the user's wish: an observation about
+    /// the user, which never holds a command back.
+    Wish,
+}
+
+impl Voice {
+    /// Whether a memory in this voice may hold a command back (#118): any
+    /// memory about the work, never an observation about the user.
+    pub(crate) fn holds(self) -> bool {
+        self != Self::Wish
+    }
+}
+
+/// A passage as a hook shows it: whose word its memory is, the label that
+/// says so, and the passage's words, ending in " …" when `partial`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Labelled {
+    pub(crate) voice: Voice,
+    pub(crate) label: String,
+    pub(crate) passage: String,
+    pub(crate) partial: bool,
+}
+
 /// The label of memory `id` and `matched`'s passage of it, from the store;
 /// none when the memory is gone, is not one a hook delivers, or the
 /// passage no longer falls on its text.
-fn labelled(
+pub(crate) fn labelled(
     conn: &Connection,
     id: &str,
     matched: &Matched,
-) -> Result<Option<(String, String)>, Error> {
+) -> Result<Option<Labelled>, Error> {
     let row = conn
         .query_row(
             "SELECT content,context,source,status,memory_type,\
@@ -151,7 +183,7 @@ fn labelled(
     let Some((content, context, source, status, memory_type, origins)) = row else {
         return Ok(None);
     };
-    let Some(label) = label(&source, &status, &memory_type, origins) else {
+    let Some((voice, label)) = label(&source, &status, &memory_type, origins) else {
         return Ok(None);
     };
     let passage = matcher::cut(&content, &context, matched);
@@ -163,13 +195,15 @@ fn labelled(
     } else {
         &content
     };
-    let more = if passage.len() < whole.trim().len() {
-        MORE
-    } else {
-        ""
-    };
+    let partial = passage.len() < whole.trim().len();
+    let more = if partial { MORE } else { "" };
     let passage = passage.split_whitespace().collect::<Vec<_>>().join(" ");
-    Ok(Some((label, format!("{passage}{more}"))))
+    Ok(Some(Labelled {
+        voice,
+        label,
+        passage: format!("{passage}{more}"),
+        partial,
+    }))
 }
 
 /// Whose word a memory is, in the voice of every text for agents: the
@@ -178,24 +212,29 @@ fn labelled(
 /// that [`reads_as_wish`] says it is not the user's rule, as its `note` in
 /// a read does; one about the work (a fact, decision, goal or lesson)
 /// names its type. None for an inference, which is never pushed.
-fn label(source: &str, status: &str, memory_type: &str, origins: usize) -> Option<String> {
+fn label(source: &str, status: &str, memory_type: &str, origins: usize) -> Option<(Voice, String)> {
     match source {
-        "explicit" if is_rule(source, status, memory_type) => Some("The user's rule".to_owned()),
-        "explicit" => Some(format!("The user's {memory_type}")),
+        "explicit" if is_rule(source, status, memory_type) => {
+            Some((Voice::Rule, "The user's rule".to_owned()))
+        }
+        "explicit" => Some((Voice::User, format!("The user's {memory_type}"))),
         "observed" => {
             let sessions = origins.max(1);
             if reads_as_wish(memory_type) {
                 let unit = if sessions == 1 { "session" } else { "sessions" };
-                Some(format!(
-                    "An agent's note, learned in {sessions} {unit}, not the user's rule"
+                Some((
+                    Voice::Wish,
+                    format!("An agent's note, learned in {sessions} {unit}, not the user's rule"),
                 ))
             } else if sessions == 1 {
-                Some(format!(
-                    "An agent's note from an earlier session ({memory_type})"
+                Some((
+                    Voice::Note,
+                    format!("An agent's note from an earlier session ({memory_type})"),
                 ))
             } else {
-                Some(format!(
-                    "An agent's note from {sessions} earlier sessions ({memory_type})"
+                Some((
+                    Voice::Note,
+                    format!("An agent's note from {sessions} earlier sessions ({memory_type})"),
                 ))
             }
         }
@@ -303,12 +342,28 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                label(source, status, memory_type, origins).as_deref(),
+                label(source, status, memory_type, origins)
+                    .map(|(_, label)| label)
+                    .as_deref(),
                 Some(want),
                 "{source} {memory_type}"
             );
         }
         assert_eq!(label("inferred", "tentative", "fact", 2), None);
+        // Whose word it is decides whether it may hold a command back: an
+        // observation about the user never does (#118).
+        let voice =
+            |source, memory_type| label(source, "confirmed", memory_type, 1).map(|(v, _)| v);
+        assert_eq!(voice("explicit", "preference"), Some(Voice::Rule));
+        assert_eq!(voice("explicit", "fact"), Some(Voice::User));
+        assert_eq!(voice("observed", "fact"), Some(Voice::Note));
+        assert_eq!(voice("observed", "preference"), Some(Voice::Wish));
+        assert!(!Voice::Wish.holds());
+        assert!(
+            [Voice::Rule, Voice::User, Voice::Note]
+                .iter()
+                .all(|v| v.holds())
+        );
     }
 
     #[test]

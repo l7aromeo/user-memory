@@ -7,6 +7,10 @@
 //! - `shown`: the passages pushed to a context in its current epoch, each
 //!   with the action it was pushed at, so a passage is pushed once per
 //!   stretch ([`STRETCH_ACTIONS`]) and two hooks at once push it once.
+//! - `held`: the passages a hold showed a context before its command ran
+//!   (#118), and those it matched but had no room for (deferred), so a
+//!   passage holds once per stretch; a held one counts as pushed, a
+//!   deferred one is still pushed after the command.
 //! - The epoch: `startup` opens the first, `clear` and `compact` a new one
 //!   with its own budget ([`SESSION_PUSH_CHARS`]); `resume` keeps it.
 //!
@@ -17,6 +21,7 @@
 use super::live::RECALL;
 use crate::{
     memory::{
+        hold::HOLD_PER_EVENT,
         matcher::{Kind, Terms, WINDOW_ACTIONS},
         push::PUSH_PER_EVENT,
     },
@@ -53,7 +58,7 @@ const WHOLE: i64 = -1;
 
 /// The state file's layout. Another layout is refused, never read: the
 /// file is rebuilt at the session's next `startup`.
-const VERSION: i64 = 1;
+const VERSION: i64 = 2;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS contexts(
@@ -83,6 +88,14 @@ CREATE TABLE IF NOT EXISTS shown(
     memory TEXT NOT NULL,
     passage INTEGER NOT NULL,
     at INTEGER NOT NULL,
+    PRIMARY KEY(agent, memory, passage)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS held(
+    agent TEXT NOT NULL,
+    memory TEXT NOT NULL,
+    passage INTEGER NOT NULL,
+    at INTEGER NOT NULL,
+    shown INTEGER NOT NULL,
     PRIMARY KEY(agent, memory, passage)
 ) WITHOUT ROWID;
 ";
@@ -189,6 +202,7 @@ impl State {
                 tx.execute("DELETE FROM window WHERE agent = ?1", [MAIN])?;
             }
             tx.execute("DELETE FROM shown WHERE agent = ?1", [MAIN])?;
+            tx.execute("DELETE FROM held WHERE agent = ?1", [MAIN])?;
             tx.execute(
                 "UPDATE contexts SET epoch = epoch + 1, chars = 0 WHERE agent = ?1",
                 [MAIN],
@@ -334,8 +348,10 @@ impl State {
             }
             let whole: bool = tx
                 .query_row(
-                    "SELECT 1 FROM shown WHERE agent = ?1 AND memory = substr(?2, 1, length(memory)) AND passage = ?3 AND ?4 - at <= ?5",
-                    params![agent, offer.memory, WHOLE, at, STRETCH_ACTIONS],
+                    "SELECT 1 FROM shown WHERE agent = ?1 AND memory = substr(?2, 1, length(memory)) AND passage = ?3 AND ?4 - at <= ?5
+                     UNION ALL
+                     SELECT 1 FROM held WHERE agent = ?1 AND memory = ?2 AND passage = ?6 AND shown = 1 AND ?4 - at <= ?5",
+                    params![agent, offer.memory, WHOLE, at, STRETCH_ACTIONS, offer.passage],
                     |_| Ok(true),
                 )
                 .optional()?
@@ -361,6 +377,123 @@ impl State {
         )?;
         tx.commit()?;
         Ok(shown)
+    }
+
+    /// What `agent`'s context has in this stretch, so a hook skips it
+    /// before reading any text: the passages pushed or printed whole, the
+    /// passages a hold showed, and for [`Use::Hold`] those it deferred too.
+    pub(super) fn handled(&self, agent: &str, by: Use) -> Result<Handled> {
+        let (_, actions, _) = context(&self.conn, agent)?;
+        let at = actions + by.ahead();
+        let mut handled = Handled::default();
+        let mut shown = self.conn.prepare(
+            "SELECT memory, passage FROM shown WHERE agent = ?1 AND ?2 - at <= ?3
+             UNION ALL
+             SELECT memory, passage FROM held WHERE agent = ?1 AND ?2 - at <= ?3 AND shown >= ?4",
+        )?;
+        let rows = shown.query_map(
+            params![agent, at, STRETCH_ACTIONS, i64::from(by == Use::Push)],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+        )?;
+        for row in rows {
+            let (memory, passage) = row?;
+            if passage == WHOLE {
+                handled.whole.push(memory);
+            } else {
+                handled.passages.insert((memory, passage));
+            }
+        }
+        Ok(handled)
+    }
+
+    /// Holds `agent`'s command back with `offers`, the passages that hold
+    /// it strongest first: the first [`HOLD_PER_EVENT`] not handled in this
+    /// stretch that fit in `room` characters are held, and each other one,
+    /// and each of `unread` (passing, their text not read), is deferred.
+    /// Returns the held positions in `offers`; none, with nothing written,
+    /// when none is held or `deadline` passes first, so the command runs
+    /// and nothing is marked that the agent was not shown.
+    pub(super) fn hold(
+        &mut self,
+        agent: &str,
+        offers: &[Offer],
+        unread: &[(&str, i64)],
+        room: usize,
+        deadline: Instant,
+    ) -> Result<Vec<usize>> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (_, at, _) = context(&tx, agent)?;
+        let mark = |memory: &str, passage: i64, shown: bool| {
+            tx.execute(
+                "INSERT INTO held(agent, memory, passage, at, shown) VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(agent, memory, passage) DO UPDATE SET at = excluded.at, shown = excluded.shown
+                 WHERE excluded.at - held.at > ?6",
+                params![agent, memory, passage, at, shown, STRETCH_ACTIONS],
+            )
+        };
+        let mut held = Vec::new();
+        let mut used = 0;
+        let mut deferred = Vec::new();
+        for (position, offer) in offers.iter().enumerate() {
+            if held.len() < HOLD_PER_EVENT && used + offer.chars <= room {
+                if mark(offer.memory, offer.passage, true)? == 1 {
+                    used += offer.chars;
+                    held.push(position);
+                }
+            } else {
+                deferred.push((offer.memory, offer.passage));
+            }
+        }
+        if held.is_empty() {
+            return Ok(held);
+        }
+        for (memory, passage) in deferred.into_iter().chain(unread.iter().copied()) {
+            mark(memory, passage, false)?;
+        }
+        if Instant::now() >= deadline {
+            return Ok(Vec::new());
+        }
+        tx.commit()?;
+        Ok(held)
+    }
+}
+
+/// Which hook asks what a context has had: a push skips what was pushed
+/// or held, a hold skips those and what it deferred too.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Use {
+    Push,
+    Hold,
+}
+
+impl Use {
+    /// How far ahead of the context's last action the hook stands: a push
+    /// comes after its action, which then counts, a hold before it.
+    fn ahead(self) -> i64 {
+        match self {
+            Self::Push => 1,
+            Self::Hold => 0,
+        }
+    }
+}
+
+/// The passages a context had in this stretch ([`State::handled`]).
+#[derive(Debug, Default)]
+pub(super) struct Handled {
+    passages: std::collections::HashSet<(String, i64)>,
+    /// The ids, as session start prints them, of memories printed whole.
+    whole: Vec<String>,
+}
+
+impl Handled {
+    /// Whether the passage `passage` of memory `id` is among them.
+    pub(super) fn contains(&self, id: &str, passage: i64) -> bool {
+        self.whole
+            .iter()
+            .any(|short| id.starts_with(short.as_str()))
+            || self.passages.contains(&(id.to_owned(), passage))
     }
 }
 

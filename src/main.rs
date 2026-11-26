@@ -190,7 +190,7 @@ enum Command {
         #[command(flatten)]
         limit: ContextLimit,
     },
-    /// Read a tool call before it runs, for the client's tool hook: keep the session's delivery index current, and the task of a call that starts a subagent; always exits successfully.
+    /// Read a tool call before it runs, for the client's tool hook: keep the session's delivery index current and the task of a call that starts a subagent, and hold back once a shell command a memory names, showing it; always exits successfully.
     PreToolUse {
         /// Client running the hook, with its JSON payload on stdin.
         #[arg(long, value_enum)]
