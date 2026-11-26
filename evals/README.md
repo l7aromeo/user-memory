@@ -301,7 +301,8 @@ kept after every step, for `file` checks on one step.
 
 `files` maps trial paths to text written before the first session, in
 private folders; a file inside a project checkout joins the project's first
-commit, so `commits` checks count only what the agent committed, and
+commit, unless the checkout's `.gitignore` (written first) covers it, as a
+build folder, so `commits` checks count only what the agent committed, and
 one in `exports/` is in the trial store's exports folder. `history` lists
 the project's earlier work, each a `cwd` and a `message` made as an empty
 commit after the first, which `commits` checks do not count either. `servers` names
