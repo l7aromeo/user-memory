@@ -349,6 +349,85 @@ fn words_alone_or_a_near_miss_never_push() {
 }
 
 #[test]
+fn each_command_of_a_line_and_each_file_it_reads_is_matched_as_its_own_step() {
+    let home = Home::new();
+    let package = home.record(
+        "Packaging needs the key",
+        "Run `python3 tools/package.py --key 4QF7`; without the key it builds an unsigned archive.",
+        &[],
+    );
+    let lint = home.record(
+        "Lint before committing",
+        "Run `python3 tools/lint.py --profile strict-7` before every `git commit`.",
+        &[],
+    );
+    let cache = home.record(
+        "Cache layout",
+        "`src/store/cache.py` keeps one file per entry under the cache folder.",
+        &[],
+    );
+    let lines: &[(&str, &[&str])] = &[
+        // A chain, a pipe or a list of reads, each naming the note's file
+        // or command among others: pushed as after that part alone.
+        (
+            "cat RELEASING.md; echo ---; cat tools/package.py",
+            &[&package],
+        ),
+        ("cat README.md src/a.py tools/package.py", &[&package]),
+        ("cat a.md b.md c.md tools/package.py", &[&package]),
+        (
+            "cat tools/package.py src/a.py src/b.py src/c.py",
+            &[&package],
+        ),
+        (
+            "head -n 40 RELEASING.md tools/package.py | less",
+            &[&package],
+        ),
+        (
+            "(cd tools && ls) && python3 tools/package.py 2>&1 | tail -20",
+            &[&package],
+        ),
+        (
+            "echo 'one' >> notes.txt && python3 tools/lint.py --profile strict-7",
+            &[&lint],
+        ),
+        (
+            "git add notes.txt && git commit -m \"Add one to notes\"",
+            &[&lint],
+        ),
+        // A commit message's words and paths are no part of the step.
+        (
+            "git commit -m \"Add one to notes.txt\n\nCo-Authored-By: someone\"",
+            &[&lint],
+        ),
+        (
+            "cat MILESTONES.md README.md src/store/cache.py tests/test_store.py tools/package.py",
+            &[&cache, &package],
+        ),
+        // A line naming none of them pushes nothing, nor does a read of
+        // other files or a message naming one.
+        ("echo ---; ls -la | wc -l", &[]),
+        ("cat README.md src/a.py src/b.py src/c.py", &[]),
+        (
+            "git commit -m \"Run tools/package.py and src/store/cache.py\"",
+            &[&lint],
+        ),
+    ];
+    for (n, (line, expected)) in lines.iter().enumerate() {
+        let session = format!("s{n}");
+        home.start(&session, "startup");
+        let pushed = home.run(&session, line);
+        for id in [&package, &lint, &cache] {
+            assert_eq!(
+                pushed.contains(short(id)),
+                expected.contains(&id.as_str()),
+                "{line}: {id} in {pushed:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn an_agents_note_is_labelled_as_one() {
     let home = Home::new();
     let note = home.record(

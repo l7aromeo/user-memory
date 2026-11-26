@@ -331,7 +331,12 @@ From user-memory, matching this step (read one for the rest before applying it):
   its path in the session's folder; the files a patch names; the topic of a
   memory search; the words a parent gives a subagent or sends a running
   one; and your prompt. A tool's result, a file's contents and the text an
-  edit writes never count.
+  edit writes never count. A shell line that chains, pipes or nests
+  commands (`&&`, `||`, `;`, `|`, a subshell) is matched as if each command
+  ran alone, so a note on one of them comes after the whole line; a command
+  that reads files (`cat`, `head`, `grep` and the like) is matched once for
+  each file it names. Quoted text, such as a commit message, is no part of
+  the command.
 - **What is pushed:** a passage that holds an anchor the step names (a
   command with its next word, a path, a code span) and matches the work of
   the last 30 steps well enough. Words alone never push one. Each line
