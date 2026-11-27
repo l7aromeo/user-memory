@@ -396,10 +396,19 @@ pub async fn start(
             + deadline.saturating_duration_since(tokio::time::Instant::now());
         // The origin stays with the state, so a later startup's sweep sends
         // this session's use under it.
+        // The notes agents kept running past hold no more (#118): only this
+        // machine's store holds a command.
+        let stopped = match setup::configured_remote().ok().flatten() {
+            None => memory::stopped_holds(&db_path()).unwrap_or_default(),
+            Some(_) => Vec::new(),
+        };
         let _ = recall::State::start(&recall::path(&snapshot), source, &whole, until).and_then(
-            |mut state| match &origin {
-                Some(origin) => state.set_origin(origin),
-                None => Ok(()),
+            |mut state| {
+                state.set_stopped(&stopped)?;
+                match &origin {
+                    Some(origin) => state.set_origin(origin),
+                    None => Ok(()),
+                }
             },
         );
     }

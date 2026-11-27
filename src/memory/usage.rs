@@ -5,10 +5,13 @@
 
 /// One row per memory, the project it counted for and the session (its
 /// origin): when the store last wrote it, and whether the session read it,
-/// recorded or confirmed it, or was shown a passage of it. `held` and
-/// `overridden` are for #118, null until known. `passage` is the slot of
-/// the passage pushed most in that session (see `index::passages::SLOTS`),
-/// null when none was. No trigger and no change
+/// recorded or confirmed it, or was shown a passage of it. `held`: a hold
+/// showed it (#118), null until known. `overridden`: whether the agent
+/// last held by it ran the held command again, the session's latest value,
+/// null until known: one session's flushes reach the store in order, each
+/// after the last one's reply, so the latest sent is the latest seen.
+/// `passage` is the slot of the passage pushed most in that session (see
+/// `index::passages::SLOTS`), null when none was. No trigger and no change
 /// counter: use changes nothing a session reads. A forgotten memory's rows
 /// go with it. Part of the stored schema since version 12.
 pub(super) const TABLE: &str = "CREATE TABLE IF NOT EXISTS memory_use (
@@ -134,7 +137,8 @@ pub enum Written {
 }
 
 /// Writes one session's use: each row upserted by memory, project and
-/// origin, its flags merged with OR and its time the store's, so sending a
+/// origin, its flags merged with OR (`overridden` takes the latest) and
+/// its time the store's, so sending a
 /// row again only adds to it; then each project written to keeps its
 /// newest [`USE_WINDOW`] origins. A row whose memory isn't stored, such as
 /// one forgotten since, or a project memory's row for another project is
@@ -152,7 +156,7 @@ pub fn write_uses(db: &Path, uses: &Uses) -> Result<Written> {
         "INSERT INTO memory_use (memory,project,origin,at,read,recorded,shown,held,overridden,passage) VALUES (?1,?2,?3,CURRENT_TIMESTAMP,?4,?5,?6,?7,?8,?9)
          ON CONFLICT(memory,project,origin) DO UPDATE SET at=excluded.at,read=max(read,excluded.read),recorded=max(recorded,excluded.recorded),shown=max(shown,excluded.shown),
          held=CASE WHEN excluded.held IS NULL THEN held ELSE max(coalesce(held,0),excluded.held) END,
-         overridden=CASE WHEN excluded.overridden IS NULL THEN overridden ELSE max(coalesce(overridden,0),excluded.overridden) END,
+         overridden=coalesce(excluded.overridden,overridden),
          passage=coalesce(excluded.passage,passage)",
     )?;
     let (mut written, mut skipped) = (0, 0);
@@ -207,7 +211,10 @@ pub(super) struct Used {
 
 /// The use of each memory in `projects`' kept sessions (each project's
 /// newest [`USE_WINDOW`], as the write prunes them). A session that
-/// counts for two of the projects counts once. Empty without projects, or
+/// counts for two of the projects counts once. A row that only says a
+/// hold showed the memory is no use here: it carries the hold's outcome
+/// (#118), and the index and the most-used part stay as reading,
+/// recording and pushes made them. Empty without projects, or
 /// before any session wrote use.
 pub(super) fn used(
     conn: &rusqlite::Connection,
@@ -218,7 +225,7 @@ pub(super) fn used(
         return Ok(found);
     }
     let mut statement = conn.prepare(
-        "SELECT memory,count(DISTINCT origin),count(DISTINCT CASE WHEN read OR recorded THEN origin END) FROM memory_use WHERE project IN (SELECT value FROM json_each(?1)) GROUP BY memory",
+        "SELECT memory,count(DISTINCT origin),count(DISTINCT CASE WHEN read OR recorded THEN origin END) FROM memory_use WHERE project IN (SELECT value FROM json_each(?1)) AND (read OR recorded OR shown) GROUP BY memory",
     )?;
     let rows = statement.query_map([serde_json::to_string(projects)?], |r| {
         Ok((r.get::<_, String>(0)?, r.get(1)?, r.get(2)?))
@@ -374,7 +381,7 @@ pub(super) fn most_used(
         return Ok(String::new());
     }
     let sessions: i64 = conn.query_row(
-        "SELECT count(DISTINCT origin) FROM memory_use WHERE project IN (SELECT value FROM json_each(?1))",
+        "SELECT count(DISTINCT origin) FROM memory_use WHERE project IN (SELECT value FROM json_each(?1)) AND (read OR recorded OR shown)",
         [serde_json::to_string(&filter.projects)?],
         |r| r.get(0),
     )?;
@@ -417,4 +424,45 @@ pub(super) fn most_used(
     } else {
         lines.join("\n")
     })
+}
+
+/// The sessions in a row whose holds an agent's note must have been run
+/// past before it stops holding a command (#118): three, so one session's
+/// misjudged hold or a note right once in a while keeps holding.
+pub(crate) const HOLD_OVERRIDES: usize = 3;
+
+/// The agents' notes that no longer hold a command (#118): each one in
+/// force that an agent observed whose latest [`HOLD_OVERRIDES`] sessions
+/// with a hold of it, all since it last changed or was confirmed, each ran
+/// the held command again. Counted by session, as `memory_use` keeps one
+/// row per session and project; a row's time is its last write, so a
+/// confirmation between a hold and its session's next flush starts the
+/// count again early. The user's rules and stated memories never stop.
+pub fn stopped_holds(db: &Path) -> Result<Vec<String>> {
+    let conn = connect(db)?;
+    let mut candidates = conn.prepare(
+        "SELECT id, max(updated_at, coalesce(last_confirmed_at, updated_at)) FROM live_memories
+         WHERE source = 'observed'
+         AND id IN (SELECT memory FROM memory_use WHERE held = 1)",
+    )?;
+    let mut sessions = conn.prepare(
+        "SELECT max(overridden) FROM memory_use
+         WHERE memory = ?1 AND held = 1 AND julianday(at) >= julianday(?2)
+         GROUP BY origin ORDER BY max(at) DESC LIMIT ?3",
+    )?;
+    let found =
+        candidates.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    let mut stopped = Vec::new();
+    for row in found {
+        let (id, since) = row?;
+        let outcomes: Vec<Option<bool>> = sessions
+            .query_map(params![id, since, i64::try_from(HOLD_OVERRIDES)?], |r| {
+                r.get(0)
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        if outcomes.len() == HOLD_OVERRIDES && outcomes.iter().all(|o| *o == Some(true)) {
+            stopped.push(id);
+        }
+    }
+    Ok(stopped)
 }

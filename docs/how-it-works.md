@@ -450,6 +450,13 @@ line, as in a push.
   the last hook, such as through the CLI in another terminal, holds the
   very next command when that fits in the 250 ms; otherwise it holds the
   command after it.
+- **When agents keep running past it:** a hold counts as overridden
+  when the agent's very next tool call runs the held command again,
+  unchanged; any other call first, such as an edit or a read, heeds it.
+  An agent's note overridden in three sessions in a row, counted since it
+  last changed or was confirmed, holds no more: it is pushed after the
+  command instead. To make it hold again, confirm the note or change it.
+  The user's rules and other stated memories never stop holding.
 - **When in doubt, it runs:** an error, a session with no state, or a
   hold past its 250 ms lets the command run. A memory server's store
   holds nothing back: a hold shows the passage and whose word it is, and

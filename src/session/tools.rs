@@ -11,7 +11,7 @@
 
 use super::{
     HookClient,
-    recall::{self, Offer, State, Step, Use},
+    recall::{self, Call, Offer, State, Step, Use},
 };
 use crate::memory::{
     delivery_files::{self, Refreshed},
@@ -132,14 +132,15 @@ pub fn pre_tool_use(client: HookClient, _context_limit: Option<usize>) -> String
     };
     let hold_deadline = started + super::hook_time(HOLD_LIMIT);
     let terms = terms_of(&action);
-    if let Ok(Some(reason)) = session.hold(&payload, terms.clone(), hold_deadline) {
+    let command = command_key(&action.text);
+    if let Ok(Some(reason)) = session.hold(&payload, &command, terms.clone(), hold_deadline) {
         session.keep_current(session.deadline);
         return deny(client, &payload, &reason);
     }
     if session
         .keep_current(hold_deadline)
         .is_some_and(Refreshed::took_in)
-        && let Ok(Some(reason)) = session.hold(&payload, terms, hold_deadline)
+        && let Ok(Some(reason)) = session.hold(&payload, &command, terms, hold_deadline)
     {
         return deny(client, &payload, &reason);
     }
@@ -313,13 +314,15 @@ impl Session {
 
     /// What the hook prints for the result in `payload`: the push of what
     /// the call matches that its agent context was not shown in this
-    /// stretch, or nothing. Notes what the call used first.
+    /// stretch, or nothing. Notes what the call used and settles the
+    /// context's last hold first.
     fn push(&self, client: HookClient, payload: &[u8]) -> String {
         let origin = super::origin(client, payload);
         let Ok(payload) = serde_json::from_slice::<Value>(payload) else {
             return String::new();
         };
         super::used::note(&self.snapshot, &payload, origin.as_deref(), self.deadline);
+        self.settle(&payload);
         let Some(mut action) = action(&payload) else {
             return String::new();
         };
@@ -444,6 +447,20 @@ impl Session {
         Ok((!shown.is_empty()).then(|| push::text(shown.iter().map(|&i| &lines[i]), failed)))
     }
 
+    /// Settles the last hold of the context whose tool call `payload`
+    /// reports ([`State::settle`]): its shell command's key, or none for
+    /// any other tool. Errors are dropped: an unsettled hold only leaves its
+    /// outcome unknown.
+    fn settle(&self, payload: &Value) {
+        let agent = payload["agent_id"].as_str().unwrap_or(recall::MAIN);
+        let call = payload["tool_use_id"].as_str().unwrap_or_default();
+        let command = action(payload)
+            .filter(|action| action.kind == Kind::Command)
+            .map(|action| command_key(&action.text));
+        let _ = State::open(&recall::path(&self.snapshot), self.deadline)
+            .and_then(|mut state| state.settle(agent, call, command.as_deref()));
+    }
+
     /// The reason to hold back the shell command that gave `terms`, about
     /// to run in its agent context, or none: the passages that hold it
     /// ([`Matched::hold`]) that the context was not shown, held or
@@ -457,6 +474,7 @@ impl Session {
     pub(super) fn hold(
         &self,
         payload: &Value,
+        command: &str,
         terms: Terms,
         deadline: Instant,
     ) -> anyhow::Result<Option<String>> {
@@ -476,9 +494,13 @@ impl Session {
         };
         let found = view.rank(&window)?;
         let handled = state.handled(agent, Use::Hold)?;
+        // A note agents kept running past holds no more: it is pushed after
+        // the command instead (#118).
+        let stopped = state.stopped()?;
         let mut holding: Vec<&Matched> = Vec::new();
         for matched in found.iter().filter(|m| m.hold()) {
-            if !handled.contains(view.id(matched.memory)?, matched.slot) {
+            let id = view.id(matched.memory)?;
+            if !handled.contains(id, matched.slot) && !stopped.iter().any(|s| s == id) {
                 holding.push(matched);
             }
         }
@@ -504,13 +526,23 @@ impl Session {
             })
             .collect();
         let room = HOLD_CHARS - hold::frame_chars();
-        let shown = state.hold(agent, &offers, &unread, room, deadline)?;
+        let call = Call {
+            id: payload["tool_use_id"].as_str().unwrap_or_default(),
+            key: command,
+        };
+        let shown = state.hold(agent, call, &offers, &unread, room, deadline)?;
         if shown.is_empty() {
             return Ok(None);
         }
         let shown: Vec<&hold::Held> = shown.iter().map(|&i| &held[i]).collect();
         Ok(Some(hold::reason(&shown)))
     }
+}
+
+/// The key a held command is known by until its context's next call: the
+/// SHA-256 of its line, so the state keeps no command text.
+fn command_key(line: &str) -> String {
+    crate::setup::upgrade::sha256(line.as_bytes())
 }
 
 /// The action a tool call is, from its payload: the command line, the

@@ -11,6 +11,9 @@
 //!   (#118), and those it matched but had no room for (deferred), so a
 //!   passage holds once per stretch; a held one counts as pushed, a
 //!   deferred one is still pushed after the command.
+//! - `pending_hold` and `outcome`: each context's last hold until its next
+//!   tool call, and whether that call ran the held command again
+//!   (overridden) or did anything else first (heeded), per memory.
 //! - The epoch: `startup` opens the first, `clear` and `compact` a new one
 //!   with its own budget ([`SESSION_PUSH_CHARS`]); `resume` keeps it.
 //!
@@ -66,7 +69,7 @@ const WHOLE: i64 = -1;
 /// [`SCHEMA`] takes the next number free on `main` when it lands; a branch
 /// still open takes the next after whichever lands before it, at its
 /// rebase, and adds its layout's entry to the upgrade test.
-const VERSION: i64 = 4;
+const VERSION: i64 = 5;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS contexts(
@@ -156,6 +159,19 @@ CREATE TABLE IF NOT EXISTS tag_ends(
 CREATE TABLE IF NOT EXISTS tag_flags(
     flag TEXT PRIMARY KEY
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS pending_hold(
+    agent TEXT PRIMARY KEY,
+    call TEXT NOT NULL,
+    command TEXT NOT NULL,
+    memories TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS outcome(
+    agent TEXT NOT NULL,
+    memory TEXT NOT NULL,
+    overridden INTEGER NOT NULL,
+    seq INTEGER NOT NULL,
+    PRIMARY KEY(agent, memory)
+) WITHOUT ROWID;
 ";
 
 /// What an agent context did with a memory, as `worked` keeps it: one row
@@ -195,6 +211,10 @@ pub(super) struct Unsent {
     pub(super) read: bool,
     pub(super) recorded: bool,
     pub(super) shown: bool,
+    /// Whether a hold showed it, and whether the context last held by it
+    /// ran the held command again (none until one did or did not).
+    pub(super) held: bool,
+    pub(super) overridden: Option<bool>,
     pub(super) passage: Option<i64>,
 }
 
@@ -212,6 +232,9 @@ const OPENED: &str = "opened";
 /// The `meta` key of the epoch the main context's last compaction ended,
 /// which its working set restores; none after a `clear`.
 const ENDED: &str = "ended";
+/// The `meta` key of the agents' notes that no longer hold a command in
+/// this session, as session start found them (#118).
+const STOPPED: &str = "stopped";
 
 /// How a session (re)started, as the client's session-start payload says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -250,6 +273,14 @@ pub(super) struct Step {
     pub(super) kind: Kind,
     pub(super) failed: bool,
     pub(super) terms: Terms,
+}
+
+/// A shell call a hold stops: its tool call's id, as the client gives it
+/// (empty when it gives none), and its command's key.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Call<'a> {
+    pub(super) id: &'a str,
+    pub(super) key: &'a str,
 }
 
 /// A passage a hook would push, with the characters its line takes.
@@ -544,10 +575,13 @@ impl State {
     /// and each of `unread` (passing, their text not read), is deferred.
     /// Returns the held positions in `offers`; none, with nothing written,
     /// when none is held or `deadline` passes first, so the command runs
-    /// and nothing is marked that the agent was not shown.
+    /// and nothing is marked that the agent was not shown. A hold is kept
+    /// as the held `call` until the context's next tool call settles it
+    /// ([`State::settle`]).
     pub(super) fn hold(
         &mut self,
         agent: &str,
+        call: Call,
         offers: &[Offer],
         unread: &[(&str, i64)],
         room: usize,
@@ -588,6 +622,11 @@ impl State {
             let memory = offers[position].memory;
             tx.execute(WORKED, params![agent, memory, 0, 0, 0, 0, 1, at, epoch])?;
         }
+        let memories: Vec<&str> = held.iter().map(|&p| offers[p].memory).collect();
+        tx.execute(
+            "INSERT OR REPLACE INTO pending_hold(agent, call, command, memories) VALUES (?1, ?2, ?3, ?4)",
+            params![agent, call.id, call.key, serde_json::to_string(&memories)?],
+        )?;
         if Instant::now() >= deadline {
             return Ok(Vec::new());
         }
@@ -720,6 +759,73 @@ impl State {
         Ok(())
     }
 
+    /// Settles `agent`'s last hold at its next tool call `call`, whose shell
+    /// command's key is `command` (none for any other tool); the held call
+    /// itself, should a client report it, settles nothing. The agent
+    /// overrode the hold when that call runs the held command again, and
+    /// heeded it when it did anything else first, such as an edit or a
+    /// read, even if the same command follows (#118). Each memory the hold
+    /// showed keeps that outcome, the latest per context, and is sent
+    /// again with it.
+    pub(super) fn settle(&mut self, agent: &str, call: &str, command: Option<&str>) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let pending: Option<(String, String, String)> = tx
+            .query_row(
+                "SELECT call, command, memories FROM pending_hold WHERE agent = ?1",
+                [agent],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let Some((held_call, held, memories)) = pending else {
+            return Ok(());
+        };
+        if !call.is_empty() && call == held_call {
+            return Ok(());
+        }
+        let overridden = command == Some(held.as_str());
+        for memory in serde_json::from_str::<Vec<String>>(&memories)? {
+            tx.execute(
+                "INSERT OR REPLACE INTO outcome(agent, memory, overridden, seq)
+                 VALUES (?1, ?2, ?3, (SELECT coalesce(max(seq), 0) + 1 FROM outcome))",
+                params![agent, memory, overridden],
+            )?;
+            tx.execute(
+                "UPDATE worked SET sent = 0, changed = (SELECT coalesce(max(changed), 0) + 1 FROM worked)
+                 WHERE agent = ?1 AND memory = ?2",
+                params![agent, memory],
+            )?;
+        }
+        tx.execute("DELETE FROM pending_hold WHERE agent = ?1", [agent])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Keeps `stopped`, the agents' notes that no longer hold a command in
+    /// this session, as session start found them in the store (#118).
+    pub(super) fn set_stopped(&mut self, stopped: &[String]) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)",
+            params![STOPPED, serde_json::to_string(stopped)?],
+        )?;
+        Ok(())
+    }
+
+    /// The agents' notes that no longer hold a command in this session.
+    pub(super) fn stopped(&self) -> Result<Vec<String>> {
+        let found: Option<String> = self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key = ?1", [STOPPED], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        Ok(match found {
+            Some(text) => serde_json::from_str(&text)?,
+            None => Vec::new(),
+        })
+    }
+
     /// Keeps the session's conversation origin, which its use is sent under.
     pub(super) fn set_origin(&mut self, origin: &str) -> Result<()> {
         self.conn.execute(
@@ -757,10 +863,11 @@ impl State {
             return Ok((Vec::new(), mark));
         }
         let mut statement = self.conn.prepare(
-            "SELECT memory, max(read), max(recorded), max(shown),
+            "SELECT memory, max(read), max(recorded), max(shown), max(held),
+             (SELECT overridden FROM outcome WHERE outcome.memory = worked.memory ORDER BY seq DESC LIMIT 1),
              (SELECT passage FROM pushed WHERE pushed.memory = worked.memory ORDER BY times DESC, passage LIMIT 1)
              FROM worked WHERE memory IN (SELECT memory FROM worked WHERE sent = 0 AND changed <= ?1)
-             AND (read OR recorded OR shown)
+             AND (read OR recorded OR shown OR held)
              GROUP BY memory ORDER BY memory",
         )?;
         let rows = statement.query_map([mark], |r| {
@@ -769,7 +876,9 @@ impl State {
                 read: r.get(1)?,
                 recorded: r.get(2)?,
                 shown: r.get(3)?,
-                passage: r.get(4)?,
+                held: r.get(4)?,
+                overridden: r.get(5)?,
+                passage: r.get(6)?,
             })
         })?;
         Ok((rows.collect::<rusqlite::Result<_>>()?, mark))
@@ -1705,6 +1814,51 @@ mod tests {
         assert_eq!(epoch_of(&path), 3);
     }
 
+    // A hold settles at its context's next tool call: overridden when that
+    // call runs the held command again, heeded when it is anything else;
+    // the held call itself and another context's calls settle nothing, and
+    // the session sends each memory's latest outcome across its contexts
+    // (#118).
+    #[test]
+    fn a_hold_settles_at_its_contexts_next_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = file(&dir);
+        let mut state = State::start(&path, Source::Startup, &[], soon()).unwrap();
+        let hold = |state: &mut State, agent: &str, id: &str, key: &str, memory: &str| {
+            let call = Call { id, key };
+            assert_eq!(
+                state
+                    .hold(agent, call, &[offer(memory, 0)], &[], ROOM_CHARS, soon())
+                    .unwrap(),
+                [0],
+                "{agent} {memory}"
+            );
+        };
+        let outcome = |state: &State, memory: &str| {
+            let (unsent, _) = state.unsent().unwrap();
+            unsent
+                .into_iter()
+                .find(|u| u.memory == memory)
+                .map(|u| (u.held, u.overridden))
+        };
+        hold(&mut state, MAIN, "t-1", "k1", "e0000001");
+        state.settle(MAIN, "t-1", Some("k1")).unwrap();
+        state.settle("agent-1", "t-2", Some("k1")).unwrap();
+        assert_eq!(outcome(&state, "e0000001"), Some((true, None)), "unsettled");
+        state.settle(MAIN, "t-3", Some("k1")).unwrap();
+        assert_eq!(outcome(&state, "e0000001"), Some((true, Some(true))));
+        // Settled once: a later call changes nothing.
+        state.settle(MAIN, "t-4", None).unwrap();
+        assert_eq!(outcome(&state, "e0000001"), Some((true, Some(true))));
+        hold(&mut state, MAIN, "t-5", "k2", "e0000002");
+        state.settle(MAIN, "t-6", None).unwrap();
+        assert_eq!(outcome(&state, "e0000002"), Some((true, Some(false))));
+        // Held again in a subagent's context and heeded there: the latest.
+        hold(&mut state, "agent-1", "t-7", "k1", "e0000001");
+        state.settle("agent-1", "t-8", Some("k3")).unwrap();
+        assert_eq!(outcome(&state, "e0000001"), Some((true, Some(false))));
+    }
+
     #[test]
     fn a_startup_resets_the_file_another_hook_holds_open() {
         let dir = tempfile::tempdir().unwrap();
@@ -1967,6 +2121,106 @@ mod tests {
          INSERT INTO pushed VALUES ('e0000001', 0, 1);
          INSERT INTO meta VALUES ('origin', 'claude:session/s1');",
         ),
+        (
+            4,
+            "CREATE TABLE contexts(
+    agent TEXT PRIMARY KEY,
+    epoch INTEGER NOT NULL,
+    actions INTEGER NOT NULL,
+    chars INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE window(
+    agent TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    failed INTEGER NOT NULL,
+    stems TEXT NOT NULL,
+    anchors TEXT NOT NULL,
+    PRIMARY KEY(agent, seq)
+) WITHOUT ROWID;
+CREATE TABLE spawns(
+    seq INTEGER PRIMARY KEY,
+    key TEXT NOT NULL,
+    stems TEXT NOT NULL,
+    anchors TEXT NOT NULL,
+    claimed INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE shown(
+    agent TEXT NOT NULL,
+    memory TEXT NOT NULL,
+    passage INTEGER NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY(agent, memory, passage)
+) WITHOUT ROWID;
+CREATE TABLE held(
+    agent TEXT NOT NULL,
+    memory TEXT NOT NULL,
+    passage INTEGER NOT NULL,
+    at INTEGER NOT NULL,
+    shown INTEGER NOT NULL,
+    PRIMARY KEY(agent, memory, passage)
+) WITHOUT ROWID;
+CREATE TABLE worked(
+    agent TEXT NOT NULL,
+    memory TEXT NOT NULL,
+    read INTEGER NOT NULL DEFAULT 0,
+    recorded INTEGER NOT NULL DEFAULT 0,
+    found INTEGER NOT NULL DEFAULT 0,
+    shown INTEGER NOT NULL DEFAULT 0,
+    held INTEGER NOT NULL DEFAULT 0,
+    at INTEGER NOT NULL,
+    epoch INTEGER NOT NULL,
+    sent INTEGER NOT NULL DEFAULT 0,
+    changed INTEGER NOT NULL,
+    PRIMARY KEY(agent, memory)
+) WITHOUT ROWID;
+CREATE TABLE pushed(
+    memory TEXT NOT NULL,
+    passage INTEGER NOT NULL,
+    times INTEGER NOT NULL,
+    PRIMARY KEY(memory, passage)
+) WITHOUT ROWID;
+CREATE TABLE meta(
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE tag_folders(
+    folder TEXT PRIMARY KEY,
+    project TEXT NOT NULL,
+    common TEXT NOT NULL,
+    root TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE tag_pending(
+    memory TEXT PRIMARY KEY,
+    tag TEXT NOT NULL,
+    project TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE tag_stamps(
+    common TEXT NOT NULL,
+    path TEXT NOT NULL,
+    stamp TEXT NOT NULL,
+    PRIMARY KEY(common, path)
+) WITHOUT ROWID;
+CREATE TABLE tag_ends(
+    memory TEXT PRIMARY KEY,
+    tag TEXT NOT NULL,
+    head TEXT NOT NULL,
+    project TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE tag_flags(
+    flag TEXT PRIMARY KEY
+) WITHOUT ROWID;
+         INSERT INTO contexts VALUES ('main', 0, 3, 0);
+         INSERT INTO window VALUES ('main', 1, 'command', 0, 'cargo', 'cargo build');
+         INSERT INTO spawns(key, stems, anchors) VALUES ('k', 'cargo', 'cargo build');
+         INSERT INTO shown VALUES ('main', 'e0000001', 0, 3);
+         INSERT INTO held VALUES ('main', 'e0000003', 0, 2, 0);
+         INSERT INTO worked(agent, memory, read, at, epoch, changed)
+             VALUES ('main', 'e0000005', 1, 2, 0, 2);
+         INSERT INTO pushed VALUES ('e0000001', 0, 1);
+         INSERT INTO meta VALUES ('origin', 'claude:session/s1');
+         INSERT INTO tag_flags VALUES ('checked');",
+        ),
     ];
 
     /// The tables of `conn`'s file, each with its row count.
@@ -2034,9 +2288,28 @@ mod tests {
             );
             assert_eq!(
                 state
-                    .hold(MAIN, &[offer("e0000002", 0)], &[], ROOM_CHARS, soon())
+                    .hold(
+                        MAIN,
+                        Call {
+                            id: "t-1",
+                            key: "key"
+                        },
+                        &[offer("e0000002", 0)],
+                        &[],
+                        ROOM_CHARS,
+                        soon()
+                    )
                     .unwrap(),
                 [0],
+                "layout {layout}"
+            );
+            // A hold's outcome (#118) is kept in tables layout 5 added.
+            state.settle(MAIN, "t-2", Some("key")).unwrap();
+            let (unsent, _) = state.unsent().unwrap();
+            assert!(
+                unsent
+                    .iter()
+                    .any(|u| u.memory == "e0000002" && u.held && u.overridden == Some(true)),
                 "layout {layout}"
             );
             // Use (#123) is kept in tables layout 3 added.
