@@ -298,26 +298,26 @@ fn recency(m: &Memory) -> (&str, i64) {
     (&m.updated_at, m.sequence)
 }
 
-/// Members of `component`, closest first (strongest link, then id), at most
-/// `MAX_MEMBERS`, and how many were left out.
-fn closest(
-    component: &[usize],
-    links: &[(usize, usize, f32)],
-    memories: &[Memory],
-) -> (Vec<usize>, usize) {
-    let mut best: HashMap<usize, f32> = HashMap::new();
+/// Each memory's strongest score among `links`, by memory index, for
+/// [`closest`]; `f32::MIN` for a memory without one.
+fn strongest(links: &[(usize, usize, f32)], size: usize) -> Vec<f32> {
+    let mut best = vec![f32::MIN; size];
     for &(a, b, score) in links {
         for i in [a, b] {
-            if component.contains(&i) {
-                let entry = best.entry(i).or_insert(f32::MIN);
-                *entry = entry.max(score);
-            }
+            best[i] = best[i].max(score);
         }
     }
+    best
+}
+
+/// Members of `component`, closest first (strongest link in `best`, from
+/// [`strongest`], then id), at most `MAX_MEMBERS`, and how many were left
+/// out.
+fn closest(component: &[usize], best: &[f32], memories: &[Memory]) -> (Vec<usize>, usize) {
     let mut members = component.to_vec();
     members.sort_by(|&a, &b| {
-        best[&b]
-            .partial_cmp(&best[&a])
+        best[b]
+            .partial_cmp(&best[a])
             .unwrap_or(Ordering::Equal)
             .then_with(|| memories[a].id.cmp(&memories[b].id))
     });
@@ -342,23 +342,35 @@ fn overlaps(links: &[(usize, usize, f32)]) -> Vec<Vec<usize>> {
         .collect();
     let related = |a: usize, b: usize| linked.contains(&(a.min(b), a.max(b)));
     let mut groups: Vec<Vec<usize>> = Vec::new();
+    // The groups holding each memory, by index in `groups`, ascending.
+    let mut holding: HashMap<usize, Vec<usize>> = HashMap::new();
     for (a, b, _) in sorted {
-        if groups.iter().any(|g| g.contains(&a) && g.contains(&b)) {
+        let of_a = holding.get(&a).map_or(&[][..], Vec::as_slice);
+        let of_b = holding.get(&b).map_or(&[][..], Vec::as_slice);
+        if of_a.iter().any(|&g| groups[g].contains(&b)) {
             continue;
         }
-        let fits = |group: &Vec<usize>, held: usize, other: usize| {
-            group.contains(&held)
-                && group.len() < MAX_MEMBERS
-                && group.iter().all(|&m| m == held || related(m, other))
+        let fits = |g: usize, held: usize, other: usize| {
+            groups[g].len() < MAX_MEMBERS
+                && groups[g].iter().all(|&m| m == held || related(m, other))
         };
-        match groups
+        let joined = of_a
             .iter()
-            .position(|g| fits(g, a, b))
-            .map(|i| (i, b))
-            .or_else(|| groups.iter().position(|g| fits(g, b, a)).map(|i| (i, a)))
-        {
-            Some((i, joining)) => groups[i].push(joining),
-            None => groups.push(vec![a, b]),
+            .find(|&&g| fits(g, a, b))
+            .map(|&g| (g, b))
+            .or_else(|| of_b.iter().find(|&&g| fits(g, b, a)).map(|&g| (g, a)));
+        match joined {
+            Some((g, joining)) => {
+                groups[g].push(joining);
+                let held = holding.entry(joining).or_default();
+                held.insert(held.partition_point(|&h| h < g), g);
+            }
+            None => {
+                for i in [a, b] {
+                    holding.entry(i).or_default().push(groups.len());
+                }
+                groups.push(vec![a, b]);
+            }
         }
     }
     groups
@@ -457,6 +469,7 @@ fn review_with(
     for &(a, b, _) in &duplicates {
         joined.join(a, b);
     }
+    let strongest_duplicate = strongest(&duplicates, memories.len());
     let mut grouped = BTreeSet::new();
     for component in joined.components() {
         let place = |i: &usize| (&memories[*i].scope, &memories[*i].project);
@@ -470,15 +483,16 @@ fn review_with(
             Kind::Shared
         };
         grouped.extend(component.iter().copied());
-        let (members, left_out) = closest(&component, &duplicates, &memories);
+        let (members, left_out) = closest(&component, &strongest_duplicate, &memories);
         groups.push((kind, members, left_out));
     }
     let related: Vec<_> = related
         .into_iter()
         .filter(|(a, b, _)| !grouped.contains(a) && !grouped.contains(b))
         .collect();
+    let strongest_related = strongest(&related, memories.len());
     for group in overlaps(&related) {
-        let (members, _) = closest(&group, &related, &memories);
+        let (members, _) = closest(&group, &strongest_related, &memories);
         groups.push((Kind::Overlap, members, 0));
     }
     let mut stale: Vec<usize> = (0..memories.len())
@@ -1659,5 +1673,111 @@ mod tests {
         embed_stored(&conn, a, unit(1.0));
         embed_stored(&conn, b, unit(1.0)[..1024].to_vec());
         assert!(groups(&conn, None, true).is_empty());
+    }
+
+    /// Overlap groups as they were built by scanning every group for each
+    /// link, the reference for [`overlaps`].
+    fn overlaps_scanning_every_group(links: &[(usize, usize, f32)]) -> Vec<Vec<usize>> {
+        let mut sorted = links.to_vec();
+        sorted.sort_by(|x, y| y.2.partial_cmp(&x.2).unwrap_or(Ordering::Equal));
+        let linked: HashSet<(usize, usize)> = links
+            .iter()
+            .map(|&(a, b, _)| (a.min(b), a.max(b)))
+            .collect();
+        let related = |a: usize, b: usize| linked.contains(&(a.min(b), a.max(b)));
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+        for (a, b, _) in sorted {
+            if groups.iter().any(|g| g.contains(&a) && g.contains(&b)) {
+                continue;
+            }
+            let fits = |group: &Vec<usize>, held: usize, other: usize| {
+                group.contains(&held)
+                    && group.len() < MAX_MEMBERS
+                    && group.iter().all(|&m| m == held || related(m, other))
+            };
+            match groups
+                .iter()
+                .position(|g| fits(g, a, b))
+                .map(|i| (i, b))
+                .or_else(|| groups.iter().position(|g| fits(g, b, a)).map(|i| (i, a)))
+            {
+                Some((i, joining)) => groups[i].push(joining),
+                None => groups.push(vec![a, b]),
+            }
+        }
+        groups
+    }
+
+    /// Members closest first as they were found by scanning every link, the
+    /// reference for [`closest`].
+    fn closest_scanning_every_link(
+        component: &[usize],
+        links: &[(usize, usize, f32)],
+        memories: &[Memory],
+    ) -> (Vec<usize>, usize) {
+        let mut best: HashMap<usize, f32> = HashMap::new();
+        for &(a, b, score) in links {
+            for i in [a, b] {
+                if component.contains(&i) {
+                    let entry = best.entry(i).or_insert(f32::MIN);
+                    *entry = entry.max(score);
+                }
+            }
+        }
+        let mut members = component.to_vec();
+        members.sort_by(|&a, &b| {
+            best[&b]
+                .partial_cmp(&best[&a])
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| memories[a].id.cmp(&memories[b].id))
+        });
+        let left_out = members.len().saturating_sub(MAX_MEMBERS);
+        members.truncate(MAX_MEMBERS);
+        (members, left_out)
+    }
+
+    // Groups indexed by member come out as scanning every group and link
+    // made them, over dense link sets with tied scores, so that groups fill
+    // up, members sit in several groups and order decides.
+    #[test]
+    fn indexed_groups_match_scanning_every_group() {
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move |below: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % below
+        };
+        let mut groups_seen = 0;
+        for size in [6, 12, 25, 40] {
+            for _ in 0..60 {
+                let memories: Vec<Memory> = (0..size)
+                    .map(|_| Memory {
+                        id: Uuid::from_u128(u128::from(next(u64::MAX))),
+                        ..Memory::default()
+                    })
+                    .collect();
+                let mut links = Vec::new();
+                for a in 0..size {
+                    for b in a + 1..size {
+                        if next(3) == 0 {
+                            let score = [0.0, 0.25, 0.5, 0.75, 1.0][next(5) as usize];
+                            links.push((a, b, score));
+                        }
+                    }
+                }
+                let groups = overlaps(&links);
+                assert_eq!(groups, overlaps_scanning_every_group(&links));
+                let best = strongest(&links, size);
+                for group in &groups {
+                    assert_eq!(
+                        closest(group, &best, &memories),
+                        closest_scanning_every_link(group, &links, &memories)
+                    );
+                }
+                groups_seen += groups.len();
+            }
+        }
+        assert!(groups_seen > 1000, "few groups to compare: {groups_seen}");
     }
 }
