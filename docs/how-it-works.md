@@ -213,12 +213,12 @@ Other memories
   last prompt. What session start itself printed never counts.
 - **The index** lists every other memory in scope, one line each: an
   8-character id and the title. Marks: `[project]` for a project memory,
-  `(learned in N sessions)` for an agent's observation seen in N
-  conversations, `(tentative)` for an inference, `(stale)` for one that
-  lost a support, and `×N` when N conversations stated it. The agent reads
-  a memory in full before it acts on it, and never follows an observation
-  or an inference as a rule. In each group, what the project's recent
-  sessions used comes first.
+  `(learned in N sessions)` for an agent's observation recorded or
+  confirmed in N conversations, `(tentative)` for an inference, `(stale)`
+  for one that lost a support, and `×N` when N conversations stated it.
+  The agent reads a memory in full before it acts on it, and never follows
+  an observation or an inference as a rule. In each group, what the
+  project's recent sessions used comes first.
 
 Your global rules are not repeated when the client's instruction file already
 holds them. A very long index lists what fits, line by line, rules first,
