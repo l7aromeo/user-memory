@@ -10,9 +10,7 @@ use rmcp::{
     transport::{
         StreamableHttpClientTransport, Transport, stdio,
         streamable_http_client::{AuthRequiredError, StreamableHttpClientTransportConfig},
-        streamable_http_server::{
-            StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
-        },
+        streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService},
     },
 };
 use serde::{Deserialize, Serialize};
@@ -30,6 +28,7 @@ mod gate;
 pub(crate) mod marker;
 pub(crate) mod refused;
 pub(crate) mod scope;
+mod sessions;
 mod tokens;
 mod transfer;
 pub(crate) mod usage;
@@ -512,7 +511,7 @@ pub async fn host(options: HostOptions) -> Result<()> {
     let delivery = delivery::routes(db.clone(), allowed.clone());
     let usage = usage::routes(db.clone(), allowed);
     let health = Health::new(db.clone());
-    let service: StreamableHttpService<crate::UserMemoryServer, LocalSessionManager> =
+    let service: StreamableHttpService<crate::UserMemoryServer, sessions::Sessions> =
         StreamableHttpService::new(
             move || {
                 Ok(crate::UserMemoryServer {
@@ -520,7 +519,7 @@ pub async fn host(options: HostOptions) -> Result<()> {
                     in_client_folder: false,
                 })
             },
-            Default::default(),
+            sessions::Sessions::start(),
             config,
         );
     // /mcp, the export, import, delivery and use endpoints and a token's own revocation
