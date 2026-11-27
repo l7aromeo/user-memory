@@ -269,6 +269,17 @@ fn history_past_its_year_leaves_the_store_as_a_backup_is_made() {
     let id = record_the_marker(&store, &mut serve);
     correct_the_marker(&store, &mut serve, &id);
     serve.close();
+    // The copy a stopping server leaves when its last check outlasts its
+    // wait, as on a slow machine: a partial and its journal, not a backup.
+    let today: String = Connection::open_in_memory()
+        .unwrap()
+        .query_row("SELECT date('now')", [], |r| r.get(0))
+        .unwrap();
+    let folder = store.db.with_file_name("backups");
+    fs::create_dir_all(&folder).unwrap();
+    let partial = format!(".memory-{today}.sqlite3.partial-1");
+    fs::write(folder.join(&partial), b"").unwrap();
+    fs::write(folder.join(format!("{partial}-journal")), b"").unwrap();
     // Yesterday's backup, made before the pruning.
     let earlier = store.back_up();
     let yesterday = earlier.with_file_name("memory-2000-01-01.sqlite3");
@@ -320,9 +331,11 @@ fn history_past_its_year_leaves_the_store_as_a_backup_is_made() {
         String::from_utf8_lossy(&out.stderr)
     );
     drop(held);
-    let backups: Vec<PathBuf> = fs::read_dir(store.db.with_file_name("backups"))
+    // The finished backups: a partial copy is none.
+    let backups: Vec<PathBuf> = fs::read_dir(&folder)
         .unwrap()
         .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|e| e == "sqlite3"))
         .collect();
     assert_eq!(backups.len(), 2, "{backups:?}");
     for backup in backups {
