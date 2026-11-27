@@ -230,7 +230,7 @@ pub(super) fn spawn_key(prompt_id: &str, agent_type: &str) -> String {
 pub fn post_tool_use(client: HookClient, _context_limit: Option<usize>) -> String {
     let started = Instant::now();
     let payload = payload();
-    let Some(session) = Session::of(client, &payload, tool_deadline(started)) else {
+    let Some(session) = Session::of(client, &payload, push_deadline(started)) else {
         return String::new();
     };
     session.keep_current(session.deadline);
@@ -253,6 +253,12 @@ pub fn post_tool_use(client: HookClient, _context_limit: Option<usize>) -> Strin
 /// A tool hook's deadline: [`TOOL_HOOK_LIMIT`] after it `started`.
 pub(super) fn tool_deadline(started: Instant) -> Instant {
     started + super::hook_time(TOOL_HOOK_LIMIT)
+}
+
+/// The post-tool push's deadline: [`TOOL_HOOK_LIMIT`] after the hook
+/// `started`, with the room a test gives it ([`super::hook_push_time`]).
+pub(super) fn push_deadline(started: Instant) -> Instant {
+    started + super::hook_push_time(TOOL_HOOK_LIMIT)
 }
 
 /// What a tool hook knows of its session: the store, the session's state
