@@ -36,6 +36,16 @@ apart.
 - **Memories reach the step they name.** When the agent runs a command,
   opens a file or starts a subagent that a memory names, the part of it
   that matches is added after that step, with whose word it is.
+- **A command a memory names is held back once.** Before the agent runs a
+  shell command one of your memories names, the hook stops it once, with
+  that memory as the reason the agent sees; running it again runs it
+  ([held back](docs/how-it-works.md#held-back-before-it-runs)).
+- **Memories can hold until something happens.** A memory can hold until a
+  date, a release tag or an event; once that ends, it leaves the index, the
+  instruction files and search ([conditions](docs/memory-model.md#conditions)).
+- **Compaction keeps what the agent worked with.** After a compaction, the
+  agent gets back the memories it worked with, as they are in the store now
+  ([after compaction](docs/how-it-works.md#after-compaction)).
 - **Saying it again counts, changing your mind replaces.** Before storing,
   the server looks for memories that may say the same thing, by their words
   and, with semantic search, by their meaning; a restatement then confirms
@@ -44,6 +54,9 @@ apart.
   duplicates, export everything; the store backs itself up every day.
 - **Corrections can be undone.** Each memory keeps its earlier versions for
   a year, with who changed them, so a wrong correction can be reverted.
+- **A token for each machine.** Each machine can have its own server token,
+  revocable, read-only or with an end date
+  ([access tokens](docs/server.md#give-a-machine-its-own-token)).
 - **Self-hosted.** No account and no telemetry. Besides your server and the
   embeddings endpoint you choose, it contacts only GitHub, for downloads and
   doctor's check for a newer release ([privacy](docs/privacy.md)).
