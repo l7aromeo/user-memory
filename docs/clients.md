@@ -448,8 +448,9 @@ Any other failure ends the session, and the next poll starts a new one,
 which also meets an upgraded server as it now is. While a connector runs,
 the server holds its session and one idle connection. A connector that
 stops does not wait to end its session: one the server is not told of
-ends there once idle, which on a user-memory server is after five minutes
-(its default idle timeout).
+ends there once idle. A user-memory server closes a session after five
+minutes with no request and no stream open, so a call that runs longer
+keeps its session and its answer.
 
 - Setup only touches its own entries, refuses a file that is not valid JSON,
   writes atomically, keeps key order, and migrates hooks written by earlier

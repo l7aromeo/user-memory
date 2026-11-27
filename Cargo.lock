@@ -2033,6 +2033,7 @@ dependencies = [
  "clap",
  "dunce",
  "foldhash",
+ "futures-core",
  "proc-macro2",
  "rand",
  "reqwest",

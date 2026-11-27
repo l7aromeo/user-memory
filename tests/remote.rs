@@ -14,6 +14,7 @@ use std::{
     net::TcpStream,
     path::Path,
     process::{Child, Command, Stdio},
+    time::Duration,
 };
 use tempfile::{TempDir, tempdir};
 
@@ -333,6 +334,203 @@ fn root() -> TempDir {
     let root = tempdir().unwrap();
     fs::write(root.path().join("token"), TOKEN).unwrap();
     root
+}
+
+/// The store's lock file, locked by this process, which stands in for
+/// another process holding its write turn.
+fn held_turn(db: &Path) -> fs::File {
+    let mut lock = db.as_os_str().to_owned();
+    lock.push(".lock");
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(std::path::PathBuf::from(lock))
+        .unwrap();
+    held.lock().unwrap();
+    held
+}
+
+// A session with a call in flight is not idle: a call that runs past the
+// session's idle bound, here a record waiting 3 s for a write turn another
+// process holds, still gets its answer (#237).
+#[test]
+fn a_call_running_past_the_session_idle_bound_still_gets_its_answer() {
+    let (host, _held) = busy_host();
+    let (status, body) = host.request(
+        Some(TOKEN),
+        serde_json::from_str(&waiting_record(3)).unwrap(),
+    );
+    assert_eq!(status, 200);
+    let refused: Value = serde_json::from_slice(&body)
+        .unwrap_or_else(|_| panic!("no answer: {:?}", String::from_utf8_lossy(&body)));
+    assert!(
+        refused["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("kept its write turn on the store for"),
+        "{refused}"
+    );
+}
+
+/// The settings that make the host close an idle session after 1 s and
+/// hold a write 3 s for a turn another process keeps.
+const SHORT_SESSIONS: [(&str, &str); 2] = [
+    ("USER_MEMORY_SESSION_IDLE_MS", "1000"),
+    ("USER_MEMORY_TURN_WAIT_MS", "3000"),
+];
+
+/// Longer than the test's idle bound plus the time the host takes to find
+/// an idle session (a quarter of the bound) and some slack.
+const PAST_IDLE: Duration = Duration::from_millis(1800);
+
+/// A request of `method` to the host's /mcp in its current session, with
+/// `headers`, `body` and the test's token; the connection, left open.
+fn send(host: &Host, method: &str, headers: &str, body: &str) -> TcpStream {
+    let mut socket = TcpStream::connect(&host.address).unwrap();
+    socket.set_read_timeout(Some(STUCK)).unwrap();
+    let session = host.session.borrow().clone().unwrap();
+    write!(socket, "{method} /mcp HTTP/1.1\r\nHost: {}\r\nAccept: application/json, text/event-stream\r\nContent-Type: application/json\r\nMCP-Protocol-Version: 2025-06-18\r\nMcp-Session-Id: {session}\r\nAuthorization: Bearer {TOKEN}\r\n{headers}Connection: close\r\nContent-Length: {}\r\n\r\n{body}", host.address, body.len()).unwrap();
+    socket
+}
+
+/// Reads `socket` until its text holds `wanted`; what it read.
+fn read_until(socket: &mut TcpStream, wanted: &str) -> String {
+    let mut seen = Vec::new();
+    let mut chunk = [0; 4096];
+    while !String::from_utf8_lossy(&seen).contains(wanted) {
+        let read = socket.read(&mut chunk).unwrap();
+        assert!(
+            read > 0,
+            "closed before {wanted:?}: {}",
+            String::from_utf8_lossy(&seen)
+        );
+        seen.extend_from_slice(&chunk[..read]);
+    }
+    String::from_utf8_lossy(&seen).into_owned()
+}
+
+/// The HTTP status of a ping in the host's current session.
+fn ping(host: &Host, id: u64) -> u16 {
+    host.request(
+        Some(TOKEN),
+        json!({"jsonrpc":"2.0","id":id,"method":"ping"}),
+    )
+    .0
+}
+
+/// The HTTP status of a notification in the host's current session: a
+/// request the server answers with no stream.
+fn notify(host: &Host) -> u16 {
+    host.request(
+        Some(TOKEN),
+        json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":999}}),
+    )
+    .0
+}
+
+/// A host with [`SHORT_SESSIONS`], one memory stored, and the store's write
+/// turn held by this test, so the next record waits 3 s.
+fn busy_host() -> (Host, fs::File) {
+    let host = Host::start_with(root(), None, &SHORT_SESSIONS);
+    host.rpc(initialize(1));
+    let stored = host.rpc(call(2, "record", json!({"category":"build","title":"The quartz lantern build","content":"The quartz lantern build needs the cobalt flag.","scope":"global","user_confirmed":true})));
+    assert!(
+        stored["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("\"stored\":true"),
+        "{stored}"
+    );
+    let held = held_turn(&host.root.path().join("shared.sqlite3"));
+    (host, held)
+}
+
+/// A record call that waits behind the held turn.
+fn waiting_record(id: u64) -> String {
+    call(id, "record", json!({"category":"build","title":"The walnut gate","content":"The walnut gate opens with the ember key.","scope":"global","user_confirmed":true})).to_string()
+}
+
+// A session with no request and no stream is closed after the idle bound,
+// and the next request in it is refused as for any unknown session. One
+// that keeps asking stays open past it, even with requests that open no
+// stream, such as notifications.
+#[test]
+fn a_session_is_closed_once_idle_and_kept_while_it_asks() {
+    let host = Host::start_with(root(), None, &SHORT_SESSIONS);
+    host.rpc(initialize(1));
+    for _ in 0..4 {
+        std::thread::sleep(Duration::from_millis(600));
+        assert_eq!(notify(&host), 202, "closed while it asked");
+    }
+    std::thread::sleep(PAST_IDLE);
+    assert_eq!(notify(&host), 404);
+}
+
+// A client that closes its session with DELETE has it closed at once.
+#[test]
+fn a_deleted_session_is_closed_at_once() {
+    let host = Host::start_with(root(), None, &SHORT_SESSIONS);
+    host.rpc(initialize(1));
+    let mut deleted = send(&host, "DELETE", "", "");
+    let said = read_until(&mut deleted, "\r\n\r\n");
+    assert!(said.starts_with("HTTP/1.1 2"), "{said}");
+    assert_eq!(ping(&host, 2), 404);
+}
+
+// Sessions clients opened and left are all closed, so the server's list of
+// them does not grow.
+#[test]
+fn every_abandoned_session_is_closed() {
+    let host = Host::start_with(root(), None, &SHORT_SESSIONS);
+    let mut left = Vec::new();
+    for id in 1..6 {
+        host.rpc(initialize(id));
+        left.push(host.session.borrow().clone().unwrap());
+    }
+    std::thread::sleep(PAST_IDLE);
+    for (id, session) in (10..).zip(left) {
+        *host.session.borrow_mut() = Some(session);
+        assert_eq!(ping(&host, id), 404);
+    }
+}
+
+// A call whose client dropped the connection keeps no stream open, so its
+// session is closed after the idle bound though the call still runs.
+#[test]
+fn a_session_whose_call_was_dropped_is_closed_after_the_idle_bound() {
+    let (host, _held) = busy_host();
+    let mut posted = send(&host, "POST", "", &waiting_record(3));
+    read_until(&mut posted, "id: ");
+    drop(posted);
+    std::thread::sleep(PAST_IDLE);
+    assert_eq!(ping(&host, 4), 404);
+}
+
+// A stream resumed with Last-Event-ID counts as open: the session outlives
+// the idle bound while it lives and the call's answer arrives on it. Once
+// it is dropped the idle time starts.
+#[test]
+fn a_resumed_stream_keeps_its_session_until_it_is_dropped() {
+    let (host, _held) = busy_host();
+    let mut posted = send(&host, "POST", "", &waiting_record(3));
+    let primed = read_until(&mut posted, "\n\n");
+    let event = primed
+        .lines()
+        .find_map(|line| line.strip_prefix("id: "))
+        .unwrap_or_else(|| panic!("no event id: {primed}"))
+        .trim()
+        .to_owned();
+    drop(posted);
+    let mut resumed = send(&host, "GET", &format!("Last-Event-ID: {event}\r\n"), "");
+    let answered = read_until(&mut resumed, "kept its write turn on the store for");
+    assert!(answered.contains("\"id\":3"), "{answered}");
+    drop(resumed);
+    // The idle time counts from the drop, not from the session's last
+    // request, which was over 3 s ago.
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(notify(&host), 202, "closed as the stream was dropped");
+    std::thread::sleep(PAST_IDLE);
+    assert_eq!(ping(&host, 4), 404);
 }
 
 #[test]
