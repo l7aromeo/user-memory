@@ -375,12 +375,20 @@ fn an_action_below_its_latest_major_needs_a_reason() {
 /// here.
 #[cfg(unix)]
 fn rust_stable(pinned_lines: &str, stable: &str) -> (bool, String) {
+    rust_stable_after(pinned_lines, stable, "")
+}
+
+/// [`rust_stable`] with `rest` after the channel's `[pkg.rust]` section, as
+/// the real manifest's other packages and targets follow it. The script
+/// runs with SIGPIPE ignored, as GitHub's runners start it.
+#[cfg(unix)]
+fn rust_stable_after(pinned_lines: &str, stable: &str, rest: &str) -> (bool, String) {
     let dir = tempfile::tempdir().unwrap();
     let channel = dir.path().join("channel-rust-stable.toml");
     fs::write(
         &channel,
         format!(
-            "manifest-version = \"2\"\n\n[pkg.cargo]\nversion = \"0.100.0 (aaa 2026-10-13)\"\n\n[pkg.rust]\nversion = \"{stable} (58cf8f9c3 2026-10-13)\"\n"
+            "manifest-version = \"2\"\n\n[pkg.cargo]\nversion = \"0.100.0 (aaa 2026-10-13)\"\n\n[pkg.rust]\nversion = \"{stable} (58cf8f9c3 2026-10-13)\"\n{rest}"
         ),
     )
     .unwrap();
@@ -391,6 +399,7 @@ fn rust_stable(pinned_lines: &str, stable: &str) -> (bool, String) {
     )
     .unwrap();
     let out = std::process::Command::new("sh")
+        .args(["-c", "trap '' PIPE; exec sh \"$0\""])
         .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/check-rust-stable"))
         .env(
             "RUST_STABLE_CHANNEL",
@@ -431,6 +440,27 @@ fn a_release_needs_the_current_stable_rust_or_a_reason() {
     assert!(!ok, "a reason must say something: {text}");
     let (ok, text) = rust_stable("ARG RUST_IMAGE=rust:1.100.0-bookworm", "1.99.1");
     assert!(ok, "a newer pin is fine: {text}");
+}
+
+/// Target sections after the channel's `[pkg.rust]`: about 900 KB, past a
+/// pipe's buffer (64 KiB on Linux and macOS), as the real manifest is.
+#[cfg(unix)]
+const MANIFEST_TARGETS: usize = 10_000;
+
+// The script reads the stable version from the start of a large manifest.
+// Stopping there left the shell's printf writing to a closed pipe: where
+// SIGPIPE is ignored it printed "printf: I/O error" before the answer.
+#[cfg(unix)]
+#[test]
+fn the_stable_check_reads_a_large_manifest_without_an_error() {
+    let rest: String = (0..MANIFEST_TARGETS)
+        .map(|n| {
+            format!("\n[pkg.rust.target.t{n}]\navailable = true\nurl = \"https://example.invalid/rust-{n}.tar.gz\"\n")
+        })
+        .collect();
+    let (ok, text) = rust_stable_after("ARG RUST_IMAGE=rust:1.99.1-bookworm", "1.99.1", &rest);
+    assert!(ok, "{text}");
+    assert_eq!(text, "Rust 1.99.1 is current (stable is 1.99.1).\n");
 }
 
 /// The current-stable check reads the network, so only a release runs it:

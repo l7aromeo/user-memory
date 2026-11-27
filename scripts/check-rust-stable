@@ -23,11 +23,14 @@ fail() {
 pinned=$(sed -n 's/^ARG RUST_IMAGE=rust:\([0-9][0-9.]*\)-.*/\1/p' "$dockerfile")
 [ -n "$pinned" ] || fail "$dockerfile names no RUST_IMAGE=rust:<version>-…"
 # The manifest's [pkg.rust] section holds version = "1.99.1 (<hash> <date>)".
+# awk reads the whole manifest, about 1 MB: stopping at the version would
+# leave printf writing to a closed pipe, an error where SIGPIPE is ignored,
+# as on GitHub's runners.
 manifest=$(curl -fsSL "$channel") || fail "cannot read the stable channel $channel"
 stable=$(printf '%s\n' "$manifest" |
     awk '/^\[pkg\.rust\]$/ { section = 1; next }
          /^\[/ { section = 0 }
-         section && /^version = "/ { sub(/^version = "/, ""); sub(/ .*/, ""); print; exit }')
+         section && !found && /^version = "/ { sub(/^version = "/, ""); sub(/ .*/, ""); print; found = 1 }')
 [ -n "$stable" ] || fail "$channel names no stable Rust version"
 
 # The newer of the two, comparing each dotted part as a number.
