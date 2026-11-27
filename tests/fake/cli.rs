@@ -775,8 +775,16 @@ fn gh(calls: &Path, args: &[String]) -> u8 {
 /// says so, then runs the real git that `git.real` names, with the same
 /// standard streams, and exits with its code. `git.delay` holds the
 /// milliseconds, then optionally an argument: only a call naming it waits.
+/// `git.fail` holds a word: a call with an argument containing it fails at
+/// once, as git does in a repository it refuses to read.
 fn git(exe: &Path, args: &[String]) -> u8 {
     log(&exe.with_file_name("git.calls"), args);
+    if let Ok(word) = fs::read_to_string(exe.with_file_name("git.fail"))
+        && args.iter().any(|arg| arg.contains(word.trim()))
+    {
+        eprintln!("fatal: detected dubious ownership in repository");
+        return 128;
+    }
     if let Ok(delay) = fs::read_to_string(exe.with_file_name("git.delay")) {
         let mut words = delay.split_whitespace();
         let millis: u64 = words.next().unwrap().parse().unwrap();

@@ -122,6 +122,22 @@ impl Home {
             .count()
     }
 
+    /// The git calls the hooks made after the first `before`, each by its
+    /// arguments after the folder.
+    fn calls_after(&self, before: usize) -> Vec<String> {
+        fs::read_to_string(self.log())
+            .unwrap_or_default()
+            .lines()
+            .skip(before)
+            .map(|line| {
+                ["rev-parse", "config", "cat-file", "for-each-ref"]
+                    .iter()
+                    .find_map(|verb| line.find(verb).map(|at| line[at..].to_owned()))
+                    .unwrap_or_else(|| line.to_owned())
+            })
+            .collect()
+    }
+
     /// The lookups the hooks made: `cat-file` calls.
     fn lookups(&self) -> usize {
         fs::read_to_string(self.log())
@@ -999,4 +1015,59 @@ fn a_tool_hook_leaves_a_folder_to_git_when_git_dir_is_set() {
     home.ran("s1", &sub, "cargo build");
     assert_eq!(home.git_calls(), before, "no git in a tool hook");
     assert_eq!(home.end(&id), None);
+}
+
+#[test]
+fn a_prompt_asks_git_for_its_folder_once() {
+    let home = Home::new();
+    let checkout = home.checkout();
+    let sub = checkout.join("src");
+    fs::create_dir(&sub).unwrap();
+    home.start("s1", &checkout);
+    // The prompt reads its folder again each time: its root, then its
+    // remote for the project key. The root also finds its list file.
+    let once = [
+        "rev-parse --show-toplevel",
+        "config --get remote.origin.url",
+    ];
+    for (what, folder) in [
+        ("start's folder", &checkout),
+        ("start's folder again", &checkout),
+        ("a folder the session never saw", &sub),
+        ("that folder again", &sub),
+    ] {
+        let before = home.git_calls();
+        home.prompted("s1", folder, "go on");
+        assert_eq!(home.calls_after(before), once, "{what}");
+    }
+}
+
+#[test]
+fn a_listed_folder_git_cannot_read_is_named_with_git_s_complaint() {
+    let home = Home::new();
+    let checkout = home.checkout();
+    let listed = home.dir.path().join("refusedweb");
+    home.repository(&listed, "git@github.com:example/web.git");
+    fs::write(checkout.join(".user-memory"), "@../refusedweb\n").unwrap();
+    fs::write(home.shim().join("git.fail"), "refusedweb").unwrap();
+    let shown = home.hook(
+        "session-start",
+        &checkout,
+        &json!({"session_id": "s1", "cwd": checkout, "hook_event_name": "SessionStart", "source": "startup"}),
+    );
+    let note = shown
+        .lines()
+        .find(|line| line.starts_with("Raise with the user once this session: "))
+        .unwrap_or_else(|| panic!("{shown}"));
+    assert!(
+        note.contains("@../refusedweb: no project (git rev-parse --show-toplevel failed in ")
+            && note.contains(": fatal: detected dubious ownership in repository)"),
+        "{note}"
+    );
+    let asked = fs::read_to_string(home.log())
+        .unwrap()
+        .lines()
+        .filter(|line| line.contains("refusedweb"))
+        .count();
+    assert_eq!(asked, 1, "git is asked about the folder once");
 }
