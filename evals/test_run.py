@@ -155,6 +155,32 @@ class Escalation(unittest.TestCase):
         self.assertFalse(passed)
 
 
+class HookEvents(unittest.TestCase):
+    """The hooks the rehearsal expects in a trial are the ones setup
+    writes: `HOOKS` in src/setup/hooks.rs, each hook's event and whether
+    Codex gets it."""
+
+    def setup_hooks(self):
+        source = (HERE.parent / "src" / "setup" / "hooks.rs").read_text()
+        listed = re.search(r"pub\(super\) const HOOKS: \[Hook; \d+\] = \[(.*?)\];", source, re.S)
+        self.assertIsNotNone(listed, "no HOOKS array in src/setup/hooks.rs")
+        hooks = []
+        for name in re.findall(r"[A-Z][A-Z_]*", listed.group(1)):
+            body = re.search(rf"const {name}: Hook = Hook \{{(.*?)\n\}};", source, re.S)
+            self.assertIsNotNone(body, f"no Hook constant {name} in src/setup/hooks.rs")
+            event = re.search(r'\bevent: "(\w+)"', body.group(1)).group(1)
+            codex = re.search(r"\bcodex: (true|false)", body.group(1)).group(1) == "true"
+            hooks.append((event, codex))
+        return hooks
+
+    def test_the_rehearsal_expects_the_hooks_setup_writes(self):
+        hooks = self.setup_hooks()
+        self.assertEqual(run.CLAUDE_HOOK_EVENTS, sorted({event for event, _ in hooks}))
+        self.assertEqual(sorted(run.CODEX_HOOK_EVENTS),
+                         sorted({event[0].lower() + event[1:] for event, codex in hooks if codex}))
+        self.assertEqual(run.CODEX_HOOK_HANDLERS, sum(codex for _, codex in hooks))
+
+
 class Cleanup(unittest.TestCase):
     def test_a_codex_session_that_fails_to_start_leaves_no_login(self):
         home = Path(tempfile.mkdtemp())
