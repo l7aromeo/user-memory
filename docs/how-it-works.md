@@ -478,8 +478,8 @@ Found by a search:
   on it". On a memory server's store each line names the id alone.
 - **The store as it is now:** a memory changed since prints its current
   text, a superseded one the memory in force that replaced it, and a
-  forgotten or stale one nothing. A changed rule never comes back in its
-  old form.
+  forgotten or stale one, or one whose condition ended, nothing. A
+  changed rule never comes back in its old form.
 - **Shown again:** what it prints counts as pushed in the new stretch, so
   the next steps do not push it again, and it is kept for the next
   compaction.

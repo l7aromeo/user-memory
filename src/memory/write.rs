@@ -706,7 +706,7 @@ const CONFIRM_TARGET: &str = "confirms must name an active explicit memory, or a
 const CONFIRM_ENDED: &str = "That memory's condition has ended; to put it in force again, update it with the user's yes, giving a new until or clearing it";
 
 /// Whether memory `id` is in force: in `live_memories`.
-fn is_live(conn: &Connection, id: Uuid) -> Result<bool> {
+pub(super) fn is_live(conn: &Connection, id: Uuid) -> Result<bool> {
     Ok(conn.query_row(
         "SELECT EXISTS (SELECT 1 FROM live_memories WHERE id=?1)",
         [id.to_string()],

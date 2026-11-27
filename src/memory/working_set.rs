@@ -3,10 +3,12 @@
 //! was held back by and was pushed, each kind newest first, then those a
 //! search found, as pointers. A memory changed since prints its current
 //! text, a superseded one the memory in force that replaced it, and a
-//! forgotten or stale one nothing, so a changed rule never comes back in
-//! its old form.
+//! forgotten or stale one, or one whose condition ended, nothing, so a
+//! changed rule never comes back in its old form.
 
-use super::{FitUnit, Memory, ids::SHORT_ID, push::label, read::passage, schema::get};
+use super::{
+    FitUnit, Memory, ids::SHORT_ID, push::label, read::passage, schema::get, write::is_live,
+};
 use anyhow::Result;
 use rusqlite::Connection;
 use std::collections::HashSet;
@@ -193,9 +195,10 @@ fn fit(memories: Vec<(Use, Vec<(Printed, String)>)>, room: usize, unit: FitUnit)
     restored
 }
 
-/// The memory in force that `id` stands for now: itself while it is
-/// confirmed or tentative, the memory that superseded it when that one is,
-/// following at most [`SUPERSEDE_HOPS`]; none when forgotten or stale.
+/// The memory in force that `id` stands for now: itself while it is in
+/// `live_memories`, the memory that superseded it when that one is,
+/// following at most [`SUPERSEDE_HOPS`]; none when forgotten, stale or
+/// ended by its condition.
 fn in_force(conn: &Connection, id: &str) -> Result<Option<Memory>> {
     let Ok(mut id) = Uuid::parse_str(id) else {
         return Ok(None);
@@ -204,8 +207,10 @@ fn in_force(conn: &Connection, id: &str) -> Result<Option<Memory>> {
         let Some(memory) = get(conn, id)? else {
             return Ok(None);
         };
+        if is_live(conn, id)? {
+            return Ok(Some(memory));
+        }
         match (memory.status.as_str(), memory.superseded_by) {
-            ("confirmed" | "tentative", _) => return Ok(Some(memory)),
             ("superseded", Some(next)) => id = next,
             _ => return Ok(None),
         }
