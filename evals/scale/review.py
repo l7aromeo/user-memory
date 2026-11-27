@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Review speed on large stores, against the budgets of issue #236.
+"""Review speed on large stores, against the budgets of issues #236 and #245.
 
 Builds throwaway stores of synthetic memories (10,000 and 50,000 unless
 told otherwise) as the search budget does, makes one in a hundred a light
@@ -7,6 +7,9 @@ rewording of another so review has duplicates to find, and times `review`
 as one call to a long-running `user-memory serve`, and as a command-line
 process for reference: keyword-only, then with a current vector of each
 length given for every memory, a hundredth of them copies of another's.
+With vectors it times three cases: every pair compared (the kept pairs
+forgotten first), the kept pairs with nothing changed, and the kept pairs
+after `SAVED` vectors were saved again.
 Prints each median and exits with status 1 if one is over its budget.
 Nothing here touches the user's own store or settings.
 
@@ -56,6 +59,32 @@ VECTOR_BUDGET_S = {
     (50_000, 1024): 53.0,
     (50_000, 2560): 116.0,
 }
+# Budgets with vectors for a review from kept pairs (#245), by (store size,
+# vector length), in seconds: with nothing changed since the last review,
+# and after `SAVED` vectors were saved. The macOS runner's median times 1.5,
+# rounded up, as above. Most of a review with nothing changed is reading the
+# memories and their vectors; the saved vectors add each one compared
+# against every other.
+KEPT_BUDGET_S = {
+    (10_000, 1024): 0.4,
+    (10_000, 2560): 0.4,
+    (50_000, 1024): 4.3,
+    (50_000, 2560): 4.4,
+}
+SAVED_BUDGET_S = {
+    (10_000, 1024): 0.5,
+    (10_000, 2560): 0.7,
+    (50_000, 1024): 5.5,
+    (50_000, 2560): 9.8,
+}
+# Vectors saved again before each review of the "saved" case: a busy day's
+# records and updates on a large store.
+SAVED = 100
+# The cases timed with vectors, each with its budgets, in the order run:
+# the kept pairs are forgotten before each review of the first.
+CASES = {"every pair": VECTOR_BUDGET_S, "kept": KEPT_BUDGET_S, "saved": SAVED_BUDGET_S}
+CASE_NAMES = {"every pair": "every pair compared", "kept": "kept pairs, nothing changed",
+              "saved": f"kept pairs, {SAVED} vectors saved"}
 
 # Timed calls per case; the first of each is a warm-up, not counted.
 RUNS = 3
@@ -121,13 +150,28 @@ def add_vectors(db, dimensions, copies):
     conn.close()
 
 
+def ready(db, case):
+    """Sets the store up for one timed review of `case` (see `CASES`): the
+    kept pairs forgotten, so it compares every pair; nothing changed; or
+    `SAVED` vectors saved again."""
+    conn = sqlite3.connect(db)
+    if case == "every pair":
+        conn.execute("DELETE FROM memory_pairs_state")
+    elif case == "saved":
+        conn.execute("UPDATE memory_vectors SET source=source WHERE rowid IN "
+                     "(SELECT rowid FROM memory_vectors ORDER BY random() LIMIT ?)", (SAVED,))
+    conn.commit()
+    conn.close()
+
+
 def median_s(samples):
     return round(statistics.median(samples[1:]), 2)
 
 
-def time_cli(binary, env):
+def time_cli(binary, env, before=lambda: None):
     samples = []
     for _ in range(RUNS + 1):
+        before()
         started = time.perf_counter()
         subprocess.run([str(binary), "review", "--max-groups", "20"], env=env, check=True,
                        capture_output=True)
@@ -135,12 +179,14 @@ def time_cli(binary, env):
     return median_s(samples)
 
 
-def time_server(binary, env):
-    """The median review call's time on one `serve`, and its group count."""
+def time_server(binary, env, before=lambda: None):
+    """The median review call's time on one `serve`, and its group count;
+    `before` runs ahead of each call, untimed."""
     server = scale.Server(binary, env)
     try:
         samples = []
         for _ in range(RUNS + 1):
+            before()
             started = time.perf_counter()
             reply = server.call("tools/call", {"name": "review", "arguments": {"max_groups": 20}})
             samples.append(time.perf_counter() - started)
@@ -184,13 +230,16 @@ def main():
                 semantic = {**env, "USER_MEMORY_EMBED_URL": "http://127.0.0.1:9/v1/embeddings",
                             "USER_MEMORY_EMBED_ALLOW_HTTP": "1", "USER_MEMORY_EMBED_MODEL": MODEL,
                             "USER_MEMORY_EMBED_DIMENSIONS": str(dimensions)}
-                served, groups = time_server(args.binary, semantic)
-                cli = time_cli(args.binary, semantic)
-                print(f"{count:,} memories, {dimensions} dimensions: server {served} s, command line {cli} s, "
-                      f"{groups} groups", flush=True)
-                budget = VECTOR_BUDGET_S.get((count, dimensions))
-                if budget is not None and served > budget:
-                    over.append(f"{count:,} at {dimensions} dimensions: {served} s > {budget} s")
+                for case, budgets in CASES.items():
+                    before = lambda case=case: ready(db, case)
+                    served, groups = time_server(args.binary, semantic, before)
+                    cli = time_cli(args.binary, semantic, before)
+                    print(f"{count:,} memories, {dimensions} dimensions, {CASE_NAMES[case]}: server {served} s, "
+                          f"command line {cli} s, {groups} groups", flush=True)
+                    budget = budgets.get((count, dimensions))
+                    if budget is not None and served > budget:
+                        over.append(f"{count:,} at {dimensions} dimensions, {CASE_NAMES[case]}: "
+                                    f"{served} s > {budget} s")
     if over:
         print("Over budget:\n  " + "\n  ".join(over))
         sys.exit(1)

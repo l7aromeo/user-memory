@@ -657,13 +657,18 @@ find. It then times one `review` call on a long-running `serve`, and a
 `review` command for reference, keyword-only and again with a current
 vector for every memory at 1,024 and 2,560 dimensions (`--dimensions N …`).
 The vectors are unique, except one in a hundred that copies the reworded
-memory's original. It prints each median and fails when a server call is
-over its budget in `evals/scale/review.py`.
+memory's original. With vectors it times three cases: every pair compared,
+with the kept pairs forgotten before each call; the kept pairs with nothing
+changed; and the kept pairs after 100 vectors were saved again. It prints
+each median and fails when a server call is over its budget in
+`evals/scale/review.py`.
 
 Review compares memories by words through an index that finds every pair
-that can overlap enough, and compares every pair of vectors, since no exact
-method skips pairs at these lengths. So its cost with vectors grows with
-the square of the store's size times the vector length. Run it after a
+that can overlap enough. It compares vectors pair by pair, since no exact
+method skips pairs at these lengths, and keeps the pairs near a cutoff in
+the store, so a later review compares only the vectors saved since. A
+review that compares every pair, as the first after an upgrade does, grows
+with the square of the store's size times the vector length. Run it after a
 change to review or the similarity signals, and report what it printed.
 Local timings carry whatever else the machine runs; the budgets hold on
 GitHub's macOS runner.
