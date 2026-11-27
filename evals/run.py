@@ -638,12 +638,13 @@ def user_memory_hooks(sandbox):
             if "user-memory" in hook.get("command", "")]
 
 
-# The events setup gives user-memory's hooks in each client: Claude Code's
-# settings keys, and Codex's events as `hooks/list` names them, with how
-# many handlers Codex lists (two on session start: the index and, on
-# compact, the working set).
-CLAUDE_HOOK_EVENTS = ["PostToolUse", "PostToolUseFailure", "PreToolUse", "SessionStart",
-                      "SubagentStart", "UserPromptSubmit"]
+# The events setup gives user-memory's hooks in each client, as `HOOKS` in
+# src/setup/hooks.rs lists them (evals/test_run.py checks they match):
+# Claude Code's settings keys, sorted, and Codex's events as `hooks/list`
+# names them, with how many handlers Codex lists (two on session start: the
+# index and, on compact, the working set).
+CLAUDE_HOOK_EVENTS = ["PostToolUse", "PostToolUseFailure", "PreCompact", "PreToolUse",
+                      "SessionStart", "SubagentStart", "UserPromptSubmit"]
 CODEX_HOOK_EVENTS = ["postToolUse", "preToolUse", "sessionStart", "subagentStart",
                      "userPromptSubmit"]
 CODEX_HOOK_HANDLERS = 6
