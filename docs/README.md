@@ -48,3 +48,4 @@
 
 - [Development](dev/development.md): build, test and run from a checkout.
 - [Releasing](dev/releasing.md): how a release is made.
+- [Not planned for now](dev/not-planned.md): features set aside, and why.
