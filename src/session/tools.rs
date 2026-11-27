@@ -32,7 +32,10 @@ use std::{
 /// #175), from its start: a refresh past it renames nothing. A refresh
 /// costs 5 to 12 ms on macOS at 10,000 memories, process start included;
 /// the rest is room for Windows' slower process start and file scanning,
-/// and a loaded machine. A hold has its own, [`HOLD_LIMIT`].
+/// and a loaded machine. A hold has its own, [`HOLD_LIMIT`]. The delivery
+/// bench's cost check (evals/delivery/run.py) holds to it the time a tool
+/// hook adds over a start of the same hook that returns at once, since the
+/// limit starts in the hook; the start has a limit of its own there.
 pub(crate) const TOOL_HOOK_LIMIT: Duration = Duration::from_millis(100);
 
 /// The most the pre-tool hook spends deciding a hold (#118, #241), from its
@@ -41,7 +44,9 @@ pub(crate) const TOOL_HOOK_LIMIT: Duration = Duration::from_millis(100);
 /// (setup gives it 5 s), so a hold that comes late costs less than one that
 /// never comes; on Windows x64 CI the hook's 95th percentile was 107 ms
 /// with the fold before the hold. 250 ms is about twice that, and a wait
-/// before a command that is hardly felt.
+/// before a command that is hardly felt. The delivery bench's cost check
+/// holds to it the time the hook adds over a start that returns at once, as
+/// for [`TOOL_HOOK_LIMIT`].
 pub(crate) const HOLD_LIMIT: Duration = Duration::from_millis(250);
 
 /// The tools Claude Code's pre-tool hook acts on: its shells (`Bash`,

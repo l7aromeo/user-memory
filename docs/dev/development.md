@@ -771,17 +771,28 @@ slows down between rounds moves none of them; a set whose middle half is
 over 200 points wide, a runner whose speed swung within its rounds, is
 timed once more, and a second one as wide prints `too noisy to judge`
 instead of failing); a tool hook that finds a
-change, process start included, once pushing nothing and once pushing the
+change, once pushing nothing and once pushing the
 memory its command names (budget: `TOOL_HOOK_LIMIT`); the tool hook in a
 session whose project waits for a tag, in a folder the session never saw,
 pushing the memory its command names, then the tag check, and the same
 after a ref change, when the check looks the tag up with git (budget: two
 `TOOL_HOOK_LIMIT`s each, the push's and the check's own after it); the
 pre-tool hook holding back the command a memory recorded just before
-names, its median and 95th percentile, and each round's time (budget:
-`HOLD_LIMIT`; a round that holds nothing fails the run, with or without
-`--check-cost`); the
-prompt hook pushing the memory its words name (budget: `PROMPT_LIMIT`);
+names (budget: `HOLD_LIMIT`; a round that holds nothing within it fails
+the run, with or without `--check-cost`); the
+prompt hook pushing the memory its words name (budget: `PROMPT_LIMIT`).
+Each of these hook runs is timed in a pair with a start of the same hook
+whose payload names no session, which returns before it reads the store,
+back to back and in an order that alternates from run to run. A line is
+judged on the median time the hook adds over its start, since each
+budget starts in the hook, and every pair is printed. A line whose middle
+half is wider than `HOOK_NOISY_SPREAD` of its budget, or one of whose runs
+pushed nothing past its budget, where the hook stops by design, is timed
+once more in a fresh home on a copy of the store; a second set as wide,
+or with such a run, prints `too noisy to judge` instead of failing, and a
+run that pushed nothing within its budget fails. The start itself, its
+median over every line's pairs, has its own budget, `START_LIMIT_MS`,
+which is what catches a slower start. It also times
 what a forget adds when three scopes' files hold the memory (budget:
 400 ms);
 whether the prompt hook builds a missing base within `PROMPT_LIMIT`; and,

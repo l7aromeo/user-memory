@@ -563,6 +563,129 @@ class SessionJudged(unittest.TestCase):
         self.assertFalse(noisy)
 
 
+def added(times, start=40.0):
+    """A hook line's pairs: each run adds `times[n]` ms over a `start` ms
+    start."""
+    return [(start + took, start) for took in times]
+
+
+# Ten runs adding about 12 ms over their start, steady.
+STEADY = added([11.0, 12.0, 13.0, 12.0, 11.5, 12.5, 12.0, 13.0, 11.0, 12.0])
+# Ten runs adding from nothing to 120 ms: a runner whose speed swung
+# within the pairs themselves.
+SPREAD = added([0.0, 5.0, 10.0, 20.0, 40.0, 60.0, 80.0, 100.0, 110.0, 120.0])
+
+
+class HookJudged(unittest.TestCase):
+    """`hooks_judged` and `hook_verdict` (#284): a hook line is judged on
+    what the hook adds over a start that returns at once, a set too spread
+    to judge is timed once more, and a second as spread is too noisy, not
+    a failure."""
+
+    def judged(self, *sets, line="tool", limit=100):
+        taken = [{line: timed if isinstance(timed, dict) else run.hook_set(timed)}
+                 for timed in sets]
+        asked = []
+
+        def take(again):
+            asked.append(again)
+            return taken.pop(0)
+
+        judged = run.hooks_judged(take, {line: limit})
+        return asked, judged[line], run.hook_verdict(judged[line], limit)
+
+    def test_a_slowdown_added_to_every_run_fails(self):
+        asked, sets, verdict = self.judged([(took + 100.0, base) for took, base in STEADY])
+        self.assertEqual(asked, [False])
+        self.assertGreater(verdict["added"], 100)
+        self.assertFalse(verdict["noisy"])
+        self.assertTrue(verdict["over"])
+
+    def test_a_slow_stretch_on_both_of_its_pairs_passes(self):
+        # Six runs in a stretch 80 ms slower, hook and start alike: the
+        # hooks' median is over the limit, what they add is not.
+        slow = [(took + 80.0, base + 80.0) if 2 <= n < 8 else (took, base)
+                for n, (took, base) in enumerate(STEADY)]
+        asked, sets, verdict = self.judged(slow)
+        self.assertEqual(asked, [False])
+        self.assertGreater(verdict["hook"], 100, "the hook's own median would fail")
+        self.assertAlmostEqual(verdict["added"], 12.0)
+        self.assertFalse(verdict["over"])
+
+    def test_a_spread_set_is_timed_again_and_the_second_judged(self):
+        asked, sets, verdict = self.judged(SPREAD, STEADY)
+        self.assertEqual(asked, [False, True])
+        self.assertEqual(len(sets), 2)
+        self.assertAlmostEqual(verdict["added"], 12.0)
+        self.assertFalse(verdict["noisy"])
+        self.assertFalse(verdict["over"])
+
+    def test_a_run_out_of_its_time_is_timed_again_and_the_second_judged(self):
+        asked, sets, verdict = self.judged(run.hook_set(STEADY[1:], [(140.0, 40.0)]), STEADY)
+        self.assertEqual(asked, [False, True])
+        self.assertAlmostEqual(verdict["added"], 12.0)
+        self.assertFalse(verdict["noisy"])
+        self.assertFalse(verdict["over"])
+
+    def test_runs_out_of_their_time_twice_are_too_noisy_and_not_failed(self):
+        ran_out = run.hook_set(STEADY[1:], [(140.0, 40.0)])
+        asked, sets, verdict = self.judged(ran_out, ran_out)
+        self.assertEqual(asked, [False, True])
+        self.assertTrue(verdict["noisy"])
+        self.assertFalse(verdict["over"])
+
+    def test_two_spread_sets_are_too_noisy_to_judge_and_not_failed(self):
+        over = added([0.0, 5.0, 10.0, 20.0, 105.0, 110.0, 160.0, 170.0, 180.0, 190.0])
+        asked, sets, verdict = self.judged(over, over)
+        self.assertEqual(asked, [False, True])
+        self.assertGreater(verdict["added"], 100, "a judged set would fail")
+        self.assertTrue(verdict["noisy"])
+        self.assertFalse(verdict["over"])
+
+    def test_only_a_line_too_spread_takes_its_second_set(self):
+        taken = [{"tool": run.hook_set(STEADY), "push": run.hook_set(SPREAD)},
+                 {"tool": run.hook_set(SPREAD), "push": run.hook_set(STEADY)}]
+        sets = run.hooks_judged(lambda again: taken.pop(0), {"tool": 100, "push": 100})
+        self.assertEqual([len(sets["tool"]), len(sets["push"])], [1, 2])
+        self.assertEqual(sets["tool"], [run.hook_set(STEADY)])
+        self.assertEqual(sets["push"][-1], run.hook_set(STEADY))
+
+    def test_a_slower_start_passes_the_hook_lines_and_fails_the_start_line(self):
+        # Every start, and so every hook run, 100 ms slower: what the hooks
+        # add is unchanged, and the start line is what catches it.
+        slower = {line: [run.hook_set([(took + 100.0, base + 100.0) for took, base in STEADY])]
+                  for line in run.HOOK_LINES}
+        limits = run.hook_limits(100, 250, 1000)
+        for line in run.HOOK_LINES:
+            self.assertFalse(run.hook_verdict(slower[line], limits[line])["over"], line)
+        self.assertEqual(run.start_median(slower), 140.0)
+        self.assertGreater(run.start_median(slower), run.START_LIMIT_MS)
+        steady = {line: [run.hook_set(STEADY)] for line in run.HOOK_LINES}
+        self.assertEqual(run.start_median(steady), 40.0)
+        self.assertLess(run.start_median(steady), run.START_LIMIT_MS)
+
+    def test_a_run_that_names_nothing_ran_out_of_time_only_at_or_past_the_limit(self):
+        missed = []
+        self.assertIs(run.push_checked("pushes abc12345", "abc12345", 60.0, 40.0, 100, missed), True)
+        self.assertIsNone(run.push_checked("", "abc12345", 139.9, 40.0, 100, missed),
+                          "a push that should have come within the limit")
+        self.assertEqual(missed, [])
+        self.assertIs(run.push_checked("", "abc12345", 140.0, 40.0, 100, missed), False)
+        self.assertIs(run.push_checked("other", "abc12345", 400.0, 40.0, 100, missed), False)
+        self.assertEqual(missed, [(140.0, 40.0), (400.0, 40.0)])
+
+    def test_a_pair_alternates_which_runs_first(self):
+        calls = []
+
+        def hook_said(event, session, cwd, **extra):
+            calls.append(session)
+            return (1.0, "out") if session else (0.5, "")
+
+        for n in range(4):
+            self.assertEqual(run.pair(hook_said, n, "PostToolUse", "s0", "."), (1.0, "out", 0.5))
+        self.assertEqual(calls, [None, "s0", "s0", None, None, "s0", "s0", None])
+
+
 class SessionRounds(unittest.TestCase):
     def test_the_order_rotates_and_a_building_start_finds_no_base(self):
         steps, saved = [], run.bench

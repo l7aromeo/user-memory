@@ -116,6 +116,33 @@ FORGET_LEFT_POLLS = 3
 # Tool hooks timed after a change each, and forgets timed with and without
 # the files, for the cost.
 HOOK_RUNS = 11
+# How wide the middle half of a hook line's added times may be, high end
+# less low end, as a share of the line's limit, for the line to be judged
+# (#284). Each hook run is timed in a pair with a start of the same hook
+# that returns at once, and the line is judged on what the hook adds, so a
+# runner's speed during the pair falls on both. A wider middle half means
+# the runner's speed swung across the pairs: the hook series is timed once
+# more, and a second set as wide is reported too noisy to judge, not
+# failed. #284's calibration (runs 46065157064 and 46066921245, 71 sets on
+# the four CI runners, 426 line-sets) was at most 0.175 wide (Windows x64,
+# the tool hook pushing nothing), 0.095 at the 99th percentile. Twice the
+# widest leaves that room, and a series half of whose runs a runner slowed
+# as 296fdb5's Windows x64 run (about 43 ms against 110 ms added, on a
+# 100 ms limit) is about 0.67 wide.
+HOOK_NOISY_SPREAD = 0.35
+# The most a hook's start that returns at once may take, its median over
+# every hook line's pairs, process start included (#284). The hook lines
+# are judged on the time a hook adds over this start, so this line is what
+# still catches a slower start itself, such as a bigger binary or new work
+# before the hook reads its session; the lookups time the bench binary,
+# not this one. In #284's calibration (run 46066921245) the start was 2.5
+# ms on Ubuntu, 9.4 on macOS, 13.3 on Windows x64 and 14.8 on Windows arm64
+# at the median of each runner's sets, 16.9 ms at most. It is timed whole,
+# as the hook lines once were, so it gets about three times the slowest.
+START_LIMIT_MS = 50
+# The hook lines the cost check times in pairs, by the name their pairs
+# are kept under.
+HOOK_LINES = ("tool", "push", "tagged", "looked_up", "hold", "prompted")
 FORGETS = 5
 # The store's global memories the cost phase forgets: each forget is timed
 # with the delivery files and then without them, on another memory.
@@ -460,6 +487,21 @@ def rust_ms(path, name):
     return value * 1000 if unit == "secs" else value
 
 
+def pair(hook_said, n, event, session, cwd, **extra):
+    """Run `n` of a hook line through `hook_said`: the hook's time and
+    output, and the time of the same hook started with no session, which
+    returns at once, back to back. The start comes first on even runs and
+    the hook first on odd ones, so a runner's speed in either place falls
+    on both."""
+    if n % 2:
+        took, out = hook_said(event, session, cwd, **extra)
+        base = hook_said(event, None, cwd, **extra)[0]
+    else:
+        base = hook_said(event, None, cwd, **extra)[0]
+        took, out = hook_said(event, session, cwd, **extra)
+    return took, out, base
+
+
 def hook_env(home):
     """`sandbox(home)` with the per-user folders Windows reads in it too, so
     the hooks' state stays in the throwaway home."""
@@ -469,16 +511,20 @@ def hook_env(home):
     return env
 
 
-def upkeep(binary, bench_binary, db, folder, drawn):
+def upkeep(binary, bench_binary, db, folder, drawn, limits, hooks_only=False):
     """#175's, #117's and #118's costs through the real binary on the store
-    at `db` in `folder`, from process start: a tool hook that finds a change,
-    pushing nothing and pushing the memory its command names; the pre-tool
-    hook holding back the command a memory recorded just before names,
-    with the rounds that held nothing counted; the prompt hook pushing
-    the memory its words name; what a forget adds when three
-    scopes' files hold the memory; and the prompt hook building a missing
-    base. Returns their medians by name, whether the prompt hook built its
-    base, and the sets of session start's rounds timed (see `session_judged`)."""
+    at `db` in `folder`: a tool hook that finds a change, pushing nothing
+    and pushing the memory its command names; the pre-tool hook holding
+    back the command a memory recorded just before names, with the rounds
+    that held nothing counted; the prompt hook pushing the memory its words
+    name; what a forget adds when three scopes' files hold the memory; and
+    the prompt hook building a missing base. Each hook run is timed from
+    process start in a pair with a start of the same hook that returns at
+    once (`paired`). Returns each hook line's set under `sets` (see
+    `HOOK_LINES` and `hook_set`), judged against its limit in `limits`, the
+    forgets' median, whether the prompt hook built its base, and the sets
+    of session start's rounds timed (see `session_judged`). With
+    `hooks_only`, only the hook lines, as a set timed again needs them."""
     home = folder / "home"
     env = hook_env(home)
     delivery = home / ".local/state/user-memory/delivery"
@@ -496,13 +542,20 @@ def upkeep(binary, bench_binary, db, folder, drawn):
         return said(*args, payload=payload)[0]
 
     def hook_said(event, session, cwd, **extra):
+        """A hook's time and output; with no `session`, its payload names
+        none, so the hook returns before it reads its session or the store."""
         name = {"SessionStart": "session-start", "UserPromptSubmit": "prompt-submit",
                 "PreToolUse": "pre-tool-use", "PostToolUse": "post-tool-use"}[event]
-        return said(name, "--client", "claude",
-                    payload={"session_id": session, "cwd": str(cwd), "hook_event_name": event, **extra})
+        payload = {"cwd": str(cwd), "hook_event_name": event, **extra}
+        if session is not None:
+            payload["session_id"] = session
+        return said(name, "--client", "claude", payload=payload)
 
     def hook(event, session, cwd, **extra):
         return hook_said(event, session, cwd, **extra)[0]
+
+    def paired(n, event, session, cwd, **extra):
+        return pair(hook_said, n, event, session, cwd, **extra)
 
     # Three scopes: no project, and each of two projects' repositories.
     folders = [folder / "plain"]
@@ -516,7 +569,7 @@ def upkeep(binary, bench_binary, db, folder, drawn):
     env["GIT_CEILING_DIRECTORIES"] = str(folder)
     # Session start in the first scope, building its base and finding it,
     # before any other scope has files.
-    rounds = session_judged(lambda: session_rounds(
+    rounds = None if hooks_only else session_judged(lambda: session_rounds(
         bench_binary, db, folder / "alone.index", delivery,
         lambda session: hook("SessionStart", session, folders[0], source="startup")))
     for n, cwd in enumerate(folders):
@@ -539,11 +592,20 @@ def upkeep(binary, bench_binary, db, folder, drawn):
             raise SystemExit(f"recording an upkeep memory was refused: {out.stdout}")
         return command, stored["id"][:8]
 
-    def pushed(text, short, what):
-        """Fails unless `text`, a hook's output, pushes memory `short`: a
-        timing of the path that pushes must not time one that doesn't."""
-        if short not in text:
-            raise SystemExit(f"{what} did not push the memory it names: {text!r}")
+    missed_runs = {line: [] for line in HOOK_LINES}
+
+    def pushed(text, short, what, line, took, base):
+        """Whether `text`, a hook's output, pushes memory `short`, which a
+        run of `line` must for its time to count; False for a run that ran
+        out of its time (`push_checked`). Fails on one that pushed nothing
+        within it: a timing of the path that pushes must not time one that
+        doesn't."""
+        done = push_checked(text, short, took, base, limits[line], missed_runs[line])
+        if done is None:
+            raise SystemExit(f"{what} did not push the memory it names in {took:.1f} ms, "
+                             f"{took - base:.1f} ms over its start, within its {limits[line]} ms "
+                             f"limit: {text!r}")
+        return done
 
     # After each change, a call that matches nothing, a call naming the new
     # memory's command, in another session a prompt naming it, and a call
@@ -553,39 +615,47 @@ def upkeep(binary, bench_binary, db, folder, drawn):
     for n in range(4 * HOOK_RUNS):
         command, short = record(n)
         if n < HOOK_RUNS:
-            took = hook("PostToolUse", "s0", folders[0], tool_name="Bash",
-                        tool_input={"command": "ls"}, tool_response={"stdout": ""})
+            took, _, base = paired(n, "PostToolUse", "s0", folders[0], tool_name="Bash",
+                                   tool_input={"command": "ls"}, tool_response={"stdout": ""})
             if n:
-                tool.append(took)
+                tool.append((took, base))
         elif n < 2 * HOOK_RUNS:
-            took, out = hook_said("PostToolUse", "s0", folders[0], tool_name="Bash",
-                                  tool_input={"command": command}, tool_response={"stdout": ""})
-            pushed(out, short, "a tool hook")
+            took, out, base = paired(n, "PostToolUse", "s0", folders[0], tool_name="Bash",
+                                     tool_input={"command": command}, tool_response={"stdout": ""})
+            done = pushed(out, short, "a tool hook", "push", took, base)
             named.append((command, short))
-            if n > HOOK_RUNS:
-                push.append(took)
+            if done and n > HOOK_RUNS:
+                push.append((took, base))
         elif n < 3 * HOOK_RUNS:
-            took, out = hook_said("UserPromptSubmit", "s0", folders[0],
-                                  prompt=f"Run `{command}` next.")
-            pushed(out, short, "the prompt hook")
-            if n > 2 * HOOK_RUNS:
-                prompted.append(took)
+            took, out, base = paired(n, "UserPromptSubmit", "s0", folders[0],
+                                     prompt=f"Run `{command}` next.")
+            done = pushed(out, short, "the prompt hook", "prompted", took, base)
+            if done and n > 2 * HOOK_RUNS:
+                prompted.append((took, base))
         else:
-            took, out = hook_said("PreToolUse", "s0", folders[0], tool_name="Bash",
-                                  tool_input={"command": command})
-            # A hold that never comes lets the command run: each one is
-            # counted, and any fails the bench (#241).
-            if out:
-                if '"permissionDecision":"deny"' not in out:
-                    raise SystemExit(f"the pre-tool hook printed something other than a hold: {out!r}")
-                pushed(out, short, "a hold")
-            else:
+            took, out, base = paired(n, "PreToolUse", "s0", folders[0], tool_name="Bash",
+                                     tool_input={"command": command})
+            # A hold that never comes lets the command run: each one within
+            # the hook's limit is counted, and any fails the bench (#241);
+            # one past it ran out of time (`push_checked`).
+            if out and '"permissionDecision":"deny"' not in out:
+                raise SystemExit(f"the pre-tool hook printed something other than a hold: {out!r}")
+            done = push_checked(out, short, took, base, limits["hold"], missed_runs["hold"])
+            if done is None:
+                if out:
+                    raise SystemExit(f"a hold did not name the memory it holds for: {out!r}")
                 missed += 1
-            if n > 3 * HOOK_RUNS:
-                holding.append(took)
+                done = True
+            if done and n > 3 * HOOK_RUNS:
+                holding.append((took, base))
 
-    tagged = tag_waited(hook_said, pushed, folders[1], delivery.parent / "sessions", named)
-    looked_up = tag_looked_up(binary, env, hook_said, pushed, folders[1], named, waited)
+    tagged = tag_waited(paired, pushed, folders[1], delivery.parent / "sessions", named)
+    looked_up = tag_looked_up(binary, env, paired, pushed, folders[1], named, waited)
+    pairs = {"tool": tool, "push": push, "tagged": tagged, "looked_up": looked_up,
+             "hold": holding, "prompted": prompted}
+    sets = {line: hook_set(pairs[line], missed_runs[line]) for line in HOOK_LINES}
+    if hooks_only:
+        return {"sets": sets, "hold_missed": missed}
     held = [m["id"] for m in drawn["memories"] if m["scope"] == "global"]
     added = []
     for n in range(FORGETS):
@@ -601,13 +671,7 @@ def upkeep(binary, bench_binary, db, folder, drawn):
         path.unlink()
     prompt = hook("UserPromptSubmit", "s0", folders[0], prompt="go on")
     built = len(list(delivery.glob("*.index"))) == 1
-    rounds_held = list(holding)
-    holding.sort()
-    return {"tool": statistics.median(tool), "push": statistics.median(push),
-            "tagged": tagged, "looked_up": looked_up,
-            "hold": statistics.median(holding), "hold_p95": holding[int(len(holding) * 0.95) - 1],
-            "hold_rounds": rounds_held, "hold_missed": missed,
-            "prompted": statistics.median(prompted), "added": statistics.median(added),
+    return {"sets": sets, "hold_missed": missed, "added": statistics.median(added),
             "built_at_prompt": built, "prompt": prompt, "rounds": rounds}
 
 
@@ -638,21 +702,20 @@ def tag_session(binary, env, checkout):
     return stored["id"]
 
 
-def tag_waited(hook_said, pushed, checkout, sessions, named):
+def tag_waited(paired, pushed, checkout, sessions, named):
     """#121's tool hook with a tag waited for, in `tag_session`'s session:
     each of `named`'s commands (command, short id) runs in a folder of
     `checkout` the session never saw, so after the push the tag check asks
-    git for that folder's project and git folder. Returns the median time
-    from process start, after the first run."""
+    git for that folder's project and git folder. Returns the pairs
+    (`paired`) of the runs after the first that pushed (`pushed`)."""
     took = []
     for n, (command, short) in enumerate(named):
         folder = checkout / f"new{n}"
         folder.mkdir()
-        ms, said = hook_said("PostToolUse", "t0", folder, tool_name="Bash",
-                             tool_input={"command": command}, tool_response={"stdout": ""})
-        pushed(said, short, "a tool hook with a tag waited for")
-        if n:
-            took.append(ms)
+        ms, said, base = paired(n, "PostToolUse", "t0", folder, tool_name="Bash",
+                                tool_input={"command": command}, tool_response={"stdout": ""})
+        if pushed(said, short, "a tool hook with a tag waited for", "tagged", ms, base) and n:
+            took.append((ms, base))
     # The check must have looked in every new folder, or this timed a hook
     # that skipped it.
     # Each connection is closed here: `with` on one only ends its
@@ -668,32 +731,31 @@ def tag_waited(hook_said, pushed, checkout, sessions, named):
             conn.close()
     if looked < len(named):
         raise SystemExit(f"the tag check looked in {looked} of {len(named)} new folders")
-    return statistics.median(took)
+    return took
 
 
-def tag_looked_up(binary, env, hook_said, pushed, checkout, named, waited):
+def tag_looked_up(binary, env, paired, pushed, checkout, named, waited):
     """#121's tool hook after a ref change, with a tag waited for, in
     `tag_session`'s session `t1`: before each of `named`'s commands
     (command, short id) runs in `checkout`, a new tag changes its refs, so
     after the push the check looks the waited-for tag up with git. The last
-    tag is the one waited for, which ends memory `waited`. Returns the median
-    time from process start, after the first run."""
+    tag is the one waited for, which ends memory `waited`. Returns the pairs
+    (`paired`) of the runs after the first that pushed (`pushed`)."""
     took = []
     for n, (command, short) in enumerate(named):
         tag = PENDING_TAG if n == len(named) - 1 else f"bench-{n}"
         subprocess.run(["git", "tag", tag], cwd=checkout, env=env, check=True, capture_output=True)
-        ms, said = hook_said("PostToolUse", "t1", checkout, tool_name="Bash",
-                             tool_input={"command": command}, tool_response={"stdout": ""})
-        pushed(said, short, f"a tool hook after a ref change, in {ms:.1f} ms,")
-        if n:
-            took.append(ms)
+        ms, said, base = paired(n, "PostToolUse", "t1", checkout, tool_name="Bash",
+                                tool_input={"command": command}, tool_response={"stdout": ""})
+        if pushed(said, short, "a tool hook after a ref change", "looked_up", ms, base) and n:
+            took.append((ms, base))
     # The last lookup must have found the tag, or this timed hooks that
     # looked nothing up.
     out = subprocess.run([str(binary), "read", waited], env=env,
                          check=True, capture_output=True, text=True)
     if not all(m.get("ended") for m in json.loads(out.stdout)["memories"]):
         raise SystemExit(f"the tag check never ended the memory waiting for {PENDING_TAG}")
-    return statistics.median(took)
+    return took
 
 
 def session_rounds(bench_binary, db, alone, delivery, start):
@@ -749,6 +811,88 @@ def session_share(rounds):
     low, _, high = statistics.quantiles(shares, n=4, method="inclusive")
     medians = {step: statistics.median(r[step] for r in rounds) for step in rounds[0]}
     return statistics.median(shares), low, high, medians
+
+
+def push_checked(text, short, took, base, limit, missed):
+    """Whether a hook run's output `text` names memory `short`: True when it
+    does. One that names nothing ran out of its time when what it added
+    over its start, `took` less `base`, is at or past the hook's `limit`,
+    where the hook stops and prints nothing by design (#284): it is kept in
+    `missed` and False, so its line is timed again like a set too spread to
+    judge. One within the limit is None: a push that should have come."""
+    if short in text:
+        return True
+    if took - base >= limit:
+        missed.append((took, base))
+        return False
+    return None
+
+
+def hook_set(pairs, missed=()):
+    """A hook line's set: the `pairs` of its runs that pushed, and the runs
+    `missed` past the hook's limit (`push_checked`)."""
+    return {"pairs": pairs, "missed": list(missed)}
+
+
+def hook_added(pairs):
+    """What a hook line's `pairs` (hook, start) say: the median time the
+    hook adds over its start, the middle half's ends, and the medians of
+    the hook and of the start alone."""
+    added = sorted(took - base for took, base in pairs)
+    if len(added) < 2:
+        # A set whose runs nearly all ran out of time: nothing to judge.
+        nothing = float("nan")
+        return {"added": nothing, "low": nothing, "high": nothing, "hook": nothing,
+                "start": nothing}
+    low, _, high = statistics.quantiles(added, n=4, method="inclusive")
+    return {"added": statistics.median(added), "low": low, "high": high,
+            "hook": statistics.median(took for took, _ in pairs),
+            "start": statistics.median(base for _, base in pairs)}
+
+
+def hook_too_wide(pairs, limit):
+    """Whether `pairs`' middle half is too wide to judge against `limit`
+    (`HOOK_NOISY_SPREAD`)."""
+    added = hook_added(pairs)
+    return added["high"] - added["low"] > HOOK_NOISY_SPREAD * limit
+
+
+def hook_unjudged(timed, limit):
+    """Whether a hook line's set `timed` (`hook_set`) can't be judged: a run
+    of it ran out of the hook's time, or its middle half is too wide."""
+    return bool(timed["missed"]) or hook_too_wide(timed["pairs"], limit)
+
+
+def hooks_judged(take, limits):
+    """The sets `take(again)` times for each hook line (`hook_set`): one, or
+    two for a line whose first set can't be judged (`hook_unjudged`). `take`
+    times every line at once, so a second set is taken only when a line
+    needs it. The last of a line's sets is the one judged (`hook_verdict`)."""
+    first = take(False)
+    sets = {line: [timed] for line, timed in first.items()}
+    wide = [line for line, timed in first.items() if hook_unjudged(timed, limits[line])]
+    if wide:
+        again = take(True)
+        for line in wide:
+            sets[line].append(again[line])
+    return sets
+
+
+def hook_verdict(sets, limit):
+    """A hook line's verdict on the last of its `sets` (`hook_added`), with
+    whether it is too noisy to judge, as unjudged as the set that made it be
+    timed again (`hooks_judged` takes a second set for every line unjudged
+    at first), and whether it is over `limit`."""
+    verdict = hook_added(sets[-1]["pairs"])
+    verdict["noisy"] = hook_unjudged(sets[-1], limit)
+    verdict["over"] = not verdict["noisy"] and verdict["added"] > limit
+    return verdict
+
+
+def start_median(sets):
+    """The median start that returns at once over every hook line's judged
+    pairs, against `START_LIMIT_MS`."""
+    return statistics.median(base for line in sets.values() for _, base in line[-1]["pairs"])
 
 
 # Windows' share modes (winnt.h). A reader that shares all three never stops
@@ -905,6 +1049,68 @@ def cost_world(seed, size):
     return drawn
 
 
+# What each hook line times, as its failure says it.
+HOOK_WHAT = {"tool": "the tool hook pushing nothing", "push": "the tool hook pushing a memory",
+             "tagged": "the tool hook with a tag waited for",
+             "looked_up": "the tool hook looking a tag up",
+             "hold": "the pre-tool hook holding a command back",
+             "prompted": "the prompt hook pushing a memory"}
+# How each hook line is reported: the hook, and what its runs do.
+HOOK_SAYS = {"tool": ("tool hook  ", "after a change, nothing pushed"),
+             "push": ("tool hook  ", "after a change, pushing the memory its command names"),
+             "tagged": ("tool hook  ", "with a tag waited for, in a folder the session never saw, "
+                                       "pushing the memory its command names"),
+             "looked_up": ("tool hook  ", "with a tag waited for, after a ref change, pushing the "
+                                          "memory its command names"),
+             "hold": ("pre-tool hook", "after a change, holding back the command a memory names"),
+             "prompted": ("prompt hook", "after a change, pushing the memory its words name")}
+
+
+def hook_limits(tool_limit, hold_limit, prompt_limit):
+    """Each hook line's limit, from the hooks' own (`rust_ms`)."""
+    return {"tool": tool_limit, "push": tool_limit, "tagged": TAG_CHECK_LIMITS * tool_limit,
+            "looked_up": TAG_CHECK_LIMITS * tool_limit, "hold": hold_limit,
+            "prompted": prompt_limit}
+
+
+def print_hook_line(line, sets, limit):
+    """A hook line's report: each set timed, the last judged, and its pairs."""
+    hook, does = HOOK_SAYS[line]
+    for n, timed in enumerate(sets):
+        pairs = timed["pairs"]
+        added = hook_added(pairs)
+        again = ""
+        if n < len(sets) - 1:
+            again = (" timed again: a run ran out of its time" if timed["missed"]
+                     else " timed again: the middle half is too wide to judge")
+        print(f"  {hook} median {added['added']:6.1f} ms added {does}, over a start that returns at "
+              f"once (middle half {added['low']:.1f} to {added['high']:.1f} ms), "
+              f"{added['hook']:.1f} ms in all, process start included "
+              f"({len(pairs)} pairs, limit {limit} ms){again}")
+        print(f"    pairs (hook/start ms) {' '.join(f'{took:.1f}/{base:.1f}' for took, base in pairs)}")
+        for took, base in timed["missed"]:
+            print(f"    ran out of its time: printed nothing in {took:.1f} ms, "
+                  f"{took - base:.1f} ms over its start {base:.1f} ms (limit {limit} ms)")
+    verdict = hook_verdict(sets, limit)
+    if verdict["noisy"]:
+        why = ("a run ran out of its time twice" if sets[-1]["missed"]
+               else f"wider than {HOOK_NOISY_SPREAD * limit:.0f} ms twice")
+        print(f"  {hook} too noisy to judge: middle half {verdict['low']:.1f} to "
+              f"{verdict['high']:.1f} ms, {why}")
+
+
+def copy_store(db, to):
+    """A copy of the store at `db` at `to`, through SQLite, so a write-ahead
+    log's pages come too."""
+    source = sqlite3.connect(db)
+    target = sqlite3.connect(to)
+    try:
+        source.backup(target)
+    finally:
+        target.close()
+        source.close()
+
+
 def cost(found, seed, size, keep, drawn):
     """One lookup's time from a new process: start, load the delivery
     index, match one action; and with the passing passages' text cut from
@@ -933,10 +1139,32 @@ def cost(found, seed, size, keep, drawn):
         build_median = statistics.median(build_ms)
         print(f"  build       median {build_median:6.1f} ms, largest {build_ms[-1]:6.1f} ms "
               f"({BUILDS - 1} builds)")
-        kept = upkeep(found["user-memory"], found["bench"], db, folder, drawn)
         tool_limit = rust_ms("src/session/tools.rs", "TOOL_HOOK_LIMIT")
         hold_limit = rust_ms("src/session/tools.rs", "HOLD_LIMIT")
         prompt_limit = rust_ms("src/session.rs", "PROMPT_LIMIT")
+        limits = hook_limits(tool_limit, hold_limit, prompt_limit)
+        # A set timed again starts from the store as built, in a home of its
+        # own, so it times the same hooks on the same changes.
+        built = folder / "built.sqlite3"
+        copy_store(db, built)
+        timed = []
+
+        def take(again):
+            if not again:
+                timed.append(upkeep(found["user-memory"], found["bench"], db, folder, drawn, limits))
+            else:
+                home = folder / "again" / "home"
+                home.mkdir(parents=True)
+                copy_store(built, home / Path(db).name)
+                timed.append(upkeep(found["user-memory"], found["bench"], home / Path(db).name,
+                                    folder / "again", drawn, limits, hooks_only=True))
+            return timed[-1]["sets"]
+
+        sets = hooks_judged(take, limits)
+        kept = timed[0]
+        kept["hold_missed"] = sum(t["hold_missed"] for t in timed)
+        kept["hold_runs"] = HOOK_RUNS * len(timed)
+        kept["sets"] = sets
         # Every set timed, so a rerun's reason stays in the report.
         for n, rounds in enumerate(kept["rounds"]):
             share, low, high, steps = session_share(rounds)
@@ -950,23 +1178,11 @@ def cost(found, seed, size, keep, drawn):
             print(f"  session start too noisy to judge: middle half {low:.0%} to {high:.0%}, "
                   f"wider than {SESSION_NOISY_SPREAD:.0%} twice")
             share = None
-        print(f"  tool hook   median {kept['tool']:6.1f} ms after a change, nothing pushed, process "
-              f"start included ({HOOK_RUNS - 1} runs, limit {tool_limit} ms)")
-        print(f"  tool hook   median {kept['push']:6.1f} ms after a change, pushing the memory "
-              f"its command names ({HOOK_RUNS - 1} runs, limit {tool_limit} ms)")
-        print(f"  tool hook   median {kept['tagged']:6.1f} ms with a tag waited for, in a folder "
-              f"the session never saw, pushing the memory its command names ({HOOK_RUNS - 1} runs, "
-              f"limit {TAG_CHECK_LIMITS * tool_limit} ms)")
-        print(f"  tool hook   median {kept['looked_up']:6.1f} ms with a tag waited for, after a ref "
-              f"change, pushing the memory its command names ({HOOK_RUNS - 1} runs, "
-              f"limit {TAG_CHECK_LIMITS * tool_limit} ms)")
-        print(f"  pre-tool hook median {kept['hold']:6.1f} ms, 95th percentile {kept['hold_p95']:6.1f} ms "
-              f"after a change, holding back the command a memory names ({HOOK_RUNS - 1} runs, "
-              f"limit {hold_limit} ms)")
-        print(f"  pre-tool hook rounds {' '.join(f'{ms:.1f}' for ms in kept['hold_rounds'])} ms "
-              f"(after the first); {kept['hold_missed']} of {HOOK_RUNS} did not hold")
-        print(f"  prompt hook median {kept['prompted']:6.1f} ms after a change, pushing the memory "
-              f"its words name ({HOOK_RUNS - 1} runs, limit {prompt_limit} ms)")
+        for line in HOOK_LINES:
+            print_hook_line(line, sets[line], limits[line])
+        start = start_median(sets)
+        print(f"  hook start  median {start:6.1f} ms returning at once with no session, process "
+              f"start included (over every hook line's pairs, limit {START_LIMIT_MS} ms)")
         print(f"  forget      median {kept['added']:6.1f} ms added by three scopes' files "
               f"({FORGETS} pairs, limit {FORGET_ADDED_LIMIT_MS} ms)")
         print(f"  prompt hook {kept['prompt']:6.1f} ms building a missing base: "
@@ -990,7 +1206,7 @@ def cost(found, seed, size, keep, drawn):
                   f"largest {samples[-1]:6.1f} ms")
         served_ok = (downloading <= rust_ms("src/session.rs", "LIMIT")
                      and left is not None and left <= FORGET_LEFT_POLLS * poll)
-        return (worst, share, kept, tool_limit, hold_limit, prompt_limit, served_ok)
+        return (worst, share, kept, limits, start, served_ok)
 
 
 def main():
@@ -1017,7 +1233,7 @@ def main():
     tuning = {}
     if args.cost or args.check_cost:
         seed, size = REPORT_SEEDS[0], max(sizes)
-        worst, build_added, kept, tool_limit, hold_limit, prompt_limit, served_ok = cost(
+        worst, build_added, kept, limits, start, served_ok = cost(
             found, seed, size, args.keep, cost_world(seed, size))
         over = False
         if args.check_cost and worst > LOOKUP_LIMIT_MS:
@@ -1027,21 +1243,19 @@ def main():
             print(f"session start building its base adds over {SESSION_BUILD_SHARE:.0%} of the build")
             over = True
         # The hooks' limits are read from their constants in the Rust
-        # source (`rust_ms`), so the two cannot drift.
-        for key, what, limit in (("tool", "the tool hook pushing nothing", tool_limit),
-                                 ("push", "the tool hook pushing a memory", tool_limit),
-                                 ("tagged", "the tool hook with a tag waited for",
-                                  TAG_CHECK_LIMITS * tool_limit),
-                                 ("looked_up", "the tool hook looking a tag up",
-                                  TAG_CHECK_LIMITS * tool_limit),
-                                 ("hold", "the pre-tool hook holding a command back", hold_limit),
-                                 ("prompted", "the prompt hook pushing a memory", prompt_limit)):
-            if args.check_cost and kept[key] > limit:
-                print(f"{what} is over its {limit} ms limit")
+        # source (`rust_ms`), so the two cannot drift. Each is judged on
+        # what the hook adds over its start (`hook_verdict`).
+        for line in HOOK_LINES:
+            verdict = hook_verdict(kept["sets"][line], limits[line])
+            if args.check_cost and verdict["over"]:
+                print(f"{HOOK_WHAT[line]} is over its {limits[line]} ms limit")
                 over = True
+        if args.check_cost and start > START_LIMIT_MS:
+            print(f"a hook's start that returns at once is over its {START_LIMIT_MS} ms limit")
+            over = True
         if kept["hold_missed"]:
             print(f"the pre-tool hook did not hold back the command a memory names "
-                  f"{kept['hold_missed']} of {HOOK_RUNS} times")
+                  f"{kept['hold_missed']} of {kept['hold_runs']} times")
             over = True
         if args.check_cost and kept["added"] > FORGET_ADDED_LIMIT_MS:
             print(f"a forget adds over {FORGET_ADDED_LIMIT_MS} ms")

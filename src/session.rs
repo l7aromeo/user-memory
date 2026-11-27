@@ -195,7 +195,9 @@ const ORIGIN_CHARS: usize = 240;
 const SNAPSHOT_SHARE: Duration = Duration::from_secs(2);
 /// Upper bound for the hook that runs before every prompt: a slow or
 /// unreachable store delays the user's prompt at most this long, and the
-/// notice is skipped.
+/// notice is skipped. The delivery bench's cost check holds to it the time
+/// the hook adds over a start that returns at once, as for the tool hook's
+/// limit.
 const PROMPT_LIMIT: Duration = Duration::from_secs(1);
 
 /// `limit` for this run. Debug builds multiply every hook limit, and the
