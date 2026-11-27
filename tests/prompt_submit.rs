@@ -218,47 +218,47 @@ fn a_running_session_hears_what_changed_since_it_last_looked() {
     assert!(home.notice("s1").contains("Write release notes"));
 }
 
-/// Seconds a test date lies ahead of now: long enough for the record and
-/// session start before it passes, on a loaded machine.
-const DATE_AHEAD_SECS: i64 = 4;
-
 // A date that passes moves no marker, so the session keeps the earliest
 // one it sees: the first prompt after it lists the memory as gone, once.
 #[test]
 fn the_first_prompt_after_a_date_passes_lists_its_memory_as_gone() {
-    let home = Home::new();
-    let until = (jiff::Timestamp::now() + jiff::SignedDuration::from_secs(DATE_AHEAD_SECS))
-        .strftime("%Y-%m-%dT%H:%M:%SZ")
-        .to_string();
-    let out = home.cli(&[
-        "record",
-        "--type",
-        "preference",
-        "--category",
-        "workflow",
-        "--title",
-        "Freeze merges for the audit",
-        "--content",
-        "Merge nothing while the audit runs.",
-        "--scope",
-        "global",
-        "--until-date",
-        &until,
-    ]);
-    let dated = out["id"].as_str().unwrap().to_owned();
-    let kept = home.record("Prefer Rust for tools");
-    home.hook("SessionStart", "s1", &[]);
-    assert_eq!(home.notice("s1"), "", "the date is ahead");
-    std::thread::sleep(std::time::Duration::from_secs(
-        DATE_AHEAD_SECS.unsigned_abs() + 1,
-    ));
-    let notice = home.notice("s1");
-    assert!(
-        notice.ends_with(&format!("\n- {} Freeze merges for the audit", id8(&dated))),
-        "{notice}"
-    );
-    assert!(!notice.contains(id8(&kept)), "{notice}");
-    assert_eq!(home.notice("s1"), "", "told once");
+    time::date_window(|date| {
+        let home = Home::new();
+        let out = home.cli(&[
+            "record",
+            "--type",
+            "preference",
+            "--category",
+            "workflow",
+            "--title",
+            "Freeze merges for the audit",
+            "--content",
+            "Merge nothing while the audit runs.",
+            "--scope",
+            "global",
+            "--until-date",
+            &date.until(),
+        ]);
+        let Some(dated) = date.stored(&out) else {
+            return false;
+        };
+        let kept = home.record("Prefer Rust for tools");
+        home.hook("SessionStart", "s1", &[]);
+        let ahead = home.notice("s1");
+        if !date.still_ahead() {
+            return false;
+        }
+        assert_eq!(ahead, "", "the date is ahead");
+        date.wait_past();
+        let notice = home.notice("s1");
+        assert!(
+            notice.ends_with(&format!("\n- {} Freeze merges for the audit", id8(&dated))),
+            "{notice}"
+        );
+        assert!(!notice.contains(id8(&kept)), "{notice}");
+        assert_eq!(home.notice("s1"), "", "told once");
+        true
+    });
 }
 
 // An undone import reaches running sessions as a forget and a correction

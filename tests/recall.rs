@@ -61,6 +61,13 @@ impl Home {
     /// Records a global memory with `args` after its title and content;
     /// returns its id.
     fn record(&self, title: &str, content: &str, args: &[&str]) -> String {
+        let out = self.record_reply(title, content, args);
+        assert_eq!(out["stored"], true, "{out}");
+        out["id"].as_str().unwrap().to_owned()
+    }
+
+    /// [`Home::record`]'s reply, stored or not.
+    fn record_reply(&self, title: &str, content: &str, args: &[&str]) -> Value {
         let typed = args.contains(&"--type");
         let mut all = vec!["record"];
         if !typed {
@@ -80,9 +87,7 @@ impl Home {
         all.extend(args);
         let out = self.command(&all).output().unwrap();
         assert!(out.status.success(), "{out:?}");
-        let out: Value = serde_json::from_slice(&out.stdout).unwrap();
-        assert_eq!(out["stored"], true, "{out}");
-        out["id"].as_str().unwrap().to_owned()
+        serde_json::from_slice(&out.stdout).unwrap()
     }
 
     /// Runs `subcommand` for Claude Code with `payload` on stdin; its
@@ -1295,34 +1300,32 @@ fn a_note_on_the_interpreter_still_comes_when_it_runs_a_script() {
     assert!(pushed.contains(short(&note)), "{pushed:?}");
 }
 
-/// Seconds a test date lies ahead of now: long enough for the record,
-/// session start and one call before it passes, on a loaded machine.
-const DATE_AHEAD_SECS: i64 = 4;
-
 #[test]
 fn a_memory_whose_date_passed_mid_session_is_never_pushed() {
-    let home = Home::new();
-    let until = (jiff::Timestamp::now() + jiff::SignedDuration::from_secs(DATE_AHEAD_SECS))
-        .strftime("%Y-%m-%dT%H:%M:%SZ")
-        .to_string();
-    let note = home.record(
-        "Dry run before publishing",
-        "Run `cargo publish --dry-run` before `cargo publish`.",
-        &["--until-date", &until],
-    );
-    home.start("s1", "startup");
-    assert!(home.run("s1", "cargo publish").contains(short(&note)));
-    // A passed date writes nothing, so the delivery index still holds the
-    // memory; the push reads it in force or not at all.
-    std::thread::sleep(std::time::Duration::from_secs(
-        DATE_AHEAD_SECS.unsigned_abs() + 1,
-    ));
-    let sub = home.call(
-        "s1",
-        Some("a1"),
-        "Bash",
-        json!({"command": "cargo publish"}),
-        json!({}),
-    );
-    assert_eq!(sub, "");
+    time::date_window(|date| {
+        let home = Home::new();
+        let Some(note) = date.stored(&home.record_reply(
+            "Dry run before publishing",
+            "Run `cargo publish --dry-run` before `cargo publish`.",
+            &["--until-date", &date.until()],
+        )) else {
+            return false;
+        };
+        home.start("s1", "startup");
+        if !date.ahead(home.run("s1", "cargo publish").contains(short(&note))) {
+            return false;
+        }
+        // A passed date writes nothing, so the delivery index still holds
+        // the memory; the push reads it in force or not at all.
+        date.wait_past();
+        let sub = home.call(
+            "s1",
+            Some("a1"),
+            "Bash",
+            json!({"command": "cargo publish"}),
+            json!({}),
+        );
+        assert_eq!(sub, "");
+        true
+    });
 }
