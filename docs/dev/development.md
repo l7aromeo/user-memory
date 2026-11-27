@@ -725,7 +725,10 @@ Commands:
     just delivery-bench --check-cost     # the same, failing past a budget
 
 `--cost` times one lookup from a new process, and the build of the index
-from the store, which it reports. Through the release binary, in the same
+from the store, which it reports. It runs on the largest `--sizes`, which
+must draw at least 10 global memories for the forget rounds; at 50 and
+100 memories the store draws fewer, and the bench says so before it
+builds anything. Through the release binary, in the same
 throwaway home, it also times the delivery index's upkeep: session start
 building its scope's base against session start finding it (budget: the
 difference is at most 75 % of the build's own time, since the build runs
