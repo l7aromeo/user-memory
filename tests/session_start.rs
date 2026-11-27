@@ -5,6 +5,8 @@
     reason = "integration tests may unwrap: a failed unwrap is a failed test"
 )]
 
+#[path = "support/port.rs"]
+mod port;
 #[path = "support/sandbox.rs"]
 mod sandbox;
 use sandbox::Sandboxed;
@@ -170,9 +172,7 @@ fn an_unreachable_remote_tells_the_agent_to_go_on_and_name_doctor() {
     let secret = "s".repeat(40);
     std::fs::write(&token, &secret).unwrap();
     // A port nothing listens on: the connection is refused at once.
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
-    drop(listener);
+    let url = format!("http://127.0.0.1:{}/mcp", port::closed_port());
     let out = session_start(
         home.path(),
         home.path(),

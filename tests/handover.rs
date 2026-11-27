@@ -13,6 +13,8 @@
 
 #[path = "support/fake.rs"]
 mod fake;
+#[path = "support/port.rs"]
+mod port;
 #[path = "support/replace.rs"]
 mod replace;
 #[path = "support/sandbox.rs"]
@@ -1136,13 +1138,10 @@ fn a_starting_serve_removes_hand_over_files_left_behind() {
 /// The token the tests' memory server accepts.
 const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-/// An address on loopback where nothing listens yet.
+/// An address on loopback where nothing listens yet: a test port, so no
+/// other test takes it while this one starts and stops servers there.
 fn free_address() -> String {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .to_string()
+    format!("127.0.0.1:{}", port::closed_port())
 }
 
 /// A memory server of this build on `address`, its store and token in

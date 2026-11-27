@@ -1,4 +1,6 @@
-//! Ports for servers a test starts itself after choosing the port.
+//! Ports for servers a test starts itself after choosing the port, or
+//! stops while it still relies on the address: one bound to port 0 and then
+//! let go can be handed to a test running beside it.
 
 #![allow(dead_code, reason = "each test file uses part of this module")]
 
@@ -13,7 +15,7 @@ use std::{
 };
 
 /// Where test ports start: lower ones are often other software's defaults.
-const FIRST: u16 = 20_000;
+pub const FIRST: u16 = 20_000;
 /// Room the tests need below the system's ephemeral range.
 const ROOM: u16 = 1_000;
 
