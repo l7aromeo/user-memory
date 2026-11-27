@@ -1,10 +1,11 @@
 //! The pairs of memories review links, found without comparing every pair
 //! by words: each memory's words, category group and vector norm are worked
-//! out once, an exact prefix-filter join over the words finds every pair
-//! that reaches [`RELATED_OVERLAP`], and the vectors are compared with a
-//! fast dot product that only picks the pairs worth the exact one. Every
-//! pair found is then decided exactly as before ([`compare`]), and the lists
-//! come out in the same order, by the lower index, then the higher.
+//! out once, and an exact prefix-filter join over the words finds every
+//! pair that reaches [`RELATED_OVERLAP`]. Vector pairs come from
+//! [`super::kept`], which compares vectors with the fast dot products here
+//! and keeps the pairs worth an exact look. Every pair found is then decided
+//! exactly as before ([`compare`]), and the lists come out in the same
+//! order, by the lower index, then the higher.
 
 use super::super::{
     Memory,
@@ -61,17 +62,28 @@ impl Ids {
 /// The duplicate and related pairs among `active` (memory indexes, in
 /// ascending order) that are not marked distinct, both observed, or one
 /// evidence of the other. `cutoffs` holds the model's cutoffs by vector
-/// length; a length without them is compared by keywords.
+/// length; a length without them is compared by keywords. `near` holds
+/// every pair of memories whose vectors may be at a cutoff, as
+/// [`super::kept`] finds them; others may be in it too.
 pub(super) fn links(
     memories: &[Memory],
     active: &[usize],
     distinct: &HashSet<(Uuid, Uuid)>,
     vectors: &HashMap<Uuid, Vec<f32>>,
     cutoffs: &HashMap<usize, Thresholds>,
+    near: &[(Uuid, Uuid)],
 ) -> Links {
     let prepared = prepare(memories, active, vectors);
     let mut pairs = by_words(&prepared);
-    pairs.extend(by_vectors(&prepared, cutoffs));
+    let position: HashMap<Uuid, usize> = active
+        .iter()
+        .enumerate()
+        .map(|(p, &i)| (memories[i].id, p))
+        .collect();
+    pairs.extend(near.iter().filter_map(|(a, b)| {
+        let (p, q) = (*position.get(a)?, *position.get(b)?);
+        Some((p.min(q), p.max(q)))
+    }));
     pairs.sort_unstable();
     pairs.dedup();
     let mut links = Links {
@@ -359,7 +371,7 @@ fn by_words(prepared: &[Prepared]) -> Vec<(usize, usize)> {
 /// product that swallows every small one after it in the sequential sum, is
 /// 1.8e-5 there, 34 times less: real sums stay far inside the bound, so a
 /// tenth of it would still pass them, though it no longer bounds every sum.
-fn margin(length: usize) -> f32 {
+pub(super) fn margin(length: usize) -> f32 {
     (length as f32 + 4.0) * 2.0 * f32::EPSILON
 }
 
@@ -373,44 +385,11 @@ const BLOCK: usize = 32;
 const TILE: usize = 4;
 
 /// A vector to compare: its memory's position, the vector and its norm.
-type Row<'a> = (usize, &'a [f32], f32);
-
-/// Every pair of positions in `prepared`, lower first, whose stored
-/// vectors, of one length with cutoffs, may be at a cutoff: the fast cosine
-/// is within [`margin`] of the lower of the two. Exact work is left to
-/// [`compare`]. Every vector pair is compared: for cosine the norms divide
-/// out, and a bound on part of the vector stays above the cutoffs when
-/// models spread a vector evenly, so no exact method skips pairs at these
-/// lengths.
-///
-/// So the cost is n²/2 · d multiply-adds for n vectors of d dimensions:
-/// 3.2·10¹² at 50,000 of 2,560, 77 s on GitHub's macOS runner (3 cpus,
-/// about 14·10⁹ a second on each). It passes the connector's 150 s
-/// (`FORWARDED_CALL_LIMIT` in src/remote.rs) there at about 70,000 vectors
-/// of 2,560 dimensions, or 100,000 of 1,024.
-fn by_vectors(prepared: &[Prepared], cutoffs: &HashMap<usize, Thresholds>) -> Vec<(usize, usize)> {
-    let mut by_length: HashMap<usize, Vec<Row>> = HashMap::new();
-    for (p, set) in prepared.iter().enumerate() {
-        if let Some((vector, norm)) = set.vector
-            && cutoffs.contains_key(&vector.len())
-        {
-            by_length
-                .entry(vector.len())
-                .or_default()
-                .push((p, vector, norm));
-        }
-    }
-    let mut pairs = Vec::new();
-    for (length, rows) in by_length {
-        let lowest = cutoffs[&length].related.min(cutoffs[&length].duplicate) - margin(length);
-        pairs.extend(near(&rows, lowest));
-    }
-    pairs
-}
+pub(super) type Row<'a> = (usize, &'a [f32], f32);
 
 /// The pairs of `rows` (position, vector, norm), lower first, whose fast
 /// cosine is `lowest` or more, compared on scoped threads.
-fn near(rows: &[Row], lowest: f32) -> Vec<(usize, usize)> {
+pub(super) fn near(rows: &[Row], lowest: f32) -> Vec<(usize, usize)> {
     let threads = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
     let starts: Vec<usize> = (0..rows.len()).step_by(BLOCK).collect();
     let found: Vec<Vec<(usize, usize)>> = std::thread::scope(|scope| {
@@ -460,6 +439,44 @@ fn near(rows: &[Row], lowest: f32) -> Vec<(usize, usize)> {
                                 a += TILE;
                             }
                             b += TILE;
+                        }
+                    }
+                    found
+                })
+            })
+            .collect();
+        runs.into_iter()
+            .map(|run| run.join().expect("a vector comparison thread never panics"))
+            .collect()
+    });
+    found.into_iter().flatten().collect()
+}
+
+/// The pairs of `rows` (position, vector, norm), lower first, with at
+/// least one of them `due`, whose fast cosine is `lowest` or more: each due
+/// row against every other, on scoped threads, each pair once.
+pub(super) fn near_due(rows: &[Row], due: &[bool], lowest: f32) -> Vec<(usize, usize)> {
+    let threads = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+    let changed: Vec<usize> = (0..rows.len()).filter(|&r| due[r]).collect();
+    let found: Vec<Vec<(usize, usize)>> = std::thread::scope(|scope| {
+        let runs: Vec<_> = (0..threads)
+            .map(|t| {
+                let changed = &changed;
+                scope.spawn(move || {
+                    let mut found = Vec::new();
+                    for &d in changed.iter().skip(t).step_by(threads) {
+                        let (p, x, nx) = rows[d];
+                        for (e, &(q, y, ny)) in rows.iter().enumerate() {
+                            // A pair of two due rows is the later one's.
+                            if e == d || (due[e] && e > d) {
+                                continue;
+                            }
+                            let scale = nx * ny;
+                            let dot = fast_dot(x, y);
+                            let cosine = if scale > 0.0 { dot / scale } else { 0.0 };
+                            if cosine >= lowest {
+                                found.push((p.min(q), p.max(q)));
+                            }
                         }
                     }
                     found
@@ -535,6 +552,7 @@ fn fast_dot(a: &[f32], b: &[f32]) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    use super::super::kept::{Kept, refresh};
     use super::*;
     use crate::memory::similar::{cosine, overlap};
 
@@ -793,31 +811,6 @@ mod tests {
         [fast_dot(x, y) / scale, tiled[0][0] / scale]
     }
 
-    // A pair whose fast cosine falls just under a cutoff, within the
-    // margin, is still compared exactly.
-    #[test]
-    fn a_pair_within_the_margin_of_a_cutoff_is_compared() {
-        let mut rng = Seeded(11);
-        let x: Vec<f32> = (0..24).map(|_| rng.unit()).collect();
-        let y: Vec<f32> = x.iter().map(|v| v + 0.2 * rng.unit()).collect();
-        let fast = fast_dot(&x, &y) / (norm(&x) * norm(&y));
-        let at = fast + margin(24) / 2.0;
-        let cutoffs = HashMap::from([(
-            24,
-            Thresholds {
-                duplicate: at,
-                related: at,
-            },
-        )]);
-        let prepared = [&x, &y].map(|v| Prepared {
-            words: Vec::new(),
-            category: 0,
-            group: Vec::new(),
-            vector: Some((v.as_slice(), norm(v))),
-        });
-        assert_eq!(by_vectors(&prepared, &cutoffs), [(0, 1)]);
-    }
-
     // The index finds exactly the pairs, scores and order comparing every
     // pair found, over stores full of pairs at the cutoffs.
     #[test]
@@ -833,7 +826,12 @@ mod tests {
             .chain((31..=50).map(|seed| (seed, &large, 60)))
         {
             let (memories, active, distinct, vectors) = store(seed, 160, vocabulary, longest);
-            let found = links(&memories, &active, &distinct, &vectors, &cutoffs);
+            let stored = vectors
+                .iter()
+                .map(|(id, vector)| (*id, (String::new(), vector.clone())))
+                .collect();
+            let near = refresh(&stored, &cutoffs, &Kept::default()).near;
+            let found = links(&memories, &active, &distinct, &vectors, &cutoffs, &near);
             let expected = every_pair(&memories, &active, &distinct, &vectors, &cutoffs);
             assert_eq!(bits(&found), bits(&expected), "seed {seed}");
             linked += expected.duplicates.len() + expected.related.len();
