@@ -26,8 +26,9 @@ latest change, and for each memory changed since the number of its latest
 change, with the time it was removed for a forgotten one; no text),
 `memory_use` (since schema version 12: for each of a project's newest 40
 conversations, which memories it read, recorded or was shown, the number
-of the passage it was shown most, whether it held to or set aside each,
-and when; no text; a memory's rows are deleted with it), `memory_ended`
+of the passage it was shown most, whether a command was held back by it
+and whether the agent then ran that command again, and when; no text; a
+memory's rows are deleted with it), `memory_ended`
 (when a memory's tag or text condition ended, how and on what evidence,
 since schema version 13), the views `out_of_force` (the memories ended
 or past their date) and `live_memories` (the memories in force:

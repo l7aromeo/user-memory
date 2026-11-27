@@ -34,12 +34,16 @@ const HELD: &str = "Held back once by user-memory to show ";
 /// A sandboxed home with its own store, its sessions working in it.
 struct Home {
     dir: TempDir,
+    /// The tool calls made so far: each new call gets its own id, as a
+    /// client gives it, and its post-tool hook the same one.
+    calls: std::cell::Cell<u32>,
 }
 
 impl Home {
     fn new() -> Self {
         Self {
             dir: tempdir().unwrap(),
+            calls: std::cell::Cell::new(0),
         }
     }
 
@@ -163,7 +167,7 @@ impl Home {
 
     fn call(&self, session: &str, agent: Option<&str>, command: &str) -> Value {
         let mut payload = json!({"session_id": session, "cwd": self.path(), "tool_name": "Bash",
-                                 "tool_input": {"command": command}, "tool_use_id": "t-1"});
+                                 "tool_input": {"command": command}, "tool_use_id": format!("t-{}", self.calls.get())});
         if let Some(agent) = agent {
             payload["agent_id"] = json!(agent);
             payload["agent_type"] = json!("general-purpose");
@@ -185,6 +189,7 @@ impl Home {
         command: &str,
         env: &[(&str, &str)],
     ) -> Option<String> {
+        self.calls.set(self.calls.get() + 1);
         let mut payload = self.call(session, agent, command);
         payload["hook_event_name"] = json!("PreToolUse");
         reason(&self.run("pre-tool-use", "claude", &payload, env))
@@ -217,6 +222,90 @@ impl Home {
     /// writes `<path>.reached` there, even when the file is missing.
     fn pause(&self) -> PathBuf {
         self.path().join("pause")
+    }
+    /// An edit of `file` in `session` by the agent context `agent`: a new
+    /// tool call, and no shell command.
+    fn edit(&self, session: &str, agent: Option<&str>, file: &str) {
+        self.calls.set(self.calls.get() + 1);
+        let mut payload = json!({"session_id": session, "cwd": self.path(), "tool_name": "Edit",
+                                 "hook_event_name": "PostToolUse", "tool_use_id": format!("t-{}", self.calls.get()),
+                                 "tool_input": {"file_path": self.path().join(file)}, "tool_response": {}});
+        if let Some(agent) = agent {
+            payload["agent_id"] = json!(agent);
+            payload["agent_type"] = json!("general-purpose");
+        }
+        self.run("post-tool-use", "claude", &payload, &[]);
+    }
+
+    /// Makes the home a checkout of a project, so its sessions' use counts
+    /// for that project in `memory_use`.
+    fn with_project(&self) {
+        for args in [
+            &["init", "-q", "-b", "main"][..],
+            &["remote", "add", "origin", "git@github.com:example/app.git"],
+        ] {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(self.path())
+                .args(args)
+                .sandboxed(self.path())
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{out:?}");
+        }
+    }
+
+    /// A prompt in `session`, which sends its use to the store.
+    fn prompt(&self, session: &str) {
+        self.run(
+            "prompt-submit",
+            "claude",
+            &json!({"session_id": session, "cwd": self.path(), "hook_event_name": "UserPromptSubmit", "prompt": "Go on."}),
+            &[],
+        );
+    }
+
+    /// The store's hold outcomes of `memory`, one per session: held and
+    /// overridden, by origin.
+    fn outcomes(&self, memory: &str) -> Vec<(String, Option<bool>, Option<bool>)> {
+        let conn = rusqlite::Connection::open(self.db()).unwrap();
+        let mut statement = conn
+            .prepare(
+                "SELECT origin, held, overridden FROM memory_use WHERE memory = ?1 ORDER BY origin",
+            )
+            .unwrap();
+        statement
+            .query_map([memory], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    /// A session `session` that reads `other` and is held back on
+    /// `command`, which the agent then runs again unchanged, overriding the
+    /// hold; its use sent.
+    fn overridden(&self, session: &str, other: &str, command: &str) {
+        self.start(session);
+        self.calls.set(self.calls.get() + 1);
+        let reply = json!({"memories": [{"id": other}]}).to_string();
+        self.run(
+            "post-tool-use",
+            "claude",
+            &json!({"session_id": session, "cwd": self.path(), "hook_event_name": "PostToolUse",
+                    "tool_name": "mcp__user-memory__read", "tool_use_id": format!("t-{}", self.calls.get()),
+                    "tool_input": {}, "tool_response": [{"type": "text", "text": reply}]}),
+            &[],
+        );
+        assert!(
+            self.before(session, None, command).is_some(),
+            "{session}: held"
+        );
+        assert!(
+            self.before(session, None, command).is_none(),
+            "{session}: re-run"
+        );
+        self.after(session, None, command);
+        self.prompt(session);
     }
     /// The push after `command` ran in `session`; empty for none.
     fn after(&self, session: &str, agent: Option<&str>, command: &str) -> String {
@@ -728,5 +817,147 @@ fn a_rule_whose_fold_misses_the_hook_holds_the_command_after() {
     assert!(
         reason.as_deref().is_some_and(|r| r.contains(short(&rule))),
         "the next one holds it: {reason:?}"
+    );
+}
+
+/// The agents' note about lock files, recorded in `home`; its id.
+fn locks_note(home: &Home) -> String {
+    home.record(
+        "lesson",
+        "Lock files in a chained rm",
+        "Never delete another session's lock file in `rm -rf .locks/` chained after another command.",
+        true,
+    )
+}
+
+const CHAINED_RM: &str = "cargo build && rm -rf .locks/";
+
+/// A memory each test session reads, so its use counts: the store's
+/// most-used part then weighs what the holds sent beside it.
+fn docs_fact(home: &Home) -> String {
+    home.record("fact", "Docs site", "The docs build with mdBook.", false)
+}
+
+// An agent's note whose hold agents ran past, unchanged, in three
+// sessions in a row holds no more in the fourth: it is pushed after the
+// command instead. The user's rule, run past as often, keeps holding
+// (#118).
+#[test]
+fn a_note_agents_run_past_in_three_sessions_stops_holding_and_comes_after() {
+    let home = Home::new();
+    home.with_project();
+    let note = locks_note(&home);
+    let rule = dry_run(&home);
+    let other = docs_fact(&home);
+    for session in ["s1", "s2", "s3"] {
+        home.overridden(session, &other, CHAINED_RM);
+        home.overridden(session, &other, "cargo publish");
+    }
+    let sessions = |id: &str| {
+        home.outcomes(id)
+            .into_iter()
+            .map(|(_, held, overridden)| (held, overridden))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(sessions(&note), [(Some(true), Some(true)); 3]);
+    home.start("s4");
+    assert_eq!(home.before("s4", None, CHAINED_RM), None, "stopped");
+    assert!(
+        home.after("s4", None, CHAINED_RM).contains(short(&note)),
+        "pushed after instead"
+    );
+    assert!(
+        home.before("s4", None, "cargo publish").is_some(),
+        "the user's rule keeps holding"
+    );
+    let _ = rule;
+    // A note an agent observes again holds again: the count starts at its
+    // confirmation.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    home.record_with(
+        "lesson",
+        "Lock files in a chained rm",
+        "Never delete another session's lock file in `rm -rf .locks/` chained after another command.",
+        &[
+            "--source",
+            "observed",
+            "--evidence",
+            "Seen again in a third session",
+            "--confirms",
+            &note,
+            "--origin",
+            "claude:session/other",
+        ],
+    );
+    home.start("s5");
+    assert!(
+        home.before("s5", None, CHAINED_RM).is_some(),
+        "confirmed, so held"
+    );
+}
+
+// A hold counts as overridden only when the context's very next tool
+// call runs the held command again: an edit first is heeding it, even with
+// the same command after. A session whose hold was overridden in one
+// context and then heeded in another counts as heeded, its latest, so the
+// count starts again and the note holds in the next session.
+#[test]
+fn a_hold_heeded_before_the_same_command_starts_the_count_again() {
+    let home = Home::new();
+    home.with_project();
+    let note = locks_note(&home);
+    let other = docs_fact(&home);
+    home.overridden("s1", &other, CHAINED_RM);
+    home.overridden("s2", &other, CHAINED_RM);
+    home.overridden("s3", &other, CHAINED_RM);
+    home.start("s4");
+    assert_eq!(home.before("s4", None, CHAINED_RM), None, "stopped");
+    // A changed note holds again: its count starts at its change.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let out = home
+        .command(&[
+            "update",
+            &note,
+            "--context",
+            "Seen when two sessions share a checkout.",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    home.start("s5");
+    assert!(
+        home.before("s5", None, CHAINED_RM).is_some(),
+        "changed, so held"
+    );
+    home.edit("s5", None, "notes.md");
+    assert!(home.before("s5", None, CHAINED_RM).is_none(), "the re-run");
+    home.after("s5", None, CHAINED_RM);
+    home.prompt("s5");
+    // Overridden in the main context, then heeded in a subagent's.
+    home.start("s6");
+    assert!(home.before("s6", None, CHAINED_RM).is_some());
+    assert!(home.before("s6", None, CHAINED_RM).is_none());
+    home.after("s6", None, CHAINED_RM);
+    home.prompt("s6");
+    assert!(home.before("s6", Some("a1"), CHAINED_RM).is_some());
+    home.edit("s6", Some("a1"), "notes.md");
+    home.after("s6", Some("a1"), CHAINED_RM);
+    home.prompt("s6");
+    let outcomes: Vec<(String, Option<bool>)> = home
+        .outcomes(&note)
+        .into_iter()
+        .map(|(origin, _, overridden)| (origin, overridden))
+        .collect();
+    assert_eq!(
+        outcomes[3..],
+        [
+            ("claude:session/s5".to_owned(), Some(false)),
+            ("claude:session/s6".to_owned(), Some(false)),
+        ]
+    );
+    home.start("s7");
+    assert!(
+        home.before("s7", None, CHAINED_RM).is_some(),
+        "the count started again"
     );
 }

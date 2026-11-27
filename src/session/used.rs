@@ -277,8 +277,8 @@ fn rows(unsent: &[Unsent], projects: &[String]) -> Vec<Use> {
                 read: used.read,
                 recorded: used.recorded,
                 shown: used.shown,
-                held: None,
-                overridden: None,
+                held: used.held.then_some(true),
+                overridden: used.overridden,
                 passage: used.passage.and_then(|slot| u32::try_from(slot).ok()),
             })
         })

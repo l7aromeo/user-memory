@@ -389,7 +389,7 @@ async fn download(assets: &str, name: &str, path: &Path) -> Result<(), Download>
 
 /// The SHA-256 of `bytes` in lowercase hex, as the release's `.sha256`
 /// files give it.
-fn sha256(bytes: &[u8]) -> String {
+pub(crate) fn sha256(bytes: &[u8]) -> String {
     aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, bytes)
         .as_ref()
         .iter()

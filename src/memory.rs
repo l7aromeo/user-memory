@@ -82,7 +82,7 @@ pub use transfer::{
 mod ends;
 pub use ends::{Pending, TAGS_PENDING, TAGS_WAIT, TagEnd, end_by_tags, pending_tags};
 pub(crate) use usage::{USE_REQUEST_BYTES, USES_PER_REQUEST};
-pub use usage::{Use, Uses, Written, write_uses};
+pub use usage::{Use, Uses, Written, stopped_holds, write_uses};
 pub use write::{
     COPY_ON_SERVER, Forget, Record, Update, forget, record, record_in, update, update_in,
 };
