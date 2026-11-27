@@ -24,6 +24,7 @@ use std::{
     collections::HashMap,
     env, fs, io,
     path::{Path, PathBuf},
+    pin::Pin,
     process::Stdio,
     sync::{Arc, Mutex, PoisonError},
     time::Duration,
@@ -37,9 +38,11 @@ pub const ENV: &str = "USER_MEMORY_HANDOVER";
 const PROBE: &str = "probe";
 /// The state file's format; a binary's probe lists the ones it reads.
 const FORMAT: u64 = 1;
-/// How long a replacement has to answer `--version` or the probe. Either
-/// answers in milliseconds; the rest covers macOS checking a new executable
-/// on its first start on a busy machine.
+/// How long a replacement has to answer its whole check: `--version`, then
+/// the probe. Each answers in milliseconds; the rest covers macOS checking
+/// a new executable on its first start on a busy machine. The probe is the
+/// second start, after that first one has passed, so one deadline covers
+/// both, and the app's messages wait for a check at most this long.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a relay waits for its child to end once its input is closed,
 /// before it kills it: a child with no request in flight ends at once.
@@ -442,9 +445,9 @@ async fn ask(binary: &Path, args: &[&str], handover: Option<&str>) -> Result<Str
         Some(value) => command.env(ENV, value),
         None => command.env_remove(ENV),
     };
-    let output = tokio::time::timeout(probe_timeout(), command.output())
+    let output = command
+        .output()
         .await
-        .map_err(|_| Refused::Unanswered("it did not answer".to_owned()))?
         .map_err(|err| Refused::Broken(format!("it did not start: {err}")))?;
     if !output.status.success() {
         let said = format!("it ended with {}", output.status);
@@ -458,19 +461,56 @@ async fn ask(binary: &Path, args: &[&str], handover: Option<&str>) -> Result<Str
         .map_err(|_| Refused::Broken("its answer isn't text".to_owned()))
 }
 
-/// Checks that `binary` can take over a session agreed on `protocol`: it
-/// runs, is not older than this one, reads this state format and speaks
-/// the protocol. The same version in another file, such as a rebuild,
-/// takes over; only a lower version is refused.
-async fn check(binary: &Path, protocol: Option<&str>) -> Result<(), Refused> {
-    let printed = ask(binary, &["--version"], None).await?;
-    let new = versions::of_binary(&printed)
-        .ok_or_else(|| Refused::Broken("it doesn't say its version".into()))?;
-    if Version::parse(versions::running()).is_some_and(|running| new < running) {
-        return Err(Refused::Older(new));
-    }
-    let answer = ask(binary, &["serve"], Some(PROBE)).await?;
-    judge(new, &answer, protocol)
+/// What a replacement's check found: its version and its probe's answer,
+/// judged against the session's protocol when the check ends, since a
+/// 2026-07-28 session names its protocol in each request.
+struct Probed {
+    version: Version,
+    answer: String,
+}
+
+/// A check of the replacement with `identity`, which `serve`'s loop polls
+/// beside the app's input and the server's output. It is never spawned:
+/// dropping it drops the runs it waits on, and `kill_on_drop` ends them.
+struct Check {
+    identity: Identity,
+    run: Pin<Box<dyn Future<Output = Result<Probed, Refused>> + Send>>,
+}
+
+/// Runs `binary`'s check: it runs and is not older than this one, within
+/// one [`PROBE_TIMEOUT`] for both of its starts. The same version in
+/// another file, such as a rebuild, takes over; only a lower version is
+/// refused.
+async fn check(binary: PathBuf) -> Result<Probed, Refused> {
+    let steps = async {
+        let printed = ask(&binary, &["--version"], None).await?;
+        let version = versions::of_binary(&printed)
+            .ok_or_else(|| Refused::Broken("it doesn't say its version".into()))?;
+        if Version::parse(versions::running()).is_some_and(|running| version < running) {
+            return Err(Refused::Older(version));
+        }
+        let answer = ask(&binary, &["serve"], Some(PROBE)).await?;
+        Ok(Probed { version, answer })
+    };
+    tokio::time::timeout(probe_timeout(), steps)
+        .await
+        .map_err(|_| Refused::Unanswered("it did not answer".to_owned()))?
+}
+
+/// A message of the app's held while a check runs.
+struct Held {
+    /// Its id, when it is a request.
+    id: Option<String>,
+    line: Vec<u8>,
+}
+
+/// The end of the check in `check`, with the identity it checked; never,
+/// when no check runs.
+async fn checked(check: &mut Option<Check>) -> (Identity, Result<Probed, Refused>) {
+    let Some(check) = check else {
+        return std::future::pending().await;
+    };
+    (check.identity, check.run.as_mut().await)
 }
 
 /// Whether a binary at version `new`, whose probe printed `answer`, can
@@ -652,7 +692,7 @@ fn takes_listen(message: &Value) -> bool {
 
 /// What the front does with a message from the app.
 enum Step {
-    /// Passed to the server.
+    /// Passed to the server, or held while a check runs.
     Passed,
     /// The binary was replaced: the message goes to the new one, with what
     /// follows it.
@@ -701,6 +741,8 @@ pub async fn serve(inner: Inner) -> Result<()> {
         refused: None,
         wanted: None,
         transient: None,
+        checking: None,
+        held: Vec::new(),
         in_flight: HashMap::new(),
         notices: Vec::new(),
         buffer: Vec::new(),
@@ -730,8 +772,11 @@ pub async fn serve(inner: Inner) -> Result<()> {
                     front.buffer.extend_from_slice(&chunk);
                     front.handle_input(&mut reader).await?;
                 }
-                _ => front.end_input(),
+                _ => front.end_input().await?,
             },
+            (identity, verdict) = checked(&mut front.checking), if front.checking.is_some() => {
+                front.on_checked(identity, verdict, &mut reader).await?;
+            }
             line = front.backend.output.next_line() => match line {
                 Ok(Some(line)) => {
                     front.on_output(line).await?;
@@ -746,8 +791,10 @@ pub async fn serve(inner: Inner) -> Result<()> {
             },
             () = &mut stopped, if !signalled => {
                 signalled = true;
+                // Input first: what a check held reaches the server, and a
+                // listen among it is opened, so every stream is completed.
+                front.end_input().await?;
                 front.close_listens().await?;
-                front.end_input();
             }
         }
     }
@@ -772,6 +819,17 @@ struct Front {
     wanted: Option<Identity>,
     /// A replacement whose checks failed for a passing reason, and how many.
     transient: Option<(Identity, u32)>,
+    /// The check of a replacement under way.
+    checking: Option<Check>,
+    /// The app's messages that came in while a check runs, in order, for
+    /// the code the check decides on. They are held, not passed to the
+    /// server serving now: setup replaces the binary before it migrates the
+    /// store, and that server may refuse a migrated store ("older than the
+    /// store"). This closes that window only for the check itself: a check
+    /// that passes while requests are in flight sends what it held to the
+    /// server serving now, as any message is sent while a hand-over waits,
+    /// since one of them may be the answer an in-flight call waits for.
+    held: Vec<Held>,
     /// The app's requests the server has not answered, by id, with their
     /// method.
     in_flight: HashMap<String, String>,
@@ -798,25 +856,87 @@ impl Front {
             }
         }
         if self.eof {
-            self.end_input();
+            self.end_input().await?;
         }
         Ok(())
     }
 
     async fn on_input(&mut self, line: Vec<u8>) -> Result<Step> {
-        let replaced = !self.session.relayed && self.replaced().await;
+        if self.checking.is_some() {
+            self.hold(line).await?;
+            return Ok(Step::Passed);
+        }
+        let replaced = !self.session.relayed && self.replaced();
         #[cfg(debug_assertions)]
         if env::var_os(TEST_TRACE).is_some() {
             eprintln!(
-                "user-memory trace: serving {:?}, on disk {:?}, replaced {replaced}, in flight {:?}",
+                "user-memory trace: serving {:?}, on disk {:?}, replaced {replaced}, checking {:?}, in flight {:?}",
                 self.identity,
                 identity(&self.session.binary).ok(),
+                self.checking.as_ref().map(|check| check.identity),
                 self.in_flight.keys().collect::<Vec<_>>()
             );
         }
         if replaced && !self.app_in_flight() {
             return Ok(Step::HandOver(line));
         }
+        if self.checking.is_some() {
+            self.hold(line).await?;
+            return Ok(Step::Passed);
+        }
+        self.pass_on(line).await
+    }
+
+    /// Holds `line` until the check under way ends. A cancellation of a
+    /// held request takes it back, and neither reaches the server, since a
+    /// cancelled request gets no answer; any other cancellation goes on at
+    /// once, for a request the server already has.
+    async fn hold(&mut self, line: Vec<u8>) -> Result<()> {
+        let message = serde_json::from_slice::<Value>(&line).ok();
+        if let Some(message) = &message
+            && message["method"] == "notifications/cancelled"
+        {
+            let cancelled = message.pointer("/params/requestId").map(key);
+            let at = self
+                .held
+                .iter()
+                .position(|held| held.id.is_some() && held.id == cancelled);
+            if let Some(at) = at {
+                self.held.remove(at);
+            } else {
+                self.pass_on(line).await?;
+            }
+            return Ok(());
+        }
+        let id = message
+            .filter(|message| message["method"].is_string())
+            .and_then(|message| message.get("id").map(key));
+        self.held.push(Held { id, line });
+        Ok(())
+    }
+
+    /// Passes what a check held to the server serving now.
+    async fn release(&mut self) -> Result<()> {
+        for held in std::mem::take(&mut self.held) {
+            self.pass_on(held.line).await?;
+        }
+        Ok(())
+    }
+
+    /// The held messages and the buffer, in the order they came, as the
+    /// input a hand-over gives the new code first.
+    fn take_held(&mut self) -> Vec<u8> {
+        let mut pending: Vec<u8> = std::mem::take(&mut self.held)
+            .into_iter()
+            .flat_map(|held| held.line)
+            .collect();
+        pending.append(&mut self.buffer);
+        pending
+    }
+
+    /// Notes what `line` tells of the session and passes it to the server,
+    /// or answers it here.
+    async fn pass_on(&mut self, line: Vec<u8>) -> Result<Step> {
         if let Ok(message) = serde_json::from_slice::<Value>(&line) {
             if !self.legacy()
                 && let Some(protocol) = message
@@ -936,9 +1056,10 @@ impl Front {
         }
     }
 
-    /// Whether the binary was replaced by one that can take over: checked
-    /// once per replacement, a refusal said in the next tool reply.
-    async fn replaced(&mut self) -> bool {
+    /// Whether the binary was replaced by one that passed its check. A
+    /// replacement not yet checked starts its check, once per replacement,
+    /// and a refusal is said in the next tool reply.
+    fn replaced(&mut self) -> bool {
         let Ok(now) = identity(&self.session.binary) else {
             // Mid-replacement, or gone: the next message looks again.
             return false;
@@ -946,31 +1067,88 @@ impl Front {
         if self.wanted == Some(now) {
             return true;
         }
-        if Some(now) == self.identity || Some(now) == self.refused {
-            return false;
+        self.start_check(now);
+        false
+    }
+
+    /// Starts the check of the replacement `now`, unless it is the build
+    /// serving, one already refused, or one being checked. A replacement
+    /// checked before it is dropped: only the file checked is handed to.
+    fn start_check(&mut self, now: Identity) {
+        if Some(now) == self.identity
+            || Some(now) == self.refused
+            || self
+                .checking
+                .as_ref()
+                .is_some_and(|check| check.identity == now)
+        {
+            return;
         }
-        match check(&self.session.binary, self.session.protocol.as_deref()).await {
+        self.wanted = None;
+        self.checking = Some(Check {
+            identity: now,
+            run: Box::pin(check(self.session.binary.clone())),
+        });
+    }
+
+    /// Acts on the end of the check of `checked`: hands over to it, or goes
+    /// on with the build serving, passing it what the check held.
+    async fn on_checked(
+        &mut self,
+        checked: Identity,
+        verdict: Result<Probed, Refused>,
+        reader: &mut Reader,
+    ) -> Result<()> {
+        self.checking = None;
+        let now = identity(&self.session.binary).ok();
+        if now != Some(checked) {
+            // Replaced again during the check: its verdict is for a file no
+            // longer there. The new one is checked, holding the same input.
+            if let Some(now) = now {
+                self.start_check(now);
+            }
+            if self.checking.is_none() {
+                self.release().await?;
+            }
+            return Ok(());
+        }
+        let verdict = verdict.and_then(|probed| {
+            judge(
+                probed.version,
+                &probed.answer,
+                self.session.protocol.as_deref(),
+            )
+        });
+        match verdict {
             Ok(()) => {
-                self.wanted = Some(now);
-                true
+                self.wanted = Some(checked);
+                if self.app_in_flight() || self.eof {
+                    // The hand-over waits for them; see `held`.
+                    self.release().await?;
+                } else {
+                    let pending = self.take_held();
+                    self.hand_over(reader, pending).await?;
+                    self.handle_input(reader).await?;
+                }
             }
             Err(Refused::Killed(why) | Refused::Unanswered(why))
-                if self.transient_checks(now) < TRANSIENT_CHECKS =>
+                if self.transient_checks(checked) < TRANSIENT_CHECKS =>
             {
-                // Checked again at a later message, saying nothing to the
-                // app yet; the app's log of serve's stderr says why.
+                // Checked again at a message that comes after these, saying
+                // nothing to the app yet; the app's log of serve's stderr
+                // says why.
                 eprintln!(
                     "user-memory: a check of the replaced binary failed ({why}); trying again at the next message"
                 );
-                false
+                self.release().await?;
             }
             Err(why) => {
-                self.refused = Some(now);
-                self.wanted = None;
+                self.refused = Some(checked);
                 self.notices.push(refusal(&why));
-                false
+                self.release().await?;
             }
         }
+        Ok(())
     }
 
     fn send(&mut self, line: &[u8]) {
@@ -1149,10 +1327,16 @@ impl Front {
     }
 
     /// Closes the server's input once the app closed its own; the server
-    /// answers what is in flight, then ends.
-    fn end_input(&mut self) {
+    /// answers what is in flight, then ends. A check under way is dropped,
+    /// ending its runs, and what it held goes to the server serving now,
+    /// which answers it before it ends.
+    async fn end_input(&mut self) -> Result<()> {
+        if self.checking.take().is_some() {
+            self.release().await?;
+        }
         self.eof = true;
         self.backend.input = None;
+        Ok(())
     }
 
     /// Stops the server: closes its input, passes on what it still says,
@@ -1226,14 +1410,21 @@ impl Front {
     /// relays to it, or when this binary goes on, with `pending` back in
     /// the buffer for the caller to handle.
     async fn hand_over(&mut self, reader: &mut Reader, mut pending: Vec<u8>) -> Result<()> {
-        let mut wanted = self.wanted.take();
-        // Replaced again since the check: check that one.
-        if identity(&self.session.binary).ok() != wanted {
-            if !self.replaced().await {
-                self.buffer = pending;
+        let wanted = self.wanted.take();
+        // Replaced again since the check: that one is checked first, and
+        // the input waits for it as for any check.
+        if let Ok(now) = identity(&self.session.binary)
+            && Some(now) != wanted
+        {
+            self.start_check(now);
+            if self.checking.is_some() {
+                self.hold_pending(pending).await?;
                 return Ok(());
             }
-            wanted = self.wanted.take();
+        }
+        if identity(&self.session.binary).ok() != wanted {
+            self.buffer = pending;
+            return Ok(());
         }
         self.stdout.flush().await?;
         self.stop().await;
@@ -1295,6 +1486,23 @@ impl Front {
         "this system can't replace a running program".into()
     }
 
+    /// Holds the whole messages in `pending` for the check under way; the
+    /// part of a message after them is kept for the rest to come.
+    async fn hold_pending(&mut self, mut pending: Vec<u8>) -> Result<()> {
+        let whole = pending
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |end| end + 1);
+        let mut rest = pending.split_off(whole);
+        rest.append(&mut self.buffer);
+        self.buffer = rest;
+        while let Some(end) = pending.iter().position(|byte| *byte == b'\n') {
+            let line: Vec<u8> = pending.drain(..=end).collect();
+            self.hold(line).await?;
+        }
+        Ok(())
+    }
+
     /// Goes on with this binary after a failed hand-over to the one with
     /// identity `wanted`, saying so in the next tool reply.
     async fn resume(
@@ -1314,9 +1522,10 @@ impl Front {
     }
 }
 
-/// The test-only tool of a debug build told to report a test version: the
+/// The test-only tools of a debug build told to report a test version: the
 /// version answering, which tells the tests which code serves the session,
-/// and a tool list that differs from the real build's.
+/// and a tool list that differs from the real build's; and a ping of the
+/// app, a request of the server's for the app to answer.
 #[cfg(debug_assertions)]
 #[rmcp::tool_router(router = debug_router, vis = "pub(crate)")]
 impl crate::UserMemoryServer {
@@ -1325,6 +1534,17 @@ impl crate::UserMemoryServer {
     )]
     async fn debug_version(&self) -> String {
         json!({"version": versions::running(), "pid": std::process::id()}).to_string()
+    }
+
+    #[rmcp::tool(
+        description = "Debug builds only: pings the app and answers once the app has answered."
+    )]
+    async fn debug_ping(&self, peer: rmcp::Peer<rmcp::RoleServer>) -> String {
+        let ping = rmcp::model::ServerRequest::PingRequest(rmcp::model::PingRequest::default());
+        match peer.send_request(ping).await {
+            Ok(_) => "answered".to_owned(),
+            Err(err) => format!("not answered: {err}"),
+        }
     }
 }
 

@@ -598,9 +598,9 @@ const SENDS_TO_EMBEDDINGS: [&str; 3] = ["index", "search", "record"];
 
 impl UserMemoryServer {
     /// The tools this server offers: its own, and in a debug build that
-    /// reports a test version, the test-only `debug_version`. Their hints
-    /// are the `#[tool]` annotations, with `openWorldHint` set from this
-    /// process's embedding setting.
+    /// reports a test version, the test-only `debug_version` and
+    /// `debug_ping`. Their hints are the `#[tool]` annotations, with
+    /// `openWorldHint` set from this process's embedding setting.
     fn router(&self) -> rmcp::handler::server::router::tool::ToolRouter<Self> {
         let mut router = Self::tool_router();
         if memory::embedding_elsewhere(&setup::embedding_setting).is_some() {
