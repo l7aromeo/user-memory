@@ -12,6 +12,10 @@ for what a fix needs. Then open a pull request that closes it, with
 `Fixes #N` in its description, so the issue and the change stay linked.
 Security issues are the exception: report those privately, as below.
 
+Before proposing a large feature, check
+[not-planned.md](docs/dev/not-planned.md): it lists the ideas set aside
+for now, and why.
+
 ## Set up
 
 You need [rustup](https://rustup.rs/), which installs the Rust that
