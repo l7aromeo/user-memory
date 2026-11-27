@@ -52,8 +52,28 @@ fn detect(path: &Path, home: Option<&Path>) -> Result<String> {
 }
 
 fn resolve(path: &Path, home: Option<&Path>) -> Result<Identity> {
-    match git_root(path)? {
-        Some(root) => repository_identity(&root),
+    resolve_in(path, git_root(path)?.as_deref(), home)
+}
+
+/// [`resolve_in`] on git's answer `root` for `path`, with either error
+/// formatted as `{:#}`.
+fn identity_of(
+    path: &Path,
+    root: &Result<Option<PathBuf>>,
+    home: Option<&Path>,
+) -> Result<Identity, String> {
+    match root {
+        Ok(root) => resolve_in(path, root.as_deref(), home).map_err(|err| format!("{err:#}")),
+        Err(err) => Err(format!("{err:#}")),
+    }
+}
+
+/// [`resolve`] with git's answer for `path` given: `root`, the work tree
+/// root holding it, or none outside git. A caller that needs the root too
+/// asks git once.
+fn resolve_in(path: &Path, root: Option<&Path>, home: Option<&Path>) -> Result<Identity> {
+    match root {
+        Some(root) => repository_identity(root),
         None => match nearest(path, home, key_file)? {
             Some(file) => Ok(Identity {
                 notes: file.notes(),
@@ -330,9 +350,10 @@ pub fn folder(path: &Path) -> Folder {
 }
 
 fn folder_with_home(path: &Path, home: Option<&Path>) -> Folder {
-    let (key, pending, warnings) = match resolve(path, home) {
+    let root = git_root(path);
+    let (key, pending, warnings) = match identity_of(path, &root, home) {
         Ok(identity) => (Ok(identity.key), identity.pending, identity.notes),
-        Err(err) => (Err(format!("{err:#}")), None, Vec::new()),
+        Err(why) => (Err(why), None, Vec::new()),
     };
     let mut found = Folder {
         key,
@@ -340,7 +361,7 @@ fn folder_with_home(path: &Path, home: Option<&Path>) -> Folder {
         includes: Vec::new(),
         warnings,
     };
-    let list = match git_root(path) {
+    let list = match root {
         Ok(Some(root)) => list_file(&root),
         Ok(None) => nearest(path, home, list_file).ok().flatten(),
         Err(_) => None,
@@ -357,9 +378,10 @@ fn folder_with_home(path: &Path, home: Option<&Path>) -> Folder {
                 .push(format!("{line}: a key belongs in .user-memory-key")),
         }
     }
-    // Each listed folder costs a few git calls; resolving them side by side
-    // keeps a long list within the prompt hook's time limit. Joining in
-    // order keeps the file's order.
+    // Each listed folder costs one git call for its root and, in a
+    // checkout, one for its remote; resolving them side by side keeps a
+    // long list within the prompt hook's time limit. Joining in order
+    // keeps the file's order.
     found.includes = std::thread::scope(|scope| {
         let running: Vec<_> = listed
             .iter()
@@ -441,7 +463,8 @@ fn included(dir: &Path, listed: &str, home: Option<&Path>) -> Include {
             "no such folder"
         });
     }
-    match resolve(&target, home) {
+    let root = git_root(&target);
+    match identity_of(&target, &root, home) {
         Ok(identity) => Include {
             warnings: identity
                 .notes
@@ -452,10 +475,10 @@ fn included(dir: &Path, listed: &str, home: Option<&Path>) -> Include {
             key: Ok(identity.key),
             pending: identity.pending,
         },
-        Err(err) => refused(&match git_root(&target) {
+        Err(err) => refused(&match root {
             Ok(Some(_)) => "no project (no commits and no git remote)".into(),
             Ok(None) => "no project (no git remote)".into(),
-            Err(_) => format!("no project ({err:#})"),
+            Err(_) => format!("no project ({err})"),
         }),
     }
 }
