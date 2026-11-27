@@ -235,6 +235,11 @@ pub fn post_tool_use(client: HookClient, _context_limit: Option<usize>) -> Strin
     };
     session.keep_current(session.deadline);
     let pushed = session.push(client, &payload);
+    // Settling the context's last hold (#118) comes after the push, on a
+    // deadline of its own: it writes only what the next flush and the
+    // working set read, never what this push reads, and on a slow disk its
+    // open of the session state would otherwise leave the push no time.
+    session.settle(&payload, tool_deadline(Instant::now()));
     // The tag check (#121) runs once the push is chosen, on a deadline of
     // its own, so its git and its request to a server never take the
     // push's time. The prompt hook and session start run theirs within
@@ -314,15 +319,13 @@ impl Session {
 
     /// What the hook prints for the result in `payload`: the push of what
     /// the call matches that its agent context was not shown in this
-    /// stretch, or nothing. Notes what the call used and settles the
-    /// context's last hold first.
+    /// stretch, or nothing. Notes what the call used first.
     fn push(&self, client: HookClient, payload: &[u8]) -> String {
         let origin = super::origin(client, payload);
         let Ok(payload) = serde_json::from_slice::<Value>(payload) else {
             return String::new();
         };
         super::used::note(&self.snapshot, &payload, origin.as_deref(), self.deadline);
-        self.settle(&payload);
         let Some(mut action) = action(&payload) else {
             return String::new();
         };
@@ -448,16 +451,20 @@ impl Session {
     }
 
     /// Settles the last hold of the context whose tool call `payload`
-    /// reports ([`State::settle`]): its shell command's key, or none for
-    /// any other tool. Errors are dropped: an unsettled hold only leaves its
-    /// outcome unknown.
-    fn settle(&self, payload: &Value) {
+    /// reports ([`State::settle`]) by `deadline`: its shell command's key,
+    /// or none for any other tool. Errors are dropped: an unsettled hold
+    /// only leaves its outcome unknown.
+    fn settle(&self, payload: &[u8], deadline: Instant) {
+        let Ok(payload) = serde_json::from_slice::<Value>(payload) else {
+            return;
+        };
+        let payload = &payload;
         let agent = payload["agent_id"].as_str().unwrap_or(recall::MAIN);
         let call = payload["tool_use_id"].as_str().unwrap_or_default();
         let command = action(payload)
             .filter(|action| action.kind == Kind::Command)
             .map(|action| command_key(&action.text));
-        let _ = State::open(&recall::path(&self.snapshot), self.deadline)
+        let _ = State::open(&recall::path(&self.snapshot), deadline)
             .and_then(|mut state| state.settle(agent, call, command.as_deref()));
     }
 
