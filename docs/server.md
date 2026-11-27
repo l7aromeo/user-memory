@@ -164,14 +164,33 @@ other than the host connect only through the proxy.
        proxy_read_timeout 300s;
        proxy_send_timeout 300s;
    }
+
+   location ~ ^/(use|tags|auth/token)$ {      # session hooks, a token's scope
+       proxy_pass http://127.0.0.1:8765;        # bodies are at most 256 KiB
+       proxy_set_header Host $host;
+       proxy_set_header X-Forwarded-Proto $scheme;
+       proxy_http_version 1.1;
+       proxy_set_header Connection "";
+       proxy_read_timeout 30s;
+       proxy_send_timeout 30s;
+   }
+
+   location = / {                               # the health line
+       proxy_pass http://127.0.0.1:8765;
+       proxy_set_header Host $host;
+       proxy_set_header X-Forwarded-Proto $scheme;
+   }
    ```
 
    Keep the `Authorization` header intact: the server checks the token
-   itself. `GET /` answers one line without a token, for health checks.
-   Everything else may return 404. Avoid a CDN in front of the server: CDNs
-   often strip `Authorization`, cache or restrict `POST`, and cut streamed
-   responses short. Point the host name straight at the proxy (on
-   Cloudflare: a DNS-only record).
+   itself. `/use` and `/tags` carry what the session hooks send: what a
+   session used, and the tag conditions to check and those a checkout
+   ended. `/auth/token` answers or revokes the calling token's own scope.
+   `GET /` answers one line without a token, for health checks. The server
+   answers 404 on any other path, so nothing else needs forwarding. Avoid a
+   CDN in front of the server: CDNs often strip `Authorization`, cache or
+   restrict `POST`, and cut streamed responses short. Point the host name
+   straight at the proxy (on Cloudflare: a DNS-only record).
 
    `/delivery` sends each client the delivery index of its sessions'
    projects, 2.7 MB at 10,000 memories, when it has none. The server keeps

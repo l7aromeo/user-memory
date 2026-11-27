@@ -3080,3 +3080,102 @@ fn the_docs_give_every_tools_hints() {
         .collect();
     assert_eq!(documented, code);
 }
+
+/// The source files that build the memory server's router.
+const ROUTER_SOURCES: [&str; 5] = [
+    "src/remote.rs",
+    "src/remote/delivery.rs",
+    "src/remote/tags.rs",
+    "src/remote/transfer.rs",
+    "src/remote/usage.rs",
+];
+
+/// The paths a router source registers: `.route("/path"` and
+/// `.nest_service("/path"` literals, and `.route(&format!("/{ROUTE}")` with
+/// the file's own `ROUTE` constant. Any other first argument fails, naming
+/// `file`, so a new way to register a route can't pass unchecked.
+fn routes_in(file: &str, source: &str) -> Vec<String> {
+    let route_const = source.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("const ROUTE: &str = \"")
+            .and_then(|rest| rest.strip_suffix("\";"))
+    });
+    let mut found = Vec::new();
+    for call in [".route(", ".nest_service("] {
+        for (at, _) in source.match_indices(call) {
+            let arg = source[at + call.len()..].trim_start();
+            let path = if let Some(rest) = arg.strip_prefix('"') {
+                rest[..rest.find('"').unwrap()].to_owned()
+            } else if arg.starts_with("&format!(\"/{ROUTE}\")") {
+                let name = route_const.unwrap_or_else(|| {
+                    panic!("{file}: a route names ROUTE, which it doesn't define")
+                });
+                format!("/{name}")
+            } else {
+                panic!(
+                    "{file}: a route registered in an unknown way: {}",
+                    arg.lines().next().unwrap()
+                );
+            };
+            found.push(path);
+        }
+    }
+    found
+}
+
+/// The paths each `location` of the nginx example in `doc` forwards:
+/// `location = /path` and `location ~ ^/(a|b)$`. Any other form fails, so a
+/// new kind of location can't pass unchecked.
+fn proxied(doc: &str) -> Vec<String> {
+    let start = doc.find("```nginx\n").expect("an nginx example");
+    let block = &doc[start..];
+    let block = &block[..block[3..].find("```").unwrap() + 3];
+    let mut paths = Vec::new();
+    for line in block.lines().map(str::trim) {
+        let Some(location) = line.strip_prefix("location ") else {
+            continue;
+        };
+        let pattern = location.split(" {").next().unwrap();
+        if let Some(path) = pattern.strip_prefix("= ") {
+            paths.push(path.to_owned());
+        } else if let Some(names) = pattern
+            .strip_prefix("~ ^/(")
+            .and_then(|rest| rest.strip_suffix(")$"))
+        {
+            paths.extend(names.split('|').map(|name| format!("/{name}")));
+        } else {
+            panic!("an nginx location of an unknown form: {line}");
+        }
+    }
+    paths
+}
+
+#[test]
+fn the_proxy_example_forwards_every_route_the_server_registers() {
+    let mut routes: Vec<String> = ROUTER_SOURCES
+        .iter()
+        .flat_map(|file| routes_in(file, &fs::read_to_string(repo_file(file)).unwrap()))
+        .collect();
+    routes.sort();
+    routes.dedup();
+    // Too few means the reading broke, not that the server shrank.
+    assert!(routes.len() >= 8, "routes read from the router: {routes:?}");
+    let mut forwarded = proxied(&fs::read_to_string(repo_file("docs/server.md")).unwrap());
+    forwarded.sort();
+    assert_eq!(
+        forwarded, routes,
+        "docs/server.md's nginx example must forward exactly the routes the server registers"
+    );
+}
+
+#[test]
+#[should_panic(expected = "a route registered in an unknown way")]
+fn a_route_registered_another_way_fails_the_proxy_check() {
+    routes_in("src/remote/x.rs", "Router::new().route(PATH, get(serve))");
+}
+
+#[test]
+#[should_panic(expected = "an nginx location of an unknown form")]
+fn an_nginx_location_of_another_form_fails_the_proxy_check() {
+    proxied("```nginx\nlocation /mcp {\n}\n```\n");
+}
