@@ -405,8 +405,9 @@ From user-memory, matching this step (read one for the rest before applying it):
   subagent.
 - **Compaction and clear:** after a compaction the passages already pushed
   may be pushed again when the work matches them, as the earlier copies
-  are gone; a `/clear` also forgets the steps; a resumed session keeps
-  both.
+  are gone, except what the working set prints again
+  ([after compaction](#after-compaction)); a `/clear` also forgets the
+  steps; a resumed session keeps both.
 - **Time:** a tool hook has 100 ms. A memory whose text it could not read
   in that time is named by its id alone, with no label, since whose word
   it is comes from the store:
@@ -446,6 +447,45 @@ line, as in a push.
   hook past its 100 ms lets the command run. A memory server's store
   holds nothing back: a hold shows the passage and whose word it is, and
   only this machine's store gives the hook those.
+
+### After compaction
+
+A compaction drops what the agent read in full and what the hooks
+showed; the summary keeps a gist at best. So each session keeps which
+memories its agent read, recorded or changed, was held back by or was
+pushed, and found with `search`, and the `working-set` hook prints them
+again after a compaction:
+
+```output
+What this context worked with before it was compacted, from user-memory as it is now (a memory changed since shows its current text):
+Read:
+- e0000001 The user's rule: Run `cargo publish --dry-run` before `cargo publish`.
+Recorded or changed:
+- e0000002 An agent's note from an earlier session (fact): The bench runs on a quiet box.
+Shown after a step:
+- e0000003 The user's decision: Releases leave on Tuesdays.
+Found by a search:
+- e0000004 Lint config; read it again before acting on it
+```
+
+- **Order:** what the agent read, then what it recorded or changed, then
+  what a hold showed, then what a push showed, newest first within each;
+  what a search found comes last. A memory the agent chose to read never
+  gives its room to one a hook guessed.
+- **Form:** a memory of at most 600 characters prints whole; a longer one
+  prints its title and the passages pushed of it, or, like what a search
+  found and what does not fit, its title and "read it again before acting
+  on it". On a memory server's store each line names the id alone.
+- **The store as it is now:** a memory changed since prints its current
+  text, a superseded one the memory in force that replaced it, and a
+  forgotten or stale one nothing. A changed rule never comes back in its
+  old form.
+- **Shown again:** what it prints counts as pushed in the new stretch, so
+  the next steps do not push it again, and it is kept for the next
+  compaction.
+- **Only after a compaction:** a `/clear` asks for an empty context and a
+  new session starts its own, so neither restores anything; a resumed
+  session's transcript still holds it.
 
 Each session's steps, what was pushed and what was held are kept beside
 its snapshot ([storage](storage.md#the-state-folder)).

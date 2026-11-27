@@ -130,11 +130,11 @@ them once:
 | Event | Command | Prints |
 |---|---|---|
 | `SessionStart` (startup, resume, clear, compact) | `session-start` | the index, below |
-| `SessionStart` (compact) | `working-set` | nothing at present |
+| `SessionStart` (compact) | `working-set` | what the context worked with before the compaction ([after compaction](how-it-works.md#after-compaction)) |
 | `UserPromptSubmit` | `prompt-submit` | a notice when something changed, [below](#changes-during-a-session), then what the prompt matches ([recall](how-it-works.md#recall-during-the-task)); it sends the session's [use](how-it-works.md#the-index-at-session-start) since its last prompt |
 | `SubagentStart` | `subagent-start` | the project rules and the most-used part, [below](#rules-for-subagents), then what the subagent's task matches |
 | `PreToolUse` | `pre-tool-use` | for a shell command that names a memory's passage strongly, a deny whose reason shows it, once ([held back](how-it-works.md#held-back-before-it-runs)); otherwise nothing. It keeps the task of a call that starts a subagent for that subagent's start |
-| `PostToolUse`, and Claude Code's `PostToolUseFailure` | `post-tool-use` | what the call matches ([recall](how-it-works.md#recall-during-the-task)); after user-memory's `read` or `record`, nothing, and it notes the memories they returned or stored |
+| `PostToolUse`, and Claude Code's `PostToolUseFailure` | `post-tool-use` | what the call matches ([recall](how-it-works.md#recall-during-the-task)); after user-memory's `read`, `record`, `update` or `search`, nothing, and it notes the memories they returned, stored or changed |
 
 Claude Code's `PreToolUse` hook runs for the tools it acts on:
 `Bash|PowerShell|Monitor|Agent|Task|SendMessage`. Codex's runs before every

@@ -46,6 +46,7 @@ mod undo;
 pub mod until;
 mod usage;
 mod words;
+pub(crate) mod working_set;
 mod write;
 
 pub use history::{CLI, acting_as, client_name, set_default_client};

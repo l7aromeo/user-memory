@@ -217,7 +217,12 @@ pub(crate) fn labelled(
 /// that [`reads_as_wish`] says it is not the user's rule, as its `note` in
 /// a read does; one about the work (a fact, decision, goal or lesson)
 /// names its type. None for an inference, which is never pushed.
-fn label(source: &str, status: &str, memory_type: &str, origins: usize) -> Option<(Voice, String)> {
+pub(super) fn label(
+    source: &str,
+    status: &str,
+    memory_type: &str,
+    origins: usize,
+) -> Option<(Voice, String)> {
     match source {
         "explicit" if is_rule(source, status, memory_type) => {
             Some((Voice::Rule, "The user's rule".to_owned()))
