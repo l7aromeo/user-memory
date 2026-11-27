@@ -67,12 +67,21 @@ const TEST_EXEC_FAIL: &str = "USER_MEMORY_TEST_EXEC_FAIL";
 /// requests in flight, so a test that sees no hand-over says why.
 #[cfg(debug_assertions)]
 pub(crate) const TEST_TRACE: &str = "USER_MEMORY_TEST_TRACE";
-/// How many times a replacement whose check was ended by a signal is
-/// checked again, at later messages, before it is refused. macOS can kill a
-/// new executable while it assesses it on a loaded machine
-/// (docs/dev/development.md); the next start runs. After an `exec` there is
-/// no old process to fall back to, so only a check that ran counts.
-const KILLED_CHECKS: u32 = 3;
+/// In debug builds, a number of milliseconds that replaces
+/// [`PROBE_TIMEOUT`], so a test of a replacement too slow to answer waits
+/// that long instead of ten seconds.
+#[cfg(debug_assertions)]
+const TEST_PROBE_TIMEOUT: &str = "USER_MEMORY_TEST_PROBE_TIMEOUT_MS";
+/// How many checks of a replacement may fail for a passing reason, a signal
+/// ending it or no answer within [`PROBE_TIMEOUT`], before it is refused;
+/// each one after the first comes at a later message. macOS can kill a new
+/// executable while it assesses it on a loaded machine
+/// (docs/dev/development.md), or keep its first start waiting past the
+/// timeout; a later start runs at once (#277). Three, so a load lasting a
+/// few messages passes and a binary that never answers is reported soon.
+/// After an `exec` there is no old process to fall back to, so only a
+/// check that ran counts.
+const TRANSIENT_CHECKS: u32 = 3;
 /// How a hand-over state file's name starts and ends:
 /// `handover-<pid>-<nanoseconds>.json`.
 const STATE_PREFIX: &str = "handover-";
@@ -384,7 +393,7 @@ fn refusal(why: &Refused) -> String {
         Refused::Protocol(new, protocol) => format!(
             "user-memory {new} replaced the binary this session runs ({running}), but it can't continue this session's protocol ({protocol}), so this session keeps {running}; restart your client to run {new}."
         ),
-        Refused::Broken(err) | Refused::Killed(err) => format!(
+        Refused::Broken(err) | Refused::Killed(err) | Refused::Unanswered(err) => format!(
             "user-memory was replaced on disk, but the new binary can't take over this session ({err}), so this session keeps {running}; run user-memory doctor, then restart your client."
         ),
     }
@@ -400,6 +409,23 @@ enum Refused {
     /// executable once, so it is checked again before it is refused.
     #[cfg_attr(not(unix), allow(dead_code, reason = "only Unix has signals"))]
     Killed(String),
+    /// It did not answer within [`PROBE_TIMEOUT`]: perhaps a first start
+    /// held up on a busy machine, so it is checked again before it is
+    /// refused.
+    Unanswered(String),
+}
+
+/// How long a replacement has to answer: [`PROBE_TIMEOUT`], or in a debug
+/// build what [`TEST_PROBE_TIMEOUT`] says.
+fn probe_timeout() -> Duration {
+    #[cfg(debug_assertions)]
+    if let Some(ms) = env::var(TEST_PROBE_TIMEOUT)
+        .ok()
+        .and_then(|ms| ms.parse().ok())
+    {
+        return Duration::from_millis(ms);
+    }
+    PROBE_TIMEOUT
 }
 
 /// What `binary` prints for `args`, run with `handover` as [`ENV`] or
@@ -416,9 +442,9 @@ async fn ask(binary: &Path, args: &[&str], handover: Option<&str>) -> Result<Str
         Some(value) => command.env(ENV, value),
         None => command.env_remove(ENV),
     };
-    let output = tokio::time::timeout(PROBE_TIMEOUT, command.output())
+    let output = tokio::time::timeout(probe_timeout(), command.output())
         .await
-        .map_err(|_| Refused::Broken("it did not answer".to_owned()))?
+        .map_err(|_| Refused::Unanswered("it did not answer".to_owned()))?
         .map_err(|err| Refused::Broken(format!("it did not start: {err}")))?;
     if !output.status.success() {
         let said = format!("it ended with {}", output.status);
@@ -674,7 +700,7 @@ pub async fn serve(inner: Inner) -> Result<()> {
         session,
         refused: None,
         wanted: None,
-        killed: None,
+        transient: None,
         in_flight: HashMap::new(),
         notices: Vec::new(),
         buffer: Vec::new(),
@@ -744,8 +770,8 @@ struct Front {
     refused: Option<Identity>,
     /// A checked replacement waiting for the requests in flight.
     wanted: Option<Identity>,
-    /// A replacement whose checks a signal ended, and how many.
-    killed: Option<(Identity, u32)>,
+    /// A replacement whose checks failed for a passing reason, and how many.
+    transient: Option<(Identity, u32)>,
     /// The app's requests the server has not answered, by id, with their
     /// method.
     in_flight: HashMap<String, String>,
@@ -895,16 +921,16 @@ impl Front {
         Ok(())
     }
 
-    /// How many checks of the replacement `now` a signal ended, this one
-    /// included.
-    fn killed_checks(&mut self, now: Identity) -> u32 {
-        match &mut self.killed {
+    /// How many checks of the replacement `now` failed for a passing
+    /// reason ([`TRANSIENT_CHECKS`]), this one included.
+    fn transient_checks(&mut self, now: Identity) -> u32 {
+        match &mut self.transient {
             Some((identity, count)) if *identity == now => {
                 *count += 1;
                 *count
             }
             _ => {
-                self.killed = Some((now, 1));
+                self.transient = Some((now, 1));
                 1
             }
         }
@@ -928,7 +954,9 @@ impl Front {
                 self.wanted = Some(now);
                 true
             }
-            Err(Refused::Killed(why)) if self.killed_checks(now) < KILLED_CHECKS => {
+            Err(Refused::Killed(why) | Refused::Unanswered(why))
+                if self.transient_checks(now) < TRANSIENT_CHECKS =>
+            {
                 // Checked again at a later message, saying nothing to the
                 // app yet; the app's log of serve's stderr says why.
                 eprintln!(

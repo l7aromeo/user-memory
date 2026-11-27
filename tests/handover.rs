@@ -449,7 +449,7 @@ fn an_unchanged_tool_list_is_not_announced() {
         let stderr = session.close();
         assert!(
             stderr.contains("took over this session"),
-            "{way:?}: {stderr}"
+            "{way:?}: {stderr}\nreply: {reply}"
         );
     }
 }
@@ -486,7 +486,7 @@ fn a_replacement_with_the_old_size_and_time_is_noticed_by_its_file_id() {
         let stderr = session.close();
         assert!(
             stderr.contains("took over this session"),
-            "{way:?}: {stderr}"
+            "{way:?}: {stderr}\nreply: {reply}"
         );
     }
 }
@@ -782,6 +782,63 @@ fn a_check_ended_by_a_signal_is_tried_again_without_a_notice() {
             ) && stderr.contains("trying again at the next message"),
             "{way:?}: {stderr}"
         );
+    }
+}
+
+/// The probe timeout these tests give, in milliseconds: the two starts of
+/// a debug build that a check makes fit in it on a loaded machine, and the
+/// fake's slow run, ten times longer, never answers within it. The slow run
+/// is ended at the timeout, so it costs the test nothing more.
+const SHORT_PROBE: &str = "3000";
+
+/// A replacement slow to answer on a busy machine is checked again at the
+/// next message, without a notice, and the hand-over happens once it
+/// answers in time (#277).
+#[test]
+fn a_check_that_did_not_answer_is_tried_again_without_a_notice() {
+    for way in ways() {
+        let place = Place::new();
+        let mut session = place.serve(way, &[("USER_MEMORY_TEST_PROBE_TIMEOUT_MS", SHORT_PROBE)]);
+        place.upgrade();
+        fs::write(place.bin().join("user-memory.slow"), "1").unwrap();
+        let first = session.call("first", "index");
+        assert_eq!(texts(&first).len(), 1, "{way:?}: {first}");
+        assert!(!place.bin().join("user-memory.slow").exists());
+        assert_eq!(session.version("second"), Some(NEWER.into()), "{way:?}");
+        let stderr = session.close();
+        assert!(
+            stderr.contains("a check of the replaced binary failed (it did not answer)")
+                && stderr.contains("trying again at the next message")
+                && stderr.contains("took over this session"),
+            "{way:?}: {stderr}"
+        );
+    }
+}
+
+/// A replacement that never answers in time is refused after its last
+/// check, with the notice it always had, and the session keeps its build.
+#[test]
+fn a_replacement_that_never_answers_is_refused_after_its_checks() {
+    for way in ways() {
+        let place = Place::new();
+        let mut session = place.serve(way, &[("USER_MEMORY_TEST_PROBE_TIMEOUT_MS", SHORT_PROBE)]);
+        place.upgrade();
+        fs::write(place.bin().join("user-memory.slow"), "10").unwrap();
+        let first = session.call("first", "index");
+        let second = session.call("second", "index");
+        assert_eq!(texts(&first).len(), 1, "{way:?}: {first}");
+        assert_eq!(texts(&second).len(), 1, "{way:?}: {second}");
+        let third = session.call("third", "index");
+        let said = texts(&third);
+        assert!(
+            said.iter().any(|text| text.starts_with(
+                "user-memory was replaced on disk, but the new binary can't take over this session (it did not answer), so this session keeps "
+            )),
+            "{way:?}: {third}"
+        );
+        // The session's own build still serves: it has no debug tool.
+        assert_eq!(session.version("fourth"), None, "{way:?}");
+        session.close();
     }
 }
 
