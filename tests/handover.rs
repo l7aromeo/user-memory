@@ -842,6 +842,408 @@ fn a_replacement_that_never_answers_is_refused_after_its_checks() {
     }
 }
 
+/// The probe timeout the tests of a held check give, in milliseconds: long
+/// enough that a check the test holds (`user-memory.wait`) never times out
+/// before the test ends it.
+const LONG_PROBE: &str = "60000";
+
+/// How long a test waits for a reply that must come while a check is held:
+/// far less than [`LONG_PROBE`], so a reply that waits for the check fails.
+const DURING_CHECK: Duration = Duration::from_secs(20);
+
+/// Holds the next check's probe run until [`go_on`]; the fake writes the
+/// run's process id once it waits.
+fn hold_check(place: &Place) {
+    fs::write(place.bin().join("user-memory.wait"), "").unwrap();
+}
+
+/// The process id of the probe run a held check waits on, once it waits.
+fn held_check(place: &Place, way: Way) -> u64 {
+    let waiting = place.bin().join("user-memory.waiting");
+    let deadline = Instant::now() + REPLY_WAIT;
+    loop {
+        if let Some(pid) = fs::read_to_string(&waiting)
+            .ok()
+            .and_then(|pid| pid.trim().parse().ok())
+        {
+            return pid;
+        }
+        assert!(Instant::now() < deadline, "{way:?}: no check started");
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Lets a held check go on.
+fn go_on(place: &Place) {
+    fs::remove_file(place.bin().join("user-memory.wait")).unwrap();
+}
+
+impl Session {
+    /// The reply to `id` if it came or comes within `wait`.
+    fn reply_within(&mut self, id: &str, wait: Duration) -> Option<Value> {
+        if let Some(at) = self.seen.iter().position(|m| m["id"] == id) {
+            return Some(self.seen.remove(at));
+        }
+        let deadline = Instant::now() + wait;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.lines.recv_timeout(left) {
+                Ok(message) if message["id"] == id => return Some(message),
+                Ok(message) => self.seen.push(message),
+                Err(_) => return None,
+            }
+        }
+    }
+    /// The reply to `id`, which may have come before another awaited: a
+    /// server answers requests that came together in any order.
+    fn reply_any(&mut self, id: &str) -> Value {
+        match self.seen.iter().position(|m| m["id"] == id) {
+            Some(at) => self.seen.remove(at),
+            None => self.reply(id),
+        }
+    }
+}
+
+/// While a check runs, the server's answer to a call already in flight
+/// reaches the app; the message that started the check waits for it and
+/// is then handed over (#279).
+#[test]
+fn a_reply_written_during_a_check_reaches_the_app_at_once() {
+    for way in ways() {
+        let place = Place::new();
+        // A new store's first open pauses until the file is removed.
+        let pause = place.dir.path().join("pause");
+        fs::write(&pause, "").unwrap();
+        let mut session = place.serve(
+            way,
+            &[
+                ("USER_MEMORY_PAUSE_OPEN", pause.to_str().unwrap()),
+                ("USER_MEMORY_TEST_PROBE_TIMEOUT_MS", LONG_PROBE),
+            ],
+        );
+        session.write(&[session.call_message("slow", "index")]);
+        let reached = place.dir.path().join("pause.reached");
+        let deadline = Instant::now() + REPLY_WAIT;
+        while !reached.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "{way:?}: the call never opened the store"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+        place.upgrade();
+        hold_check(&place);
+        session.write(&[session.call_message("trigger", "debug_version")]);
+        held_check(&place, way);
+        fs::remove_file(&pause).unwrap();
+        let slow = session.reply_within("slow", DURING_CHECK);
+        assert!(
+            slow.as_ref()
+                .is_some_and(|slow| slow["result"]["isError"] == false),
+            "{way:?}: the reply waited for the check: {slow:?}; stderr: {}",
+            session.stderr_now()
+        );
+        go_on(&place);
+        let trigger = session.reply("trigger");
+        let answer: Value = serde_json::from_str(&texts(&trigger).concat()).unwrap_or_default();
+        assert_eq!(answer["version"], NEWER, "{way:?}: {trigger}");
+        session.close();
+    }
+}
+
+/// Messages that come together wait for one check, not one each: a
+/// replacement that never answers costs a burst one timeout, and the
+/// refusal is said once its last check failed (#279).
+#[test]
+fn a_burst_of_messages_waits_for_one_check() {
+    for way in ways() {
+        let place = Place::new();
+        let mut session = place.serve(way, &[("USER_MEMORY_TEST_PROBE_TIMEOUT_MS", SHORT_PROBE)]);
+        place.upgrade();
+        let slow = place.bin().join("user-memory.slow");
+        fs::write(&slow, "10").unwrap();
+        session.write(&[
+            session.call_message("one", "index"),
+            session.call_message("two", "index"),
+            session.call_message("three", "index"),
+        ]);
+        for id in ["one", "two", "three"] {
+            let reply = session.reply_any(id);
+            assert_eq!(texts(&reply).len(), 1, "{way:?}: {reply}");
+        }
+        // Each check starts the replacement once, counting the file down.
+        assert_eq!(
+            fs::read_to_string(&slow).unwrap(),
+            "9",
+            "{way:?}: more than one check"
+        );
+        let fourth = session.call("four", "index");
+        assert_eq!(texts(&fourth).len(), 1, "{way:?}: {fourth}");
+        let fifth = session.call("five", "index");
+        assert!(
+            texts(&fifth).iter().any(|text| text.starts_with(
+                "user-memory was replaced on disk, but the new binary can't take over this session (it did not answer), so this session keeps "
+            )),
+            "{way:?}: {fifth}"
+        );
+        assert_eq!(fs::read_to_string(&slow).unwrap(), "7", "{way:?}");
+        session.close();
+    }
+}
+
+/// A request cancelled while a check holds it never reaches a server and
+/// gets no answer; the request after it is served (#279).
+#[test]
+fn a_request_cancelled_during_a_check_gets_no_answer() {
+    for way in ways() {
+        let place = Place::new();
+        let mut session = place.serve(way, &[("USER_MEMORY_TEST_PROBE_TIMEOUT_MS", LONG_PROBE)]);
+        place.upgrade();
+        hold_check(&place);
+        session.write(&[session.call_message("cancelled", "index")]);
+        held_check(&place, way);
+        session.write(&[
+            json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"cancelled","reason":"stopped by the user"}}),
+            session.call_message("after", "debug_version"),
+        ]);
+        go_on(&place);
+        let after = session.reply("after");
+        let answer: Value = serde_json::from_str(&texts(&after).concat()).unwrap_or_default();
+        assert_eq!(answer["version"], NEWER, "{way:?}: {after}");
+        let (stderr, seen) = session.finish();
+        assert!(
+            seen.iter().all(|m| m["id"] != "cancelled"),
+            "{way:?}: {seen:?}\n{stderr}"
+        );
+    }
+}
+
+/// A message that comes while a check runs waits for it and goes to the
+/// new code when the check passes, as the message that started it does.
+#[test]
+fn a_message_sent_during_a_passing_check_is_served_by_the_new_binary() {
+    for way in ways() {
+        let place = Place::new();
+        let mut session = place.serve(way, &[("USER_MEMORY_TEST_PROBE_TIMEOUT_MS", LONG_PROBE)]);
+        place.upgrade();
+        hold_check(&place);
+        session.write(&[session.call_message("first", "debug_version")]);
+        held_check(&place, way);
+        session.write(&[session.call_message("second", "debug_version")]);
+        go_on(&place);
+        for id in ["first", "second"] {
+            let reply = session.reply_any(id);
+            let answer: Value = serde_json::from_str(&texts(&reply).concat()).unwrap_or_default();
+            assert_eq!(answer["version"], NEWER, "{way:?}: {reply}");
+        }
+        let stderr = session.close();
+        assert_eq!(
+            stderr.matches("took over this session").count(),
+            1,
+            "{way:?}: {stderr}"
+        );
+    }
+}
+
+/// One deadline covers a whole check: a replacement whose two starts each
+/// take most of it does not answer in time (#279).
+#[test]
+fn a_check_has_one_deadline_for_both_of_its_starts() {
+    for way in ways() {
+        let place = Place::new();
+        let mut session = place.serve(way, &[("USER_MEMORY_TEST_PROBE_TIMEOUT_MS", SHORT_PROBE)]);
+        place.upgrade();
+        // Three fifths of the timeout, each start: both fit one each.
+        fs::write(place.bin().join("user-memory.delay"), "1800").unwrap();
+        let first = session.call("first", "index");
+        assert_eq!(texts(&first).len(), 1, "{way:?}: {first}");
+        let second = session.call("second", "index");
+        assert_eq!(texts(&second).len(), 1, "{way:?}: {second}");
+        let third = session.call("third", "index");
+        assert!(
+            texts(&third).iter().any(|text| text.starts_with(
+                "user-memory was replaced on disk, but the new binary can't take over this session (it did not answer), so this session keeps "
+            )),
+            "{way:?}: {third}"
+        );
+        assert_eq!(session.version("fourth"), None, "{way:?}");
+        session.close();
+    }
+}
+
+/// A binary replaced again while its check runs: the verdict is for the
+/// file checked, so the one now on disk is checked before anything is
+/// handed to it, and a broken one is refused (#279).
+#[test]
+fn a_binary_replaced_during_its_check_is_checked_again() {
+    for way in ways() {
+        let place = Place::new();
+        let mut session = place.serve(way, &[("USER_MEMORY_TEST_PROBE_TIMEOUT_MS", LONG_PROBE)]);
+        place.upgrade();
+        hold_check(&place);
+        session.write(&[session.call_message("first", "index")]);
+        held_check(&place, way);
+        // The held probe already read its files, so it passes.
+        place.break_binary();
+        go_on(&place);
+        let first = session.reply("first");
+        let notice = texts(&first).last().cloned().unwrap_or_default();
+        assert!(
+            notice.starts_with(
+                "user-memory was replaced on disk, but the new binary can't take over this session (it ended with"
+            ),
+            "{way:?}: {first}"
+        );
+        assert_eq!(session.version("serving"), None, "{way:?}");
+        let stderr = session.close();
+        assert!(!stderr.contains("took over"), "{way:?}: {stderr}");
+    }
+}
+
+/// A check that failed for a file replaced again while it ran says
+/// nothing of it: the file now on disk is checked, and a good one takes
+/// over with no notice (#279).
+#[test]
+fn a_failed_check_of_a_file_replaced_during_it_is_dropped() {
+    for way in ways() {
+        let place = Place::new();
+        let mut session = place.serve(way, &[("USER_MEMORY_TEST_PROBE_TIMEOUT_MS", LONG_PROBE)]);
+        place.upgrade();
+        // The held probe fails once it goes on.
+        fs::write(place.bin().join("user-memory.wait"), "1").unwrap();
+        session.write(&[session.call_message("first", "debug_version")]);
+        held_check(&place, way);
+        place.upgrade_again(LATER);
+        go_on(&place);
+        let first = session.reply("first");
+        assert_eq!(texts(&first).len(), 1, "{way:?}: {first}");
+        let answer: Value = serde_json::from_str(&texts(&first).concat()).unwrap_or_default();
+        assert_eq!(answer["version"], LATER, "{way:?}: {first}");
+        session.close();
+    }
+}
+
+/// The server's request to the app, made while a check runs, gets the
+/// app's answer once the check ends: a check that passes while a call is in
+/// flight passes what it held to the server serving, so a call waiting on
+/// the app never waits on the hand-over (#279).
+#[test]
+fn an_answer_to_the_servers_request_reaches_it_after_a_check() {
+    for way in ways() {
+        let place = Place::new();
+        let mut session = place.serve(way, &[("USER_MEMORY_TEST_PROBE_TIMEOUT_MS", LONG_PROBE)]);
+        // The newer build has the debug tools, the real one doesn't.
+        place.upgrade();
+        assert_eq!(session.version("first"), Some(NEWER.into()), "{way:?}");
+        session.write(&[session.call_message("ping", "debug_ping")]);
+        let deadline = Instant::now() + REPLY_WAIT;
+        let ping = loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let message = session
+                .lines
+                .recv_timeout(left)
+                .unwrap_or_else(|_| panic!("{way:?}: no ping; seen {:?}", session.seen));
+            if message["method"] == "ping" {
+                break message;
+            }
+            session.seen.push(message);
+        };
+        hold_check(&place);
+        place.upgrade_again(LATER);
+        session.write(&[session.call_message("trigger", "index")]);
+        held_check(&place, way);
+        session.write(&[json!({"jsonrpc":"2.0","id":ping["id"],"result":{}})]);
+        go_on(&place);
+        let pinged = session.reply("ping");
+        assert_eq!(texts(&pinged), ["answered"], "{way:?}: {pinged}");
+        let trigger = session.reply("trigger");
+        assert_eq!(trigger["result"]["isError"], false, "{way:?}: {trigger}");
+        assert_eq!(session.version("after"), Some(LATER.into()), "{way:?}");
+        session.close();
+    }
+}
+
+/// The app closing its input during a check ends the check and its run,
+/// and the server serving answers what the check held (#279).
+#[test]
+fn input_closed_during_a_check_answers_what_it_held() {
+    for way in ways() {
+        let place = Place::new();
+        let mut session = place.serve(way, &[("USER_MEMORY_TEST_PROBE_TIMEOUT_MS", LONG_PROBE)]);
+        place.upgrade();
+        hold_check(&place);
+        session.write(&[session.call_message("held", "index")]);
+        let run = held_check(&place, way);
+        let closed = Instant::now();
+        let (stderr, seen) = session.finish();
+        assert!(
+            closed.elapsed() < DURING_CHECK,
+            "{way:?}: serve ended only with the check: {stderr}"
+        );
+        let held = seen.iter().find(|m| m["id"] == "held");
+        assert!(
+            held.is_some_and(|held| held["result"]["isError"] == false),
+            "{way:?}: {seen:?}\n{stderr}"
+        );
+        ended(run, way);
+    }
+}
+
+/// A stop signal during a check ends it the same way: what it held is
+/// answered, a listen stream it held is opened and completed, and its run
+/// is ended (#279).
+#[cfg(unix)]
+#[test]
+fn a_signal_during_a_check_answers_what_it_held() {
+    for way in ways() {
+        let place = Place::new();
+        let mut session = place.serve_as(
+            way,
+            &[("USER_MEMORY_TEST_PROBE_TIMEOUT_MS", LONG_PROBE)],
+            Opening::Discover,
+        );
+        place.upgrade();
+        hold_check(&place);
+        session.write(&[session.call_message("held", "index")]);
+        let run = held_check(&place, way);
+        session.write(&[session.listen_message(json!({"toolsListChanged": true}))]);
+        let stopped = Command::new("kill")
+            .args(["-TERM", &session.child.id().to_string()])
+            .status()
+            .unwrap();
+        assert!(stopped.success());
+        let held = session.reply_within("held", DURING_CHECK);
+        assert!(
+            held.as_ref()
+                .is_some_and(|held| held["result"]["isError"] == false),
+            "{way:?}: the answer waited for the check: {held:?}"
+        );
+        let complete = session.reply_within(LISTEN, DURING_CHECK);
+        assert_eq!(
+            complete.map(|complete| complete["result"].clone()),
+            Some(
+                json!({"resultType": "complete", "_meta": {"io.modelcontextprotocol/subscriptionId": LISTEN}})
+            ),
+            "{way:?}: {:?}",
+            session.seen
+        );
+        session.close();
+        ended(run, way);
+    }
+}
+
+/// Waits for process `pid` to end: a check's run never outlives it.
+fn ended(pid: u64, way: Way) {
+    let deadline = Instant::now() + REPLY_WAIT;
+    while running(pid) {
+        assert!(
+            Instant::now() < deadline,
+            "{way:?}: the check's run {pid} still runs"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// On 2026-07-28 the app hears of changed tools only on a listen stream it
 /// opened for them: the stream is acknowledged first, told nothing of a
 /// hand-over that left the tools as they were, told once of one that

@@ -850,6 +850,14 @@ fn cargo(args: &[String]) -> u8 {
 /// tests/handover.rs), so the check gives up on it every time and ends it.
 const SLOW_RUN: Duration = Duration::from_secs(30);
 
+/// How long a probe run held by `user-memory.wait` waits at most for the
+/// test to remove it: a test that fails before then leaves no process
+/// behind for longer.
+const HELD_RUN: Duration = Duration::from_secs(120);
+
+/// How often a held probe run looks whether it may go on.
+const HELD_POLL: Duration = Duration::from_millis(20);
+
 /// A newer user-memory, for the hand-over and upgrade tests: the real test
 /// build at `$FAKE_USER_MEMORY`, run with the version
 /// `$FAKE_USER_MEMORY_VERSION` (and the schema version
@@ -861,7 +869,12 @@ const SLOW_RUN: Duration = Duration::from_secs(30);
 /// by a signal, and go: a new program the system refuses once. A file
 /// `user-memory.slow` holding a count makes that many runs wait
 /// [`SLOW_RUN`] first, each counting it down: a new program slow to answer
-/// on a busy machine.
+/// on a busy machine. A file `user-memory.delay` holding milliseconds makes
+/// every run wait that long first. A file `user-memory.wait` holds a probe
+/// run, the second start of a check, until the test removes it, with the
+/// run's process id in `user-memory.waiting`, and then exits with the code
+/// the file held, if any: a check the test ends when it chooses, after it
+/// read this copy's other files.
 fn newer_build(args: &[String]) -> u8 {
     let killed = env::current_exe()
         .unwrap()
@@ -882,6 +895,27 @@ fn newer_build(args: &[String]) -> u8 {
             fs::remove_file(&slow).unwrap();
         }
         thread::sleep(SLOW_RUN);
+    }
+    let beside = |name: &str| env::current_exe().unwrap().with_file_name(name);
+    if let Some(ms) = fs::read_to_string(beside("user-memory.delay"))
+        .ok()
+        .and_then(|ms| ms.trim().parse::<u64>().ok())
+    {
+        thread::sleep(Duration::from_millis(ms));
+    }
+    let probe = args.first().is_some_and(|arg| arg == "serve")
+        && env::var_os("USER_MEMORY_HANDOVER").is_some_and(|value| value == "probe");
+    if probe && let Ok(code) = fs::read_to_string(beside("user-memory.wait")) {
+        let written = beside("user-memory.waiting.new");
+        fs::write(&written, std::process::id().to_string()).unwrap();
+        fs::rename(&written, beside("user-memory.waiting")).unwrap();
+        let deadline = std::time::Instant::now() + HELD_RUN;
+        while beside("user-memory.wait").exists() && std::time::Instant::now() < deadline {
+            thread::sleep(HELD_POLL);
+        }
+        if let Ok(code) = code.trim().parse::<u8>() {
+            return code;
+        }
     }
     let real = env::var_os("FAKE_USER_MEMORY").unwrap();
     // A version file beside the copy gives one replacement a version of its

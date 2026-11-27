@@ -48,7 +48,7 @@ pub(crate) fn running() -> &'static str {
 }
 
 /// Whether this debug build reports a test version in place of its own,
-/// which adds the test-only `debug_version` tool.
+/// which adds the test-only `debug_version` and `debug_ping` tools.
 #[cfg(debug_assertions)]
 pub(crate) fn test_build() -> bool {
     running() != env!("CARGO_PKG_VERSION")

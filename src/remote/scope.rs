@@ -38,8 +38,9 @@ pub const TOOLS: &[(&str, Need)] = &[
     // may be someone's backup, needs write access.
     ("export", Need::WriteWith(&["overwrite"])),
     ("link", Need::Read),
-    // Test builds only: reports the build's version.
+    // Test builds only: report the build's version, and ping the app.
     ("debug_version", Need::Read),
+    ("debug_ping", Need::Read),
 ];
 
 /// The sentence a read-only token's refused call gets, naming the server
@@ -215,11 +216,11 @@ mod tests {
         #[cfg(debug_assertions)]
         routed.extend(crate::UserMemoryServer::debug_router().list_all());
         let offered: BTreeSet<String> = routed.iter().map(|tool| tool.name.to_string()).collect();
-        // The test-only tool is offered by debug builds alone.
+        // The test-only tools are offered by debug builds alone.
         let classified: BTreeSet<String> = TOOLS
             .iter()
             .map(|(name, _)| (*name).to_owned())
-            .filter(|name| cfg!(debug_assertions) || name != "debug_version")
+            .filter(|name| cfg!(debug_assertions) || !name.starts_with("debug_"))
             .collect();
         assert_eq!(
             offered, classified,
@@ -317,7 +318,15 @@ mod tests {
         for tool in ["record", "update", "forget", "import", "no_such_tool"] {
             assert!(writes(tool, None), "{tool}");
         }
-        for tool in ["index", "read", "search", "export", "link", "debug_version"] {
+        for tool in [
+            "index",
+            "read",
+            "search",
+            "export",
+            "link",
+            "debug_version",
+            "debug_ping",
+        ] {
             assert!(
                 !writes(tool, args(json!({"keep": ["x"]})).as_ref()),
                 "{tool}"
