@@ -197,7 +197,12 @@ passes.
 The `windows` workflow runs `just check` on Windows x64 (`windows-latest`) and
 ARM64 (`windows-11-arm`), on every push to main and on pull requests that
 change code, tests, the build, scripts, workflows or the PowerShell
-installers; a docs-only change skips it. There the recipes run in Windows
+installers; a docs-only change skips it. The workflow itself always runs:
+its `changes` job decides (`scripts/ci-changes`), and its last job,
+`windows`, passes once the checks passed or were skipped for a change they
+don't cover. That job is the check the main ruleset can require, as a
+workflow skipped by a paths filter would leave it pending; the `docker`
+workflow ends the same way, in a `docker` job. There the recipes run in Windows
 PowerShell (the justfile's `windows-shell`), the install.ps1 tests are
 required (`REQUIRE_PWSH`), and x64 uses aws-lc-sys's prebuilt NASM, which
 the image lacks. After `just check` and `just check-release`, the install.ps1 tests run again under

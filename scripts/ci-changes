@@ -1,0 +1,52 @@
+#!/bin/sh
+# Says whether a workflow has work, as code=true or code=false on stdout and,
+# in a workflow, in $GITHUB_OUTPUT. A push (EVENT anything but pull_request)
+# always has work. A pull request has work when a file it changes matches
+# one of PATHS, one pattern per line.
+#
+# The checkout is GitHub's merge commit for the pull request, whose first
+# parent is the base branch's tip, so HEAD^1..HEAD is what the pull request
+# changes; a checkout of depth 2 holds both. Renames are not detected, so
+# a file moved out of the patterns, such as src/x.rs to docs/x.rs, lists
+# its old path too, and the move counts as the change to src/ it is.
+#
+# The patterns are matched with the shell's case, where * also matches /.
+# That is broader than a workflow's paths filter, where * stops at /:
+# compose*.yaml also matches compose/x.yaml here. Broader is the safe side:
+# it runs a workflow a narrower match would skip, and never skips one it
+# would run.
+set -eu
+
+# Whether $1 matches one of PATHS.
+matches() {
+  while IFS= read -r pattern; do
+    [ -n "$pattern" ] || continue
+    # shellcheck disable=SC2254 # the pattern is meant as a glob
+    case $1 in
+      $pattern) return 0 ;;
+    esac
+  done <<EOF
+$PATHS
+EOF
+  return 1
+}
+
+code=true
+if [ "${EVENT:-}" = pull_request ]; then
+  : "${PATHS:?PATHS lists the paths the workflow checks, one per line}"
+  changed=$(git diff --name-only --no-renames HEAD^1 HEAD)
+  code=false
+  while IFS= read -r file; do
+    if [ -n "$file" ] && matches "$file"; then
+      echo "changes $file"
+      code=true
+      break
+    fi
+  done <<EOF
+$changed
+EOF
+fi
+echo "code=$code"
+if [ -n "${GITHUB_OUTPUT:-}" ]; then
+  echo "code=$code" >>"$GITHUB_OUTPUT"
+fi

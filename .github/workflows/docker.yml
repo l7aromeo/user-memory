@@ -2,7 +2,11 @@
 # allowed host, upgrade of an older store with its migration, uninstall
 # keeping and purging the memories, and a server-only host. GitHub's Ubuntu runners have Docker;
 # check.yml runs every other test. It needs no secrets, and what it builds is
-# named per run and removed by the test.
+# named per run and removed by the test. It runs for every push to main and
+# for pull requests that change the installer, the server or its build. The
+# workflow itself always runs, so its last job, `docker`, which the main
+# ruleset requires, always reports: a workflow skipped by a paths filter
+# would leave a required check pending.
 name: docker
 
 on:
@@ -10,17 +14,6 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-    paths:
-      - install.sh
-      - uninstall.sh
-      - Dockerfile
-      - compose*.yaml
-      - src/**
-      - tests/install.rs
-      - Cargo.toml
-      - Cargo.lock
-      - scripts/client-release
-      - .github/workflows/docker.yml
 
 permissions:
   contents: read
@@ -30,7 +23,39 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  docker:
+  # Whether this pull request changes what the tests cover
+  # (scripts/ci-changes); a push to main always does.
+  changes:
+    runs-on: ubuntu-latest
+    # A checkout two commits deep and one git diff, seconds of work; 5
+    # minutes, the shortest timeout the workflows give.
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.changes.outputs.code }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+      - id: changes
+        run: sh scripts/ci-changes
+        env:
+          EVENT: ${{ github.event_name }}
+          PATHS: |
+            install.sh
+            uninstall.sh
+            Dockerfile
+            compose*.yaml
+            src/**
+            tests/install.rs
+            Cargo.toml
+            Cargo.lock
+            scripts/client-release
+            scripts/ci-changes
+            .github/workflows/docker.yml
+
+  installer:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     # About twice the longest green run (517 s), rounded up to 5 minutes.
     timeout-minutes: 20
@@ -61,3 +86,28 @@ jobs:
         env:
           USER_MEMORY_TEST_DOCKER_BINARY: ${{ runner.temp }}/build/user-memory-x86_64-unknown-linux-gnu
         run: cargo test --locked --test install a_real_docker_server -- --nocapture
+
+  # The check the main ruleset requires. It passes when every job above
+  # passed, or when the pull request changes nothing they cover and they
+  # were skipped; a failed, cancelled or skipped `changes` fails it, so a
+  # broken change check never counts as a docs-only change.
+  docker:
+    if: always()
+    needs: [changes, installer]
+    runs-on: ubuntu-latest
+    # One shell step on the results, seconds; as for changes.
+    timeout-minutes: 5
+    steps:
+      - env:
+          CHANGES: ${{ needs.changes.result }}
+          CODE: ${{ needs.changes.outputs.code }}
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "changes: $CHANGES, code: $CODE, results: $RESULTS"
+          [ "$CHANGES" = success ] || exit 1
+          for result in $RESULTS; do
+            case "$result:$CODE" in
+              success:*|skipped:false) ;;
+              *) exit 1 ;;
+            esac
+          done

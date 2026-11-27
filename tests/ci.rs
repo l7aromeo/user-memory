@@ -6,9 +6,9 @@
     reason = "integration tests may unwrap: a failed unwrap is a failed test"
 )]
 
-use std::{fs, path::Path, process::Command};
+use std::{collections::BTreeSet, fs, path::Path, process::Command};
 
-use yaml_rust2::YamlLoader;
+use yaml_rust2::{Yaml, YamlLoader};
 
 #[path = "support/pwsh.rs"]
 mod pwsh;
@@ -109,7 +109,8 @@ fn the_docker_workflow_runs_the_real_docker_installer_test() {
     let text = repo_file(".github/workflows/docker.yml");
     assert!(!text.contains("secrets."), "{text}");
     let docs = YamlLoader::load_from_str(&text).unwrap();
-    let job = &docs[0]["jobs"]["docker"];
+    assert_eq!(changes_paths(&docs[0]), DOCKER_PATHS);
+    let job = &docs[0]["jobs"]["installer"];
     assert_eq!(job["runs-on"].as_str(), Some("ubuntu-latest"));
     let steps = job["steps"].as_vec().unwrap();
     let step = |prefix: &str| {
@@ -449,7 +450,8 @@ fn only_a_release_checks_rust_against_the_current_stable() {
 
 /// The paths whose change runs the Windows checks on a pull request: code,
 /// tests, the build, scripts, workflows and the Windows installers. A
-/// docs-only change skips them; a push to main always runs them.
+/// docs-only change skips them; a push to main always runs them. The
+/// workflow's `changes` job decides (scripts/ci-changes).
 const WINDOWS_PATHS: [&str; 8] = [
     "src/**",
     "tests/**",
@@ -460,6 +462,231 @@ const WINDOWS_PATHS: [&str; 8] = [
     "install.ps1",
     "uninstall.ps1",
 ];
+
+/// The paths whose change runs the real Docker installer test on a pull
+/// request: the installers, the server and its build, and what decides
+/// that (scripts/ci-changes).
+const DOCKER_PATHS: [&str; 11] = [
+    "install.sh",
+    "uninstall.sh",
+    "Dockerfile",
+    "compose*.yaml",
+    "src/**",
+    "tests/install.rs",
+    "Cargo.toml",
+    "Cargo.lock",
+    "scripts/client-release",
+    "scripts/ci-changes",
+    ".github/workflows/docker.yml",
+];
+
+/// The patterns `workflow`'s `changes` job gives scripts/ci-changes, one per
+/// line of its `PATHS`.
+fn changes_paths(workflow: &Yaml) -> Vec<String> {
+    let steps = workflow["jobs"]["changes"]["steps"].as_vec().unwrap();
+    let step = steps
+        .iter()
+        .find(|step| step["run"].as_str() == Some("sh scripts/ci-changes"))
+        .expect("the changes job runs scripts/ci-changes");
+    assert_eq!(
+        step["env"]["EVENT"].as_str(),
+        Some("${{ github.event_name }}")
+    );
+    step["env"]["PATHS"]
+        .as_str()
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The jobs `job` needs, whether written as one name or a list.
+fn needs(job: &Yaml) -> BTreeSet<&str> {
+    match &job["needs"] {
+        Yaml::String(one) => BTreeSet::from([one.as_str()]),
+        Yaml::Array(many) => many.iter().map(|need| need.as_str().unwrap()).collect(),
+        _ => BTreeSet::new(),
+    }
+}
+
+/// A workflow skipped by a `paths` filter leaves a check the main ruleset
+/// requires pending for good (GitHub's "Troubleshooting required status
+/// checks"), so no workflow filters its runs by path. One that runs its jobs
+/// only for some changes decides in a `changes` job, and every other job
+/// waits for it. Its last job, named after the workflow, is the check the
+/// ruleset requires: it runs whatever the others did, and it needs every
+/// other job, so a job added later can't be left out of what it waits for.
+#[test]
+fn every_workflow_that_skips_its_jobs_ends_in_one_check_to_require() {
+    let mut gated = Vec::new();
+    for (file, text) in workflows() {
+        let docs = YamlLoader::load_from_str(&text).unwrap();
+        let workflow = &docs[0];
+        for event in ["push", "pull_request"] {
+            for filter in ["paths", "paths-ignore"] {
+                assert!(
+                    workflow["on"][event][filter].is_badvalue(),
+                    "{file}: on.{event}.{filter} would leave a required check pending; decide in a changes job"
+                );
+            }
+        }
+        if workflow["jobs"]["changes"].is_badvalue() {
+            continue;
+        }
+        let name = workflow["name"].as_str().unwrap();
+        let gate = &workflow["jobs"][name];
+        assert!(
+            !gate.is_badvalue(),
+            "{file}: no job named {name}, after the workflow, to require"
+        );
+        assert_eq!(
+            gate["if"].as_str(),
+            Some("always()"),
+            "{file}: {name} must run whatever the jobs before it did"
+        );
+        let others: BTreeSet<&str> = workflow["jobs"]
+            .as_hash()
+            .unwrap()
+            .keys()
+            .map(|key| key.as_str().unwrap())
+            .filter(|key| *key != name)
+            .collect();
+        assert_eq!(
+            needs(gate),
+            others,
+            "{file}: {name} must need every other job"
+        );
+        for job in others.iter().filter(|job| **job != "changes") {
+            let job_yaml = &workflow["jobs"][*job];
+            assert!(
+                needs(job_yaml).contains("changes"),
+                "{file}: {job} must wait for changes"
+            );
+            assert_eq!(
+                job_yaml["if"].as_str(),
+                Some("needs.changes.outputs.code == 'true'"),
+                "{file}: {job} must run only when changes says so"
+            );
+        }
+        let checked = gate["steps"][0]["run"].as_str().unwrap();
+        assert!(
+            checked.contains(r#"[ "$CHANGES" = success ] || exit 1"#)
+                && checked.contains("success:*|skipped:false) ;;"),
+            "{file}: {name} must fail unless changes succeeded and every job passed or was skipped for a change they don't cover"
+        );
+        gated.push(name.to_owned());
+    }
+    assert_eq!(gated, ["docker", "windows"]);
+}
+
+/// scripts/ci-changes on a scratch repository, its last commit on top of a
+/// base as a pull request's merge commit is: what the commit changes decides,
+/// with patterns matched more broadly than a workflow's paths filter, never
+/// less. Unix only: the script runs on Ubuntu runners.
+#[cfg(unix)]
+#[test]
+fn the_change_check_runs_a_workflow_for_any_change_its_paths_match() {
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/ci-changes");
+    if let Ok(out) = Command::new("shellcheck")
+        .args(["-s", "sh"])
+        .arg(&script)
+        .output()
+    {
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+    // `moved` holds files in the base that the change moves, from and to.
+    let decide = |event: &str, changed: &[&str], moved: &[(&str, &str)]| -> String {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(["-c", "user.name=ci", "-c", "user.email=ci@example.invalid"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .current_dir(repo.path())
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        fs::write(repo.path().join("README.md"), "base\n").unwrap();
+        git(&["add", "README.md"]);
+        for (from, _) in moved {
+            let path = repo.path().join(from);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, "moved\n").unwrap();
+            git(&["add", from]);
+        }
+        git(&["commit", "-q", "-m", "base"]);
+        for (from, to) in moved {
+            fs::create_dir_all(repo.path().join(to).parent().unwrap()).unwrap();
+            git(&["mv", from, to]);
+        }
+        for file in changed {
+            let path = repo.path().join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, "changed\n").unwrap();
+            git(&["add", file]);
+        }
+        git(&["commit", "-q", "-m", "change"]);
+        let out = Command::new("sh")
+            .arg(&script)
+            .current_dir(repo.path())
+            .env("EVENT", event)
+            .env("PATHS", "src/**\ncompose*.yaml\n")
+            .env_remove("GITHUB_OUTPUT")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .last()
+            .unwrap()
+            .to_owned()
+    };
+    assert_eq!(
+        decide("pull_request", &["docs/guide.md"], &[]),
+        "code=false"
+    );
+    assert_eq!(
+        decide(
+            "pull_request",
+            &["docs/guide.md", "src/memory/read.rs"],
+            &[]
+        ),
+        "code=true"
+    );
+    assert_eq!(
+        decide("pull_request", &["compose.server.yaml"], &[]),
+        "code=true"
+    );
+    // GitHub's compose*.yaml stops at /; the change check doesn't.
+    assert_eq!(
+        decide("pull_request", &["compose/override.yaml"], &[]),
+        "code=true"
+    );
+    // A file moved out of src/ changes src/, though only its new path is
+    // outside the patterns.
+    assert_eq!(
+        decide("pull_request", &[], &[("src/x.rs", "docs/x.rs")]),
+        "code=true"
+    );
+    assert_eq!(decide("push", &["docs/guide.md"], &[]), "code=true");
+}
 
 #[test]
 fn the_windows_workflow_checks_x64_and_arm64_on_code_changes() {
@@ -478,13 +705,7 @@ fn the_windows_workflow_checks_x64_and_arm64_on_code_changes() {
     assert_eq!(branches("push"), ["main"]);
     assert!(on["push"]["paths"].is_badvalue(), "every push to main runs");
     assert_eq!(branches("pull_request"), ["main"]);
-    let paths: Vec<&str> = on["pull_request"]["paths"]
-        .as_vec()
-        .unwrap()
-        .iter()
-        .map(|p| p.as_str().unwrap())
-        .collect();
-    assert_eq!(paths, WINDOWS_PATHS);
+    assert_eq!(changes_paths(&docs[0]), WINDOWS_PATHS);
     let job = &docs[0]["jobs"]["check"];
     let runners: Vec<(&str, &str)> = job["strategy"]["matrix"]["include"]
         .as_vec()
@@ -763,14 +984,18 @@ fn ci_runs_end_a_hung_test() {
 
 /// Each job's timeout-minutes, which the workflows explain with the longest
 /// green run each is set from.
-const JOB_TIMEOUTS: [(&str, &str, i64); 7] = [
+const JOB_TIMEOUTS: [(&str, &str, i64); 11] = [
     ("check.yml", "check", 35),
-    ("docker.yml", "docker", 20),
+    ("docker.yml", "changes", 5),
+    ("docker.yml", "docker", 5),
+    ("docker.yml", "installer", 20),
     ("release.yml", "assemble", 15),
     ("release.yml", "build", 30),
     ("release.yml", "publish", 5),
     ("release.yml", "version", 5),
+    ("windows.yml", "changes", 5),
     ("windows.yml", "check", 35),
+    ("windows.yml", "windows", 5),
 ];
 
 // A job that hangs outside the tests, in a build or an install, stops at its
