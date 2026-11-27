@@ -736,7 +736,10 @@ beside session start's own index and one that finishes first adds little
 of itself; each of 21 rounds times the build alone and the two session
 starts one after the other, in an order that rotates from round to round,
 and the check takes the median of the rounds' shares, so a runner that
-slows down between rounds moves none of them); a tool hook that finds a
+slows down between rounds moves none of them; a set whose middle half is
+over 200 points wide, a runner whose speed swung within its rounds, is
+timed once more, and a second one as wide prints `too noisy to judge`
+instead of failing); a tool hook that finds a
 change, process start included, once pushing nothing and once pushing the
 memory its command names (budget: `TOOL_HOOK_LIMIT`); the tool hook in a
 session whose project waits for a tag, in a folder the session never saw,

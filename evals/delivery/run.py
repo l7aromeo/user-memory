@@ -86,6 +86,18 @@ SESSION_BUILD_SHARE = 0.75
 # under the bar, and 58 % over the same runs' first 11 rounds; the 10 more
 # rounds add about 5 s.
 SESSION_ROUNDS = 21
+# How wide the middle half of a set of rounds' shares may be, high end less
+# low end, for the set to be judged (#248). A wider one means the runner's
+# speed swung within its rounds, where the steps no longer run at one
+# speed and the share means nothing: it is timed once more, and a second
+# set as wide is reported too noisy to judge, not failed. #225's calibration
+# runs (45877672167), ten per runner at 21 rounds, were at most 9 points
+# wide on Ubuntu, 29 on Windows arm64, 40 on macOS, and 15 to 62 on Windows
+# x64 with one run at 137 (-87 % to 50 %). The run that failed in #246 was
+# 1,448 wide (25 % to 1,473 %); the awaited build the bar is for, 6 (100 %
+# to 106 %). 200 points is over every calibration run with room and seven
+# times under that failure.
+SESSION_NOISY_SPREAD = 2.0
 # A server's client's session starts timed: pairs of one that downloads its
 # base (deleted first) and one that finds it, alternating so drift falls on
 # both.
@@ -466,7 +478,7 @@ def upkeep(binary, bench_binary, db, folder, drawn):
     the memory its words name; what a forget adds when three
     scopes' files hold the memory; and the prompt hook building a missing
     base. Returns their medians by name, whether the prompt hook built its
-    base, and session start's rounds (see `session_rounds`)."""
+    base, and the sets of session start's rounds timed (see `session_judged`)."""
     home = folder / "home"
     env = hook_env(home)
     delivery = home / ".local/state/user-memory/delivery"
@@ -504,8 +516,9 @@ def upkeep(binary, bench_binary, db, folder, drawn):
     env["GIT_CEILING_DIRECTORIES"] = str(folder)
     # Session start in the first scope, building its base and finding it,
     # before any other scope has files.
-    rounds = session_rounds(bench_binary, db, folder / "alone.index", delivery,
-                            lambda session: hook("SessionStart", session, folders[0], source="startup"))
+    rounds = session_judged(lambda: session_rounds(
+        bench_binary, db, folder / "alone.index", delivery,
+        lambda session: hook("SessionStart", session, folders[0], source="startup")))
     for n, cwd in enumerate(folders):
         hook("SessionStart", f"s{n}", cwd, source="startup")
     waited = tag_session(binary, env, folders[1])
@@ -709,6 +722,26 @@ def session_rounds(bench_binary, db, alone, delivery, start):
     return rounds
 
 
+def session_judged(take):
+    """The sets of rounds `take()` times for session start's build share:
+    one, or two when the first one's middle half is wider than
+    `SESSION_NOISY_SPREAD`. The last is the one judged
+    (`session_verdict`)."""
+    timed = [take()]
+    _, low, high, _ = session_share(timed[0])
+    if high - low > SESSION_NOISY_SPREAD:
+        timed.append(take())
+    return timed
+
+
+def session_verdict(timed):
+    """The last of `timed`'s share, middle half and steps' medians
+    (`session_share`), and whether it is too noisy to judge: as wide as the
+    set that made it be timed again."""
+    share, low, high, steps = session_share(timed[-1])
+    return share, low, high, steps, len(timed) > 1 and high - low > SESSION_NOISY_SPREAD
+
+
 def session_share(rounds):
     """Session start's build share over `rounds`: its median, the middle
     half's ends, and the steps' medians."""
@@ -901,14 +934,22 @@ def cost(found, seed, size, keep, drawn):
         print(f"  build       median {build_median:6.1f} ms, largest {build_ms[-1]:6.1f} ms "
               f"({BUILDS - 1} builds)")
         kept = upkeep(found["user-memory"], found["bench"], db, folder, drawn)
-        share, low, high, steps = session_share(kept["rounds"])
         tool_limit = rust_ms("src/session/tools.rs", "TOOL_HOOK_LIMIT")
         hold_limit = rust_ms("src/session/tools.rs", "HOLD_LIMIT")
         prompt_limit = rust_ms("src/session.rs", "PROMPT_LIMIT")
-        print(f"  session start median {steps['building']:6.1f} ms building its base, "
-              f"{steps['finding']:6.1f} ms finding it, build {steps['alone']:.1f} ms "
-              f"({SESSION_ROUNDS} rounds): {share:.0%} of the build added "
-              f"(middle half {low:.0%} to {high:.0%}; limit {SESSION_BUILD_SHARE:.0%})")
+        # Every set timed, so a rerun's reason stays in the report.
+        for n, rounds in enumerate(kept["rounds"]):
+            share, low, high, steps = session_share(rounds)
+            again = " timed again: the middle half is too wide to judge" if n < len(kept["rounds"]) - 1 else ""
+            print(f"  session start median {steps['building']:6.1f} ms building its base, "
+                  f"{steps['finding']:6.1f} ms finding it, build {steps['alone']:.1f} ms "
+                  f"({SESSION_ROUNDS} rounds): {share:.0%} of the build added "
+                  f"(middle half {low:.0%} to {high:.0%}; limit {SESSION_BUILD_SHARE:.0%}){again}")
+        share, low, high, steps, noisy = session_verdict(kept["rounds"])
+        if noisy:
+            print(f"  session start too noisy to judge: middle half {low:.0%} to {high:.0%}, "
+                  f"wider than {SESSION_NOISY_SPREAD:.0%} twice")
+            share = None
         print(f"  tool hook   median {kept['tool']:6.1f} ms after a change, nothing pushed, process "
               f"start included ({HOOK_RUNS - 1} runs, limit {tool_limit} ms)")
         print(f"  tool hook   median {kept['push']:6.1f} ms after a change, pushing the memory "
@@ -982,7 +1023,7 @@ def main():
         if args.check_cost and worst > LOOKUP_LIMIT_MS:
             print(f"a lookup is over the {LOOKUP_LIMIT_MS} ms limit")
             over = True
-        if args.check_cost and build_added > SESSION_BUILD_SHARE:
+        if args.check_cost and build_added is not None and build_added > SESSION_BUILD_SHARE:
             print(f"session start building its base adds over {SESSION_BUILD_SHARE:.0%} of the build")
             over = True
         # The hooks' limits are read from their constants in the Rust
