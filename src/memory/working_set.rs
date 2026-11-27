@@ -233,3 +233,53 @@ fn short(id: &str) -> &str {
 fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
+
+/// The most characters PreCompact's text takes: the room a summary
+/// request's added instructions should take at most, since they come out
+/// of the summary's own; about 30 memories by id and title.
+pub(crate) const PRE_COMPACT_CHARS: usize = 2_000;
+
+/// Opens PreCompact's request to the summary.
+const KEEP_IN_SUMMARY: &str = "Keep these user-memory memories' ids and titles in the summary; user-memory prints them again after the compaction:";
+
+/// What PreCompact asks a compaction's summary to keep: the id and title of
+/// each memory of `entries` in force, in the working set's order, within
+/// [`PRE_COMPACT_CHARS`]; ids alone without the store `conn`. Nothing for
+/// no memory. Claude Code adds it to the summary request; on an automatic
+/// compaction it reaches the new context only through the summary, so the
+/// working set's own text comes from the `working-set` hook.
+pub(crate) fn keep(conn: Option<&Connection>, entries: &[Entry]) -> Result<String> {
+    let mut ordered: Vec<&Entry> = entries.iter().collect();
+    ordered.sort_by_key(|e| e.how);
+    let mut text = KEEP_IN_SUMMARY.to_owned();
+    let mut seen = HashSet::new();
+    for entry in ordered {
+        let item = match conn {
+            Some(conn) => match in_force(conn, &entry.id)? {
+                Some(memory) if seen.insert(memory.id) => {
+                    format!(
+                        "{} {}",
+                        short(&memory.id.to_string()),
+                        one_line(&memory.title)
+                    )
+                }
+                _ => continue,
+            },
+            None => short(&entry.id).to_owned(),
+        };
+        if text.chars().count() + item.chars().count() + 2 > PRE_COMPACT_CHARS {
+            break;
+        }
+        text.push_str(if text.len() == KEEP_IN_SUMMARY.len() {
+            " "
+        } else {
+            "; "
+        });
+        text.push_str(&item);
+    }
+    Ok(if text.len() == KEEP_IN_SUMMARY.len() {
+        String::new()
+    } else {
+        text
+    })
+}

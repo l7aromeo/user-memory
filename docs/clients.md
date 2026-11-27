@@ -135,6 +135,7 @@ them once:
 | `SubagentStart` | `subagent-start` | the project rules and the most-used part, [below](#rules-for-subagents), then what the subagent's task matches |
 | `PreToolUse` | `pre-tool-use` | for a shell command that names a memory's passage strongly, a deny whose reason shows it, once ([held back](how-it-works.md#held-back-before-it-runs)); otherwise nothing. It keeps the task of a call that starts a subagent for that subagent's start |
 | `PostToolUse`, and Claude Code's `PostToolUseFailure` | `post-tool-use` | what the call matches ([recall](how-it-works.md#recall-during-the-task)); after user-memory's `read`, `record`, `update` or `search`, nothing, and it notes the memories they returned, stored or changed |
+| Claude Code's `PreCompact` | `pre-compact` | asks the compaction's summary to keep the ids and titles of what the context worked with ([after compaction](how-it-works.md#after-compaction)) |
 
 Claude Code's `PreToolUse` hook runs for the tools it acts on:
 `Bash|PowerShell|Monitor|Agent|Task|SendMessage`. Codex's runs before every

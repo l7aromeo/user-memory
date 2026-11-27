@@ -78,6 +78,17 @@
           }
         ]
       }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'/ABS/PATH/TO/user-memory' pre-compact --client claude",
+            "timeout": 5
+          }
+        ]
+      }
     ]
   }
 }
