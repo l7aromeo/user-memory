@@ -108,7 +108,59 @@ const STEPS: &[Step] = &[
         check: always,
         apply: to_v13,
     },
+    Step {
+        check: always,
+        apply: to_v14,
+    },
 ];
+
+/// Version 14 keeps similar vector pairs between reviews (#245):
+/// `memory_pairs`, `memory_pairs_state`, `memory_pairs_due` and the
+/// triggers on `memory_vectors` that keep them in step. Nothing is
+/// filled: with no state kept, the first review compares every pair and
+/// keeps what it finds, so migrating stays as fast as before. The SQL is
+/// written out as it was at version 14.
+fn to_v14(conn: &Connection, _: Option<&Titles>) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE memory_pairs (
+    a TEXT NOT NULL,
+    b TEXT NOT NULL,
+    model TEXT NOT NULL,
+    dimensions INTEGER NOT NULL,
+    PRIMARY KEY(a, b, model, dimensions),
+    CHECK(a < b)
+) WITHOUT ROWID;
+CREATE INDEX memory_pairs_by_b ON memory_pairs(b);
+CREATE TABLE memory_pairs_state (
+    model TEXT NOT NULL,
+    dimensions INTEGER NOT NULL,
+    length INTEGER NOT NULL CHECK(length > 0),
+    floor REAL NOT NULL,
+    PRIMARY KEY(model, dimensions, length)
+) WITHOUT ROWID;
+CREATE TABLE memory_pairs_due (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT NOT NULL UNIQUE,
+    model TEXT NOT NULL,
+    dimensions INTEGER NOT NULL
+);
+CREATE TRIGGER memory_pairs_vector_inserted AFTER INSERT ON memory_vectors BEGIN
+    DELETE FROM memory_pairs WHERE a=NEW.id OR b=NEW.id;
+    DELETE FROM memory_pairs_due WHERE id=NEW.id;
+    INSERT INTO memory_pairs_due(id,model,dimensions) VALUES (NEW.id,NEW.model,NEW.dimensions);
+END;
+CREATE TRIGGER memory_pairs_vector_changed AFTER UPDATE ON memory_vectors BEGIN
+    DELETE FROM memory_pairs WHERE a=OLD.id OR b=OLD.id OR a=NEW.id OR b=NEW.id;
+    DELETE FROM memory_pairs_due WHERE id=OLD.id OR id=NEW.id;
+    INSERT INTO memory_pairs_due(id,model,dimensions) VALUES (NEW.id,NEW.model,NEW.dimensions);
+END;
+CREATE TRIGGER memory_pairs_vector_deleted AFTER DELETE ON memory_vectors BEGIN
+    DELETE FROM memory_pairs WHERE a=OLD.id OR b=OLD.id;
+    DELETE FROM memory_pairs_due WHERE id=OLD.id;
+END;",
+    )?;
+    Ok(())
+}
 
 /// Version 13 lets a memory hold until a condition (#121): the three
 /// `until_*` columns, `memory_ended` and its trigger that stales the

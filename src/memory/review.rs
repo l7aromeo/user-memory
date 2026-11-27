@@ -25,6 +25,7 @@ use std::{
 };
 use uuid::Uuid;
 
+pub(super) mod kept;
 mod pairs;
 
 /// Groups returned unless asked otherwise: a few for the user to decide on
@@ -415,13 +416,16 @@ fn review_with(
         .map(|p| project_key(p))
         .filter(|p| !p.is_empty())
         .collect();
-    let memories = conn
+    // One read snapshot for the memories, their vectors and the kept pairs,
+    // so a vector saved meanwhile is told apart (`kept::keep`).
+    let snapshot = conn.unchecked_transaction()?;
+    let memories = snapshot
         .prepare(&format!(
             "{SELECT} WHERE status IN ('confirmed','tentative','stale') AND (scope='global' OR (scope='project' AND project IN (SELECT value FROM json_each(?1)))) ORDER BY rowid"
         ))?
         .query_map([serde_json::to_string(&projects)?], row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let distinct: HashSet<(Uuid, Uuid)> = conn
+    let distinct: HashSet<(Uuid, Uuid)> = snapshot
         .prepare("SELECT a,b FROM memory_distinct")?
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
         .filter_map(|pair| {
@@ -429,9 +433,32 @@ fn review_with(
             Some((Uuid::parse_str(&a).ok()?, Uuid::parse_str(&b).ok()?))
         })
         .collect();
-    let (model, vectors) = match identity {
+    // Memories out of force by their condition are compared with nothing:
+    // a merge or trim of what no longer holds helps no one.
+    let out_of_force: HashSet<Uuid> = snapshot
+        .prepare("SELECT id FROM out_of_force")?
+        .query_map([], |r| r.get::<_, String>(0))?
+        .filter_map(|id| Uuid::parse_str(&id.ok()?).ok())
+        .collect();
+    let mut cutoffs: HashMap<usize, Thresholds> = HashMap::new();
+    let (vectors, near) = match identity {
         Some(identity) => {
-            let mut stored = stored_vectors(conn, identity)?;
+            // Every stored vector of the model, of any memory: the kept
+            // pairs cover them all, whatever this review looks at.
+            let mut stored = stored_vectors(&snapshot, identity)?;
+            for (_, vector) in stored.values() {
+                if !cutoffs.contains_key(&vector.len())
+                    && let Some(found) = thresholds(&snapshot, &identity.0, vector.len())?
+                {
+                    cutoffs.insert(vector.len(), found);
+                }
+            }
+            let kept = kept::read(&snapshot, identity)?;
+            let refreshed = kept::refresh(&stored, &cutoffs, &kept);
+            snapshot.finish()?;
+            // What was found holds whether or not it can be kept: a store
+            // busy past the call's budget only leaves it for the next review.
+            let _ = kept::keep(conn, identity, &kept, &refreshed);
             let current = memories
                 .iter()
                 .filter_map(|m| {
@@ -439,30 +466,20 @@ fn review_with(
                     (source == document(&Draft::from(m))).then_some((m.id, vector))
                 })
                 .collect();
-            (identity.0.clone(), current)
+            (current, refreshed.near)
         }
-        None => (String::new(), HashMap::new()),
+        None => {
+            snapshot.finish()?;
+            (HashMap::new(), Vec::new())
+        }
     };
-    let mut cutoffs: HashMap<usize, Thresholds> = HashMap::new();
-    for length in vectors.values().map(Vec::len).collect::<BTreeSet<_>>() {
-        if let Some(found) = thresholds(conn, &model, length)? {
-            cutoffs.insert(length, found);
-        }
-    }
-    // Memories out of force by their condition are compared with nothing:
-    // a merge or trim of what no longer holds helps no one.
-    let out_of_force: HashSet<Uuid> = conn
-        .prepare("SELECT id FROM out_of_force")?
-        .query_map([], |r| r.get::<_, String>(0))?
-        .filter_map(|id| Uuid::parse_str(&id.ok()?).ok())
-        .collect();
     let active: Vec<usize> = (0..memories.len())
         .filter(|&i| memories[i].status != "stale" && !out_of_force.contains(&memories[i].id))
         .collect();
     let pairs::Links {
         duplicates,
         related,
-    } = pairs::links(&memories, &active, &distinct, &vectors, &cutoffs);
+    } = pairs::links(&memories, &active, &distinct, &vectors, &cutoffs, &near);
     // Each group with how many members it left out.
     let mut groups: Vec<(Kind, Vec<usize>, usize)> = Vec::new();
     let mut joined = Groups::new(memories.len());
@@ -1779,5 +1796,252 @@ mod tests {
             }
         }
         assert!(groups_seen > 1000, "few groups to compare: {groups_seen}");
+    }
+
+    /// The model the kept-pairs tests embed with, and its vectors' length.
+    const KEPT_MODEL: &str = "kept-test";
+    const KEPT_LENGTH: usize = 8;
+
+    /// A seeded xorshift stream, for the kept-pairs tests.
+    struct Stream(u64);
+
+    impl Stream {
+        fn below(&mut self, n: usize) -> usize {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            usize::try_from(self.0 % n as u64).unwrap()
+        }
+        /// A value in [-1, 1).
+        fn unit(&mut self) -> f32 {
+            let n = u16::try_from(self.below(1 << 16)).unwrap();
+            f32::from(n) / 32768.0 - 1.0
+        }
+    }
+
+    /// A vector near one of four directions, so pairs fall on both sides
+    /// of the cutoffs.
+    fn clustered(stream: &mut Stream) -> Vec<f32> {
+        let axis = stream.below(4);
+        (0..KEPT_LENGTH)
+            .map(|d| f32::from(u8::from(d == axis)) + 0.2 * stream.unit())
+            .collect()
+    }
+
+    fn kept_identity() -> (String, i64) {
+        (KEPT_MODEL.into(), 0)
+    }
+
+    fn calibrate(conn: &Connection, duplicate: f32, related: f32) {
+        conn.execute(
+            "INSERT OR REPLACE INTO embedding_cutoffs (model,length,duplicate,related,calibrated_at) VALUES (?1,?2,?3,?4,datetime('now'))",
+            params![KEPT_MODEL, i64::try_from(KEPT_LENGTH).unwrap(), duplicate, related],
+        )
+        .unwrap();
+    }
+
+    /// Saves `vector` for `id` from its present text, as made by `model`.
+    fn embed_as(conn: &Connection, id: Uuid, model: &str, vector: Vec<f32>) {
+        let m = conn
+            .query_row(&format!("{SELECT} WHERE id=?1"), [id.to_string()], row)
+            .unwrap();
+        let v = DraftVector {
+            vector,
+            identity: (model.into(), 0),
+            source: document(&Draft::from(&m)),
+        };
+        save_vector(conn, id, &v).unwrap();
+    }
+
+    /// Review of `projects` from the kept pairs, and from a copy of the store
+    /// that keeps none, which compares every pair.
+    fn kept_and_full(conn: &Connection, dir: &Path, projects: &[&str]) -> (Value, Value) {
+        let input = Review {
+            projects: projects.iter().map(|p| (*p).to_owned()).collect(),
+            max_groups: MAX_GROUPS,
+            keep: Vec::new(),
+            user_confirmed: false,
+        };
+        let identity = kept_identity();
+        let kept = review_with(conn, &input, Some(&identity)).unwrap();
+        let copy = dir.join("full.sqlite3");
+        let _ = std::fs::remove_file(&copy);
+        conn.execute("VACUUM INTO ?1", [copy.to_str().unwrap()])
+            .unwrap();
+        let full_conn = connect(&copy).unwrap();
+        full_conn
+            .execute_batch("DELETE FROM memory_pairs_state; DELETE FROM memory_pairs;")
+            .unwrap();
+        let full = review_with(&full_conn, &input, Some(&identity)).unwrap();
+        (kept, full)
+    }
+
+    // Review from kept pairs answers as comparing every pair does, after
+    // every kind of change a store goes through: memories recorded,
+    // edited, re-embedded, forgotten, superseded and brought back, every
+    // vector dropped, the cutoffs raised and lowered, another model's
+    // vector saved in place of one. Each review also brings the kept pairs
+    // up to date, so the next one starts from what this one kept.
+    #[test]
+    fn reviews_from_kept_pairs_answer_as_comparing_every_pair() {
+        let words = [
+            "rust", "tests", "release", "format", "tabs", "review", "push", "docs",
+        ];
+        let (mut compared, mut reused, mut updated) = (0, 0, 0);
+        for seed in 1..=6u64 {
+            let (dir, _db, conn) = store();
+            calibrate(&conn, 0.97, 0.9);
+            let mut stream = Stream(0x9e37_79b9_7f4a_7c15 ^ seed);
+            let mut ids: Vec<Uuid> = Vec::new();
+            for step in 0..30 {
+                // Up to three changes between reviews, so several vectors
+                // can be due at once.
+                for _ in 0..=stream.below(3) {
+                    let choice = if ids.len() < 4 { 0 } else { stream.below(12) };
+                    match choice {
+                        0..=3 => {
+                            let content: Vec<&str> =
+                                (0..3).map(|_| words[stream.below(words.len())]).collect();
+                            let content = content.join(" ");
+                            let category = ["programming", "workflow"][stream.below(2)];
+                            let project = ["", "github.com/x/y"][stream.below(2)];
+                            let id = insert(
+                                &conn,
+                                New {
+                                    project,
+                                    ..preference(category, &content)
+                                },
+                            );
+                            embed_as(&conn, id, KEPT_MODEL, clustered(&mut stream));
+                            ids.push(id);
+                        }
+                        4 => {
+                            let id = ids[stream.below(ids.len())];
+                            conn.execute(
+                                "UPDATE memories SET content=content||' edited' WHERE id=?1",
+                                [id.to_string()],
+                            )
+                            .unwrap();
+                        }
+                        5 | 6 => {
+                            let id = ids[stream.below(ids.len())];
+                            embed_as(&conn, id, KEPT_MODEL, clustered(&mut stream));
+                        }
+                        7 => {
+                            let id = ids.swap_remove(stream.below(ids.len()));
+                            conn.execute("DELETE FROM memories WHERE id=?1", [id.to_string()])
+                                .unwrap();
+                        }
+                        8 => {
+                            let (id, by) = (ids[0], ids[1 + stream.below(ids.len() - 1)]);
+                            let by = (stream.below(2) == 0).then(|| by.to_string());
+                            let status = if by.is_some() {
+                                "superseded"
+                            } else {
+                                "confirmed"
+                            };
+                            conn.execute(
+                                "UPDATE memories SET status=?2,superseded_by=?3 WHERE id=?1",
+                                params![id.to_string(), status, by],
+                            )
+                            .unwrap();
+                        }
+                        9 => {
+                            let (duplicate, related) =
+                                [(0.97, 0.9), (0.95, 0.85), (0.99, 0.95)][stream.below(3)];
+                            calibrate(&conn, duplicate, related);
+                        }
+                        10 => {
+                            let id = ids[stream.below(ids.len())];
+                            embed_as(&conn, id, "other-model", clustered(&mut stream));
+                        }
+                        _ => {
+                            if stream.below(4) == 0 {
+                                conn.execute("DELETE FROM memory_vectors", []).unwrap();
+                            } else {
+                                for &id in &ids {
+                                    embed_as(&conn, id, KEPT_MODEL, clustered(&mut stream));
+                                }
+                            }
+                        }
+                    }
+                }
+                let (state, due, pairs): (i64, i64, i64) = conn
+                    .query_row(
+                        "SELECT (SELECT COUNT(*) FROM memory_pairs_state),(SELECT COUNT(*) FROM memory_pairs_due WHERE model=?1),(SELECT COUNT(*) FROM memory_pairs)",
+                        [KEPT_MODEL],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    )
+                    .unwrap();
+                if state > 0 && pairs > 0 {
+                    if due > 0 {
+                        updated += 1;
+                    } else {
+                        reused += 1;
+                    }
+                }
+                for projects in [&[][..], &["github.com/x/y"][..]] {
+                    let (kept, full) = kept_and_full(&conn, dir.path(), projects);
+                    assert_eq!(kept, full, "seed {seed}, step {step}, {projects:?}");
+                    compared += kept["groups"].as_array().unwrap().len();
+                }
+            }
+        }
+        assert!(compared > 500, "few groups to compare: {compared}");
+        // Reviews that took kept pairs as they were, and ones that brought
+        // them up to date first.
+        assert!(
+            reused > 20 && updated > 50,
+            "reused {reused}, updated {updated}"
+        );
+    }
+
+    /// The due rows of the kept-pairs model, by number.
+    fn due_rows(conn: &Connection) -> Vec<(i64, String)> {
+        conn.prepare("SELECT seq,id FROM memory_pairs_due WHERE model=?1 ORDER BY seq")
+            .unwrap()
+            .query_map([KEPT_MODEL], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    // A review that cannot have the write turn still answers as comparing
+    // every pair does, and leaves what it compared due, so the next review
+    // compares it again; once the turn is free, a review keeps its pairs.
+    #[test]
+    fn a_review_kept_from_writing_answers_and_leaves_its_vectors_due() {
+        let (dir, db, conn) = store();
+        calibrate(&conn, 0.97, 0.9);
+        let mut stream = Stream(7);
+        let add = |conn: &Connection, stream: &mut Stream| {
+            let id = insert(conn, preference("programming", "Prefer Rust"));
+            embed_as(conn, id, KEPT_MODEL, clustered(stream));
+        };
+        for _ in 0..12 {
+            add(&conn, &mut stream);
+        }
+        let (kept, full) = kept_and_full(&conn, dir.path(), &[]);
+        assert_eq!(kept, full);
+        assert!(
+            due_rows(&conn).is_empty(),
+            "the first review keeps its pairs"
+        );
+        for _ in 0..3 {
+            add(&conn, &mut stream);
+        }
+        let due = due_rows(&conn);
+        assert_eq!(due.len(), 3);
+        let holder = Connection::open(&db).unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+        conn.busy_timeout(std::time::Duration::from_millis(50))
+            .unwrap();
+        let (kept, full) = kept_and_full(&conn, dir.path(), &[]);
+        assert_eq!(kept, full);
+        assert_eq!(due_rows(&conn), due, "nothing was kept");
+        holder.execute_batch("ROLLBACK").unwrap();
+        let (kept, full) = kept_and_full(&conn, dir.path(), &[]);
+        assert_eq!(kept, full);
+        assert!(due_rows(&conn).is_empty(), "kept once the turn is free");
     }
 }

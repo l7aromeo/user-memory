@@ -1,6 +1,7 @@
 # Review and consolidate memories
 
 1. Call `review`. Inside a project, pass `projects` with the projects the session start's `Projects:` line lists, the folder's own, the listed and the linked ones (or the output of `user-memory project-id`), so their memories are reviewed with the global ones; list more projects to review them too. Raise `max_groups` (up to 20) if the user wants more groups.
+   On a client of a memory server, a first review of a large store with vectors can take longer than the connector waits, and is answered ``The memory server at … did not answer``. Ask the user to run `user-memory review` once on the server's machine; reviews through the server are quick after that.
 2. Present each group by kind, with each member's id, type, scope and a short paraphrase of its content:
    - `recent`: the rules added or changed in the last 30 days, then the memories agents recorded in that time. Session start sends the user here when a rule is new.
    - `ended`: memories whose condition ended in the last 30 days, each with `ended` (when, how, the evidence and the conversation). A memory out of force by its condition is in no other group but these.

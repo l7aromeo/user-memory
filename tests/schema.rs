@@ -235,13 +235,23 @@ fn data(db: &Path, version: i64) -> Vec<Vec<String>> {
             "SELECT memory_id,ended_at,how,evidence,origin FROM memory_ended ORDER BY 1".to_owned(),
         );
     }
+    if version >= PAIRS_VERSION {
+        queries.extend(
+            [
+                "SELECT a,b,model,dimensions FROM memory_pairs ORDER BY 1,2,3,4",
+                "SELECT model,dimensions,length,floor FROM memory_pairs_state ORDER BY 1,2,3",
+                "SELECT seq,id,model,dimensions FROM memory_pairs_due ORDER BY 1",
+            ]
+            .map(str::to_owned),
+        );
+    }
     queries.iter().map(|sql| rows(&conn, sql)).collect()
 }
 
 /// The first schema version that records which memories sessions used.
 const USE_VERSION: i64 = 12;
 /// The schema version this binary writes, which a migration reaches.
-const LATEST: i64 = 13;
+const LATEST: i64 = 14;
 
 /// How many use rows the store at `db` holds.
 fn use_rows(db: &Path) -> i64 {
@@ -257,6 +267,8 @@ const HISTORY_VERSION: i64 = 7;
 const CHANGES_VERSION: i64 = 10;
 /// The first schema version that lets a memory hold until a condition.
 const UNTIL_VERSION: i64 = 13;
+/// The first schema version that keeps vector pairs between reviews.
+const PAIRS_VERSION: i64 = 14;
 
 /// The store's latest change and how many memories have a counted change.
 fn changes(db: &Path) -> (i64, i64) {
@@ -493,6 +505,19 @@ fn every_snapshot_migrates_to_the_current_schema_and_keeps_its_data() {
                 )
                 .unwrap();
             assert_eq!(held, (0, 0), "v{n} wrote a condition or an end");
+        }
+        // A store from before kept pairs gets none and nothing due: its
+        // first review compares every pair.
+        if n < PAIRS_VERSION {
+            let kept: i64 = Connection::open(&db)
+                .unwrap()
+                .query_row(
+                    "SELECT (SELECT COUNT(*) FROM memory_pairs)+(SELECT COUNT(*) FROM memory_pairs_state)+(SELECT COUNT(*) FROM memory_pairs_due)",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(kept, 0, "v{n} gained kept pairs");
         }
         // The migration writes no memory: a store reaching the counter's
         // version has counted no change yet.
@@ -1145,4 +1170,64 @@ fn a_migration_rolled_back_after_version_11_runs_again() {
     assert_eq!(both, expected);
     assert_eq!(every_row(&first[0]), before);
     assert_eq!(every_row(&second), repaired);
+}
+
+// A store migrated from before kept pairs keeps none, and its first review
+// compares every pair and keeps what it found, down to the cutoffs' floor;
+// the next review answers the same from them.
+#[test]
+fn the_first_review_after_the_upgrade_keeps_its_pairs() {
+    let dir = tempdir().unwrap();
+    let db = store_from_snapshot(dir.path(), PAIRS_VERSION - 1);
+    let out = migrate(dir.path(), &db, PAIRS_VERSION - 1);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let conn = Connection::open(&db).unwrap();
+    // A second vector of the seed's model, the same as the first.
+    conn.execute(
+        "INSERT INTO memory_vectors (id,model,dimensions,source,vector) VALUES ('1a2b3c4d-3333-4aaa-8aaa-000000000003','test-model',3,'Indent with four spaces',X'0000803F0000000000000000')",
+        [],
+    )
+    .unwrap();
+    let kept = |conn: &Connection| -> (Vec<String>, Vec<String>, Vec<String>) {
+        (
+            rows(
+                conn,
+                "SELECT a,b,model,dimensions FROM memory_pairs ORDER BY 1,2",
+            ),
+            rows(
+                conn,
+                "SELECT model,dimensions,length FROM memory_pairs_state ORDER BY 1",
+            ),
+            rows(conn, "SELECT id FROM memory_pairs_due ORDER BY 1"),
+        )
+    };
+    let (pairs, state, due) = kept(&conn);
+    assert!(pairs.is_empty() && state.is_empty(), "{pairs:?} {state:?}");
+    assert_eq!(due.len(), 1, "the new vector is due");
+    let review = || {
+        let out = Command::new(env!("CARGO_BIN_EXE_user-memory"))
+            .args(["review"])
+            .sandboxed(dir.path())
+            .env("USER_MEMORY_DB", &db)
+            .env_remove("USER_MEMORY_URL")
+            .env_remove("USER_MEMORY_TOKEN_FILE")
+            .env("USER_MEMORY_EMBED_URL", "http://127.0.0.1:9/v1/embeddings")
+            .env("USER_MEMORY_EMBED_ALLOW_HTTP", "1")
+            .env("USER_MEMORY_EMBED_MODEL", "test-model")
+            .env("USER_MEMORY_EMBED_DIMENSIONS", "3")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", stderr(&out));
+        stdout(&out)
+    };
+    let first = review();
+    let (pairs, state, due) = kept(&conn);
+    assert_eq!(
+        pairs.len(),
+        1,
+        "the two alike vectors are kept as a pair: {pairs:?}"
+    );
+    assert_eq!(state.len(), 1, "{state:?}");
+    assert!(due.is_empty(), "{due:?}");
+    assert_eq!(review(), first);
 }

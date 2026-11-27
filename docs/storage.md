@@ -29,7 +29,13 @@ conversations, which memories it read, recorded or was shown, the number
 of the passage it was shown most, whether it held to or set aside each,
 and when; no text; a memory's rows are deleted with it), `memory_ended`
 (when a memory's tag or text condition ended, how and on what evidence,
-since schema version 13), the views `out_of_force` (the memories ended
+since schema version 13), `memory_pairs`, `memory_pairs_state` and
+`memory_pairs_due` (since schema version 14: the pairs of stored vectors
+review found that may be at a cutoff, the models and vector lengths they
+are complete for, and the memories whose vector was saved since; ids only,
+no text; a vector's pairs go when it is saved again or removed, and a
+store without them only makes the next review compare every pair), the
+views `out_of_force` (the memories ended
 or past their date) and `live_memories` (the memories in force:
 confirmed or tentative and not out of force, the test every reader that
 shows memories applies), and

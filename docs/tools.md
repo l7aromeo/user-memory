@@ -314,3 +314,18 @@ one, that the user leaves as they are is kept in one call: `review` with
 via `user_confirmed`) marks every pair among them, reports how many were new
 as `kept`, and returns the groups that remain. Marking never changes any
 memory. Memories in different category groups are never grouped.
+
+With stored vectors, review compares the vectors of the current model and
+keeps the pairs that may be at a cutoff in the store, beside the vectors.
+A later review compares only the vectors saved since, so it takes about as
+long as comparing by words. A review that compares every pair takes time
+that grows with the square of the store's size: about 77 s for 50,000
+memories with 2,560-dimension vectors on a 3-core machine. That happens
+the first time after an upgrade, after the cutoffs were lowered, or after
+more than half the vectors changed, as a `reindex` with a new model does.
+Through a memory server, a call over 150 s gets ``The memory server at …
+did not answer``. On a store that large, run `user-memory review` once
+where the store lives. On a Docker server that is
+`docker compose -f ~/.local/share/user-memory/docker/compose.yaml exec memory user-memory review`.
+That run has no such limit, and the next review through the server
+starts from what it kept.
