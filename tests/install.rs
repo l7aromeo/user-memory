@@ -3347,13 +3347,11 @@ fn the_restart_line_is_said_only_for_an_upgrade_from_a_release_without_the_hand_
         } else {
             &["--local", "native"]
         };
-        // Installs, then an upgrade from this build's own version (before
-        // the hand-over), then from 0.10.0, which has it.
-        for (version, restart) in [
-            (env!("CARGO_PKG_VERSION"), true),
-            ("0.10.0", true),
-            ("0.10.1", false),
-        ] {
+        // Installs as 0.9.3, then upgrades from it (a release before the
+        // hand-over), then from 0.10.0, which has it. Each version is
+        // named, so the build's own version, which becomes 0.10.0 at the
+        // release, can't change which upgrade is from before the hand-over.
+        for (version, restart) in [("0.9.3", true), ("0.10.0", true), ("0.10.1", false)] {
             let out = c.install(&releases, &[("USER_MEMORY_TEST_VERSION", version)], args);
             let (stdout, stderr) = text(&out);
             assert!(out.status.success(), "{kind} {version}: {stderr}");
