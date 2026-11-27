@@ -627,9 +627,9 @@ fn result(line: &str, id: &str) -> Option<bool> {
 }
 
 /// The memory search tool as Claude Code names it in a hook payload.
-const SEARCH_CLAUDE: &str = "mcp__user-memory__search";
+pub(super) const SEARCH_CLAUDE: &str = "mcp__user-memory__search";
 /// The memory search tool as Codex names it in a hook payload.
-const SEARCH_CODEX: &str = "mcp__user_memory__search";
+pub(super) const SEARCH_CODEX: &str = "mcp__user_memory__search";
 
 /// A shell call's command line: as given, or a command and its arguments
 /// joined, where a shell's `-c` or `-lc` script is the command line.

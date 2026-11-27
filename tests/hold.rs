@@ -249,6 +249,23 @@ fn a_command_naming_a_rule_is_held_once_with_the_rule_before_it_runs() {
             .as_str()
         )
     );
+    // The working set keeps it as held (#118).
+    let held: Vec<(String, bool)> = home
+        .recall_files()
+        .iter()
+        .flat_map(|file| {
+            let conn = rusqlite::Connection::open(file).unwrap();
+            let mut statement = conn
+                .prepare("SELECT memory, held FROM worked WHERE agent = 'main'")
+                .unwrap();
+            statement
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(held, [(rule.clone(), true)]);
     assert_eq!(
         home.before("s1", None, "cargo publish"),
         None,

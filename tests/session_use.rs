@@ -1,6 +1,7 @@
 //! A session's use of memories (#123) as its hooks keep it, through the
 //! real binary on a local store: what the post-tool hook notes from
-//! user-memory's own `read` and `record` and from a push, what the next
+//! user-memory's own `read`, `record`, `update` and `search` and from a
+//! push, what the next
 //! prompt or session start writes to `memory_use`, what a startup sends
 //! for other sessions, and what the most-used part's whole lines spare
 //! from a push.
@@ -199,6 +200,26 @@ impl Home {
             .collect()
     }
 
+    /// What `session`'s main context did with each memory, as its state
+    /// keeps it: memory, then whether it read, recorded, found, was shown
+    /// and was held it, by memory.
+    fn worked(&self, session: &str) -> Vec<(String, [bool; 5])> {
+        let conn = Connection::open(self.state(session)).unwrap();
+        let mut statement = conn
+            .prepare("SELECT memory, read, recorded, found, shown, held FROM worked WHERE agent = 'main' ORDER BY memory")
+            .unwrap();
+        statement
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    [r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?],
+                ))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
     /// The recall state file of `session`.
     fn state(&self, session: &str) -> PathBuf {
         let dir = sandbox::folder(self.dir.path(), "state").join("sessions");
@@ -382,4 +403,77 @@ fn what_the_most_used_part_prints_whole_is_not_pushed_again() {
                 "tool_name": "Bash", "tool_input": {"command": "cargo publish"}, "tool_response": {"stdout": ""}}),
     );
     assert_eq!(pushed, "");
+}
+
+// The post-tool hook notes, for the working set (#118), what each of
+// user-memory's tools that names memories gave: `read` as read, `record`
+// and `update` as recorded when they wrote, `search` as found, in either
+// client's spelling. A refused update, and the ids in another of its
+// tools' replies, note nothing; `update` reaches `memory_use` as recorded,
+// a search does not.
+#[test]
+fn the_post_tool_hook_notes_what_read_record_update_and_search_gave() {
+    let home = Home::new();
+    let read = home.record("Parser tables", "Keep `src/tables.rs` sorted.", "procedure");
+    let recorded = home.record("Bench machine", "The bench runs on a quiet box.", "fact");
+    let updated = home.record("Docs site", "The docs build with mdBook.", "fact");
+    let refused = home.record("Release train", "Releases leave on Tuesdays.", "fact");
+    let found = home.record("Lint config", "Clippy denies warnings here.", "fact");
+    let other = home.record("Review queue", "Reviews go oldest first.", "fact");
+    home.start("s1", "startup");
+    home.call(
+        "s1",
+        "mcp__user-memory__read",
+        json!({}),
+        read_reply(&[&read]),
+    );
+    home.call(
+        "s1",
+        "mcp__user-memory__record",
+        json!({}),
+        json!(json!({"stored": true, "id": recorded}).to_string()),
+    );
+    home.call(
+        "s1",
+        "mcp__user_memory__update",
+        json!({}),
+        json!(json!({"updated": true, "id": updated, "status": "confirmed"}).to_string()),
+    );
+    home.call(
+        "s1",
+        "mcp__user-memory__update",
+        json!({}),
+        json!(
+            json!({"updated": false, "id": refused, "reason": "Memory does not exist"}).to_string()
+        ),
+    );
+    home.call(
+        "s1",
+        "mcp__user_memory__search",
+        json!({"topic": "lint"}),
+        read_reply(&[&found]),
+    );
+    for tool in [
+        "mcp__user-memory__index",
+        "mcp__user-memory__review",
+        "mcp__user-memory__forget",
+    ] {
+        home.call("s1", tool, json!({}), read_reply(&[&other]));
+    }
+    let mut expected = vec![
+        (read.clone(), [true, false, false, false, false]),
+        (recorded.clone(), [false, true, false, false, false]),
+        (updated.clone(), [false, true, false, false, false]),
+        (found, [false, false, true, false, false]),
+    ];
+    expected.sort();
+    assert_eq!(home.worked("s1"), expected);
+    home.prompt("s1");
+    let mut sent = vec![
+        row(&read, true, false, false, None),
+        row(&recorded, false, true, false, None),
+        row(&updated, false, true, false, None),
+    ];
+    sent.sort();
+    assert_eq!(home.rows(), sent);
 }
