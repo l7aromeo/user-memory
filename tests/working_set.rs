@@ -289,7 +289,7 @@ fn the_two_compact_handlers_open_one_epoch_in_either_order() {
 
 // The restore reads the store as it is now: a memory changed since shows
 // its new text, a superseded one the memory that replaced it, and a
-// forgotten or stale one nothing.
+// forgotten or stale one, or one whose condition ended, nothing.
 #[test]
 fn a_compaction_restores_the_store_as_it_is_now() {
     let home = Home::new();
@@ -297,8 +297,9 @@ fn a_compaction_restores_the_store_as_it_is_now() {
     let old = home.record("Bench machine", "The bench runs on a quiet box.");
     let forgotten = home.record("Release train", "Releases leave on Tuesdays.");
     let stale = home.record("Lint config", "Clippy denies warnings here.");
+    let ended = home.record("Merge freeze", "No merges during the freeze.");
     home.start("s1", "startup");
-    home.read("s1", &[&changed, &old, &forgotten, &stale]);
+    home.read("s1", &[&changed, &old, &forgotten, &stale, &ended]);
     home.cli(&[
         "update",
         &changed,
@@ -311,13 +312,19 @@ fn a_compaction_restores_the_store_as_it_is_now() {
         &["--supersedes", &old],
     );
     home.cli(&["forget", &forgotten]);
-    Connection::open(home.db())
-        .unwrap()
-        .execute(
-            "UPDATE memories SET status = 'stale' WHERE id = ?1",
-            [&stale],
-        )
-        .unwrap();
+    let conn = Connection::open(home.db()).unwrap();
+    conn.execute(
+        "UPDATE memories SET status = 'stale' WHERE id = ?1",
+        [&stale],
+    )
+    .unwrap();
+    // Its date passed: out of force, though still confirmed.
+    conn.execute(
+        "UPDATE memories SET until_kind = 'date', until_value = '2001-01-01T00:00:00Z' WHERE id = ?1",
+        [&ended],
+    )
+    .unwrap();
+    drop(conn);
     let set = home.compact("s1", false);
     assert!(set.contains("The docs build with Zola now."), "{set}");
     assert!(!set.contains("mdBook"), "{set}");
@@ -328,7 +335,7 @@ fn a_compaction_restores_the_store_as_it_is_now() {
         )),
         "{set}"
     );
-    for gone in [&old, &forgotten, &stale] {
+    for gone in [&old, &forgotten, &stale, &ended] {
         assert!(!set.contains(short(gone)), "{gone}: {set}");
     }
 }
