@@ -108,7 +108,72 @@ const STEPS: &[Step] = &[
         check: always,
         apply: to_v13,
     },
+    Step {
+        check: always,
+        apply: to_v14,
+    },
 ];
+
+/// Version 14 orders the writes of use (#240): `memory_use` gains `seq`,
+/// `use_clock` hands it out, and `hold_reset` with its trigger
+/// `memory_use_reset` marks where a memory's hold and passage counts start
+/// again, so readers order by write instead of by `at`'s whole seconds.
+/// The hold count starts again at a change of what the note says or when it
+/// applies (content, context, condition, scope or project) or at a
+/// confirmation, so a reset errs toward holding.
+/// The table is rebuilt with its rows, each given a seq in `at` order, ties
+/// by memory then origin, and the clock starts after the largest. Each
+/// memory with use gets the resets its rows' times gave before: the largest
+/// seq written before the second of its latest change (or confirmation,
+/// for the hold count). Rows of that same second keep counting as after
+/// it, as they did, so no count changes at the upgrade. The SQL is written
+/// out as it was at version 14.
+fn to_v14(conn: &Connection, _: Option<&Titles>) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE memory_use_v14 (
+    memory TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 240),
+    origin TEXT NOT NULL CHECK(length(origin) BETWEEN 1 AND 240),
+    at TEXT NOT NULL,
+    read INTEGER NOT NULL CHECK(read IN (0,1)),
+    recorded INTEGER NOT NULL CHECK(recorded IN (0,1)),
+    shown INTEGER NOT NULL CHECK(shown IN (0,1)),
+    held INTEGER CHECK(held IN (0,1)),
+    overridden INTEGER CHECK(overridden IN (0,1)),
+    passage INTEGER CHECK(passage >= 0),
+    seq INTEGER NOT NULL CHECK(seq > 0),
+    PRIMARY KEY(memory, project, origin)
+) WITHOUT ROWID;
+INSERT INTO memory_use_v14 SELECT memory,project,origin,at,read,recorded,shown,held,overridden,passage,
+    row_number() OVER (ORDER BY julianday(at),memory,origin) FROM memory_use;
+DROP TABLE memory_use;
+ALTER TABLE memory_use_v14 RENAME TO memory_use;
+CREATE INDEX memory_use_by_project ON memory_use(project, origin);
+CREATE TABLE use_clock (
+    id INTEGER PRIMARY KEY CHECK(id = 1),
+    seq INTEGER NOT NULL CHECK(seq > 0)
+);
+INSERT INTO use_clock SELECT 1,max(seq) FROM memory_use HAVING max(seq) IS NOT NULL;
+CREATE TABLE hold_reset (
+    memory TEXT PRIMARY KEY NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    seq INTEGER CHECK(seq >= 0),
+    passages INTEGER CHECK(passages >= 0)
+) WITHOUT ROWID;
+INSERT INTO hold_reset(memory,seq,passages) SELECT * FROM (SELECT m.id AS memory,
+    (SELECT max(u.seq) FROM memory_use u WHERE u.memory=m.id AND julianday(u.at)<julianday(max(m.updated_at,coalesce(m.last_confirmed_at,m.updated_at)))) AS seq,
+    (SELECT max(u.seq) FROM memory_use u WHERE u.memory=m.id AND u.at<m.updated_at) AS passages
+    FROM memories m WHERE m.id IN (SELECT memory FROM memory_use)) WHERE seq IS NOT NULL OR passages IS NOT NULL;
+CREATE TRIGGER memory_use_reset AFTER UPDATE ON memories
+WHEN NEW.content IS NOT OLD.content OR NEW.context IS NOT OLD.context OR NEW.until_kind IS NOT OLD.until_kind OR NEW.until_value IS NOT OLD.until_value OR NEW.until_project IS NOT OLD.until_project OR NEW.scope IS NOT OLD.scope OR NEW.project IS NOT OLD.project OR NEW.last_confirmed_at IS NOT OLD.last_confirmed_at BEGIN
+    INSERT INTO hold_reset(memory,seq,passages) SELECT NEW.id,
+        CASE WHEN NEW.content IS NOT OLD.content OR NEW.context IS NOT OLD.context OR NEW.until_kind IS NOT OLD.until_kind OR NEW.until_value IS NOT OLD.until_value OR NEW.until_project IS NOT OLD.until_project OR NEW.scope IS NOT OLD.scope OR NEW.project IS NOT OLD.project OR NEW.last_confirmed_at IS NOT OLD.last_confirmed_at THEN clock END,
+        CASE WHEN NEW.content IS NOT OLD.content OR NEW.context IS NOT OLD.context THEN clock END
+    FROM (SELECT coalesce((SELECT seq FROM use_clock WHERE id=1),0) AS clock) WHERE true
+    ON CONFLICT(memory) DO UPDATE SET seq=coalesce(excluded.seq,seq),passages=coalesce(excluded.passages,passages);
+END;",
+    )?;
+    Ok(())
+}
 
 /// Version 13 lets a memory hold until a condition (#121): the three
 /// `until_*` columns, `memory_ended` and its trigger that stales the

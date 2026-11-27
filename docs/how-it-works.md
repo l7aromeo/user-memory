@@ -203,8 +203,8 @@ Other memories
   recorded or were shown, the most used first. Each line says whose it is
   (yours, or an agent's note and from how many sessions) and holds the
   memory whole when it is short, or its title and the passage most of
-  those sessions were shown since the memory last changed (its first when
-  none was). It never holds a rule, which the part before shows, an
+  those sessions were shown since its text or context last changed (its
+  first when none was). It never holds a rule, which the part before shows, an
   inference, or an agent's observation about you. What it prints whole
   isn't pushed again in that context. A session's hooks note what
   user-memory's `read` returned, what `record` stored or confirmed and
@@ -454,9 +454,11 @@ line, as in a push.
   when the agent's very next tool call runs the held command again,
   unchanged; any other call first, such as an edit or a read, heeds it.
   An agent's note overridden in three sessions in a row, counted since it
-  last changed or was confirmed, holds no more: it is pushed after the
-  command instead. To make it hold again, confirm the note or change it.
-  The user's rules and other stated memories never stop holding.
+  last changed what it says or when it applies, or was confirmed, holds
+  no more: it is pushed after the command instead. The sessions count in
+  the order the store wrote them, even within one second. To make it hold
+  again, confirm the note or change it; a new title alone doesn't. The
+  user's rules and other stated memories never stop holding.
 - **When in doubt, it runs:** an error, a session with no state, or a
   hold past its 250 ms lets the command run. A memory server's store
   holds nothing back: a hold shows the passage and whose word it is, and

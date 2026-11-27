@@ -225,7 +225,13 @@ fn data(db: &Path, version: i64) -> Vec<Vec<String>> {
         "SELECT a,b FROM memory_distinct ORDER BY 1,2".to_owned(),
         "SELECT id,model,dimensions,source,hex(vector) FROM memory_vectors ORDER BY id".to_owned(),
     ];
-    if version >= USE_VERSION {
+    if version >= SEQ_VERSION {
+        queries.push(
+            "SELECT memory,project,origin,at,read,recorded,shown,held,overridden,passage,seq FROM memory_use ORDER BY 1,2,3".to_owned(),
+        );
+        queries.push("SELECT id,seq FROM use_clock".to_owned());
+        queries.push("SELECT memory,seq,passages FROM hold_reset ORDER BY 1".to_owned());
+    } else if version >= USE_VERSION {
         queries.push(
             "SELECT memory,project,origin,at,read,recorded,shown,held,overridden,passage FROM memory_use ORDER BY 1,2,3".to_owned(),
         );
@@ -241,7 +247,9 @@ fn data(db: &Path, version: i64) -> Vec<Vec<String>> {
 /// The first schema version that records which memories sessions used.
 const USE_VERSION: i64 = 12;
 /// The schema version this binary writes, which a migration reaches.
-const LATEST: i64 = 13;
+const LATEST: i64 = 14;
+/// The first schema version that orders the writes of use.
+const SEQ_VERSION: i64 = 14;
 
 /// How many use rows the store at `db` holds.
 fn use_rows(db: &Path) -> i64 {
@@ -438,6 +446,70 @@ fn a_damaged_store_migrates_only_after_repair_and_keeps_every_memory() {
             );
         }
     }
+}
+
+// Version 14 gives the use rows a seq in time order and sets each
+// memory's resets where its rows' times put them: a row in the same
+// second as the change still counts as after it, as it did, and one a
+// second before does not (#240).
+#[test]
+fn migrating_to_version_14_orders_use_by_time_and_keeps_every_count() {
+    let dir = tempdir().unwrap();
+    let db = store_from_snapshot(dir.path(), 13);
+    let conn = Connection::open(&db).unwrap();
+    // 1111 changed and was confirmed at 2026-10-02 09:00:00, 3333 changed
+    // at 2026-10-03 11:00:00.
+    conn.execute_batch(
+        "INSERT INTO memory_use (memory,project,origin,at,read,recorded,shown,held,overridden,passage) VALUES
+('1a2b3c4d-1111-4aaa-8aaa-000000000001','github.com/x/y','chat/before','2026-10-02 08:59:59',0,0,0,1,1,NULL),
+('1a2b3c4d-1111-4aaa-8aaa-000000000001','github.com/x/y','chat/same','2026-10-02 09:00:00',0,0,0,1,1,NULL),
+('1a2b3c4d-3333-4aaa-8aaa-000000000003','github.com/x/y','chat/p-before','2026-10-03 10:59:59',0,0,1,NULL,NULL,1),
+('1a2b3c4d-3333-4aaa-8aaa-000000000003','github.com/x/y','chat/p-same','2026-10-03 11:00:00',0,0,1,NULL,NULL,1);",
+    )
+    .unwrap();
+    drop(conn);
+    let out = migrate(dir.path(), &db, 13);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let conn = Connection::open(&db).unwrap();
+    let by_seq = rows(&conn, "SELECT memory,origin FROM memory_use ORDER BY seq");
+    let by_time = rows(
+        &conn,
+        "SELECT memory,origin FROM memory_use ORDER BY julianday(at),memory,origin",
+    );
+    assert_eq!(by_seq, by_time);
+    let seq = |origin: &str| -> i64 {
+        conn.query_row(
+            "SELECT seq FROM memory_use WHERE origin=?1",
+            [origin],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    let reset = |memory: &str, column: &str| -> Option<i64> {
+        conn.query_row(
+            &format!("SELECT {column} FROM hold_reset WHERE memory=?1"),
+            [memory],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        reset("1a2b3c4d-1111-4aaa-8aaa-000000000001", "seq"),
+        Some(seq("chat/before"))
+    );
+    assert!(seq("chat/same") > seq("chat/before"));
+    assert_eq!(
+        reset("1a2b3c4d-3333-4aaa-8aaa-000000000003", "passages"),
+        Some(seq("chat/p-before"))
+    );
+    assert!(seq("chat/p-same") > seq("chat/p-before"));
+    let clock: i64 = conn
+        .query_row("SELECT seq FROM use_clock", [], |r| r.get(0))
+        .unwrap();
+    let largest: i64 = conn
+        .query_row("SELECT max(seq) FROM memory_use", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(clock, largest);
 }
 
 // Bumping the version without a migration, or with a lossy one, fails here.

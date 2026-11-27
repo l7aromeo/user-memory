@@ -852,7 +852,7 @@ mod tests {
         for id in [note, kept] {
             for origin in ["chat/s1", "chat/s2", "chat/s3"] {
                 conn.execute(
-                    "INSERT INTO memory_use (memory,project,origin,at,read,recorded,shown,held,overridden) VALUES (?1,'github.com/example/app',?2,CURRENT_TIMESTAMP,0,0,0,1,1)",
+                    "INSERT INTO memory_use (memory,project,origin,at,read,recorded,shown,held,overridden,seq) VALUES (?1,'github.com/example/app',?2,CURRENT_TIMESTAMP,0,0,0,1,1,(SELECT coalesce(max(seq),0)+1 FROM memory_use))",
                     params![id.to_string(), origin],
                 )
                 .unwrap();
