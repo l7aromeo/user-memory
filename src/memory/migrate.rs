@@ -112,6 +112,10 @@ const STEPS: &[Step] = &[
         check: always,
         apply: to_v14,
     },
+    Step {
+        check: always,
+        apply: to_v15,
+    },
 ];
 
 /// Version 14 orders the writes of use (#240): `memory_use` gains `seq`,
@@ -170,6 +174,54 @@ WHEN NEW.content IS NOT OLD.content OR NEW.context IS NOT OLD.context OR NEW.unt
         CASE WHEN NEW.content IS NOT OLD.content OR NEW.context IS NOT OLD.context THEN clock END
     FROM (SELECT coalesce((SELECT seq FROM use_clock WHERE id=1),0) AS clock) WHERE true
     ON CONFLICT(memory) DO UPDATE SET seq=coalesce(excluded.seq,seq),passages=coalesce(excluded.passages,passages);
+END;",
+    )?;
+    Ok(())
+}
+
+/// Version 15 keeps similar vector pairs between reviews (#245):
+/// `memory_pairs`, `memory_pairs_state`, `memory_pairs_due` and the
+/// triggers on `memory_vectors` that keep them in step. Nothing is
+/// filled: with no state kept, the first review compares every pair and
+/// keeps what it finds, so migrating stays as fast as before. The SQL is
+/// written out as it was at version 15.
+fn to_v15(conn: &Connection, _: Option<&Titles>) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE memory_pairs (
+    a TEXT NOT NULL,
+    b TEXT NOT NULL,
+    model TEXT NOT NULL,
+    dimensions INTEGER NOT NULL,
+    PRIMARY KEY(a, b, model, dimensions),
+    CHECK(a < b)
+) WITHOUT ROWID;
+CREATE INDEX memory_pairs_by_b ON memory_pairs(b);
+CREATE TABLE memory_pairs_state (
+    model TEXT NOT NULL,
+    dimensions INTEGER NOT NULL,
+    length INTEGER NOT NULL CHECK(length > 0),
+    floor REAL NOT NULL,
+    PRIMARY KEY(model, dimensions, length)
+) WITHOUT ROWID;
+CREATE TABLE memory_pairs_due (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT NOT NULL UNIQUE,
+    model TEXT NOT NULL,
+    dimensions INTEGER NOT NULL
+);
+CREATE TRIGGER memory_pairs_vector_inserted AFTER INSERT ON memory_vectors BEGIN
+    DELETE FROM memory_pairs WHERE a=NEW.id OR b=NEW.id;
+    DELETE FROM memory_pairs_due WHERE id=NEW.id;
+    INSERT INTO memory_pairs_due(id,model,dimensions) VALUES (NEW.id,NEW.model,NEW.dimensions);
+END;
+CREATE TRIGGER memory_pairs_vector_changed AFTER UPDATE ON memory_vectors BEGIN
+    DELETE FROM memory_pairs WHERE a=OLD.id OR b=OLD.id OR a=NEW.id OR b=NEW.id;
+    DELETE FROM memory_pairs_due WHERE id=OLD.id OR id=NEW.id;
+    INSERT INTO memory_pairs_due(id,model,dimensions) VALUES (NEW.id,NEW.model,NEW.dimensions);
+END;
+CREATE TRIGGER memory_pairs_vector_deleted AFTER DELETE ON memory_vectors BEGIN
+    DELETE FROM memory_pairs WHERE a=OLD.id OR b=OLD.id;
+    DELETE FROM memory_pairs_due WHERE id=OLD.id;
 END;",
     )?;
     Ok(())

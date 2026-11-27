@@ -38,14 +38,20 @@ pub fn snapshot_statement(n: i64, kind: &str, name: &str) -> String {
 }
 
 /// Turns a store this binary made back to schema version 11: version 12's
-/// use table, version 14's clock, resets and their trigger, and version
-/// 13's views, date index, end records, their triggers and the condition
-/// columns go, and the history and the change counter get version 11's
-/// table and triggers.
+/// use table, version 14's clock, resets and their trigger, version 13's
+/// views, date index, end records, their triggers and the condition
+/// columns, and version 15's kept pairs go, and the history and the change
+/// counter get version 11's table and triggers.
 pub fn back_to_v11(db: &Path) {
     let conn = Connection::open(db).unwrap();
     conn.execute_batch(
-        "DROP TRIGGER memory_use_reset;
+        "DROP TRIGGER memory_pairs_vector_inserted;
+DROP TRIGGER memory_pairs_vector_changed;
+DROP TRIGGER memory_pairs_vector_deleted;
+DROP TABLE memory_pairs;
+DROP TABLE memory_pairs_state;
+DROP TABLE memory_pairs_due;
+DROP TRIGGER memory_use_reset;
 DROP TABLE hold_reset;
 DROP TABLE use_clock;
 DROP TABLE memory_use;

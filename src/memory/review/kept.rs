@@ -1,0 +1,439 @@
+//! Vector pairs kept in the store between reviews, so a review compares only
+//! the vectors that changed since the last one instead of every pair.
+//!
+//! - `memory_pairs`: pairs of stored vectors of one model and length whose
+//!   fast cosine is at or above that length's floor, the smaller id first.
+//! - `memory_pairs_state`: the model, dimensions and lengths whose pairs are
+//!   complete down to their floor: the lower cutoff minus the fast dot
+//!   product's [`margin`] when they were compared.
+//! - `memory_pairs_due`: memories whose vector was saved since its pairs
+//!   were compared, numbered in the order saved.
+//!
+//! Triggers on `memory_vectors` keep them in step with every writer: a saved
+//! vector loses its pairs and becomes due, a deleted one loses both. A
+//! `REPLACE` that removes the old vector fires no delete trigger without
+//! `recursive_triggers`, so the insert trigger removes the old pairs.
+//!
+//! A pair lives as long as both vectors, whatever their memories' status:
+//! review reads only the pairs of memories it is looking at, and a memory
+//! back in force, or a review of other projects, finds its pairs there.
+
+use super::{
+    super::{
+        schema::write,
+        similar::{Thresholds, norm},
+    },
+    pairs::{Row, margin, near, near_due},
+};
+use anyhow::Result;
+use rusqlite::{Connection, params};
+use std::collections::{HashMap, HashSet};
+use uuid::Uuid;
+
+/// The tables and triggers of the kept pairs. Part of the stored schema, so
+/// a change to it bumps `SCHEMA_VERSION`.
+pub(in crate::memory) const PAIRS: &str = "CREATE TABLE IF NOT EXISTS memory_pairs (
+    a TEXT NOT NULL,
+    b TEXT NOT NULL,
+    model TEXT NOT NULL,
+    dimensions INTEGER NOT NULL,
+    PRIMARY KEY(a, b, model, dimensions),
+    CHECK(a < b)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS memory_pairs_by_b ON memory_pairs(b);
+CREATE TABLE IF NOT EXISTS memory_pairs_state (
+    model TEXT NOT NULL,
+    dimensions INTEGER NOT NULL,
+    length INTEGER NOT NULL CHECK(length > 0),
+    floor REAL NOT NULL,
+    PRIMARY KEY(model, dimensions, length)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS memory_pairs_due (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT NOT NULL UNIQUE,
+    model TEXT NOT NULL,
+    dimensions INTEGER NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS memory_pairs_vector_inserted AFTER INSERT ON memory_vectors BEGIN
+    DELETE FROM memory_pairs WHERE a=NEW.id OR b=NEW.id;
+    DELETE FROM memory_pairs_due WHERE id=NEW.id;
+    INSERT INTO memory_pairs_due(id,model,dimensions) VALUES (NEW.id,NEW.model,NEW.dimensions);
+END;
+CREATE TRIGGER IF NOT EXISTS memory_pairs_vector_changed AFTER UPDATE ON memory_vectors BEGIN
+    DELETE FROM memory_pairs WHERE a=OLD.id OR b=OLD.id OR a=NEW.id OR b=NEW.id;
+    DELETE FROM memory_pairs_due WHERE id=OLD.id OR id=NEW.id;
+    INSERT INTO memory_pairs_due(id,model,dimensions) VALUES (NEW.id,NEW.model,NEW.dimensions);
+END;
+CREATE TRIGGER IF NOT EXISTS memory_pairs_vector_deleted AFTER DELETE ON memory_vectors BEGIN
+    DELETE FROM memory_pairs WHERE a=OLD.id OR b=OLD.id;
+    DELETE FROM memory_pairs_due WHERE id=OLD.id;
+END;";
+
+/// What the store keeps for one model and dimensions, read in the same
+/// snapshot as the vectors. Empty for a store that keeps nothing yet.
+#[derive(Default)]
+pub(super) struct Kept {
+    /// Floors by vector length, for the lengths whose pairs are complete.
+    floors: HashMap<usize, f32>,
+    pairs: Vec<(Uuid, Uuid)>,
+    /// Due memories with the number each was noted under.
+    due: HashMap<Uuid, i64>,
+    /// The highest number noted when read: a memory noted after it changed
+    /// its vector since.
+    last: i64,
+}
+
+/// Reads what the store keeps for `identity` (model, requested dimensions).
+pub(super) fn read(conn: &Connection, (model, dimensions): &(String, i64)) -> Result<Kept> {
+    let floors = conn
+        .prepare("SELECT length,floor FROM memory_pairs_state WHERE model=?1 AND dimensions=?2")?
+        .query_map(params![model, dimensions], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?))
+        })?
+        .filter_map(|row| {
+            let (length, floor) = row.ok()?;
+            #[expect(clippy::cast_possible_truncation, reason = "stored from an f32")]
+            let floor = floor as f32;
+            Some((usize::try_from(length).ok()?, floor))
+        })
+        .collect();
+    let pairs = conn
+        .prepare("SELECT a,b FROM memory_pairs WHERE model=?1 AND dimensions=?2")?
+        .query_map(params![model, dimensions], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?
+        .filter_map(|row| {
+            let (a, b) = row.ok()?;
+            Some((Uuid::parse_str(&a).ok()?, Uuid::parse_str(&b).ok()?))
+        })
+        .collect();
+    let due = conn
+        .prepare("SELECT id,seq FROM memory_pairs_due WHERE model=?1 AND dimensions=?2")?
+        .query_map(params![model, dimensions], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?
+        .filter_map(|row| {
+            let (id, seq) = row.ok()?;
+            Some((Uuid::parse_str(&id).ok()?, seq))
+        })
+        .collect();
+    let last = conn.query_row(
+        "SELECT coalesce(max(seq),0) FROM memory_pairs_due",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(Kept {
+        floors,
+        pairs,
+        due,
+        last,
+    })
+}
+
+/// The pairs worth an exact look, and what to keep of them.
+pub(super) struct Refreshed {
+    /// Every pair of stored vectors whose cosine may be at a cutoff.
+    pub(super) near: Vec<(Uuid, Uuid)>,
+    /// Pairs found now, to keep.
+    found: Vec<(Uuid, Uuid)>,
+    /// Lengths compared in full: their floor, and every memory of that
+    /// length, whose kept pairs the found ones replace.
+    replaced: Vec<(usize, f32, Vec<Uuid>)>,
+    /// Lengths without cutoffs: nothing is kept for them.
+    dropped: Vec<usize>,
+    /// Due memories compared now, with the number each was noted under.
+    compared: Vec<(Uuid, i64)>,
+}
+
+/// Every pair of `stored` vectors (by memory: the text embedded, the
+/// vector) of a length with `cutoffs` whose fast cosine is within [`margin`]
+/// of the lower cutoff or above. A length whose kept pairs are complete
+/// down to that point, with at most half its vectors due, takes its kept
+/// pairs and compares the due ones against every vector of that length:
+/// k·n·d multiply-adds for k due of n vectors of d dimensions. Any other
+/// length compares every pair, n²/2 · d: 3.2·10¹² at 50,000 of 2,560, 77 s
+/// on GitHub's macOS runner (3 cpus, about 14·10⁹ a second on each), which
+/// passes the connector's 150 s (`FORWARDED_CALL_LIMIT` in src/remote.rs)
+/// there at about 70,000 vectors of 2,560 dimensions, or 100,000 of 1,024.
+/// That happens once for a length, at the first review after the upgrade or
+/// after the cutoffs were lowered.
+pub(super) fn refresh(
+    stored: &HashMap<Uuid, (String, Vec<f32>)>,
+    cutoffs: &HashMap<usize, Thresholds>,
+    kept: &Kept,
+) -> Refreshed {
+    let mut by_length: HashMap<usize, Vec<Uuid>> = HashMap::new();
+    for (id, (_, vector)) in stored {
+        by_length.entry(vector.len()).or_default().push(*id);
+    }
+    let mut refreshed = Refreshed {
+        near: Vec::new(),
+        found: Vec::new(),
+        replaced: Vec::new(),
+        dropped: Vec::new(),
+        compared: Vec::new(),
+    };
+    for (length, mut ids) in by_length {
+        ids.sort_unstable();
+        refreshed.compared.extend(
+            ids.iter()
+                .filter_map(|id| kept.due.get(id).map(|&seq| (*id, seq))),
+        );
+        let Some(cutoffs) = cutoffs.get(&length) else {
+            refreshed.dropped.push(length);
+            continue;
+        };
+        let lowest = cutoffs.related.min(cutoffs.duplicate) - margin(length);
+        let rows: Vec<Row> = ids
+            .iter()
+            .enumerate()
+            .map(|(r, id)| {
+                let vector = stored[id].1.as_slice();
+                (r, vector, norm(vector))
+            })
+            .collect();
+        let due: Vec<bool> = ids.iter().map(|id| kept.due.contains_key(id)).collect();
+        let changed = due.iter().filter(|&&due| due).count();
+        let pair = |(p, q): (usize, usize)| (ids[p], ids[q]);
+        match kept.floors.get(&length) {
+            Some(&floor) if floor <= lowest && 2 * changed <= ids.len() => {
+                // Saving a vector removed its pairs, so none of these is due.
+                let here: HashSet<&Uuid> = ids.iter().collect();
+                refreshed.near.extend(
+                    kept.pairs
+                        .iter()
+                        .copied()
+                        .filter(|(a, b)| here.contains(a) && here.contains(b)),
+                );
+                let found: Vec<(Uuid, Uuid)> =
+                    near_due(&rows, &due, floor).into_iter().map(pair).collect();
+                refreshed.near.extend(&found);
+                refreshed.found.extend(found);
+            }
+            _ => {
+                let found: Vec<(Uuid, Uuid)> = near(&rows, lowest).into_iter().map(pair).collect();
+                refreshed.near.extend(&found);
+                refreshed.found.extend(found);
+                refreshed.replaced.push((length, lowest, ids));
+            }
+        }
+    }
+    refreshed
+}
+
+/// Keeps what `refreshed` found for `identity`, in one write within the
+/// call's budget. A vector saved since `kept` was read is left due, and no
+/// pair of it is kept, so the next review compares it again. Fails, keeping
+/// nothing, when the write turn cannot be had; the review's answer does not
+/// depend on it.
+pub(super) fn keep(
+    conn: &Connection,
+    (model, dimensions): &(String, i64),
+    kept: &Kept,
+    refreshed: &Refreshed,
+) -> Result<()> {
+    if refreshed.found.is_empty()
+        && refreshed.replaced.is_empty()
+        && refreshed.dropped.is_empty()
+        && refreshed.compared.is_empty()
+    {
+        return Ok(());
+    }
+    let tx = write(conn)?;
+    let changed: HashSet<Uuid> = tx
+        .prepare("SELECT id FROM memory_pairs_due WHERE seq>?1")?
+        .query_map([kept.last], |r| r.get::<_, String>(0))?
+        .filter_map(|id| Uuid::parse_str(&id.ok()?).ok())
+        .collect();
+    {
+        let mut forget = tx.prepare(
+            "DELETE FROM memory_pairs WHERE model=?1 AND dimensions=?2 AND (a=?3 OR b=?3)",
+        )?;
+        let mut stamp = tx.prepare(
+            "INSERT OR REPLACE INTO memory_pairs_state (model,dimensions,length,floor) VALUES (?1,?2,?3,?4)",
+        )?;
+        for (length, floor, ids) in &refreshed.replaced {
+            for id in ids.iter().filter(|id| !changed.contains(id)) {
+                forget.execute(params![model, dimensions, id.to_string()])?;
+            }
+            stamp.execute(params![
+                model,
+                dimensions,
+                i64::try_from(*length)?,
+                f64::from(*floor)
+            ])?;
+        }
+        let mut drop = tx.prepare(
+            "DELETE FROM memory_pairs_state WHERE model=?1 AND dimensions=?2 AND length=?3",
+        )?;
+        for length in &refreshed.dropped {
+            drop.execute(params![model, dimensions, i64::try_from(*length)?])?;
+        }
+        // Only while both vectors are still the ones compared.
+        let mut add = tx.prepare(
+            "INSERT OR IGNORE INTO memory_pairs (a,b,model,dimensions) SELECT ?1,?2,?3,?4 WHERE EXISTS (SELECT 1 FROM memory_vectors WHERE id=?1 AND model=?3 AND dimensions=?4) AND EXISTS (SELECT 1 FROM memory_vectors WHERE id=?2 AND model=?3 AND dimensions=?4)",
+        )?;
+        for (a, b) in &refreshed.found {
+            if changed.contains(a) || changed.contains(b) {
+                continue;
+            }
+            let (a, b) = (a.min(b), a.max(b));
+            add.execute(params![a.to_string(), b.to_string(), model, dimensions])?;
+        }
+        let mut done = tx.prepare("DELETE FROM memory_pairs_due WHERE id=?1 AND seq=?2")?;
+        for (id, seq) in &refreshed.compared {
+            done.execute(params![id.to_string(), seq])?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::super::{schema::connect, similar::DraftVector, similar::save_vector};
+    use super::*;
+
+    const MODEL: &str = "kept-test";
+
+    fn identity() -> (String, i64) {
+        (MODEL.into(), 0)
+    }
+
+    /// A store with a memory for each of `count` ids, each with `vector`.
+    fn store(count: usize, vector: &[f32]) -> (tempfile::TempDir, Connection, Vec<Uuid>) {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = connect(&dir.path().join("memory.sqlite3")).unwrap();
+        let ids: Vec<Uuid> = (0..count).map(|_| Uuid::new_v4()).collect();
+        for id in &ids {
+            conn.execute(
+                "INSERT INTO memories (id,memory_type,category,content,title) VALUES (?1,'preference','workflow','Prefer Rust','Prefer Rust')",
+                [id.to_string()],
+            )
+            .unwrap();
+            save(&conn, *id, vector);
+        }
+        conn.execute(
+            "INSERT INTO embedding_cutoffs (model,length,duplicate,related,calibrated_at) VALUES (?1,?2,0.9,0.8,datetime('now'))",
+            params![MODEL, i64::try_from(vector.len()).unwrap()],
+        )
+        .unwrap();
+        (dir, conn, ids)
+    }
+
+    fn save(conn: &Connection, id: Uuid, vector: &[f32]) {
+        let vector = DraftVector {
+            vector: vector.to_vec(),
+            identity: identity(),
+            source: String::new(),
+        };
+        save_vector(conn, id, &vector).unwrap();
+    }
+
+    fn count(conn: &Connection, sql: &str, id: Uuid) -> i64 {
+        conn.query_row(sql, [id.to_string()], |r| r.get(0)).unwrap()
+    }
+
+    /// Reads, compares and keeps, as a review does, with `between` run
+    /// after the read: another writer at work while the review compares.
+    fn review(conn: &Connection, between: impl FnOnce()) {
+        let kept = read(conn, &identity()).unwrap();
+        let stored = super::super::super::similar::stored_vectors(conn, &identity()).unwrap();
+        let cutoffs = HashMap::from([(
+            3,
+            Thresholds {
+                duplicate: 0.9,
+                related: 0.8,
+            },
+        )]);
+        let refreshed = refresh(&stored, &cutoffs, &kept);
+        between();
+        keep(conn, &identity(), &kept, &refreshed).unwrap();
+    }
+
+    const PAIRS_OF: &str = "SELECT COUNT(*) FROM memory_pairs WHERE a=?1 OR b=?1";
+    const DUE: &str = "SELECT COUNT(*) FROM memory_pairs_due WHERE id=?1";
+
+    // A saved vector is due and loses its pairs, whichever way it is
+    // saved; a removed one leaves neither a pair nor a due row.
+    #[test]
+    fn a_saved_or_removed_vector_takes_its_pairs_with_it() {
+        let (_dir, conn, ids) = store(3, &[1.0, 0.0, 0.0]);
+        assert!(ids.iter().all(|&id| count(&conn, DUE, id) == 1));
+        review(&conn, || ());
+        assert!(ids.iter().all(|&id| count(&conn, DUE, id) == 0));
+        assert_eq!(count(&conn, PAIRS_OF, ids[0]), 2);
+        save(&conn, ids[0], &[1.0, 0.0, 0.0]);
+        assert_eq!(
+            (count(&conn, PAIRS_OF, ids[0]), count(&conn, DUE, ids[0])),
+            (0, 1)
+        );
+        review(&conn, || ());
+        assert_eq!(count(&conn, PAIRS_OF, ids[0]), 2);
+        conn.execute(
+            "UPDATE memory_vectors SET source='edited' WHERE id=?1",
+            [ids[1].to_string()],
+        )
+        .unwrap();
+        assert_eq!(
+            (count(&conn, PAIRS_OF, ids[1]), count(&conn, DUE, ids[1])),
+            (0, 1)
+        );
+        conn.execute("DELETE FROM memories WHERE id=?1", [ids[2].to_string()])
+            .unwrap();
+        assert_eq!(
+            (count(&conn, PAIRS_OF, ids[2]), count(&conn, DUE, ids[2])),
+            (0, 0)
+        );
+    }
+
+    // A vector saved again while a review compares stays due, and the
+    // review keeps no pair of it, though it compared the old one; a vector
+    // removed meanwhile gets no pair back.
+    #[test]
+    fn a_vector_changed_while_a_review_compares_stays_due() {
+        let (_dir, conn, ids) = store(4, &[1.0, 0.0, 0.0]);
+        review(&conn, || {
+            save(&conn, ids[0], &[0.0, 1.0, 0.0]);
+            conn.execute("DELETE FROM memories WHERE id=?1", [ids[1].to_string()])
+                .unwrap();
+        });
+        assert_eq!(
+            (count(&conn, PAIRS_OF, ids[0]), count(&conn, DUE, ids[0])),
+            (0, 1)
+        );
+        assert_eq!(
+            (count(&conn, PAIRS_OF, ids[1]), count(&conn, DUE, ids[1])),
+            (0, 0)
+        );
+        assert_eq!(
+            count(&conn, PAIRS_OF, ids[2]),
+            1,
+            "the pair of the other two"
+        );
+        assert_eq!(count(&conn, DUE, ids[2]), 0);
+    }
+
+    // Two vectors saved since the last review are compared with each
+    // other, not only with the vectors kept before.
+    #[test]
+    fn vectors_saved_together_are_compared_with_each_other() {
+        let (_dir, conn, ids) = store(4, &[1.0, 0.0, 0.0]);
+        review(&conn, || ());
+        save(&conn, ids[0], &[0.0, 1.0, 0.0]);
+        save(&conn, ids[1], &[0.0, 1.0, 0.0]);
+        review(&conn, || ());
+        let pair: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory_pairs WHERE a=?1 AND b=?2",
+                [
+                    ids[0].min(ids[1]).to_string(),
+                    ids[0].max(ids[1]).to_string(),
+                ],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pair, 1);
+        assert_eq!(count(&conn, PAIRS_OF, ids[0]), 1, "and with nothing else");
+    }
+}

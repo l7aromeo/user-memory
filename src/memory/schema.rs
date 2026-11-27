@@ -8,12 +8,13 @@ use std::{fs, path::Path, time::Duration};
 use uuid::Uuid;
 
 /// Stamped into `PRAGMA user_version`. Bump it whenever `SCHEMA`, the
-/// search index SQL in `index.rs` or the change counter's in `changes.rs`
-/// changes, and add the step that upgrades the
+/// search index SQL in `index.rs`, the change counter's in `changes.rs` or
+/// the kept pairs' in `review/kept.rs` changes, and add the step that
+/// upgrades the
 /// previous version in `migrate.rs`: `IF NOT EXISTS` keeps an older table or
 /// trigger as it was, so connecting refuses a store from another version
 /// instead of half upgrading it.
-pub(super) const SCHEMA_VERSION: i64 = 14;
+pub(super) const SCHEMA_VERSION: i64 = 15;
 
 /// The tables and the triggers that stale inferred patterns when their
 /// support weakens: a supporting memory deleted; one changed in what it
@@ -223,6 +224,7 @@ pub fn connect(db: &Path) -> Result<Connection> {
             tx.execute_batch(super::history::EVENTS)?;
             tx.execute_batch(super::usage::TABLE)?;
             super::index::create(&tx)?;
+            tx.execute_batch(super::review::kept::PAIRS)?;
             super::index::start(&tx)?;
             tx.execute_batch(&super::changes::schema())?;
             tx.execute_batch(super::changes::START)?;
@@ -258,6 +260,7 @@ pub fn connect(db: &Path) -> Result<Connection> {
     conn.execute_batch(super::history::EVENTS)?;
     conn.execute_batch(super::usage::TABLE)?;
     super::index::create(&conn)?;
+    conn.execute_batch(super::review::kept::PAIRS)?;
     conn.execute_batch(&super::changes::schema())?;
     Ok(conn)
 }
