@@ -298,7 +298,7 @@ fn seed(home: &Path, db: &Path) {
     let conn = rusqlite::Connection::open(db).unwrap();
     for session in ["s1", "s2", "s3"] {
         conn.execute(
-            "INSERT INTO memory_use (memory,project,origin,at,read,recorded,shown,held,overridden) VALUES (?1,'lab',?2,CURRENT_TIMESTAMP,0,0,0,1,1)",
+            "INSERT INTO memory_use (memory,project,origin,at,read,recorded,shown,held,overridden,seq) VALUES (?1,'lab',?2,CURRENT_TIMESTAMP,0,0,0,1,1,(SELECT coalesce(max(seq),0)+1 FROM memory_use))",
             rusqlite::params![id, format!("claude:session/{session}")],
         )
         .unwrap();

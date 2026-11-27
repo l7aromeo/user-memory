@@ -265,6 +265,19 @@ impl Home {
         );
     }
 
+    /// Puts every use row in the second of the store's latest change, as
+    /// when the sessions and the change all fall in one second: only the
+    /// order the store wrote them in tells them apart then (#240).
+    fn one_second(&self) {
+        rusqlite::Connection::open(self.db())
+            .unwrap()
+            .execute(
+                "UPDATE memory_use SET at = (SELECT max(max(updated_at, coalesce(last_confirmed_at, updated_at))) FROM memories)",
+                [],
+            )
+            .unwrap();
+    }
+
     /// The store's hold outcomes of `memory`, one per session: held and
     /// overridden, by origin.
     fn outcomes(&self, memory: &str) -> Vec<(String, Option<bool>, Option<bool>)> {
@@ -872,8 +885,7 @@ fn a_note_agents_run_past_in_three_sessions_stops_holding_and_comes_after() {
     );
     let _ = rule;
     // A note an agent observes again holds again: the count starts at its
-    // confirmation.
-    std::thread::sleep(std::time::Duration::from_millis(1100));
+    // confirmation, though the sessions before it wrote in its second.
     home.record_with(
         "lesson",
         "Lock files in a chained rm",
@@ -889,6 +901,7 @@ fn a_note_agents_run_past_in_three_sessions_stops_holding_and_comes_after() {
             "claude:session/other",
         ],
     );
+    home.one_second();
     home.start("s5");
     assert!(
         home.before("s5", None, CHAINED_RM).is_some(),
@@ -912,8 +925,30 @@ fn a_hold_heeded_before_the_same_command_starts_the_count_again() {
     home.overridden("s3", &other, CHAINED_RM);
     home.start("s4");
     assert_eq!(home.before("s4", None, CHAINED_RM), None, "stopped");
-    // A changed note holds again: its count starts at its change.
-    std::thread::sleep(std::time::Duration::from_millis(1100));
+    // A new title is wording: the note stays stopped, though its sessions
+    // wrote a second before it (#240).
+    rusqlite::Connection::open(home.db())
+        .unwrap()
+        .execute("UPDATE memory_use SET at = datetime(at, '-1 second')", [])
+        .unwrap();
+    let out = home
+        .command(&[
+            "update",
+            &note,
+            "--title",
+            "Lock files in chained rm commands",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    home.start("s4t");
+    assert_eq!(
+        home.before("s4t", None, CHAINED_RM),
+        None,
+        "retitled, still stopped"
+    );
+    // A changed note holds again: its count starts at its change, though
+    // the sessions before it wrote in its second.
     let out = home
         .command(&[
             "update",
@@ -924,6 +959,7 @@ fn a_hold_heeded_before_the_same_command_starts_the_count_again() {
         .output()
         .unwrap();
     assert!(out.status.success(), "{out:?}");
+    home.one_second();
     home.start("s5");
     assert!(
         home.before("s5", None, CHAINED_RM).is_some(),
@@ -955,10 +991,66 @@ fn a_hold_heeded_before_the_same_command_starts_the_count_again() {
             ("claude:session/s6".to_owned(), Some(false)),
         ]
     );
+    home.one_second();
     home.start("s7");
     assert!(
         home.before("s7", None, CHAINED_RM).is_some(),
         "the count started again"
+    );
+}
+
+// An export carries no use: a store it is imported into starts with
+// none, and no reset. An import that brings a later confirmation of a
+// stopped note confirms it here too, so it holds again (#240).
+#[test]
+fn an_import_carries_no_use_and_its_confirmation_restarts_the_count() {
+    let home = Home::new();
+    home.with_project();
+    let note = locks_note(&home);
+    let other = docs_fact(&home);
+    for session in ["s1", "s2", "s3"] {
+        home.overridden(session, &other, CHAINED_RM);
+    }
+    home.start("s4");
+    assert_eq!(home.before("s4", None, CHAINED_RM), None, "stopped");
+    let file = home.path().join("export.json");
+    let out = home
+        .command(&["export", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let fresh = Home::new();
+    let out = fresh
+        .command(&["import", file.to_str().unwrap(), "--apply"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let count = |home: &Home, table: &str| -> i64 {
+        rusqlite::Connection::open(home.db())
+            .unwrap()
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap()
+    };
+    assert_eq!(count(&fresh, "memory_use"), 0);
+    assert_eq!(count(&fresh, "hold_reset"), 0);
+    // The file says the note was confirmed later than this store knows.
+    let mut exported: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    for memory in exported["memories"].as_array_mut().unwrap() {
+        if memory["id"] == note.as_str() {
+            memory["last_confirmed_at"] = json!("2099-01-01 00:00:00");
+        }
+    }
+    std::fs::write(&file, exported.to_string()).unwrap();
+    let out = home
+        .command(&["import", file.to_str().unwrap(), "--apply"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    home.one_second();
+    home.start("s5");
+    assert!(
+        home.before("s5", None, CHAINED_RM).is_some(),
+        "confirmed by the import, so held"
     );
 }
 
@@ -972,6 +1064,7 @@ fn review_lists_a_note_that_stopped_holding_until_it_is_confirmed() {
     let note = locks_note(&home);
     let other = docs_fact(&home);
     let review = || -> Value {
+        home.one_second();
         let out = home.command(&["review"]).output().unwrap();
         assert!(out.status.success(), "{out:?}");
         serde_json::from_slice(&out.stdout).unwrap()
@@ -984,17 +1077,14 @@ fn review_lists_a_note_that_stopped_holding_until_it_is_confirmed() {
             .find(|g| g["kind"] == "stopped")
             .cloned()
     };
-    // An override, then a heeded session: the run counts from there.
-    // The store's times have whole seconds: one apart orders the sessions.
-    let apart = || std::thread::sleep(std::time::Duration::from_millis(1100));
+    // An override, then a heeded session: the run counts from there, though
+    // every session writes in one second.
     home.overridden("s0", &other, CHAINED_RM);
-    apart();
     home.start("h");
     assert!(home.before("h", None, CHAINED_RM).is_some());
     home.edit("h", None, "notes.md");
     home.after("h", None, CHAINED_RM);
     home.prompt("h");
-    apart();
     home.overridden("s1", &other, CHAINED_RM);
     home.overridden("s2", &other, CHAINED_RM);
     assert_eq!(stopped(&review()), None, "two sessions are not enough");
@@ -1015,7 +1105,6 @@ fn review_lists_a_note_that_stopped_holding_until_it_is_confirmed() {
         .collect();
     let at = kinds.iter().position(|k| *k == "stopped").unwrap();
     assert_eq!(kinds[..at], ["recent"], "right after recent: {kinds:?}");
-    std::thread::sleep(std::time::Duration::from_millis(1100));
     home.record_with(
         "lesson",
         "Lock files in a chained rm",
@@ -1032,4 +1121,13 @@ fn review_lists_a_note_that_stopped_holding_until_it_is_confirmed() {
         ],
     );
     assert_eq!(stopped(&review()), None, "confirmed, so it holds again");
+    // The count starts after the confirmation: the session that wrote just
+    // before it is not one of the run.
+    home.overridden("s4", &other, CHAINED_RM);
+    home.overridden("s5", &other, CHAINED_RM);
+    assert_eq!(
+        stopped(&review()),
+        None,
+        "two overrides since the confirmation"
+    );
 }

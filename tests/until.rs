@@ -1037,6 +1037,7 @@ const READS_EVERY_STATUS: &[(&str, &str)] = &[
     ("migrate::V3_REBUILD", "a migration step"),
     ("migrate::to_v6", "a migration step"),
     ("migrate::to_v7", "a migration step"),
+    ("migrate::to_v14", "a migration step"),
     (
         "overview::render_listed",
         "whether the store holds any memory at all",

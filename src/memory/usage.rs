@@ -11,9 +11,32 @@
 /// null until known: one session's flushes reach the store in order, each
 /// after the last one's reply, so the latest sent is the latest seen.
 /// `passage` is the slot of the passage pushed most in that session (see
-/// `index::passages::SLOTS`), null when none was. No trigger and no change
-/// counter: use changes nothing a session reads. A forgotten memory's rows
-/// go with it. Part of the stored schema since version 12.
+/// `index::passages::SLOTS`), null when none was. `seq` is the
+/// [`use_clock`](TABLE) value of the row's latest write: the order of
+/// writes, which `at`'s whole seconds don't give (#240). Use changes nothing
+/// a session reads, so no change counter moves. A forgotten memory's rows
+/// go with it. Part of the stored schema since version 12, `seq` since 14.
+///
+/// `use_clock` is one row, the latest seq given out; none before the first
+/// write. Each write of use takes the next value inside its write
+/// transaction, so two writers never share one. A counter of its own
+/// rather than `max(seq) + 1`: a forget deletes rows by cascade, and the
+/// largest left could then be handed out again below a seq that
+/// `hold_reset` already points past.
+///
+/// `hold_reset` is, per memory, the clock's value at its latest change
+/// that starts its hold count again (`seq`) and at its latest change that
+/// renumbers its passages (`passages`), each null until one happened: use rows with a
+/// larger seq came after it. The trigger `memory_use_reset` keeps both.
+/// The hold count starts again when what the note asks or where it holds
+/// changes, or when it is confirmed: its content, condition, scope or
+/// project, or `last_confirmed_at`. A title or reason is wording. A type
+/// change is left out: making a note a rule already stops it from ever
+/// stopping. A category move doesn't change what it asks. The passage
+/// count starts again when the content or context changes. Neither reads
+/// `updated_at`: it has whole seconds, so a change in the second the
+/// memory was written leaves it as it was. Part of the stored schema since
+/// version 14.
 pub(super) const TABLE: &str = "CREATE TABLE IF NOT EXISTS memory_use (
     memory TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
     project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 240),
@@ -25,9 +48,27 @@ pub(super) const TABLE: &str = "CREATE TABLE IF NOT EXISTS memory_use (
     held INTEGER CHECK(held IN (0,1)),
     overridden INTEGER CHECK(overridden IN (0,1)),
     passage INTEGER CHECK(passage >= 0),
+    seq INTEGER NOT NULL CHECK(seq > 0),
     PRIMARY KEY(memory, project, origin)
 ) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS memory_use_by_project ON memory_use(project, origin);";
+CREATE INDEX IF NOT EXISTS memory_use_by_project ON memory_use(project, origin);
+CREATE TABLE IF NOT EXISTS use_clock (
+    id INTEGER PRIMARY KEY CHECK(id = 1),
+    seq INTEGER NOT NULL CHECK(seq > 0)
+);
+CREATE TABLE IF NOT EXISTS hold_reset (
+    memory TEXT PRIMARY KEY NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    seq INTEGER CHECK(seq >= 0),
+    passages INTEGER CHECK(passages >= 0)
+) WITHOUT ROWID;
+CREATE TRIGGER IF NOT EXISTS memory_use_reset AFTER UPDATE ON memories
+WHEN NEW.content IS NOT OLD.content OR NEW.context IS NOT OLD.context OR NEW.until_kind IS NOT OLD.until_kind OR NEW.until_value IS NOT OLD.until_value OR NEW.until_project IS NOT OLD.until_project OR NEW.scope IS NOT OLD.scope OR NEW.project IS NOT OLD.project OR NEW.last_confirmed_at IS NOT OLD.last_confirmed_at BEGIN
+    INSERT INTO hold_reset(memory,seq,passages) SELECT NEW.id,
+        CASE WHEN NEW.content IS NOT OLD.content OR NEW.context IS NOT OLD.context OR NEW.until_kind IS NOT OLD.until_kind OR NEW.until_value IS NOT OLD.until_value OR NEW.until_project IS NOT OLD.until_project OR NEW.scope IS NOT OLD.scope OR NEW.project IS NOT OLD.project OR NEW.last_confirmed_at IS NOT OLD.last_confirmed_at THEN clock END,
+        CASE WHEN NEW.content IS NOT OLD.content OR NEW.context IS NOT OLD.context THEN clock END
+    FROM (SELECT coalesce((SELECT seq FROM use_clock WHERE id=1),0) AS clock) WHERE true
+    ON CONFLICT(memory) DO UPDATE SET seq=coalesce(excluded.seq,seq),passages=coalesce(excluded.passages,passages);
+END;";
 
 use super::{clean, project_key, schema::connect, schema::write, selection::refuse_local_paths};
 use anyhow::Result;
@@ -137,10 +178,10 @@ pub enum Written {
 }
 
 /// Writes one session's use: each row upserted by memory, project and
-/// origin, its flags merged with OR (`overridden` takes the latest) and
-/// its time the store's, so sending a
-/// row again only adds to it; then each project written to keeps its
-/// newest [`USE_WINDOW`] origins. A row whose memory isn't stored, such as
+/// origin, its flags merged with OR (`overridden` takes the latest), its
+/// time the store's and its seq the flush's, the next `use_clock` value, so
+/// sending a row again only adds to it; then each project written to keeps
+/// the [`USE_WINDOW`] origins it wrote last, by seq. A row whose memory isn't stored, such as
 /// one forgotten since, or a project memory's row for another project is
 /// skipped: a project memory counts for its own project, a global one for
 /// any. No change marker moves and no memory changes.
@@ -151,10 +192,17 @@ pub fn write_uses(db: &Path, uses: &Uses) -> Result<Written> {
     };
     let conn = connect(db)?;
     let tx = write(&conn)?;
+    // The flush's place in the order of writes: the store's write lock is
+    // held from here to the commit, so no other writer takes the same seq.
+    let seq: i64 = tx.query_row(
+        "INSERT INTO use_clock(id,seq) VALUES (1,1) ON CONFLICT(id) DO UPDATE SET seq=seq+1 RETURNING seq",
+        [],
+        |r| r.get(0),
+    )?;
     let mut place = tx.prepare("SELECT scope,project FROM memories WHERE id=?1")?;
     let mut upsert = tx.prepare(
-        "INSERT INTO memory_use (memory,project,origin,at,read,recorded,shown,held,overridden,passage) VALUES (?1,?2,?3,CURRENT_TIMESTAMP,?4,?5,?6,?7,?8,?9)
-         ON CONFLICT(memory,project,origin) DO UPDATE SET at=excluded.at,read=max(read,excluded.read),recorded=max(recorded,excluded.recorded),shown=max(shown,excluded.shown),
+        "INSERT INTO memory_use (memory,project,origin,at,read,recorded,shown,held,overridden,passage,seq) VALUES (?1,?2,?3,CURRENT_TIMESTAMP,?4,?5,?6,?7,?8,?9,?10)
+         ON CONFLICT(memory,project,origin) DO UPDATE SET at=excluded.at,seq=excluded.seq,read=max(read,excluded.read),recorded=max(recorded,excluded.recorded),shown=max(shown,excluded.shown),
          held=CASE WHEN excluded.held IS NULL THEN held ELSE max(coalesce(held,0),excluded.held) END,
          overridden=coalesce(excluded.overridden,overridden),
          passage=coalesce(excluded.passage,passage)",
@@ -181,13 +229,14 @@ pub fn write_uses(db: &Path, uses: &Uses) -> Result<Written> {
             row.given.held,
             row.given.overridden,
             row.given.passage,
+            seq,
         ])?;
         written += 1;
         projects.insert(row.project.clone());
     }
     drop((place, upsert));
     let mut prune = tx.prepare(
-        "DELETE FROM memory_use WHERE project=?1 AND origin NOT IN (SELECT origin FROM memory_use WHERE project=?1 GROUP BY origin ORDER BY max(at) DESC, origin DESC LIMIT ?2)",
+        "DELETE FROM memory_use WHERE project=?1 AND origin NOT IN (SELECT origin FROM memory_use WHERE project=?1 GROUP BY origin ORDER BY max(seq) DESC LIMIT ?2)",
     )?;
     let window = i64::try_from(USE_WINDOW).expect("USE_WINDOW is a small constant");
     for project in &projects {
@@ -289,8 +338,9 @@ fn label(m: &super::Memory) -> String {
 }
 
 /// The slot of each of `chosen`'s passages shown in most of `projects`'
-/// kept sessions, counting only sessions written since the memory last
-/// changed, since an edit renumbers its passages. A memory none of them
+/// kept sessions, counting only rows written after the memory last changed
+/// (by seq, against `hold_reset.passages`), since an edit renumbers its
+/// passages. A memory none of them
 /// was shown a passage of has none. Ties go to the earlier passage.
 fn delivered(
     conn: &rusqlite::Connection,
@@ -298,7 +348,8 @@ fn delivered(
     chosen: &[super::Memory],
 ) -> Result<std::collections::HashMap<Uuid, i64>> {
     let mut statement = conn.prepare(
-        "SELECT passage,origin,at FROM memory_use WHERE memory=?1 AND passage IS NOT NULL AND project IN (SELECT value FROM json_each(?2))",
+        "SELECT passage,origin FROM memory_use WHERE memory=?1 AND passage IS NOT NULL AND project IN (SELECT value FROM json_each(?2))
+         AND seq > coalesce((SELECT passages FROM hold_reset WHERE memory=?1),0)",
     )?;
     let projects = serde_json::to_string(projects)?;
     let mut found = std::collections::HashMap::new();
@@ -306,18 +357,11 @@ fn delivered(
         let mut sessions: std::collections::BTreeMap<i64, BTreeSet<String>> =
             std::collections::BTreeMap::new();
         let rows = statement.query_map(params![m.id.to_string(), projects], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-            ))
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
         })?;
         for row in rows {
-            let (passage, origin, at) = row?;
-            // Both are the store's `YYYY-MM-DD HH:MM:SS`: compared as text.
-            if at >= m.updated_at {
-                sessions.entry(passage).or_default().insert(origin);
-            }
+            let (passage, origin) = row?;
+            sessions.entry(passage).or_default().insert(origin);
         }
         // The earliest passage among the most shown: max_by_key keeps the
         // last of equals, so the slots are walked from the last.
@@ -433,11 +477,12 @@ pub(crate) const HOLD_OVERRIDES: usize = 3;
 
 /// The agents' notes that no longer hold a command (#118): each one in
 /// force that an agent observed whose latest [`HOLD_OVERRIDES`] sessions
-/// with a hold of it, all since it last changed or was confirmed, each ran
-/// the held command again. Counted by session, as `memory_use` keeps one
-/// row per session and project; a row's time is its last write, so a
-/// confirmation between a hold and its session's next flush starts the
-/// count again early. The user's rules and stated memories never stop.
+/// with a hold of it, all written after it last changed what it asks or was
+/// confirmed (`hold_reset.seq`), each ran the held command again, in the
+/// order the store wrote them. Counted by session, as `memory_use` keeps
+/// one row per session and project; a row's seq is its latest write, so a
+/// confirmation between a hold and its session's next flush still counts
+/// that session after it. The user's rules and stated memories never stop.
 pub fn stopped_holds(db: &Path) -> Result<Vec<String>> {
     Ok(override_runs(&connect(db)?)?
         .into_iter()
@@ -446,26 +491,26 @@ pub fn stopped_holds(db: &Path) -> Result<Vec<String>> {
 }
 
 /// Each stopped note in force ([`stopped_holds`]) with its run: how many of its
-/// latest sessions with a hold, since it last changed or was confirmed,
-/// overrode it in a row, at least [`HOLD_OVERRIDES`] (#238).
+/// latest sessions with a hold, written after its reset, overrode it in a
+/// row, at least [`HOLD_OVERRIDES`] (#238).
 pub(super) fn override_runs(conn: &rusqlite::Connection) -> Result<Vec<(String, usize)>> {
     let mut candidates = conn.prepare(
-        "SELECT id, max(updated_at, coalesce(last_confirmed_at, updated_at)) FROM live_memories
+        "SELECT id FROM live_memories
          WHERE source = 'observed'
          AND id IN (SELECT memory FROM memory_use WHERE held = 1)",
     )?;
     let mut sessions = conn.prepare(
         "SELECT max(overridden) FROM memory_use
-         WHERE memory = ?1 AND held = 1 AND julianday(at) >= julianday(?2)
-         GROUP BY origin ORDER BY max(at) DESC",
+         WHERE memory = ?1 AND held = 1
+         AND seq > coalesce((SELECT seq FROM hold_reset WHERE memory = ?1), 0)
+         GROUP BY origin ORDER BY max(seq) DESC",
     )?;
-    let found =
-        candidates.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    let found = candidates.query_map([], |r| r.get::<_, String>(0))?;
     let mut stopped = Vec::new();
-    for row in found {
-        let (id, since) = row?;
+    for id in found {
+        let id = id?;
         let outcomes: Vec<Option<bool>> = sessions
-            .query_map(params![id, since], |r| r.get(0))?
+            .query_map([&id], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         let run = outcomes.iter().take_while(|o| **o == Some(true)).count();
         if run >= HOLD_OVERRIDES {
@@ -473,4 +518,58 @@ pub(super) fn override_runs(conn: &rusqlite::Connection) -> Result<Vec<(String, 
         }
     }
     Ok(stopped)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The store's resets of `id`: its hold count's and its passages'.
+    fn resets(conn: &rusqlite::Connection, id: &str) -> Option<(Option<i64>, Option<i64>)> {
+        conn.query_row(
+            "SELECT seq,passages FROM hold_reset WHERE memory=?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .unwrap()
+    }
+
+    // The trigger reads what changed, not `updated_at`, which a change in
+    // the second the memory was written leaves as it was: each update here
+    // keeps it. A title is wording; a context restarts both counts, a
+    // confirmation the hold count only (#240).
+    #[test]
+    fn what_a_change_touches_restarts_its_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = connect(&dir.path().join("memory.sqlite3")).unwrap();
+        let id = "e0000001-0000-4000-8000-000000000001";
+        conn.execute(
+            "INSERT INTO memories (id,memory_type,category,title,content,source,evidence) VALUES (?1,'lesson','workflow','Locks','Keep the locks','observed','seen')",
+            [id],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO use_clock VALUES (1,4)", [])
+            .unwrap();
+        let change = |set: &str| {
+            conn.execute(&format!("UPDATE memories SET {set} WHERE id=?1"), [id])
+                .unwrap();
+        };
+        change("title='Lock files'");
+        assert_eq!(resets(&conn, id), None, "a title is wording");
+        change("content='Keep the lock files'");
+        assert_eq!(resets(&conn, id), Some((Some(4), Some(4))));
+        conn.execute("UPDATE use_clock SET seq=7", []).unwrap();
+        change("last_confirmed_at=CURRENT_TIMESTAMP");
+        assert_eq!(resets(&conn, id), Some((Some(7), Some(4))));
+        conn.execute("UPDATE use_clock SET seq=9", []).unwrap();
+        change("context='In a shared checkout'");
+        assert_eq!(resets(&conn, id), Some((Some(9), Some(9))));
+        change("memory_type='preference',category='tooling'");
+        assert_eq!(
+            resets(&conn, id),
+            Some((Some(9), Some(9))),
+            "type and category"
+        );
+    }
 }

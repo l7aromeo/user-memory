@@ -24,11 +24,15 @@ version 5), `store_changes` and `memory_changes` (the store's count of its
 own changes, since schema version 10: the store's id, the number of its
 latest change, and for each memory changed since the number of its latest
 change, with the time it was removed for a forgotten one; no text),
-`memory_use` (since schema version 12: for each of a project's newest 40
-conversations, which memories it read, recorded or was shown, the number
-of the passage it was shown most, whether a command was held back by it
-and whether the agent then ran that command again, and when; no text; a
-memory's rows are deleted with it), `memory_ended`
+`memory_use` (since schema version 12: for each of the 40 conversations
+of a project that wrote last, which memories it read, recorded or was
+shown, the number of the passage it was shown most, whether a command was
+held back by it and whether the agent then ran that command again, and
+when; since schema version 14 also the order of its latest write; no
+text; a memory's rows are deleted with it), `use_clock` and `hold_reset`
+(since schema version 14: the last write order given out, and for each
+memory where in that order its hold count and its passage count start
+again), `memory_ended`
 (when a memory's tag or text condition ended, how and on what evidence,
 since schema version 13), the views `out_of_force` (the memories ended
 or past their date) and `live_memories` (the memories in force:

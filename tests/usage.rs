@@ -430,28 +430,87 @@ fn a_session_s_use_is_merged_by_memory_project_and_origin() {
     );
 }
 
-// A project keeps the use of its newest USE_WINDOW sessions: a session
-// past them drops the oldest.
+// A project keeps the use of the USE_WINDOW sessions that wrote last: a
+// session past them drops the one written first, even when all wrote in
+// the same second and its origin sorts last (#240).
 #[test]
-fn a_project_keeps_its_newest_sessions_use() {
+fn a_project_keeps_the_sessions_that_wrote_last() {
     let host = Host::start(&[]);
     let memory = host.record("Run the fast tests first", None);
+    let origin = |n: usize| format!("claude:session/{:02}", USE_WINDOW - n);
     for n in 0..=USE_WINDOW {
-        let body = json!({"origin": format!("claude:session/{n:02}"), "uses": [used(&memory, PROJECT, true, false, false)]});
+        let body =
+            json!({"origin": origin(n), "uses": [used(&memory, PROJECT, true, false, false)]});
         assert_eq!(host.post(SHARED, &body.to_string()).0, 200);
-        // Each session a second later than the last, as real sessions are.
+        // All in one second, however fast the machine.
         Connection::open(host.db())
             .unwrap()
-            .execute("UPDATE memory_use SET at=datetime(at,'-1 second')", [])
+            .execute("UPDATE memory_use SET at='2026-01-01 00:00:00'", [])
             .unwrap();
     }
     let origins: Vec<String> = host.rows().into_iter().map(|row| row.2).collect();
     assert_eq!(origins.len(), USE_WINDOW);
-    assert!(
-        !origins.contains(&"claude:session/00".to_owned()),
-        "{origins:?}"
-    );
-    assert!(origins.contains(&format!("claude:session/{USE_WINDOW:02}")));
+    assert!(!origins.contains(&origin(0)), "{origins:?}");
+    assert!(origins.contains(&origin(1)), "{origins:?}");
+    assert!(origins.contains(&origin(USE_WINDOW)), "{origins:?}");
+}
+
+// A session that writes again counts as written then: the prune keeps it
+// and drops the one whose latest write is oldest (#240).
+#[test]
+fn a_session_that_writes_again_counts_from_its_latest_write() {
+    let host = Host::start(&[]);
+    let memory = host.record("Run the fast tests first", None);
+    let post = |origin: &str| {
+        let body = json!({"origin": origin, "uses": [used(&memory, PROJECT, true, false, false)]});
+        assert_eq!(host.post(SHARED, &body.to_string()).0, 200);
+    };
+    let origin = |n: usize| format!("claude:session/{n:02}");
+    for n in 0..USE_WINDOW {
+        post(&origin(n));
+    }
+    post(&origin(0));
+    post(&origin(USE_WINDOW));
+    let origins: Vec<String> = host.rows().into_iter().map(|row| row.2).collect();
+    assert_eq!(origins.len(), USE_WINDOW);
+    assert!(origins.contains(&origin(0)), "{origins:?}");
+    assert!(!origins.contains(&origin(1)), "{origins:?}");
+}
+
+/// Writers sending use at once, as agents running in parallel do.
+const WRITERS: usize = 8;
+
+// Sessions writing use at once, within one second, each get a write of
+// their own in the store's order: distinct seqs, one per write, with no
+// gap and no repeat (#240).
+#[test]
+fn sessions_writing_at_once_get_one_seq_each() {
+    let host = Host::start(&[]);
+    let memory = host.record("Run the fast tests first", None);
+    std::thread::scope(|scope| {
+        for n in 0..WRITERS {
+            let (host, memory) = (&host, &memory);
+            scope.spawn(move || {
+                let body = json!({"origin": format!("claude:session/w{n}"), "uses": [used(memory, PROJECT, true, false, false)]});
+                assert_eq!(host.post(SHARED, &body.to_string()).0, 200);
+            });
+        }
+    });
+    let conn = Connection::open(host.db()).unwrap();
+    let mut seqs: Vec<i64> = conn
+        .prepare("SELECT seq FROM memory_use")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    seqs.sort_unstable();
+    let expected: Vec<i64> = (1..=i64::try_from(WRITERS).unwrap()).collect();
+    assert_eq!(seqs, expected);
+    let clock: i64 = conn
+        .query_row("SELECT seq FROM use_clock", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(clock, *expected.last().unwrap());
 }
 
 // A malformed request is refused with its reason and writes nothing; a
@@ -1016,15 +1075,21 @@ fn the_most_used_part_prints_the_passage_most_sessions_were_shown() {
         printed.contains("Release steps — bravo ") && !printed.contains("alpha"),
         "{printed}"
     );
-    // The store's times have whole seconds: the edit is a second later
-    // than every row.
-    std::thread::sleep(std::time::Duration::from_millis(1100));
     host.cli(&[
         "update",
         &id,
         "--content",
         &three_passages(["delta", "echo", "foxtrot"]),
     ]);
+    // Every row in the edit's second: only the order of writes says they
+    // came before it (#240).
+    Connection::open(host.db())
+        .unwrap()
+        .execute(
+            "UPDATE memory_use SET at = (SELECT updated_at FROM memories WHERE id = memory_use.memory)",
+            [],
+        )
+        .unwrap();
     assert!(line(&host).contains("— delta "), "{}", line(&host));
     post("s4", Some(3));
     assert!(line(&host).contains("— foxtrot "), "{}", line(&host));
