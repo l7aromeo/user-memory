@@ -768,6 +768,20 @@ impl State {
     /// showed keeps that outcome, the latest per context, and is sent
     /// again with it.
     pub(super) fn settle(&mut self, agent: &str, call: &str, command: Option<&str>) -> Result<()> {
+        // Most calls follow no hold: a read finds that without the write
+        // lock, which another hook of the session may hold. The hold is read
+        // again under the lock, since another hook may settle it between.
+        let waiting: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM pending_hold WHERE agent = ?1",
+                [agent],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if waiting.is_none() {
+            return Ok(());
+        }
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1812,6 +1826,24 @@ mod tests {
         let mut state = State::start(&path, Source::Compact, &[], soon()).unwrap();
         assert!(state.working_set().unwrap().is_none());
         assert_eq!(epoch_of(&path), 3);
+    }
+
+    /// How long a settle in these tests may wait for a lock it doesn't need.
+    const BRIEF: Duration = Duration::from_millis(200);
+
+    // A call that follows no hold settles without the state's write lock,
+    // which another hook of the session may hold (#118): it never waits for
+    // that lock, nor fails on it.
+    #[test]
+    fn a_call_after_no_hold_settles_without_the_write_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = file(&dir);
+        State::start(&path, Source::Startup, &[], soon()).unwrap();
+        let other = Connection::open(&path).unwrap();
+        other.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let mut state = State::open(&path, Instant::now() + BRIEF).unwrap();
+        state.settle(MAIN, "t-1", Some("k1")).unwrap();
+        other.execute_batch("COMMIT").unwrap();
     }
 
     // A hold settles at its context's next tool call: overridden when that

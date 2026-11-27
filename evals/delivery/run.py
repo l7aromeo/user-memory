@@ -684,7 +684,7 @@ def tag_looked_up(binary, env, hook_said, pushed, checkout, named, waited):
         subprocess.run(["git", "tag", tag], cwd=checkout, env=env, check=True, capture_output=True)
         ms, said = hook_said("PostToolUse", "t1", checkout, tool_name="Bash",
                              tool_input={"command": command}, tool_response={"stdout": ""})
-        pushed(said, short, "a tool hook after a ref change")
+        pushed(said, short, f"a tool hook after a ref change, in {ms:.1f} ms,")
         if n:
             took.append(ms)
     # The last lookup must have found the tag, or this timed hooks that
