@@ -845,6 +845,11 @@ fn cargo(args: &[String]) -> u8 {
     }
 }
 
+/// How long a slow run of the newer build waits before it answers: ten
+/// times the probe timeout the hand-over tests give (`SHORT_PROBE` in
+/// tests/handover.rs), so the check gives up on it every time and ends it.
+const SLOW_RUN: Duration = Duration::from_secs(30);
+
 /// A newer user-memory, for the hand-over and upgrade tests: the real test
 /// build at `$FAKE_USER_MEMORY`, run with the version
 /// `$FAKE_USER_MEMORY_VERSION` (and the schema version
@@ -853,13 +858,30 @@ fn cargo(args: &[String]) -> u8 {
 /// as `exec` does; on Windows it runs it on the same input and output.
 ///
 /// A file `user-memory.killed-once` beside the copy makes its next run end
-/// by a signal, and go: a new program the system refuses once.
+/// by a signal, and go: a new program the system refuses once. A file
+/// `user-memory.slow` holding a count makes that many runs wait
+/// [`SLOW_RUN`] first, each counting it down: a new program slow to answer
+/// on a busy machine.
 fn newer_build(args: &[String]) -> u8 {
     let killed = env::current_exe()
         .unwrap()
         .with_file_name("user-memory.killed-once");
     if fs::remove_file(&killed).is_ok() {
         std::process::abort();
+    }
+    let slow = env::current_exe()
+        .unwrap()
+        .with_file_name("user-memory.slow");
+    if let Some(left) = fs::read_to_string(&slow)
+        .ok()
+        .and_then(|count| count.trim().parse::<u32>().ok())
+    {
+        if left > 1 {
+            fs::write(&slow, (left - 1).to_string()).unwrap();
+        } else {
+            fs::remove_file(&slow).unwrap();
+        }
+        thread::sleep(SLOW_RUN);
     }
     let real = env::var_os("FAKE_USER_MEMORY").unwrap();
     // A version file beside the copy gives one replacement a version of its

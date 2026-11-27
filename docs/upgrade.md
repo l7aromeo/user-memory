@@ -130,6 +130,11 @@ version it has, and its next tool reply says why, once:
 - ``user-memory … replaced the binary this session runs (…), but it can't continue this session's protocol (…), so this session keeps …; restart your client to run …``
 - ``user-memory was replaced on disk, but the new binary can't take over this session (…), so this session keeps …; run user-memory doctor, then restart your client.``
 
+A new binary that the system stops on its first start, or that doesn't
+answer its check within 10 seconds on a busy machine, is checked again at
+the session's next messages, three checks in all, before the session says
+it can't take over; the brackets then say ``it did not answer``.
+
 ## Upgrade a shared server
 
 For the installer's Docker or native server, run the installer again. It
