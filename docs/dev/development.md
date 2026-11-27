@@ -651,6 +651,27 @@ on the command line reads every vector and is reported, not checked.
 after a change to search, the keyword index or the vectors, and report what
 it printed. It takes a few minutes and needs no CI.
 
+## Review budget
+
+`just review-budget` checks that `review` stays fast as the store grows.
+It builds throwaway stores of 10,000 and 50,000 synthetic memories
+(`--memories N …` for others) as the search budget does, and makes one in a
+hundred a light rewording of an earlier one, so review has duplicates to
+find. It then times one `review` call on a long-running `serve`, and a
+`review` command for reference, keyword-only and again with a current
+vector for every memory at 1,024 and 2,560 dimensions (`--dimensions N …`).
+The vectors are unique, except one in a hundred that copies the reworded
+memory's original. It prints each median and fails when a server call is
+over its budget in `evals/scale/review.py`.
+
+Review compares memories by words through an index that finds every pair
+that can overlap enough, and compares every pair of vectors, since no exact
+method skips pairs at these lengths. So its cost with vectors grows with
+the square of the store's size times the vector length. Run it after a
+change to review or the similarity signals, and report what it printed.
+Local timings carry whatever else the machine runs; the budgets hold on
+GitHub's macOS runner.
+
 ## Upgrade and write budgets
 
 Two more scripts build the same synthetic store and time what a schema

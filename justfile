@@ -69,6 +69,11 @@ search-budget *args:
     cargo build --release --locked
     python3 -I evals/scale/run.py {{ args }}
 
+# Review speed on 10,000 and 50,000 synthetic memories, keyword-only and with vectors, against its budgets; fails past one: `just review-budget --memories 20000 --dimensions 1024`.
+review-budget *args:
+    cargo build --release --locked
+    python3 -I evals/scale/review.py {{ args }}
+
 # The time a store upgrade takes on 100,000 synthetic memories, from a store an earlier release built: `just upgrade-budget --from-binary OLD`.
 upgrade-budget *args:
     cargo build --release --locked
