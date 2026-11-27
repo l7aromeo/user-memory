@@ -752,13 +752,15 @@ const APP_START_LIMIT: Duration = Duration::from_secs(30);
 /// before the relay answers it with an error and drops the connection: the
 /// call's waits, which the server bounds at 90 s in all (`TOOL_CALL_BUDGET`
 /// in src/memory/budget.rs), its own work, and 10 s for the network. The
-/// heaviest work measured on a synthetic store of 10,000 memories with no
-/// other writer, release builds on GitHub's runners, is `review`: 46 s on
-/// macOS (3 cpus), 39 s on Windows x64 and 37 s on Ubuntu. An import into an
+/// heaviest work, measured on synthetic stores with no other writer with
+/// release builds on GitHub's macOS runner (3 cpus), is `review` (#236):
+/// by words only 0.16 s at 10,000 memories and 1.9 s at 50,000; with a
+/// vector of 2,560 dimensions for each, 2.8 s and 77 s. With vectors its
+/// cost grows with the square of the store's size times the vector length,
+/// so it reaches this limit there at about 70,000 memories of 2,560
+/// dimensions, or 100,000 of 1,024. At 10,000 memories an import into an
 /// empty store takes 3.7 s, an export of everything 0.2 s and a search that
-/// saves 32 vectors 0.04 s. Debug builds, an upper bound, take review past
-/// 300 s. Review's cost grows with the square of the store's size, so a
-/// review of a much larger store can still pass this limit. Under the 300 s
+/// saves 32 vectors 0.04 s. Under the 300 s
 /// Codex gives a tool call (`DEFAULT_TOOL_TIMEOUT` in its
 /// codex-rs/codex-mcp/src/rmcp_client.rs; its docs say 60 s), so the agent
 /// gets this answer, not the app's timeout. Claude Code moves a call past two
