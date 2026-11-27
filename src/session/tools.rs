@@ -14,7 +14,7 @@ use super::{
     recall::{self, Offer, State, Step, Use},
 };
 use crate::memory::{
-    delivery_files,
+    delivery_files::{self, Refreshed},
     hold::{self, HOLD_CHARS, HOLD_READ},
     matcher::{Action, Kind, Matched, Terms, Window, terms_of, word_spans},
     push,
@@ -32,8 +32,17 @@ use std::{
 /// #175), from its start: a refresh past it renames nothing. A refresh
 /// costs 5 to 12 ms on macOS at 10,000 memories, process start included;
 /// the rest is room for Windows' slower process start and file scanning,
-/// and a loaded machine.
+/// and a loaded machine. A hold has its own, [`HOLD_LIMIT`].
 pub(crate) const TOOL_HOOK_LIMIT: Duration = Duration::from_millis(100);
+
+/// The most the pre-tool hook spends deciding a hold (#118, #241), from its
+/// start, with the fold of the store's changes that a second look needs.
+/// Claude Code and Codex wait for this hook before they run the command
+/// (setup gives it 5 s), so a hold that comes late costs less than one that
+/// never comes; on Windows x64 CI the hook's 95th percentile was 107 ms
+/// with the fold before the hold. 250 ms is about twice that, and a wait
+/// before a command that is hardly felt.
+pub(crate) const HOLD_LIMIT: Duration = Duration::from_millis(250);
 
 /// The tools Claude Code's pre-tool hook acts on: its shells (`Bash`,
 /// `PowerShell` on Windows, and `Monitor`, which runs a command) and the
@@ -89,6 +98,15 @@ pub(crate) fn acts_on(client: HookClient, tool: &str) -> bool {
 /// once: a deny whose reason shows the passages (#118). Anything else, and
 /// any error, missing state or overrun deadline, prints nothing, and the
 /// call runs.
+///
+/// The hold is decided first, from the delivery files as they are, within
+/// [`HOLD_LIMIT`], so folding the store's changes into them never takes its
+/// time (#241). After a hold the fold keeps the tool hook's own limit. When
+/// nothing is held, the fold gets what is left of `HOLD_LIMIT`, and if it
+/// took in a change the hold is decided again within it: a rule recorded
+/// outside the session's own tool calls, such as through the CLI, then holds
+/// the very next command when the fold fits, and the command after it when
+/// not.
 pub fn pre_tool_use(client: HookClient, _context_limit: Option<usize>) -> String {
     let started = Instant::now();
     let payload = payload();
@@ -98,22 +116,34 @@ pub fn pre_tool_use(client: HookClient, _context_limit: Option<usize>) -> String
     let Some(session) = Session::of(client, &payload, tool_deadline(started)) else {
         return String::new();
     };
-    session.keep_current();
     let Ok(payload) = serde_json::from_slice::<Value>(&payload) else {
+        session.keep_current(session.deadline);
         return String::new();
     };
     if let Some((key, task)) = spawned(client, &payload) {
+        session.keep_current(session.deadline);
         let _ = State::open(&recall::path(&session.snapshot), session.deadline)
             .and_then(|mut state| state.spawn(&key, &terms_of(&task)));
         return String::new();
     }
     let Some(action) = action(&payload).filter(|action| action.kind == Kind::Command) else {
+        session.keep_current(session.deadline);
         return String::new();
     };
-    match session.hold(&payload, terms_of(&action)) {
-        Ok(Some(reason)) => deny(client, &payload, &reason),
-        _ => String::new(),
+    let hold_deadline = started + super::hook_time(HOLD_LIMIT);
+    let terms = terms_of(&action);
+    if let Ok(Some(reason)) = session.hold(&payload, terms.clone(), hold_deadline) {
+        session.keep_current(session.deadline);
+        return deny(client, &payload, &reason);
     }
+    if session
+        .keep_current(hold_deadline)
+        .is_some_and(Refreshed::took_in)
+        && let Ok(Some(reason)) = session.hold(&payload, terms, hold_deadline)
+    {
+        return deny(client, &payload, &reason);
+    }
+    String::new()
 }
 
 /// The pre-tool hook's deny with `reason`, as both clients read it. Codex
@@ -202,7 +232,7 @@ pub fn post_tool_use(client: HookClient, _context_limit: Option<usize>) -> Strin
     let Some(session) = Session::of(client, &payload, tool_deadline(started)) else {
         return String::new();
     };
-    session.keep_current();
+    session.keep_current(session.deadline);
     let pushed = session.push(client, &payload);
     // The tag check (#121) runs once the push is chosen, on a deadline of
     // its own, so its git and its request to a server never take the
@@ -270,17 +300,15 @@ impl Session {
     }
 
     /// Keeps the session's delivery overlay current (#175), never waiting
-    /// for the lock. A server's store does nothing: its files are its
-    /// connector's. Prints nothing.
-    fn keep_current(&self) {
-        if self.remote.is_none() {
-            let _ = crate::memory::delivery_files::refresh(
-                &super::db_path(),
-                &self.projects,
-                self.deadline,
-                false,
-            );
+    /// for the lock, and writing it only by `deadline`; says what the
+    /// refresh did, and none on a server's store, whose files are its
+    /// connector's, or when it failed. Prints nothing.
+    fn keep_current(&self, deadline: Instant) -> Option<Refreshed> {
+        if self.remote.is_some() {
+            return None;
         }
+        crate::memory::delivery_files::refresh(&super::db_path(), &self.projects, deadline, false)
+            .ok()
     }
 
     /// What the hook prints for the result in `payload`: the push of what
@@ -426,11 +454,16 @@ impl Session {
     /// server's store holds nothing: a hold shows a passage and its label,
     /// which only this machine's store gives the hook. Past the deadline it
     /// holds nothing and writes nothing.
-    pub(super) fn hold(&self, payload: &Value, terms: Terms) -> anyhow::Result<Option<String>> {
+    pub(super) fn hold(
+        &self,
+        payload: &Value,
+        terms: Terms,
+        deadline: Instant,
+    ) -> anyhow::Result<Option<String>> {
         if self.remote.is_some() {
             return Ok(None);
         }
-        let mut state = State::open(&recall::path(&self.snapshot), self.deadline)?;
+        let mut state = State::open(&recall::path(&self.snapshot), deadline)?;
         let agent = payload["agent_id"].as_str().unwrap_or(recall::MAIN);
         let mut window = Window::default();
         for step in state.window(agent)? {
@@ -457,7 +490,7 @@ impl Session {
             &db,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
-        let held = hold::lines(&conn, &view, &holding[..read], self.deadline)?;
+        let held = hold::lines(&conn, &view, &holding[..read], deadline)?;
         let mut unread = Vec::with_capacity(holding.len() - read);
         for matched in &holding[read..] {
             unread.push((view.id(matched.memory)?, matched.slot));
@@ -471,7 +504,7 @@ impl Session {
             })
             .collect();
         let room = HOLD_CHARS - hold::frame_chars();
-        let shown = state.hold(agent, &offers, &unread, room, self.deadline)?;
+        let shown = state.hold(agent, &offers, &unread, room, deadline)?;
         if shown.is_empty() {
             return Ok(None);
         }

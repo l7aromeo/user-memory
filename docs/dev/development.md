@@ -736,6 +736,10 @@ session whose project waits for a tag, in a folder the session never saw,
 pushing the memory its command names, then the tag check, and the same
 after a ref change, when the check looks the tag up with git (budget: two
 `TOOL_HOOK_LIMIT`s each, the push's and the check's own after it); the
+pre-tool hook holding back the command a memory recorded just before
+names, its median and 95th percentile, and each round's time (budget:
+`HOLD_LIMIT`; a round that holds nothing fails the run, with or without
+`--check-cost`); the
 prompt hook pushing the memory its words name (budget: `PROMPT_LIMIT`);
 what a forget adds when three scopes' files hold the memory (budget:
 400 ms);

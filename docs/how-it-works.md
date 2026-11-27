@@ -443,8 +443,15 @@ line, as in a push.
   `PreToolUse:Bash hook error: …`, and Codex as
   `Command blocked by PreToolUse hook: …`. The text says the hold is
   deliberate and not your refusal.
+- **Time:** a hold has 250 ms, longer than a tool hook's 100 ms, since
+  the client waits for this hook before the command runs anyway. It is
+  decided from the memories the session's files already hold, and only
+  then are the store's latest changes folded in. A memory recorded since
+  the last hook, such as through the CLI in another terminal, holds the
+  very next command when that fits in the 250 ms; otherwise it holds the
+  command after it.
 - **When in doubt, it runs:** an error, a session with no state, or a
-  hook past its 100 ms lets the command run. A memory server's store
+  hold past its 250 ms lets the command run. A memory server's store
   holds nothing back: a hold shows the passage and whose word it is, and
   only this machine's store gives the hook those.
 
