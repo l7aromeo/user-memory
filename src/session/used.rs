@@ -1,5 +1,6 @@
 //! Which memories a session used (#123), as its hooks see it: the post-tool
-//! hook notes what user-memory's own `read` and `record` returned, a push
+//! hook notes what user-memory's own `read`, `record`, `update` and
+//! `search` returned (#118: `search` only as found, for the working set), a push
 //! notes what it showed (`recall::State::record`), and the next prompt or
 //! session start sends what is not sent yet to the store, local or a
 //! server's, as `memory_use` rows. A `startup` also sends what other
@@ -8,6 +9,7 @@
 use super::{
     live,
     recall::{self, How, State, Unsent},
+    tools::{SEARCH_CLAUDE, SEARCH_CODEX},
 };
 use crate::{
     memory::{self, USES_PER_REQUEST, Use, Uses, Written},
@@ -21,13 +23,15 @@ use std::{
 };
 use uuid::Uuid;
 
-/// The `read` and `record` tools as each client's hook payload names them:
-/// Claude Code joins the server's name as configured, Codex replaces its
-/// `-` with `_` (as for `search`, `tools::SEARCH_CODEX`).
+/// The `read`, `record` and `update` tools as each client's hook payload
+/// names them (`search` is `tools`'): Claude Code joins the server's name as
+/// configured, Codex replaces its `-` with `_`.
 const READ_CLAUDE: &str = "mcp__user-memory__read";
 const READ_CODEX: &str = "mcp__user_memory__read";
 const RECORD_CLAUDE: &str = "mcp__user-memory__record";
 const RECORD_CODEX: &str = "mcp__user_memory__record";
+const UPDATE_CLAUDE: &str = "mcp__user-memory__update";
+const UPDATE_CODEX: &str = "mcp__user_memory__update";
 
 /// The most other sessions' state files a `startup` sends the use of,
 /// newest first: those a session left after its last prompt are recent,
@@ -42,9 +46,9 @@ pub(super) const USE_SWEEP_FILES: usize = 20;
 pub(super) const USE_FLUSH_LIMIT: Duration = Duration::from_millis(250);
 
 /// Notes, for the post-tool hook of the session whose snapshot is at
-/// `snapshot`, the memories a call of user-memory's `read` returned or its
-/// `record` stored or confirmed. Anything else, and a refused record,
-/// notes nothing. Keeps `origin` as the session's when the file has none,
+/// `snapshot`, the memories a call of user-memory's `read` or `search`
+/// returned, its `record` stored or confirmed, or its `update` changed.
+/// Anything else, and a refused record or update, notes nothing. Keeps `origin` as the session's when the file has none,
 /// as one an earlier release started has not: a later startup's sweep
 /// sends only under a kept origin.
 pub(super) fn note(snapshot: &Path, payload: &Value, origin: Option<&str>, deadline: Instant) {
@@ -63,20 +67,24 @@ pub(super) fn note(snapshot: &Path, payload: &Value, origin: Option<&str>, deadl
 
 /// How the call in `payload` used memories, and their full ids.
 fn used_by(payload: &Value) -> Option<(How, Vec<String>)> {
-    let how = match payload["tool_name"].as_str()? {
-        READ_CLAUDE | READ_CODEX => How::Read,
-        RECORD_CLAUDE | RECORD_CODEX => How::Recorded,
+    // The tool decides before its reply is read: another tool's result
+    // can be long, and is never parsed here.
+    let (how, done) = match payload["tool_name"].as_str()? {
+        READ_CLAUDE | READ_CODEX => (How::Read, None),
+        SEARCH_CLAUDE | SEARCH_CODEX => (How::Found, None),
+        RECORD_CLAUDE | RECORD_CODEX => (How::Recorded, Some("stored")),
+        UPDATE_CLAUDE | UPDATE_CODEX => (How::Recorded, Some("updated")),
         _ => return None,
     };
     let reply = reply_of(&payload["tool_response"])?;
-    let ids: Vec<String> = match how {
-        How::Read => reply["memories"]
+    let ids: Vec<String> = match done {
+        None => reply["memories"]
             .as_array()?
             .iter()
             .filter_map(|m| m["id"].as_str())
             .filter_map(full_id)
             .collect(),
-        How::Recorded => (reply["stored"] == true)
+        Some(done) => (reply[done] == true)
             .then(|| reply["id"].as_str().and_then(full_id))
             .flatten()
             .into_iter()

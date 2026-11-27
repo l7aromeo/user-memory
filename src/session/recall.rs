@@ -160,9 +160,9 @@ CREATE TABLE IF NOT EXISTS tag_flags(
 /// What an agent context did with a memory, as `worked` keeps it: one row
 /// per context and memory (its full id), its flags only ever set. `read`:
 /// the `read` tool returned it; `recorded`: `record` stored or confirmed
-/// it; `found`: `search` returned it (#118); `shown`: a push showed a
-/// passage of it, which `pushed` counts by passage; `held`: a hold showed
-/// it (#118). `at` and `epoch` are the context's action count and epoch
+/// it, or `update` changed it; `found`: `search` returned it (#118);
+/// `shown`: a push showed a passage of it, which `pushed` counts by
+/// passage; `held`: a hold showed it (#118). `at` and `epoch` are the context's action count and epoch
 /// at its last use, which #118 reads its working set by and moves to a new
 /// epoch when it restores the memory: that is not a use. `sent` says the
 /// session's use flush has sent the row's flags; any use sets it back to 0
@@ -170,10 +170,11 @@ CREATE TABLE IF NOT EXISTS tag_flags(
 /// The flush decides on the flags and `sent` alone, never on `at` or
 /// `epoch`.
 const WORKED: &str =
-    "INSERT INTO worked(agent, memory, read, recorded, shown, at, epoch, sent, changed)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, (SELECT coalesce(max(changed), 0) + 1 FROM worked))
+    "INSERT INTO worked(agent, memory, read, recorded, found, shown, held, at, epoch, sent, changed)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, (SELECT coalesce(max(changed), 0) + 1 FROM worked))
      ON CONFLICT(agent, memory) DO UPDATE SET read = max(read, excluded.read),
-     recorded = max(recorded, excluded.recorded), shown = max(shown, excluded.shown),
+     recorded = max(recorded, excluded.recorded), found = max(found, excluded.found),
+     shown = max(shown, excluded.shown), held = max(held, excluded.held),
      at = excluded.at, epoch = excluded.epoch, sent = 0, changed = excluded.changed";
 
 /// How a tool call used a memory, as the post-tool hook reads it.
@@ -181,6 +182,7 @@ const WORKED: &str =
 pub(super) enum How {
     Read,
     Recorded,
+    Found,
 }
 
 /// One memory the session used and has not sent, its flags joined over
@@ -481,7 +483,10 @@ impl State {
                 chars += offer.chars;
                 event += offer.chars;
                 shown.push(position);
-                tx.execute(WORKED, params![agent, offer.memory, 0, 0, 1, at, epoch])?;
+                tx.execute(
+                    WORKED,
+                    params![agent, offer.memory, 0, 0, 0, 1, 0, at, epoch],
+                )?;
                 tx.execute(
                     "INSERT INTO pushed(memory, passage, times) VALUES (?1, ?2, 1)
                      ON CONFLICT(memory, passage) DO UPDATE SET times = times + 1",
@@ -542,7 +547,7 @@ impl State {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (_, at, _) = context(&tx, agent)?;
+        let (epoch, at, _) = context(&tx, agent)?;
         let mark = |memory: &str, passage: i64, shown: bool| {
             tx.execute(
                 "INSERT INTO held(agent, memory, passage, at, shown) VALUES (?1, ?2, ?3, ?4, ?5)
@@ -569,6 +574,10 @@ impl State {
         }
         for (memory, passage) in deferred.into_iter().chain(unread.iter().copied()) {
             mark(memory, passage, false)?;
+        }
+        for &position in &held {
+            let memory = offers[position].memory;
+            tx.execute(WORKED, params![agent, memory, 0, 0, 0, 0, 1, at, epoch])?;
         }
         if Instant::now() >= deadline {
             return Ok(Vec::new());
@@ -634,6 +643,8 @@ impl State {
                     memory,
                     how == How::Read,
                     how == How::Recorded,
+                    how == How::Found,
+                    0,
                     0,
                     actions,
                     epoch
