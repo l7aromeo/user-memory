@@ -83,7 +83,11 @@ source out.
   build as a release over loopback, for the installer tests.
 - `tests/support/port.rs` gives each test a port no other test or process
   takes: below the system's ephemeral range (read from `sysctl`, `/proc` or
-  `netsh`), reserved across processes with a lock file.
+  `netsh`), reserved across processes with a lock file. A port a test
+  frees while it still relies on it (a server it kills and expects down,
+  or restarts on the same address), or binds only later, comes from
+  `closed_port()`. A port bound with `127.0.0.1:0` and then let go can be
+  handed to a test running beside it.
 - `tests/support/session.rs` keeps a `user-memory serve` running across
   tool calls, as an agent session does, for tests of what the server does
   between and after calls; `serve.rs` makes one call.

@@ -20,6 +20,8 @@ use tempfile::{TempDir, tempdir};
 
 #[path = "support/fake.rs"]
 mod fake;
+#[path = "support/port.rs"]
+mod port;
 #[path = "support/replace.rs"]
 mod replace;
 #[path = "support/time.rs"]
@@ -74,15 +76,17 @@ impl Host {
     fn start_as(root: TempDir, version: Option<&str>) -> Self {
         Self::start_with(root, version, &[])
     }
-    /// [`Host::start_as`], with `env` added.
+    /// [`Host::start_as`], with `env` added. It listens on a test port, so
+    /// once killed its address goes to no other test until a restart.
     fn start_with(root: TempDir, version: Option<&str>, env: &[(&str, &str)]) -> Self {
         let mut command = Command::new(env!("CARGO_BIN_EXE_user-memory"));
         if let Some(version) = version {
             command.env("USER_MEMORY_TEST_VERSION", version);
         }
         command.envs(env.iter().copied());
+        let listen = format!("127.0.0.1:{}", port::closed_port());
         let mut child = command
-            .args(["host", "--listen", "127.0.0.1:0", "--db"])
+            .args(["host", "--listen", &listen, "--db"])
             .arg(root.path().join("shared.sqlite3"))
             .arg("--token-file")
             .arg(root.path().join("token"))
@@ -2478,15 +2482,14 @@ fn versioned_endpoint(said: &Shared) -> String {
 }
 
 /// An endpoint where nothing listens yet, and what starts the fake server
-/// of [`versioned_endpoint`] there: a server down when a session starts.
+/// of [`versioned_endpoint`] there: a server down when a session starts. A
+/// test port, so no other test takes it in between.
 fn endpoint_down(said: &Shared) -> (String, impl FnOnce()) {
-    let address = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap();
+    let address = format!("127.0.0.1:{}", port::closed_port());
+    let url = format!("http://{address}/mcp");
     let said = said.clone();
     let start = move || serve_fake(std::net::TcpListener::bind(address).unwrap(), &said);
-    (format!("http://{address}/mcp"), start)
+    (url, start)
 }
 
 /// Serves the fake memory server of [`versioned_endpoint`] on `listener`.
@@ -5775,4 +5778,64 @@ fn session_start_replaces_a_server_s_files_no_connector_kept_current() {
         Vec::<std::path::PathBuf>::new()
     );
     assert_eq!(holding(home, "wombat-lint").len(), 1, "downloaded again");
+}
+
+/// Set in the child of the test below: the port it must not be given.
+const KILLED_PORT: &str = "USER_MEMORY_TEST_KILLED_PORT";
+
+// Run as a child of the test below: takes a test port, starting at the
+// killed host's place in the range, and prints it. On its own it does
+// nothing.
+#[test]
+fn child_takes_a_port_where_a_killed_host_was() {
+    if std::env::var_os(KILLED_PORT).is_none() {
+        return;
+    }
+    // On a line of its own: the test harness prints the test's name first.
+    println!("\ntaken {}", port::closed_port());
+}
+
+// A killed host's port goes to no test running beside it, so the next call
+// finds nothing there (CI once got another test's stand-in server's
+// answer): another process's test port starting at that very place skips
+// it, and the system never hands it to a listener on port 0, since it is
+// below the range those come from.
+#[test]
+fn a_killed_hosts_port_goes_to_no_other_test() {
+    let mut host = Host::start(root());
+    host.child.kill().unwrap();
+    host.child.wait().unwrap();
+    let killed: u16 = host.address.rsplit(':').next().unwrap().parse().unwrap();
+    let ephemeral = port::ephemeral_range();
+    assert!(
+        killed < *ephemeral.start(),
+        "port {killed} is in the range {ephemeral:?} the system hands out"
+    );
+    let out = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "child_takes_a_port_where_a_killed_host_was",
+            "--nocapture",
+            "--test-threads",
+            "1",
+        ])
+        .env(KILLED_PORT, killed.to_string())
+        .env(
+            "USER_MEMORY_TEST_PORT_START",
+            (killed - port::FIRST).to_string(),
+        )
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let taken: u16 = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("taken "))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_ne!(
+        taken, killed,
+        "another process was given the killed host's port"
+    );
 }
