@@ -147,8 +147,15 @@ Details:
   conversation, when the memory has none) is a harmless no-op, so retries are
   safe.
 - Observations from different conversations are never duplicates: they are
-  independent evidence. An agent that finds the same observation again may
-  still confirm it, so one memory counts the conversations that saw it.
+  independent evidence. An observation's N, in `(learned in N sessions)`,
+  is the number of conversations whose agent recorded or confirmed it.
+  Agents don't confirm an observation on their own when they see the user
+  do it again, so N doesn't count every conversation where the behaviour
+  happened: in the `an_observation_seen_again_is_confirmed` eval (November
+  2026), Claude Code on Sonnet 5.5 confirmed the observation in 0 of 5
+  runs, and none of 25 runs of it and four related scenarios recorded
+  anything wrong. N orders the index and decides nothing else; a higher N
+  never makes an observation a rule.
 - A narrower project exception next to a general preference ("use Go in this
   repository" next to "prefer Rust") is usually recorded directly; similarity
   cannot tell it from related memories, and review lists such pairs as

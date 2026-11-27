@@ -203,7 +203,8 @@ topic as `topic`, or `query`.
   largest first. Stale and superseded memories are listed, marked, only when
   `status` asks for them.
 - Each line is `<8-character id> <title>`, marked `[project]` for project
-  scope, `(learned in N sessions)` for an observation N conversations saw,
+  scope, `(learned in N sessions)` for an observation N conversations
+  recorded or confirmed,
   `(tentative)` for an inference or `(stale)`, and `×N` when N
   conversations stated it.
   Every memory id a tool or command takes (`read`, `update`, `forget`, and
