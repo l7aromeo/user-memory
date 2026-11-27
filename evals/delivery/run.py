@@ -105,6 +105,9 @@ FORGET_LEFT_POLLS = 3
 # the files, for the cost.
 HOOK_RUNS = 11
 FORGETS = 5
+# The store's global memories the cost phase forgets: each forget is timed
+# with the delivery files and then without them, on another memory.
+FORGET_GLOBALS = 2 * FORGETS
 # The tag the upkeep's tag-waiting session waits for (#121): one no checkout
 # has, so the check looks and ends nothing.
 PENDING_TAG = "v99.0.0"
@@ -856,11 +859,23 @@ def served(binary, folder):
                 process.wait()
 
 
-def cost(found, seed, size, keep):
+def cost_world(seed, size):
+    """The world the cost phase builds its store from, drawn once; refuses
+    one with fewer global memories than the forget rounds take, before any
+    store is built or timed."""
+    drawn = world.generate(seed, size)
+    held = sum(1 for m in drawn["memories"] if m["scope"] == "global")
+    if held < FORGET_GLOBALS:
+        raise SystemExit(f"the cost phase forgets {FORGET_GLOBALS} of the store's global memories, "
+                         f"and a store of {size} at seed {seed} holds {held}: "
+                         f"give --sizes a larger store, such as {max(SIZES)}")
+    return drawn
+
+
+def cost(found, seed, size, keep, drawn):
     """One lookup's time from a new process: start, load the delivery
     index, match one action; and with the passing passages' text cut from
-    the store."""
-    drawn = world.generate(seed, size)
+    the store `drawn`, the world of `seed` at `size`."""
     with tempfile.TemporaryDirectory() as tmp:
         folder = Path(keep or tmp) / f"cost-seed{seed}-size{size}"
         folder.mkdir(parents=True, exist_ok=True)
@@ -960,8 +975,9 @@ def main():
     sizes = [int(s) for s in args.sizes.split(",")]
     tuning = {}
     if args.cost or args.check_cost:
+        seed, size = REPORT_SEEDS[0], max(sizes)
         worst, build_added, kept, tool_limit, hold_limit, prompt_limit, served_ok = cost(
-            found, REPORT_SEEDS[0], max(sizes), args.keep)
+            found, seed, size, args.keep, cost_world(seed, size))
         over = False
         if args.check_cost and worst > LOOKUP_LIMIT_MS:
             print(f"a lookup is over the {LOOKUP_LIMIT_MS} ms limit")
