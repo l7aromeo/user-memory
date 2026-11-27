@@ -31,6 +31,7 @@ use std::{
     collections::BTreeSet,
     io::{IsTerminal, Read},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
 
@@ -894,38 +895,39 @@ fn store_identity() -> Option<String> {
 pub async fn prompt_submit(client: HookClient) -> String {
     let deadline = tokio::time::Instant::now() + hook_time(PROMPT_LIMIT);
     let landing = std::sync::Arc::new(live::Landing::default());
+    let progress = Progress::default();
     let mut missed = None;
     let mut projects = None;
     let mut asked = None;
-    let notice =
-        match tokio::time::timeout_at(deadline, changes(client, landing.clone(), deadline)).await {
-            Ok(Some(found)) => match tokio::time::timeout_at(deadline, found.saved).await {
-                Ok(_) => {
-                    projects = found.projects;
-                    missed = found.missed;
-                    asked = Some(found.payload);
-                    found.notice
-                }
-                // Told only with the snapshot that records it: a save abandoned
-                // in time leaves the change for the next prompt.
-                Err(_) => {
-                    stopped();
-                    #[cfg(debug_assertions)]
-                    live::hold_for_tests(live::HOLD_ABANDON);
-                    if landing.abandon() {
-                        missed = found.missed;
-                        found.notice
-                    } else {
-                        None
-                    }
-                }
-            },
-            Ok(None) => None,
-            Err(_) => {
-                stopped();
-                None
+    let changed = changes(client, landing.clone(), deadline, &progress);
+    let notice = match tokio::time::timeout_at(deadline, changed).await {
+        Ok(Some(found)) => match tokio::time::timeout_at(deadline, found.saved).await {
+            Ok(_) => {
+                projects = found.projects;
+                missed = found.missed;
+                asked = Some(found.payload);
+                found.notice
             }
-        };
+            // Told only with the snapshot that records it: a save abandoned
+            // in time leaves the change for the next prompt.
+            Err(_) => {
+                stopped(&[Stage::Save]);
+                #[cfg(debug_assertions)]
+                live::hold_for_tests(live::HOLD_ABANDON);
+                if landing.abandon() {
+                    missed = found.missed;
+                    found.notice
+                } else {
+                    None
+                }
+            }
+        },
+        Ok(None) => None,
+        Err(_) => {
+            stopped(&progress.running());
+            None
+        }
+    };
     // Told once: the mark goes with the text that answers it.
     if let (Some(_), Some(missed)) = (&notice, &missed) {
         let _ = std::fs::remove_file(missed);
@@ -1066,11 +1068,93 @@ fn recall_prompt(
         .flatten()
 }
 
-/// Says, in a debug build, that the prompt hook stopped at its time limit, so
-/// tests can tell this cut-off from the other ways the hook stays silent.
-fn stopped() {
+/// A stage of the prompt hook's work that can still be running at its limit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stage {
+    /// Reading the hook's payload and the session's files, before the read
+    /// of what it sees and the late index start.
+    Input,
+    /// Reading what the session sees now.
+    Snapshot,
+    /// The index for a session that started without memory.
+    LateIndex,
+    /// Working out the notice from what the session saw and sees.
+    Notice,
+    /// Saving what the session sees now.
+    Save,
+}
+
+#[cfg(any(debug_assertions, test))]
+impl Stage {
+    /// The stage as the stop line names it.
+    fn words(self) -> &'static str {
+        match self {
+            Self::Input => "reading the hook's input",
+            Self::Snapshot => "reading what the session sees",
+            Self::LateIndex => "the late index",
+            Self::Notice => "working out the notice",
+            Self::Save => "saving what the session sees",
+        }
+    }
+}
+
+/// How far [`changes`] got, so a prompt cut off at its limit can say what
+/// was still running.
+#[derive(Default)]
+struct Progress {
+    /// The read of what the session sees and the late index have started.
+    started: AtomicBool,
+    snapshot: AtomicBool,
+    late_index: AtomicBool,
+}
+
+impl Progress {
+    fn done(flag: &AtomicBool) {
+        flag.store(true, Ordering::Relaxed);
+    }
+
+    /// The stages of [`changes`] not yet done: never none, since whatever
+    /// follows the read and the late index is the notice.
+    fn running(&self) -> Vec<Stage> {
+        let done = |flag: &AtomicBool| flag.load(Ordering::Relaxed);
+        if !done(&self.started) {
+            return vec![Stage::Input];
+        }
+        let running: Vec<Stage> = [
+            (Stage::Snapshot, &self.snapshot),
+            (Stage::LateIndex, &self.late_index),
+        ]
+        .into_iter()
+        .filter(|(_, flag)| !done(flag))
+        .map(|(stage, _)| stage)
+        .collect();
+        if running.is_empty() {
+            vec![Stage::Notice]
+        } else {
+            running
+        }
+    }
+}
+
+/// The line a debug build prints when the prompt hook stops at its limit
+/// with `running` still under way.
+#[cfg(any(debug_assertions, test))]
+fn stop_line(running: &[Stage]) -> String {
+    let parts: Vec<&str> = running.iter().map(|stage| stage.words()).collect();
+    format!(
+        "user-memory: the prompt hook stopped at its time limit, waiting on {}",
+        parts.join(" and ")
+    )
+}
+
+/// Says, in a debug build, that the prompt hook stopped at its time limit
+/// and what was still running, so tests can tell this cut-off from the
+/// other ways the hook stays silent, and a slow run says where it stalled.
+fn stopped(running: &[Stage]) {
     #[cfg(debug_assertions)]
-    eprintln!("user-memory: the prompt hook stopped at its time limit");
+    eprintln!("{}", stop_line(running));
+    #[cfg(not(debug_assertions))]
+    let _ = running;
 }
 
 /// What a prompt found: its notice, the save of what the session sees now,
@@ -1095,6 +1179,7 @@ async fn changes(
     client: HookClient,
     landing: std::sync::Arc<live::Landing>,
     deadline: tokio::time::Instant,
+    progress: &Progress,
 ) -> Option<Found> {
     let bytes = payload().await?;
     let origin = origin(client, &bytes);
@@ -1123,7 +1208,20 @@ async fn changes(
             .ok()?
             .ok()
     };
-    let (seen, late_index) = tokio::join!(snapshot(&looking, before.as_ref(), false), late_index);
+    let late_index = async {
+        let index = late_index.await;
+        Progress::done(&progress.late_index);
+        index
+    };
+    let seen = async {
+        #[cfg(debug_assertions)]
+        let _ = tokio::task::spawn_blocking(|| live::hold_for_tests(live::HOLD_READ)).await;
+        let seen = snapshot(&looking, before.as_ref(), false).await;
+        Progress::done(&progress.snapshot);
+        seen
+    };
+    Progress::done(&progress.started);
+    let (seen, late_index) = tokio::join!(seen, late_index);
     let (now, reply) = seen.ok()?;
     // What this conversation changed last, it knows already.
     let own: BTreeSet<String> = reply
@@ -1872,6 +1970,41 @@ fn capped(text: String, limit: usize, unit: FitUnit, note: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_prompt_cut_off_at_its_limit_names_each_stage_still_running() {
+        let progress = Progress::default();
+        assert_eq!(progress.running(), [Stage::Input]);
+        Progress::done(&progress.started);
+        assert_eq!(progress.running(), [Stage::Snapshot, Stage::LateIndex]);
+        assert_eq!(
+            stop_line(&progress.running()),
+            "user-memory: the prompt hook stopped at its time limit, waiting on reading what the session sees and the late index"
+        );
+        Progress::done(&progress.snapshot);
+        assert_eq!(progress.running(), [Stage::LateIndex]);
+        // Both done: the line still names a stage, never ends empty.
+        Progress::done(&progress.late_index);
+        assert_eq!(progress.running(), [Stage::Notice]);
+        let late_first = Progress::default();
+        Progress::done(&late_first.started);
+        Progress::done(&late_first.late_index);
+        assert_eq!(late_first.running(), [Stage::Snapshot]);
+        for (stage, words) in [
+            (Stage::Input, "reading the hook's input"),
+            (Stage::Snapshot, "reading what the session sees"),
+            (Stage::LateIndex, "the late index"),
+            (Stage::Notice, "working out the notice"),
+            (Stage::Save, "saving what the session sees"),
+        ] {
+            assert_eq!(
+                stop_line(&[stage]),
+                format!(
+                    "user-memory: the prompt hook stopped at its time limit, waiting on {words}"
+                )
+            );
+        }
+    }
 
     #[test]
     fn a_notice_that_fills_the_limit_is_cut_and_the_push_kept() {

@@ -118,15 +118,7 @@ impl Home {
     }
     /// The prompt hook's notice with `env` added, such as another store.
     fn notice_with(&self, session: &str, env: &[(&str, &str)]) -> String {
-        let out = self.hook_in("UserPromptSubmit", session, self.path(), env);
-        if out.stdout.is_empty() {
-            return String::new();
-        }
-        let reply: Value = serde_json::from_slice(&out.stdout).unwrap();
-        reply["hookSpecificOutput"]["additionalContext"]
-            .as_str()
-            .unwrap()
-            .to_owned()
+        notice_of(&self.hook_in("UserPromptSubmit", session, self.path(), env))
     }
     /// The prompt hook's notice for a session now working in `cwd`.
     fn notice_in(&self, session: &str, cwd: &Path) -> String {
@@ -350,7 +342,9 @@ fn a_save_cut_off_by_the_limit_leaves_the_change_for_the_next_prompt() {
     );
     assert!(out.stdout.is_empty(), "{out:?}");
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("the prompt hook stopped at its time limit"),
+        String::from_utf8_lossy(&out.stderr).contains(
+            "the prompt hook stopped at its time limit, waiting on saving what the session sees"
+        ),
         "{out:?}"
     );
     assert_eq!(std::fs::read(&snapshot).unwrap(), told);
@@ -936,15 +930,61 @@ fn a_session_started_without_memory_is_told_to_ask_when_the_index_is_late() {
     home.record("Prefer Rust for tools");
     let hold = home.path().join("hold");
     std::fs::write(&hold, "").unwrap();
-    let notice = home.notice_with(
+    let out = home.hook_in(
+        "UserPromptSubmit",
         "s",
+        home.path(),
         &[("USER_MEMORY_HOLD_LATE_INDEX", hold.to_str().unwrap())],
     );
     std::fs::remove_file(&hold).unwrap();
+    // The hook's stderr says, in a debug build, what it was still doing
+    // when it stopped at its limit.
     assert_eq!(
-        notice,
+        notice_of(&out),
         format!("{BACK}: call index before going on."),
-        "{notice:?}"
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
     assert_eq!(home.notice("s"), "", "told once");
+}
+
+/// The notice in the prompt hook's output `out`, or "" for none.
+fn notice_of(out: &Output) -> String {
+    if out.stdout.is_empty() {
+        return String::new();
+    }
+    let reply: Value = serde_json::from_slice(&out.stdout).unwrap();
+    reply["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[test]
+fn a_read_of_what_the_session_sees_cut_off_by_the_limit_is_named() {
+    let home = Home::new();
+    home.record("Prefer Rust for tools");
+    home.hook("SessionStart", "s", &[]);
+    let hold = home.path().join("hold");
+    std::fs::write(&hold, "").unwrap();
+    let out = home.hook(
+        "UserPromptSubmit",
+        "s",
+        &[
+            ("USER_MEMORY_HOLD_READ", hold.to_str().unwrap()),
+            HOOK_LIMITS,
+        ],
+    );
+    std::fs::remove_file(&hold).unwrap();
+    assert!(
+        home.path().join("hold.reached").exists(),
+        "the read was held"
+    );
+    assert!(out.stdout.is_empty(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains(
+            "the prompt hook stopped at its time limit, waiting on reading what the session sees"
+        ),
+        "{out:?}"
+    );
 }
