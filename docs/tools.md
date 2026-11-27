@@ -275,6 +275,12 @@ says where the origin comes from.
   rule the user did not give only with their yes. Its members are never
   passed to `keep`, which marks memories that are alike, and the group
   stays listed for 30 days whatever the user answers;
+- **stopped** — third, after ended: agents' notes in force that no longer
+  hold a command back, because
+  agents ran the held command again, unchanged, in three sessions in a row
+  ([held back](how-it-works.md#held-back-before-it-runs)); each member's
+  `overrides` says in how many. Show them to the user: confirming a note
+  makes it hold again, and changing or forgetting it are the other ways;
 - **duplicate** — the same memory recorded more than once in one scope
   (merge with `supersedes` + `merge`);
 - **redundant** — a project memory that repeats a global one (forget the copy);

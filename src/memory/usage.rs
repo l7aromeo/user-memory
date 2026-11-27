@@ -439,7 +439,16 @@ pub(crate) const HOLD_OVERRIDES: usize = 3;
 /// confirmation between a hold and its session's next flush starts the
 /// count again early. The user's rules and stated memories never stop.
 pub fn stopped_holds(db: &Path) -> Result<Vec<String>> {
-    let conn = connect(db)?;
+    Ok(override_runs(&connect(db)?)?
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect())
+}
+
+/// Each stopped note in force ([`stopped_holds`]) with its run: how many of its
+/// latest sessions with a hold, since it last changed or was confirmed,
+/// overrode it in a row, at least [`HOLD_OVERRIDES`] (#238).
+pub(super) fn override_runs(conn: &rusqlite::Connection) -> Result<Vec<(String, usize)>> {
     let mut candidates = conn.prepare(
         "SELECT id, max(updated_at, coalesce(last_confirmed_at, updated_at)) FROM live_memories
          WHERE source = 'observed'
@@ -448,7 +457,7 @@ pub fn stopped_holds(db: &Path) -> Result<Vec<String>> {
     let mut sessions = conn.prepare(
         "SELECT max(overridden) FROM memory_use
          WHERE memory = ?1 AND held = 1 AND julianday(at) >= julianday(?2)
-         GROUP BY origin ORDER BY max(at) DESC LIMIT ?3",
+         GROUP BY origin ORDER BY max(at) DESC",
     )?;
     let found =
         candidates.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
@@ -456,12 +465,11 @@ pub fn stopped_holds(db: &Path) -> Result<Vec<String>> {
     for row in found {
         let (id, since) = row?;
         let outcomes: Vec<Option<bool>> = sessions
-            .query_map(params![id, since, i64::try_from(HOLD_OVERRIDES)?], |r| {
-                r.get(0)
-            })?
+            .query_map(params![id, since], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
-        if outcomes.len() == HOLD_OVERRIDES && outcomes.iter().all(|o| *o == Some(true)) {
-            stopped.push(id);
+        let run = outcomes.iter().take_while(|o| **o == Some(true)).count();
+        if run >= HOLD_OVERRIDES {
+            stopped.push((id, run));
         }
     }
     Ok(stopped)
