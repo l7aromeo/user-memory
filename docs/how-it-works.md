@@ -486,6 +486,11 @@ Found by a search:
 - **Only after a compaction:** a `/clear` asks for an empty context and a
   new session starts its own, so neither restores anything; a resumed
   session's transcript still holds it.
+- **Claude Code's summary:** before a compaction, manual or automatic,
+  Claude Code's `PreCompact` hook asks the summary to keep these
+  memories' ids and titles. On an automatic compaction that request
+  reaches the new context only through the summary; the text itself comes
+  from the `working-set` hook. Codex's `PreCompact` cannot add text.
 
 Each session's steps, what was pushed and what was held are kept beside
 its snapshot ([storage](storage.md#the-state-folder)).

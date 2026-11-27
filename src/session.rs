@@ -15,7 +15,7 @@ mod tags;
 mod tools;
 mod used;
 
-pub use restore::working_set;
+pub use restore::{pre_compact, working_set};
 pub use subagent::subagent_start;
 #[cfg(test)]
 pub(crate) use tools::CLAUDE_TOOLS;

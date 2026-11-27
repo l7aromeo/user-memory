@@ -617,6 +617,13 @@ impl State {
         Ok(Some((ended, entries)))
     }
 
+    /// The main context's working set as it stands, before a compaction
+    /// ends its epoch: what PreCompact asks the summary to keep.
+    pub(super) fn current_set(&self) -> Result<Vec<Entry>> {
+        let (epoch, _, _) = context(&self.conn, MAIN)?;
+        entries(&self.conn, epoch)
+    }
+
     /// Moves what the working set `printed` to the main context's current
     /// epoch, which is not a use, and counts it as shown from now: whole,
     /// or by the passages it showed. A pointer is not shown.

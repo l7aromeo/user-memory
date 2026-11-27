@@ -182,6 +182,12 @@ enum Command {
         #[command(flatten)]
         limit: ContextLimit,
     },
+    /// Ask a compaction's summary to keep the ids and titles of the memories the context worked with, for Claude Code's hook; always exits successfully.
+    PreCompact {
+        /// Client running the hook, with its JSON payload on stdin.
+        #[arg(long, value_enum)]
+        client: session::HookClient,
+    },
     /// Print the project's rules for a starting subagent, then what its task matches, for its hook; always exits successfully.
     SubagentStart {
         /// Client running the hook, with its JSON payload on stdin.
@@ -923,6 +929,7 @@ async fn run(mut cli: Cli) -> Result<()> {
         Command::WorkingSet { client, limit } => {
             Some(session::working_set(*client, limit.context_limit).await)
         }
+        Command::PreCompact { client } => Some(session::pre_compact(*client).await),
         _ => None,
     };
     if let Some(text) = quiet {
@@ -1448,6 +1455,7 @@ async fn run(mut cli: Cli) -> Result<()> {
         Command::SessionStart { .. }
         | Command::PromptSubmit { .. }
         | Command::WorkingSet { .. }
+        | Command::PreCompact { .. }
         | Command::SubagentStart { .. }
         | Command::PreToolUse { .. }
         | Command::PostToolUse { .. }

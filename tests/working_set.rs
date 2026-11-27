@@ -1,7 +1,8 @@
 //! The working set across a compaction (#118), through the real binary on
 //! a local store: what `working-set` prints on `compact`, in which order
 //! and form, from the store as it is now; that its two compact handlers
-//! open one epoch in either order; and that no other start restores.
+//! open one epoch in either order; that no other start restores; and what
+//! `pre-compact` asks the summary to keep.
 
 #![allow(
     clippy::unwrap_used,
@@ -140,6 +141,14 @@ impl Home {
         }
     }
 
+    /// What PreCompact prints for `session`.
+    fn pre_compact(&self, session: &str) -> String {
+        self.hook(
+            "pre-compact",
+            &json!({"session_id": session, "cwd": self.checkout(), "hook_event_name": "PreCompact", "trigger": "auto"}),
+        )
+    }
+
     /// The post-tool hook after `tool` gave `reply` in `session`.
     fn call(&self, session: &str, tool: &str, reply: &Value) -> String {
         self.hook(
@@ -246,6 +255,16 @@ fn a_compaction_restores_what_the_context_read_recorded_and_was_shown() {
         "",
         "printed whole, so not pushed again"
     );
+    // PreCompact names the same set by id and title, from the new epoch.
+    let keep = home.pre_compact("s1");
+    assert!(
+        keep.contains(&format!("{} Docs site", short(&second))),
+        "{keep}"
+    );
+    assert!(
+        keep.contains(&format!("{} Lint config", short(&found))),
+        "{keep}"
+    );
 }
 
 // Both compact handlers open one epoch however they run: the working set
@@ -335,4 +354,5 @@ fn only_a_compaction_restores() {
     );
     home.start("s2", "startup");
     assert_eq!(home.compact("s2", false), "", "a new session's");
+    assert_eq!(home.pre_compact("s2"), "");
 }

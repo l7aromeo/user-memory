@@ -1,8 +1,10 @@
-//! The working set after a compaction (#118): the `working-set` hook, run
-//! on `compact` beside session start, prints what the context worked with
-//! in the epoch that ended, from the store as it is now, and counts it as
-//! shown in the new epoch: its own handler, since each client caps each
-//! handler's text on its own, it takes no room from session start's.
+//! The working set across a compaction (#118). Claude Code's `pre-compact`
+//! hook asks the summary to keep its ids and titles. The `working-set`
+//! hook, run on `compact` beside session start, prints what the context
+//! worked with in the epoch that ended, from the store as it is now, and
+//! counts it as shown in the new epoch: its own handler, since each client
+//! caps each handler's text on its own, it takes no room from session
+//! start's.
 
 use super::{
     ADDED_ROOM, HookClient, LIMIT, db_path, hook_limit, hook_time, payload,
@@ -54,4 +56,34 @@ pub async fn working_set(client: HookClient, context_limit: Option<usize>) -> St
         Ok(restored.text)
     });
     restored.await.ok().and_then(Result::ok).unwrap_or_default()
+}
+
+/// What `client`'s pre-compact hook prints for the payload on stdin: the
+/// summary's instructions to keep the working set's ids and titles, or
+/// nothing for an empty set or any error. It never stops the compaction.
+pub async fn pre_compact(client: HookClient) -> String {
+    let deadline = Instant::now() + hook_time(LIMIT);
+    let Some(payload) = payload().await else {
+        return String::new();
+    };
+    let Some(snapshot) = session_file(client, &payload) else {
+        return String::new();
+    };
+    let remote = setup::configured_remote().ok().flatten();
+    let kept = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+        let state = State::open(&recall::path(&snapshot), deadline)?;
+        let entries = state.current_set()?;
+        if entries.is_empty() {
+            return Ok(String::new());
+        }
+        let conn = match remote {
+            None => Some(Connection::open_with_flags(
+                db_path(),
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?),
+            Some(_) => None,
+        };
+        working_set::keep(conn.as_ref(), &entries)
+    });
+    kept.await.ok().and_then(Result::ok).unwrap_or_default()
 }

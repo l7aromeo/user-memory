@@ -3288,6 +3288,7 @@ fn the_cli_offers_exactly_these_commands() {
             "session-start",
             "prompt-submit",
             "working-set",
+            "pre-compact",
             "subagent-start",
             "pre-tool-use",
             "post-tool-use",

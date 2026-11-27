@@ -66,6 +66,22 @@ pub(super) const WORKING_SET: Hook = Hook {
     codex: true,
 };
 
+/// Before Claude Code compacts a context, asks its summary to keep the ids
+/// and titles of the memories the context worked with (#118). Its stdout
+/// joins the summary request's instructions, on `/compact` and on an
+/// automatic compaction (measured with Claude Code 2.1.332); the text
+/// itself comes back from [`WORKING_SET`]. Codex's PreCompact cannot add
+/// text, so Codex has none.
+pub(super) const PRE_COMPACT: Hook = Hook {
+    event: "PreCompact",
+    matcher: None,
+    codex_matcher: None,
+    subcommand: "pre-compact",
+    timeout_seconds: 5,
+    status_message: None,
+    codex: false,
+};
+
 /// Tells a running session what changed in memory before each prompt. It
 /// runs on every prompt, so it shows no status; it bounds itself to about a
 /// second.
@@ -145,7 +161,7 @@ pub(super) const POST_TOOL_USE_FAILURE: Hook = Hook {
 };
 
 /// Every hook this tool installs, in the order setup reports them.
-pub(super) const HOOKS: [Hook; 7] = [
+pub(super) const HOOKS: [Hook; 8] = [
     SESSION_START,
     WORKING_SET,
     PROMPT_SUBMIT,
@@ -153,6 +169,7 @@ pub(super) const HOOKS: [Hook; 7] = [
     PRE_TOOL_USE,
     POST_TOOL_USE,
     POST_TOOL_USE_FAILURE,
+    PRE_COMPACT,
 ];
 
 impl Hook {
@@ -692,6 +709,7 @@ mod tests {
                     "post-tool-use --client claude",
                     None
                 ),
+                row("PreCompact", None, "pre-compact --client claude", None),
             ]
         );
         let limited = Target {

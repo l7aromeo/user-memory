@@ -838,6 +838,7 @@ fn hook_set(
     ];
     if client == "claude" {
         set.push(("PostToolUseFailure", None, "post-tool-use"));
+        set.push(("PreCompact", None, "pre-compact"));
     }
     set.into_iter()
         .map(|(event, matcher, subcommand)| {
@@ -914,7 +915,7 @@ fn setup_adds_session_hooks_that_load_the_project_index() {
     let codex = s.path("home/.codex/hooks.json");
     assert!(
         stdout.contains(&format!(
-            "{HOOKS_ADDED}, PostToolUseFailure added ({})",
+            "{HOOKS_ADDED}, PostToolUseFailure added, PreCompact added ({})",
             claude.display()
         )),
         "{stdout}"
@@ -1471,6 +1472,7 @@ fn setup_keeps_unrelated_client_settings_and_refuses_invalid_files() {
         "SubagentStart",
         "PostToolUse",
         "PostToolUseFailure",
+        "PreCompact",
     ] {
         expected["hooks"][event] = updated["hooks"][event].clone();
     }
@@ -1489,7 +1491,8 @@ fn setup_keeps_unrelated_client_settings_and_refuses_invalid_files() {
             "UserPromptSubmit",
             "SubagentStart",
             "PostToolUse",
-            "PostToolUseFailure"
+            "PostToolUseFailure",
+            "PreCompact"
         ]
     );
 }
@@ -1541,7 +1544,7 @@ fn doctor_reports_missing_hooks_and_no_hooks_removes_them() {
     assert_success(&out);
     assert!(
         String::from_utf8_lossy(&out.stdout)
-            .contains("session hooks SessionStart removed, SessionStart (compact) removed, UserPromptSubmit removed, SubagentStart removed, PreToolUse removed, PostToolUse removed, PostToolUseFailure removed")
+            .contains("session hooks SessionStart removed, SessionStart (compact) removed, UserPromptSubmit removed, SubagentStart removed, PreToolUse removed, PostToolUse removed, PostToolUseFailure removed, PreCompact removed")
     );
     assert_eq!(fs::read_to_string(&settings).unwrap(), "{}");
     // The saved choice keeps doctor from expecting a hook.
@@ -1627,7 +1630,7 @@ fn opting_out_of_hooks_survives_reruns_until_opting_back_in() {
     assert_success(&out);
     assert!(
         String::from_utf8_lossy(&out.stdout)
-            .contains("session hooks SessionStart removed, SessionStart (compact) removed, UserPromptSubmit removed, SubagentStart removed, PreToolUse removed, PostToolUse removed, PostToolUseFailure removed")
+            .contains("session hooks SessionStart removed, SessionStart (compact) removed, UserPromptSubmit removed, SubagentStart removed, PreToolUse removed, PostToolUse removed, PostToolUseFailure removed, PreCompact removed")
     );
     let rerun = s.run(&["setup", "--client", "claude"]);
     assert_success(&rerun);
