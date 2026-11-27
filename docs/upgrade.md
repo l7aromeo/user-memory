@@ -81,12 +81,12 @@ Before any change to the store's format, the upgrade copies the store to a
 backup file beside it, then upgrades it in one step. A native store prints:
 
 ```output
-Backed up <store> to <store>.v4-<time>.bak
-Migrated <store> from schema version 4 to 5.
+Backed up <store> to <store>.v6-<time>.bak
+Migrated <store> from schema version 6 to 15.
 ```
 
 The installer's Docker server does the same inside its volume, with the
-backup at `/data/memories.sqlite3.v4-<time>.bak`. Your memories come
+backup at `/data/memories.sqlite3.v6-<time>.bak`. Your memories come
 through unchanged. If the upgrade fails, the store is left as it was. Keep
 the backup's name: [rolling back](#roll-back-an-upgrade) needs it.
 
@@ -190,6 +190,29 @@ since the upgrade are lost unless you exported them first.
 Each release's notes say what changed; [the changelog](../CHANGELOG.md)
 collects them. The versions below needed something more than running the
 installer again.
+
+### Upgrade to 0.10: from 0.9.3
+
+0.9.3 has no `user-memory upgrade`, so run the installer again on each
+machine and on the server. Setup backs the store up beside itself
+(`<store>.v6-<UTC time>.bak`), then migrates it from schema version 6 to
+15 in one run. No memory, conversation or vector changes. A store of
+100,000 memories with vectors (1.3 GB) took 13 to 16 seconds when
+measured. A 0.9 binary refuses a version 15 store, so upgrade every
+machine that opens the store; to go back, follow
+[roll back an upgrade](#roll-back-an-upgrade).
+
+Setup adds session hooks; in Codex, approve them once. Then restart Claude
+Code and Codex once: a session 0.9.3 started keeps that binary until its
+client restarts, and the restart also loads the new hooks. From 0.10.0 on,
+open sessions move to a newer binary on their own
+([open sessions](#open-sessions)).
+
+A memory server behind a reverse proxy needs more of its routes: forward
+`POST /delivery`, `/use`, `/tags`, `/auth/token` and `/` beside `/export`
+and `/import`, as the example in
+[a shared server behind HTTPS](server.md#a-shared-server-behind-https)
+does.
 
 ### Upgrade to 0.9: the keyword index
 
