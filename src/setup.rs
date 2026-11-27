@@ -2378,13 +2378,69 @@ mod tests {
     /// only, so the file can't be renamed while the handle is open.
     #[cfg(windows)]
     fn hold(path: &Path) -> fs::File {
+        hold_within(path, Duration::ZERO).unwrap()
+    }
+
+    /// [`hold`], trying again for up to `wait` while another handle refuses
+    /// to share the file, as the product's renames do
+    /// (`platform::windows::retry_shared`).
+    #[cfg(windows)]
+    fn hold_within(path: &Path, wait: Duration) -> std::io::Result<fs::File> {
         use std::os::windows::fs::OpenOptionsExt;
         use windows::Win32::Storage::FileSystem::FILE_SHARE_READ;
-        fs::OpenOptions::new()
-            .read(true)
-            .share_mode(FILE_SHARE_READ.0)
-            .open(path)
-            .unwrap()
+        let mut held = None;
+        crate::platform::windows::retry_shared(wait, || {
+            held = Some(
+                fs::OpenOptions::new()
+                    .read(true)
+                    .share_mode(FILE_SHARE_READ.0)
+                    .open(path)?,
+            );
+            Ok(())
+        })?;
+        Ok(held.expect("retry_shared returns Ok only after the open succeeded"))
+    }
+
+    /// How long [`hold_set_aside`] tries to open the set-aside file while
+    /// another handle refuses to share it: the rename that set it aside,
+    /// which still has it open with delete access, or a virus scanner
+    /// opening the newly named binary. Inside the 1.5 s the watcher has
+    /// before its hold must start ([`BRIEF_HOLD_PAST`]).
+    #[cfg(windows)]
+    const WATCH_HOLD_WAIT: Duration = Duration::from_secs(1);
+
+    /// How long the test of [`hold_within`] keeps its delete-access handle
+    /// open: a brief moment, as a rename does, well inside
+    /// [`WATCH_HOLD_WAIT`].
+    #[cfg(windows)]
+    const RENAME_HANDLE: Duration = Duration::from_millis(100);
+
+    /// A file another handle has open with delete access, as the rename
+    /// that set it aside has for a moment, is held once that handle
+    /// closes: the sharing violation is waited out, not taken for an
+    /// error.
+    #[cfg(windows)]
+    #[test]
+    fn a_hold_waits_out_a_rename_that_still_has_the_file_open() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows::Win32::Storage::FileSystem::{
+            DELETE, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let aside = dir.path().join(format!("{SET_ASIDE}1-1.exe"));
+        fs::write(&aside, "old").unwrap();
+        let renaming = fs::OpenOptions::new()
+            .access_mode(DELETE.0)
+            .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0)
+            .open(&aside)
+            .unwrap();
+        let closer = std::thread::spawn(move || {
+            std::thread::sleep(RENAME_HANDLE);
+            drop(renaming);
+        });
+        let held = hold_within(&aside, WATCH_HOLD_WAIT);
+        closer.join().unwrap();
+        assert!(held.is_ok(), "{held:?}");
     }
 
     /// Replaces an installed binary while another program holds `held`,
@@ -2465,7 +2521,9 @@ mod tests {
                     .flatten()
                     .find(|entry| entry.file_name().to_string_lossy().starts_with(SET_ASIDE));
                 if let Some(aside) = aside {
-                    let _held = hold(&aside.path());
+                    let Ok(_held) = hold_within(&aside.path(), WATCH_HOLD_WAIT) else {
+                        return false;
+                    };
                     let _ = released.recv_timeout(hold_for);
                     return true;
                 }

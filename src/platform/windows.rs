@@ -255,7 +255,10 @@ pub fn refused(err: &io::Error) -> bool {
 /// Runs `step` until it ends in anything but a sharing violation, or `wait`
 /// has passed, pausing longer between tries as [`RENAME_PAUSE`] and
 /// [`RENAME_PAUSE_MAX`] say.
-fn retry_shared(wait: Duration, mut step: impl FnMut() -> io::Result<()>) -> io::Result<()> {
+pub(crate) fn retry_shared(
+    wait: Duration,
+    mut step: impl FnMut() -> io::Result<()>,
+) -> io::Result<()> {
     let deadline = Instant::now() + wait;
     let mut pause = RENAME_PAUSE;
     loop {
