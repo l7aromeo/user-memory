@@ -1049,7 +1049,12 @@ async fn run(mut cli: Cli) -> Result<()> {
             _ => None,
         };
         if let Some((name, args)) = request {
-            println!("{}", connection.call(name, args).await?);
+            println!(
+                "{}",
+                connection
+                    .call(name, args, remote::server_call_limit())
+                    .await?
+            );
             if remote::WRITE_TOOLS.contains(&name) {
                 let _ = setup::sync_bounded().await;
             }

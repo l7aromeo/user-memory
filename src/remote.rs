@@ -135,7 +135,7 @@ impl Connection {
         Ok(StreamableHttpClientTransport::with_client(client, config))
     }
     pub async fn probe(&self) -> Result<()> {
-        let service = tokio::time::timeout(Duration::from_secs(10), ().serve(self.transport()?))
+        let service = tokio::time::timeout(HANDSHAKE_TIMEOUT, ().serve(self.transport()?))
             .await
             .context("Memory server connection timed out")?
             .map_err(|err| {
@@ -145,7 +145,7 @@ impl Connection {
                     Some("Cannot connect to memory server; check endpoint and access token"),
                 )
             })?;
-        let result = tokio::time::timeout(Duration::from_secs(10), service.list_all_tools()).await;
+        let result = tokio::time::timeout(TOOL_LIST_TIMEOUT, service.list_all_tools()).await;
         let _ = service.cancel().await;
         let tools = result.context("Memory server tool check timed out")??;
         let schemas: Vec<(String, serde_json::Value)> = tools
@@ -164,7 +164,7 @@ impl Connection {
     /// refused token's reason stays in the error's chain for
     /// [`refused::Reason::of`].
     pub async fn handshake(&self) -> Result<serde_json::Value> {
-        let service = tokio::time::timeout(Duration::from_secs(10), ().serve(self.transport()?))
+        let service = tokio::time::timeout(HANDSHAKE_TIMEOUT, ().serve(self.transport()?))
             .await
             .context("Memory server connection timed out")?
             .context("Cannot connect to memory server")?;
@@ -203,10 +203,16 @@ impl Connection {
     }
 
     /// Calls the tool `name` with `arguments` in a session of its own,
-    /// opened for the call and ended after it.
-    pub async fn call(&self, name: &'static str, arguments: serde_json::Value) -> Result<String> {
+    /// opened for the call and ended after it, waiting `wait` for the
+    /// answer ([`Connection::call_in`]).
+    pub async fn call(
+        &self,
+        name: &'static str,
+        arguments: serde_json::Value,
+        wait: Duration,
+    ) -> Result<String> {
         let session = self.open().await?;
-        let result = self.call_in(&session, name, arguments).await;
+        let result = self.call_in(&session, name, arguments, wait).await;
         let _ = session.cancel().await;
         result
     }
@@ -214,7 +220,7 @@ impl Connection {
     /// Opens an MCP session with the server: its handshake, which names the
     /// server's version for [`Connection::call_in`].
     pub(crate) async fn open(&self) -> Result<Session> {
-        tokio::time::timeout(Duration::from_secs(10), ().serve(self.transport()?))
+        tokio::time::timeout(HANDSHAKE_TIMEOUT, ().serve(self.transport()?))
             .await
             .context("Memory server connection timed out")?
             .map_err(|err| refused::told(err, &self.url, Some("Cannot connect to memory server")))
@@ -227,12 +233,15 @@ impl Connection {
     /// made again after the server dropped it keeps that version, which is
     /// stale when the server was upgraded or rolled back meanwhile; only
     /// the marker poll keeps a session, and no server version refuses its
-    /// input, so the stale version decides nothing there.
+    /// input, so the stale version decides nothing there. The answer is
+    /// waited for `wait`, each caller's own bound: a CLI command waits
+    /// longer than a hook ([`server_call_limit`], [`HOOK_CALL_WAIT`]).
     pub(crate) async fn call_in(
         &self,
         session: &Session,
         name: &'static str,
         arguments: serde_json::Value,
+        wait: Duration,
     ) -> Result<String> {
         let handshake = session.peer_info().map(serde_json::to_value).transpose()?;
         if let Some(server) = handshake
@@ -246,13 +255,11 @@ impl Connection {
         }
         let request = rmcp::model::CallToolRequestParams::new(name)
             .with_arguments(arguments.as_object().cloned().unwrap_or_default());
+        let result = tokio::time::timeout(wait, session.call_tool(request))
+            .await
+            .map_err(|_| anyhow::anyhow!("{}", unanswered(&self.url, name, wait)))?;
         let result =
-            tokio::time::timeout(Duration::from_secs(10), session.call_tool(request)).await;
-        let result = serde_json::to_value(
-            result
-                .context("Memory server request timed out")?
-                .map_err(|err| refused::told(err, &self.url, None))?,
-        )?;
+            serde_json::to_value(result.map_err(|err| refused::told(err, &self.url, None))?)?;
         let content = result["content"]
             .as_array()
             .context("Memory server returned no content")?;
@@ -270,6 +277,37 @@ impl Connection {
 
 /// An MCP session with a memory server, as this machine's client.
 pub(crate) type Session = rmcp::service::RunningService<RoleClient, ()>;
+
+/// How long a handshake with a server may take: a new session's
+/// `initialize` exchange, which the server answers from memory, so only a
+/// down, unreachable or stalled server takes this long. A hook's own
+/// deadline ends it sooner where the hook runs under one.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long `probe` waits for a server's tool list after the handshake:
+/// the list is answered from memory, like the handshake.
+const TOOL_LIST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long a hook's call to a server waits for its answer. The hook's own
+/// deadline ends it sooner where the hook runs under one (`LIMIT` and
+/// `PROMPT_LIMIT` in src/session.rs); this bounds it anywhere else. A CLI
+/// command waits [`server_call_limit`] instead.
+pub(crate) const HOOK_CALL_WAIT: Duration = Duration::from_secs(10);
+
+/// What a CLI command says when the server at `url` gave no answer to
+/// `name` within `wait`. A write the server took and finished after the
+/// wait was stored, so a write's message says to search before repeating
+/// it, as the connector's does.
+fn unanswered(url: &str, name: &str, wait: Duration) -> String {
+    let seconds = wait.as_secs();
+    if WRITE_TOOLS.contains(&name) {
+        format!(
+            "The memory server at {url} did not answer {name} within {seconds} s; it may have completed it. Search for it before repeating it."
+        )
+    } else {
+        format!("The memory server at {url} did not answer {name} within {seconds} s.")
+    }
+}
 
 /// Why the server's `name` call failed, from the text it sent with
 /// `isError`: the `error` of a JSON reply, else the text itself without
@@ -581,7 +619,7 @@ pub async fn connect_over(
         &endpoint,
         &token_file,
         behind_front,
-        forwarded_call_limit(),
+        server_call_limit(),
     )
     .await;
     // The poller ends its kept session on its own time, so a hand-over or
@@ -724,9 +762,9 @@ fn answered(message: &impl serde::Serialize) -> Option<serde_json::Value> {
 }
 
 /// How long the relay waits to reconnect before answering the call that
-/// asked for it with an error: the 10 seconds `probe` and `call` give a
-/// handshake, so a reconnect waits no longer than a hook would.
-const RECONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// asked for it with an error: [`HANDSHAKE_TIMEOUT`], so a reconnect waits
+/// no longer than a hook's own handshake would.
+const RECONNECT_TIMEOUT: Duration = HANDSHAKE_TIMEOUT;
 
 /// How long the bridge waits for its server to answer a session's first
 /// request before it answers the handshake and the tool list itself
@@ -748,8 +786,9 @@ const FIRST_ANSWER: Duration = Duration::from_secs(3);
 /// reconnect has [`RECONNECT_TIMEOUT`].
 const APP_START_LIMIT: Duration = Duration::from_secs(30);
 
-/// How long a call the relay forwarded may wait for the server's answer
-/// before the relay answers it with an error and drops the connection: the
+/// How long this machine waits for a server's answer to a tool call: a call
+/// the relay forwarded, which it then answers with an error and drops the
+/// connection, and a CLI command, which then fails ([`unanswered`]). The
 /// call's waits, which the server bounds at 90 s in all (`TOOL_CALL_BUDGET`
 /// in src/memory/budget.rs), its own work, and 10 s for the network. The
 /// heaviest work measured on a synthetic store of 10,000 memories with no
@@ -765,20 +804,20 @@ const APP_START_LIMIT: Duration = Duration::from_secs(30);
 /// minutes to a background task, where the reply still arrives, and its own
 /// limits are far longer (code.claude.com/docs/en/mcp, "Time limits on MCP
 /// tool calls").
-const FORWARDED_CALL_LIMIT: Duration = Duration::from_secs(150);
+const SERVER_CALL_LIMIT: Duration = Duration::from_secs(150);
 
-/// [`FORWARDED_CALL_LIMIT`], which debug builds take in milliseconds from
-/// `USER_MEMORY_FORWARDED_CALL_LIMIT_MS` so tests can see a stalled server's
+/// [`SERVER_CALL_LIMIT`], which debug builds take in milliseconds from
+/// `USER_MEMORY_SERVER_CALL_LIMIT_MS` so tests can see a stalled server's
 /// call answered without waiting minutes.
-fn forwarded_call_limit() -> Duration {
+pub(crate) fn server_call_limit() -> Duration {
     #[cfg(debug_assertions)]
-    if let Some(ms) = std::env::var("USER_MEMORY_FORWARDED_CALL_LIMIT_MS")
+    if let Some(ms) = std::env::var("USER_MEMORY_SERVER_CALL_LIMIT_MS")
         .ok()
         .and_then(|ms| ms.parse().ok())
     {
         return Duration::from_millis(ms);
     }
-    FORWARDED_CALL_LIMIT
+    SERVER_CALL_LIMIT
 }
 
 /// How long the bridge waits for the stand-in's answers to the requests it
@@ -925,7 +964,7 @@ async fn replay_handshake<R: Transport<RoleClient>>(
 /// while tokio's stdin reader is blocked in a read that can't be cancelled,
 /// so it would stay up, silent, until the client's next message. A call
 /// forwarded to the server waits at most `call_limit` for its answer
-/// ([`FORWARDED_CALL_LIMIT`]).
+/// ([`SERVER_CALL_LIMIT`]).
 async fn forward<R: Transport<RoleClient>>(
     mut local: impl Transport<RoleServer>,
     mut remote: R,
@@ -942,7 +981,7 @@ async fn forward<R: Transport<RoleClient>>(
     // The app's requests the server has not answered, with their methods.
     let mut pending: Vec<(serde_json::Value, String)> = Vec::new();
     // When each request forwarded to the server is answered with an error
-    // instead ([`FORWARDED_CALL_LIMIT`]), oldest first; only those still
+    // instead ([`SERVER_CALL_LIMIT`]), oldest first; only those still
     // pending count.
     let mut due: Vec<(serde_json::Value, tokio::time::Instant)> = Vec::new();
     let mut initialize: Option<RxJsonRpcMessage<RoleServer>> = None;
@@ -1503,6 +1542,28 @@ fn refusal(value: &serde_json::Value, server: Option<&str>, endpoint: &str) -> O
 mod tests {
     use super::*;
 
+    /// A write's message says it may have completed and to search first; a
+    /// read's says only that no answer came.
+    #[test]
+    fn an_unanswered_call_says_whether_it_may_have_completed() {
+        let url = "http://127.0.0.1:8765/mcp";
+        let wait = Duration::from_secs(150);
+        for write in WRITE_TOOLS {
+            assert_eq!(
+                unanswered(url, write, wait),
+                format!(
+                    "The memory server at {url} did not answer {write} within 150 s; it may have completed it. Search for it before repeating it."
+                )
+            );
+        }
+        for read in ["search", "read", "index", "review", "export"] {
+            assert_eq!(
+                unanswered(url, read, wait),
+                format!("The memory server at {url} did not answer {read} within 150 s.")
+            );
+        }
+    }
+
     /// The bridge asks for the whole tool list with the app's `_meta`,
     /// whatever page the app last asked for, and reports no progress.
     #[test]
@@ -1803,7 +1864,7 @@ mod tests {
             "test",
             Path::new("token"),
             false,
-            FORWARDED_CALL_LIMIT,
+            SERVER_CALL_LIMIT,
         ));
         runtime.block_on(async {
             while written.lock().unwrap().len() < 2 || sent.lock().unwrap().len() < 3 {
@@ -1834,7 +1895,7 @@ mod tests {
                 let local = Local { incoming, written: written.clone() };
                 let remote = Remote { replies, sent: sent.clone() };
                 let mut next = Some(Remote { replies: next_replies, sent: resumed.clone() });
-                let task = tokio::spawn(forward(local, remote, move || next.take().context("no transport"), "test", Path::new("token"), false, FORWARDED_CALL_LIMIT));
+                let task = tokio::spawn(forward(local, remote, move || next.take().context("no transport"), "test", Path::new("token"), false, SERVER_CALL_LIMIT));
                 let wait_for = |log: Log, n| async move {
                     tokio::time::timeout(Duration::from_secs(5), async {
                         while log.lock().unwrap().len() < n {
