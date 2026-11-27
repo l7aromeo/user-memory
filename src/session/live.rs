@@ -317,6 +317,11 @@ pub(super) fn mark_missed(path: &Path) -> io::Result<()> {
 #[cfg(debug_assertions)]
 pub(crate) const HOLD_LATE_INDEX: &str = "USER_MEMORY_HOLD_LATE_INDEX";
 
+/// Names, in debug builds only, the file that holds a prompt's read of what
+/// the session sees, before it starts ([`hold_for_tests`]).
+#[cfg(debug_assertions)]
+pub(crate) const HOLD_READ: &str = "USER_MEMORY_HOLD_READ";
+
 /// Names, in debug builds only, the file that holds a save before it
 /// replaces the snapshot ([`hold_for_tests`]).
 #[cfg(debug_assertions)]
