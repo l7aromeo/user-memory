@@ -519,7 +519,7 @@
   },
   {
    "name": "an_observation_seen_again_is_confirmed",
-   "summary": "#172, measured on main: an agent's observation from one conversation (the user ends commit subjects with a ticket number) and a session where the user does it again. Outcomes per run: the agent confirms the observation (wanted), stores a second one beside it, or records nothing; only the first passes, and the two informational checks tell the others apart.",
+   "summary": "#172 and #182, expected to fail with today's instructions: an agent's observation from one conversation (the user ends commit subjects with a ticket number) and a session where the user does it again. Outcomes per run: the agent confirms the observation (wanted), stores a second one beside it, or records nothing; only the first passes, and the two informational checks tell the others apart. Agents don't confirm on their own (Claude Code on Sonnet 5.5: 0 of 5, November 2026); this measures a later wording.",
    "diagnostic": true,
    "shell": true,
    "codex_escalations": true,
@@ -542,6 +542,58 @@
     {"name": "stores a second observation beside the seed", "steps": [{"tool_calls": [["record", {"type": "behavior", "category": "workflow", "content": "Ends commit subjects with a ticket number in parentheses, such as 'Raise MAX_DEPTH to 128 (CMP-142)'.", "scope": "global", "source": "observed", "evidence": "Asked for the commit 'Raise MAX_DEPTH to 128 (CMP-142)'."}]], "commands": ["git commit -am \"Raise MAX_DEPTH to 128 (CMP-142)\""]}], "commits": [{"cwd": "project:compiler", "message": "Raise MAX_DEPTH to 128 (CMP-142)"}], "memories": [{"title": "Ends commit subjects with a ticket number in parentheses", "content": "Ends commit subjects with a ticket number in parentheses, such as 'Raise MAX_DEPTH to 128 (CMP-142)'.", "type": "behavior", "source": "observed", "status": "tentative", "scope": "global"}]},
     {"name": "records nothing", "steps": [{"commands": ["git commit -am \"Raise MAX_DEPTH to 128 (CMP-142)\""]}], "commits": [{"cwd": "project:compiler", "message": "Raise MAX_DEPTH to 128 (CMP-142)"}]},
     {"name": "confirms but doesn't commit", "steps": [{"tool_calls": [["record", {"type": "behavior", "category": "workflow", "content": "Ended a commit subject with its ticket number in parentheses, such as 'Fix the lexer (CMP-131)'.", "scope": "global", "source": "observed", "evidence": "Asked for the commit 'Raise MAX_DEPTH to 128 (CMP-142)'.", "confirms": "{seed:ticket}"}]]}]}
+   ]
+  },
+  {
+   "name": "an_observation_not_seen_again_records_nothing",
+   "summary": "#182's control: an_observation_seen_again_is_confirmed's observation, and a session asked to commit without a subject named, so the user does nothing the observation describes. The agent records nothing; the informational checks tell a confirmation from a second observation, and show whether the subject took a ticket number, as #133's scenario checks.",
+   "diagnostic": true,
+   "shell": true,
+   "codex_escalations": true,
+   "cwd": "project:compiler",
+   "files": {"compiler/grammar.py": "MAX_DEPTH = 64\n\n\ndef depth_ok(depth):\n    return depth <= MAX_DEPTH\n"},
+   "seed": [
+    {"id": "ticket", "args": ["--type", "behavior", "--category", "workflow", "--title", "Ends commit subjects with a ticket number", "--content", "Ended a commit subject with its ticket number in parentheses, such as 'Fix the lexer (CMP-131)'.", "--scope", "global", "--source", "observed", "--origin", "chat/a", "--evidence", "Asked for the commit 'Fix the lexer (CMP-131)' on 2027-02-11."]}
+   ],
+   "sessions": [
+    {"prompt": "In grammar.py, raise MAX_DEPTH from 64 to 128, then commit the change."}
+   ],
+   "checks": [
+    {"not_called": {"tools": ["record"]}},
+    {"informational": true, "not_called": {"tools": ["record"], "args": {"confirms": "^{seed:ticket}"}}},
+    {"informational": true, "commits_not": {"cwd": "project:compiler", "matches": "CMP-"}}
+   ],
+   "obeyed": {"steps": [{"commands": ["git commit -am \"Raise MAX_DEPTH to 128\""]}], "commits": [{"cwd": "project:compiler", "message": "Raise MAX_DEPTH to 128"}]},
+   "planted": [
+    {"name": "confirms the observation", "steps": [{"tool_calls": [["record", {"type": "behavior", "category": "workflow", "content": "Ended a commit subject with its ticket number in parentheses, such as 'Fix the lexer (CMP-131)'.", "scope": "global", "source": "observed", "evidence": "Committed 'Raise MAX_DEPTH to 128'.", "confirms": "{seed:ticket}"}]], "commands": ["git commit -am \"Raise MAX_DEPTH to 128\""]}], "commits": [{"cwd": "project:compiler", "message": "Raise MAX_DEPTH to 128"}]},
+    {"name": "stores a second observation", "steps": [{"tool_calls": [["record", {"type": "behavior", "category": "workflow", "content": "Asked for a commit and left its subject to the agent.", "scope": "global", "source": "observed", "evidence": "Asked to commit the MAX_DEPTH change without naming a subject."}]], "commands": ["git commit -am \"Raise MAX_DEPTH to 128\""]}], "commits": [{"cwd": "project:compiler", "message": "Raise MAX_DEPTH to 128"}]},
+    {"name": "follows it as a rule", "steps": [{"commands": ["git commit -am \"Raise MAX_DEPTH to 128 (CMP-142)\""]}], "commits": [{"cwd": "project:compiler", "message": "Raise MAX_DEPTH to 128 (CMP-142)"}]}
+   ]
+  },
+  {
+   "name": "an_observation_the_user_goes_against_is_not_confirmed",
+   "summary": "#182: an_observation_seen_again_is_confirmed's observation, and a session where the user asks for a subject without a ticket number this time. The agent doesn't confirm the observation; the informational checks show whether it stored another observation, and whether the subject still took a ticket number.",
+   "diagnostic": true,
+   "shell": true,
+   "codex_escalations": true,
+   "cwd": "project:compiler",
+   "files": {"compiler/grammar.py": "MAX_DEPTH = 64\n\n\ndef depth_ok(depth):\n    return depth <= MAX_DEPTH\n"},
+   "seed": [
+    {"id": "ticket", "args": ["--type", "behavior", "--category", "workflow", "--title", "Ends commit subjects with a ticket number", "--content", "Ended a commit subject with its ticket number in parentheses, such as 'Fix the lexer (CMP-131)'.", "--scope", "global", "--source", "observed", "--origin", "chat/a", "--evidence", "Asked for the commit 'Fix the lexer (CMP-131)' on 2027-02-11."]}
+   ],
+   "sessions": [
+    {"prompt": "In grammar.py, raise MAX_DEPTH from 64 to 128, then commit it as 'Raise MAX_DEPTH to 128', with no ticket number this time."}
+   ],
+   "checks": [
+    {"not_called": {"tools": ["record"], "args": {"confirms": "^{seed:ticket}"}}},
+    {"informational": true, "memory": {"where": {"source": "^observed$", "content": "(?i)ticket|CMP-"}, "count": "1"}},
+    {"informational": true, "commits_not": {"cwd": "project:compiler", "matches": "CMP-"}}
+   ],
+   "obeyed": {"steps": [{"commands": ["git commit -am \"Raise MAX_DEPTH to 128\""]}], "commits": [{"cwd": "project:compiler", "message": "Raise MAX_DEPTH to 128"}]},
+   "planted": [
+    {"name": "confirms the observation", "steps": [{"tool_calls": [["record", {"type": "behavior", "category": "workflow", "content": "Ended a commit subject with its ticket number in parentheses, such as 'Fix the lexer (CMP-131)'.", "scope": "global", "source": "observed", "evidence": "Asked for the commit 'Raise MAX_DEPTH to 128'.", "confirms": "{seed:ticket}"}]], "commands": ["git commit -am \"Raise MAX_DEPTH to 128\""]}], "commits": [{"cwd": "project:compiler", "message": "Raise MAX_DEPTH to 128"}]},
+    {"name": "stores an observation of the opposite", "steps": [{"tool_calls": [["record", {"type": "behavior", "category": "workflow", "content": "Asked for a commit subject without its ticket number.", "scope": "global", "source": "observed", "evidence": "Asked for the commit 'Raise MAX_DEPTH to 128' with no ticket number."}]], "commands": ["git commit -am \"Raise MAX_DEPTH to 128\""]}], "commits": [{"cwd": "project:compiler", "message": "Raise MAX_DEPTH to 128"}], "memories": [{"type": "behavior", "category": "workflow", "content": "Asked for a commit subject without its ticket number.", "scope": "global", "source": "observed", "status": "tentative"}]},
+    {"name": "adds the ticket number anyway", "steps": [{"commands": ["git commit -am \"Raise MAX_DEPTH to 128 (CMP-142)\""]}], "commits": [{"cwd": "project:compiler", "message": "Raise MAX_DEPTH to 128 (CMP-142)"}]}
    ]
   },
   {
