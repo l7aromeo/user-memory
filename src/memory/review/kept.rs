@@ -92,9 +92,9 @@ pub(super) struct Kept {
     last: i64,
 }
 
-/// Reads what the store keeps for `identity` (model, requested dimensions).
-pub(super) fn read(conn: &Connection, (model, dimensions): &(String, i64)) -> Result<Kept> {
-    let floors = conn
+/// The floors stamped for `identity`, by vector length.
+fn floors(conn: &Connection, (model, dimensions): &(String, i64)) -> Result<HashMap<usize, f32>> {
+    Ok(conn
         .prepare("SELECT length,floor FROM memory_pairs_state WHERE model=?1 AND dimensions=?2")?
         .query_map(params![model, dimensions], |r| {
             Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?))
@@ -105,7 +105,13 @@ pub(super) fn read(conn: &Connection, (model, dimensions): &(String, i64)) -> Re
             let floor = floor as f32;
             Some((usize::try_from(length).ok()?, floor))
         })
-        .collect();
+        .collect())
+}
+
+/// Reads what the store keeps for `identity` (model, requested dimensions).
+pub(super) fn read(conn: &Connection, identity: &(String, i64)) -> Result<Kept> {
+    let (model, dimensions) = identity;
+    let floors = floors(conn, identity)?;
     let pairs = conn
         .prepare("SELECT a,b FROM memory_pairs WHERE model=?1 AND dimensions=?2")?
         .query_map(params![model, dimensions], |r| {
@@ -244,15 +250,22 @@ pub(super) fn refresh(
 /// since is made due again: the review that kept its pairs may have had
 /// other cutoffs, and the next one compares it at the floor stamped. Which
 /// ids those are is read inside the same write, an immediate transaction,
-/// so no other review keeps between that read and these writes. Fails, keeping
-/// nothing, when the write turn cannot be had; the review's answer does not
-/// depend on it.
+/// so no other review keeps between that read and these writes.
+///
+/// Keeps nothing when a floor was stamped, changed or dropped since the
+/// read: what this review compared, and which vectors it may mark
+/// compared, assumed the floors it read, and the next review compares
+/// again. This holds for the whole keep, not one length: the vectors of
+/// one model and requested dimensions share a length, short of a model
+/// that changed its output size. Fails, keeping nothing, when the write
+/// turn cannot be had; the review's answer does not depend on it.
 pub(super) fn keep(
     conn: &Connection,
-    (model, dimensions): &(String, i64),
+    identity: &(String, i64),
     kept: &Kept,
     refreshed: &Refreshed,
 ) -> Result<()> {
+    let (model, dimensions) = identity;
     if refreshed.found.is_empty()
         && refreshed.replaced.is_empty()
         && refreshed.dropped.is_empty()
@@ -261,6 +274,9 @@ pub(super) fn keep(
         return Ok(());
     }
     let tx = write(conn)?;
+    if floors(&tx, identity)? != kept.floors {
+        return Ok(());
+    }
     let changed: HashSet<Uuid> = tx
         .prepare("SELECT id FROM memory_pairs_saved WHERE seq>?1")?
         .query_map([kept.last], |r| r.get::<_, String>(0))?
@@ -542,16 +558,20 @@ mod race {
         ids
     }
 
-    // R1 compares every pair (nothing kept yet) while X is unlike the
-    // rest; X is then saved like the rest, and R2 compares and keeps X's
-    // pairs. R1 keeps last: it forgets R2's pairs of X, keeps none, and X
-    // is no longer due, so no later review finds X's three pairs.
+    // R0 keeps. R1 reads at lower cutoffs, so it compares every pair, while
+    // X is unlike the rest; X is then saved like the rest, and R2, at R0's
+    // cutoffs, compares X and keeps its pairs. R1 keeps last: it forgets
+    // R2's pairs of X, keeps none, and X is no longer due, so no later
+    // review finds X's three pairs.
     #[test]
     fn a_late_full_review_drops_the_pairs_of_a_vector_saved_after_its_read() {
+        let low = cutoffs(0.9, 0.6);
         let (_dir, conn, ids) = store(4, &[1.0, 0.0, 0.0]);
         let x = ids[0];
+        let (k0, r0) = compare(&conn);
+        keep(&conn, &identity(), &k0, &r0).unwrap();
         save(&conn, x, &[0.0, 1.0, 0.0]);
-        let (kept1, refreshed1) = compare(&conn);
+        let (kept1, refreshed1) = compare_at(&conn, &low);
         save(&conn, x, &[1.0, 0.0, 0.0]);
         let (kept2, refreshed2) = compare(&conn);
         keep(&conn, &identity(), &kept2, &refreshed2).unwrap();
@@ -561,26 +581,34 @@ mod race {
             (3, 1),
             "R2's pairs of X stay, and X is due at R1's floor"
         );
-        let (_, refreshed3) = compare(&conn);
+        let (_, refreshed3) = compare_at(&conn, &low);
         assert_eq!(near_of(&refreshed3, x), 3, "X is like the other three");
     }
 
-    // R1 compares every pair at low cutoffs; a new vector N, a cosine of
-    // 0.7 from the rest, is then saved, and R2 compares at high cutoffs and
-    // keeps no pair of N. R1 keeps last and stamps its lower floor, so N
+    // R0 keeps at high cutoffs. R1 reads at low ones, so it compares every
+    // pair; a new vector N, a cosine of 0.7 from the rest, is then saved,
+    // and R3 compares N at R0's floor and keeps first: no pair of N, which
+    // is marked compared. R1 keeps last and stamps its lower floor, so N
     // must be due again, or no later review finds N's three pairs.
     #[test]
     fn a_late_full_review_at_a_lower_floor_makes_a_vector_saved_since_due() {
         let low = cutoffs(0.9, 0.6);
+        let high = cutoffs(0.99, 0.95);
         let (_dir, conn, _) = store(3, &[1.0, 0.0, 0.0]);
+        let (k0, r0) = compare_at(&conn, &high);
+        keep(&conn, &identity(), &k0, &r0).unwrap();
         let (kept1, refreshed1) = compare_at(&conn, &low);
         let n = store_into(&conn, 1, &[0.7, 0.714_142_8, 0.0])[0];
-        let (kept2, refreshed2) = compare_at(&conn, &cutoffs(0.99, 0.95));
-        keep(&conn, &identity(), &kept2, &refreshed2).unwrap();
-        assert_eq!(count(&conn, PAIRS_OF, n), 0, "R2 keeps no pair of N");
+        let (kept3, refreshed3) = compare_at(&conn, &high);
+        keep(&conn, &identity(), &kept3, &refreshed3).unwrap();
+        assert_eq!(
+            (count(&conn, PAIRS_OF, n), count(&conn, DUE, n)),
+            (0, 0),
+            "R3 keeps no pair of N and marks it compared"
+        );
         keep(&conn, &identity(), &kept1, &refreshed1).unwrap();
-        let (_, refreshed3) = compare_at(&conn, &low);
-        assert_eq!(near_of(&refreshed3, n), 3, "N is near the other three");
+        let (_, refreshed4) = compare_at(&conn, &low);
+        assert_eq!(near_of(&refreshed4, n), 3, "N is near the other three");
     }
 
     // X is due and like the rest when R1 reads; it is then saved unlike
@@ -603,5 +631,88 @@ mod race {
             (0, 0),
             "X is unlike the rest"
         );
+    }
+
+    // R0 keeps at high cutoffs. R1 reads at low ones, so it compares every
+    // pair. N, a cosine of 0.7 from the rest, is saved. R3 reads at the
+    // high cutoffs, takes R0's floor and compares N there: no pair. R1
+    // keeps, stamping its lower floor and making N due again; R3 keeps
+    // last and marks N compared under N's save number, so the state says
+    // complete at R1's floor while N was compared only at R0's.
+    #[test]
+    fn a_high_floor_review_keeping_last_leaves_a_vector_compared_above_the_stamped_floor() {
+        let low = cutoffs(0.9, 0.6);
+        let high = cutoffs(0.99, 0.95);
+        let (_dir, conn, _) = store(3, &[1.0, 0.0, 0.0]);
+        let (k0, r0) = compare_at(&conn, &high);
+        keep(&conn, &identity(), &k0, &r0).unwrap();
+        let (kept1, refreshed1) = compare_at(&conn, &low);
+        let n = store_into(&conn, 1, &[0.7, 0.714_142_8, 0.0])[0];
+        let (kept3, refreshed3) = compare_at(&conn, &high);
+        keep(&conn, &identity(), &kept1, &refreshed1).unwrap();
+        keep(&conn, &identity(), &kept3, &refreshed3).unwrap();
+        let (_, refreshed4) = compare_at(&conn, &low);
+        assert_eq!(near_of(&refreshed4, n), 3, "N is near the other three");
+    }
+
+    // R0 keeps. N is saved, and R1 compares it on the fast path, finding
+    // its three pairs. R2 has no cutoffs for the length and drops its
+    // state. R1 keeps last against a state that is gone: it keeps nothing.
+    // Keeping would give no wrong answer, as a length
+    // without state is compared in full, but it would write against floors
+    // that no longer hold.
+    #[test]
+    fn a_review_keeping_after_its_length_was_dropped_keeps_nothing() {
+        let (_dir, conn, _) = store(3, &[1.0, 0.0, 0.0]);
+        let (k0, r0) = compare(&conn);
+        keep(&conn, &identity(), &k0, &r0).unwrap();
+        let n = store_into(&conn, 1, &[1.0, 0.0, 0.0])[0];
+        let (kept1, refreshed1) = compare(&conn);
+        assert_eq!(near_of(&refreshed1, n), 3, "R1 finds N's pairs");
+        let (kept2, refreshed2) = compare_at(&conn, &HashMap::new());
+        keep(&conn, &identity(), &kept2, &refreshed2).unwrap();
+        keep(&conn, &identity(), &kept1, &refreshed1).unwrap();
+        assert_eq!(count(&conn, PAIRS_OF, n), 0, "R1 keeps no pair of N");
+    }
+
+    // #253's first order: R1 and R2 both read with nothing kept, X saved
+    // between them. R2 compares every pair, keeps X's pairs and stamps its
+    // floor first, so R1, whose read had no floor, keeps nothing.
+    #[test]
+    fn a_late_full_review_after_another_stamped_keeps_nothing() {
+        let (_dir, conn, ids) = store(4, &[1.0, 0.0, 0.0]);
+        let x = ids[0];
+        save(&conn, x, &[0.0, 1.0, 0.0]);
+        let (kept1, refreshed1) = compare(&conn);
+        save(&conn, x, &[1.0, 0.0, 0.0]);
+        let (kept2, refreshed2) = compare(&conn);
+        keep(&conn, &identity(), &kept2, &refreshed2).unwrap();
+        keep(&conn, &identity(), &kept1, &refreshed1).unwrap();
+        assert_eq!(
+            (count(&conn, PAIRS_OF, x), count(&conn, DUE, x)),
+            (3, 0),
+            "R2's keep stands and R1 keeps nothing"
+        );
+        let (_, refreshed3) = compare(&conn);
+        assert_eq!(near_of(&refreshed3, x), 3, "X is like the other three");
+    }
+
+    // The lower-floor order with nothing kept: R1 reads at low cutoffs, N
+    // is saved, and R2 compares every pair at high cutoffs and stamps its
+    // floor first. R1 keeps nothing, so the state stays R2's and the next
+    // low-cutoff review compares every pair.
+    #[test]
+    fn a_late_full_review_after_a_higher_floor_was_stamped_keeps_nothing() {
+        let low = cutoffs(0.9, 0.6);
+        let (_dir, conn, _) = store(3, &[1.0, 0.0, 0.0]);
+        let (kept1, refreshed1) = compare_at(&conn, &low);
+        let n = store_into(&conn, 1, &[0.7, 0.714_142_8, 0.0])[0];
+        let (kept2, refreshed2) = compare_at(&conn, &cutoffs(0.99, 0.95));
+        keep(&conn, &identity(), &kept2, &refreshed2).unwrap();
+        let stamped = read(&conn, &identity()).unwrap().floors;
+        keep(&conn, &identity(), &kept1, &refreshed1).unwrap();
+        assert_eq!(read(&conn, &identity()).unwrap().floors, stamped);
+        let (_, refreshed3) = compare_at(&conn, &low);
+        assert_eq!(near_of(&refreshed3, n), 3, "N is near the other three");
     }
 }
