@@ -458,7 +458,8 @@ def upkeep(binary, bench_binary, db, folder, drawn):
     """#175's, #117's and #118's costs through the real binary on the store
     at `db` in `folder`, from process start: a tool hook that finds a change,
     pushing nothing and pushing the memory its command names; the pre-tool
-    hook holding back the command a memory names; the prompt hook pushing
+    hook holding back the command a memory recorded just before names,
+    with the rounds that held nothing counted; the prompt hook pushing
     the memory its words name; what a forget adds when three
     scopes' files hold the memory; and the prompt hook building a missing
     base. Returns their medians by name, whether the prompt hook built its
@@ -532,6 +533,7 @@ def upkeep(binary, bench_binary, db, folder, drawn):
     # memory's command, in another session a prompt naming it, and a call
     # about to run the new memory's command, which holds it back.
     tool, push, prompted, holding, named = [], [], [], [], []
+    missed = 0
     for n in range(4 * HOOK_RUNS):
         command, short = record(n)
         if n < HOOK_RUNS:
@@ -555,9 +557,14 @@ def upkeep(binary, bench_binary, db, folder, drawn):
         else:
             took, out = hook_said("PreToolUse", "s0", folders[0], tool_name="Bash",
                                   tool_input={"command": command})
-            if '"permissionDecision":"deny"' not in out:
-                raise SystemExit(f"the pre-tool hook did not hold back the command a memory names: {out!r}")
-            pushed(out, short, "a hold")
+            # A hold that never comes lets the command run: each one is
+            # counted, and any fails the bench (#241).
+            if out:
+                if '"permissionDecision":"deny"' not in out:
+                    raise SystemExit(f"the pre-tool hook printed something other than a hold: {out!r}")
+                pushed(out, short, "a hold")
+            else:
+                missed += 1
             if n > 3 * HOOK_RUNS:
                 holding.append(took)
 
@@ -578,10 +585,12 @@ def upkeep(binary, bench_binary, db, folder, drawn):
         path.unlink()
     prompt = hook("UserPromptSubmit", "s0", folders[0], prompt="go on")
     built = len(list(delivery.glob("*.index"))) == 1
+    rounds_held = list(holding)
     holding.sort()
     return {"tool": statistics.median(tool), "push": statistics.median(push),
             "tagged": tagged, "looked_up": looked_up,
             "hold": statistics.median(holding), "hold_p95": holding[int(len(holding) * 0.95) - 1],
+            "hold_rounds": rounds_held, "hold_missed": missed,
             "prompted": statistics.median(prompted), "added": statistics.median(added),
             "built_at_prompt": built, "prompt": prompt, "rounds": rounds}
 
@@ -879,6 +888,7 @@ def cost(found, seed, size, keep):
         kept = upkeep(found["user-memory"], found["bench"], db, folder, drawn)
         share, low, high, steps = session_share(kept["rounds"])
         tool_limit = rust_ms("src/session/tools.rs", "TOOL_HOOK_LIMIT")
+        hold_limit = rust_ms("src/session/tools.rs", "HOLD_LIMIT")
         prompt_limit = rust_ms("src/session.rs", "PROMPT_LIMIT")
         print(f"  session start median {steps['building']:6.1f} ms building its base, "
               f"{steps['finding']:6.1f} ms finding it, build {steps['alone']:.1f} ms "
@@ -896,7 +906,9 @@ def cost(found, seed, size, keep):
               f"limit {TAG_CHECK_LIMITS * tool_limit} ms)")
         print(f"  pre-tool hook median {kept['hold']:6.1f} ms, 95th percentile {kept['hold_p95']:6.1f} ms "
               f"after a change, holding back the command a memory names ({HOOK_RUNS - 1} runs, "
-              f"limit {tool_limit} ms)")
+              f"limit {hold_limit} ms)")
+        print(f"  pre-tool hook rounds {' '.join(f'{ms:.1f}' for ms in kept['hold_rounds'])} ms "
+              f"(after the first); {kept['hold_missed']} of {HOOK_RUNS} did not hold")
         print(f"  prompt hook median {kept['prompted']:6.1f} ms after a change, pushing the memory "
               f"its words name ({HOOK_RUNS - 1} runs, limit {prompt_limit} ms)")
         print(f"  forget      median {kept['added']:6.1f} ms added by three scopes' files "
@@ -922,7 +934,7 @@ def cost(found, seed, size, keep):
                   f"largest {samples[-1]:6.1f} ms")
         served_ok = (downloading <= rust_ms("src/session.rs", "LIMIT")
                      and left is not None and left <= FORGET_LEFT_POLLS * poll)
-        return (worst, share, kept, tool_limit, prompt_limit, served_ok)
+        return (worst, share, kept, tool_limit, hold_limit, prompt_limit, served_ok)
 
 
 def main():
@@ -948,7 +960,7 @@ def main():
     sizes = [int(s) for s in args.sizes.split(",")]
     tuning = {}
     if args.cost or args.check_cost:
-        worst, build_added, kept, tool_limit, prompt_limit, served_ok = cost(
+        worst, build_added, kept, tool_limit, hold_limit, prompt_limit, served_ok = cost(
             found, REPORT_SEEDS[0], max(sizes), args.keep)
         over = False
         if args.check_cost and worst > LOOKUP_LIMIT_MS:
@@ -965,11 +977,15 @@ def main():
                                   TAG_CHECK_LIMITS * tool_limit),
                                  ("looked_up", "the tool hook looking a tag up",
                                   TAG_CHECK_LIMITS * tool_limit),
-                                 ("hold", "the pre-tool hook holding a command back", tool_limit),
+                                 ("hold", "the pre-tool hook holding a command back", hold_limit),
                                  ("prompted", "the prompt hook pushing a memory", prompt_limit)):
             if args.check_cost and kept[key] > limit:
                 print(f"{what} is over its {limit} ms limit")
                 over = True
+        if kept["hold_missed"]:
+            print(f"the pre-tool hook did not hold back the command a memory names "
+                  f"{kept['hold_missed']} of {HOOK_RUNS} times")
+            over = True
         if args.check_cost and kept["added"] > FORGET_ADDED_LIMIT_MS:
             print(f"a forget adds over {FORGET_ADDED_LIMIT_MS} ms")
             over = True

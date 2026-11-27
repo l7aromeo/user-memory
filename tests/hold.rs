@@ -19,7 +19,8 @@ use serde_json::{Value, json};
 use std::{
     io::Write,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
+    time::Duration,
 };
 use tempfile::{TempDir, tempdir};
 
@@ -186,22 +187,37 @@ impl Home {
     ) -> Option<String> {
         let mut payload = self.call(session, agent, command);
         payload["hook_event_name"] = json!("PreToolUse");
-        let out = self.run("pre-tool-use", "claude", &payload, env);
-        if out.is_empty() {
-            return None;
-        }
-        let out: Value = serde_json::from_str(&out).unwrap();
-        let decision = &out["hookSpecificOutput"];
-        assert_eq!(decision["hookEventName"], "PreToolUse", "{out}");
-        assert_eq!(decision["permissionDecision"], "deny", "{out}");
-        Some(
-            decision["permissionDecisionReason"]
-                .as_str()
-                .unwrap()
-                .to_owned(),
-        )
+        reason(&self.run("pre-tool-use", "claude", &payload, env))
     }
 
+    /// Starts Claude Code's pre-tool hook for `command` in `session`, with
+    /// `env` set too, without waiting; [`held`] reads its reason.
+    fn spawn_before(&self, session: &str, command: &str, env: &[(&str, &str)]) -> Child {
+        let mut payload = self.call(session, None, command);
+        payload["hook_event_name"] = json!("PreToolUse");
+        let mut child = self
+            .command(&["pre-tool-use", "--client", "claude"])
+            .envs(env.iter().copied())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload.to_string().as_bytes())
+            .unwrap();
+        child
+    }
+
+    /// The path of a file that pauses a hook's refresh of the delivery
+    /// files while it exists, after the refresh built its overlay; the hook
+    /// writes `<path>.reached` there, even when the file is missing.
+    fn pause(&self) -> PathBuf {
+        self.path().join("pause")
+    }
     /// The push after `command` ran in `session`; empty for none.
     fn after(&self, session: &str, agent: Option<&str>, command: &str) -> String {
         let mut payload = self.call(session, agent, command);
@@ -217,6 +233,31 @@ impl Home {
             .unwrap()
             .to_owned()
     }
+}
+
+/// The reason in a pre-tool hook's output `out`; none when it is empty.
+fn reason(out: &str) -> Option<String> {
+    if out.is_empty() {
+        return None;
+    }
+    let out: Value = serde_json::from_str(out).unwrap();
+    let decision = &out["hookSpecificOutput"];
+    assert_eq!(decision["hookEventName"], "PreToolUse", "{out}");
+    assert_eq!(decision["permissionDecision"], "deny", "{out}");
+    Some(
+        decision["permissionDecisionReason"]
+            .as_str()
+            .unwrap()
+            .to_owned(),
+    )
+}
+
+/// The reason the pre-tool hook `child` held its command back with, once it
+/// exits; none when it ran.
+fn held(child: Child) -> Option<String> {
+    let out = time::finish(child, "the pre-tool hook");
+    assert!(out.status.success(), "{out:?}");
+    reason(&String::from_utf8(out.stdout).unwrap())
 }
 
 /// The id as hooks print it.
@@ -540,4 +581,152 @@ fn a_rule_on_a_script_holds_however_the_script_is_run() {
             "{command}: {reason:?}"
         );
     }
+}
+
+/// Longer than the tool hook's 100 ms limit at [`HOOK_ROOM`]'s scale (1 s)
+/// and well within the hold's 250 ms (2.5 s): a pause or wait that ends a
+/// hook working on the tool hook's limit and leaves the hold time to finish.
+const PAST_TOOL_LIMIT: Duration = Duration::from_millis(1500);
+
+/// Longer than the hold's 250 ms limit at [`HOOK_ROOM`]'s scale (2.5 s): a
+/// pause that leaves nothing of it to whatever comes after it.
+const PAST_HOLD_LIMIT: Duration = Duration::from_millis(3000);
+
+/// Records a change after the start, so the next tool hook's refresh folds
+/// it into the delivery files.
+fn change(home: &Home) {
+    home.record(
+        "fact",
+        "Release notes",
+        "The release notes live in `notes/releases.md`.",
+        true,
+    );
+}
+
+#[test]
+fn a_hold_is_decided_before_the_stores_changes_are_folded_in() {
+    let home = Home::new();
+    let rule = dry_run(&home);
+    home.start("s1");
+    change(&home);
+    let pause = home.pause();
+    std::fs::write(&pause, "").unwrap();
+    let hook = home.spawn_before(
+        "s1",
+        "cargo publish",
+        &[("USER_MEMORY_HOLD_REFRESH", pause.to_str().unwrap())],
+    );
+    let reached = home.path().join("pause.reached");
+    time::until("the hook's refresh pauses", || reached.exists());
+    std::thread::sleep(PAST_HOLD_LIMIT);
+    std::fs::remove_file(&pause).unwrap();
+    let reason = held(hook);
+    assert!(
+        reason.as_deref().is_some_and(|r| r.contains(short(&rule))),
+        "a slow fold kept the hold from coming: {reason:?}"
+    );
+}
+
+#[test]
+fn a_hold_still_folds_the_stores_changes_in_after_it() {
+    let home = Home::new();
+    dry_run(&home);
+    home.start("s1");
+    change(&home);
+    assert!(home.before("s1", None, "cargo publish").is_some());
+    // The pause file is missing, so the next hook's refresh doesn't stop,
+    // yet it marks when it built an overlay: one change was left to fold.
+    let pause = home.pause();
+    let probe = home.spawn_before(
+        "s1",
+        "ls",
+        &[("USER_MEMORY_HOLD_REFRESH", pause.to_str().unwrap())],
+    );
+    assert_eq!(held(probe), None);
+    assert!(
+        !home.path().join("pause.reached").exists(),
+        "the hook that held left the change unfolded"
+    );
+}
+
+#[test]
+fn a_hold_waits_for_the_session_state_past_the_tool_hooks_limit() {
+    let home = Home::new();
+    let rule = dry_run(&home);
+    home.start("s1");
+    let files = home.recall_files();
+    assert_eq!(files.len(), 1, "{files:?}");
+    // Another of the session's hooks writing its state, as parallel tool
+    // calls do.
+    let other = rusqlite::Connection::open(&files[0]).unwrap();
+    other.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let hook = home.spawn_before("s1", "cargo publish", &[]);
+    std::thread::sleep(PAST_TOOL_LIMIT);
+    other.execute_batch("COMMIT").unwrap();
+    let reason = held(hook);
+    assert!(
+        reason.as_deref().is_some_and(|r| r.contains(short(&rule))),
+        "{reason:?}"
+    );
+}
+
+#[test]
+fn a_rule_recorded_through_the_cli_holds_the_very_next_command() {
+    let home = Home::new();
+    home.start("s1");
+    let rule = dry_run(&home);
+    let reason = home.before("s1", None, "cargo publish");
+    assert!(
+        reason.as_deref().is_some_and(|r| r.contains(short(&rule))),
+        "{reason:?}"
+    );
+}
+
+#[test]
+fn a_slow_fold_still_holds_the_very_next_command() {
+    let home = Home::new();
+    home.start("s1");
+    let rule = dry_run(&home);
+    let pause = home.pause();
+    std::fs::write(&pause, "").unwrap();
+    let hook = home.spawn_before(
+        "s1",
+        "cargo publish",
+        &[("USER_MEMORY_HOLD_REFRESH", pause.to_str().unwrap())],
+    );
+    time::until("the hook's refresh pauses", || {
+        home.path().join("pause.reached").exists()
+    });
+    std::thread::sleep(PAST_TOOL_LIMIT);
+    std::fs::remove_file(&pause).unwrap();
+    let reason = held(hook);
+    assert!(
+        reason.as_deref().is_some_and(|r| r.contains(short(&rule))),
+        "a fold past the tool hook's limit and within the hold's: {reason:?}"
+    );
+}
+
+#[test]
+fn a_rule_whose_fold_misses_the_hook_holds_the_command_after() {
+    let home = Home::new();
+    home.start("s1");
+    let rule = dry_run(&home);
+    let pause = home.pause();
+    std::fs::write(&pause, "").unwrap();
+    let hook = home.spawn_before(
+        "s1",
+        "cargo publish",
+        &[("USER_MEMORY_HOLD_REFRESH", pause.to_str().unwrap())],
+    );
+    time::until("the hook's refresh pauses", || {
+        home.path().join("pause.reached").exists()
+    });
+    std::thread::sleep(PAST_HOLD_LIMIT);
+    std::fs::remove_file(&pause).unwrap();
+    assert_eq!(held(hook), None, "the fold came too late for this hook");
+    let reason = home.before("s1", None, "cargo publish");
+    assert!(
+        reason.as_deref().is_some_and(|r| r.contains(short(&rule))),
+        "the next one holds it: {reason:?}"
+    );
 }

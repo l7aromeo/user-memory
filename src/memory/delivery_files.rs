@@ -580,6 +580,13 @@ pub(crate) enum Refreshed {
     Cleared,
 }
 
+impl Refreshed {
+    /// Whether the overlay now holds a change it didn't before.
+    pub(crate) fn took_in(self) -> bool {
+        self == Self::Done
+    }
+}
+
 /// A hook's refresh of its scope's overlay (#175), for the local store at
 /// `db` and the scope `projects`: when the store's marker names a change
 /// the overlay does not hold, takes the store's lock (once, unless `wait`,
