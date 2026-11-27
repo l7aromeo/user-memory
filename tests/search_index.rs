@@ -13,6 +13,8 @@
 
 #[path = "support/sandbox.rs"]
 mod sandbox;
+#[path = "support/time.rs"]
+mod time;
 use sandbox::Sandboxed;
 use serde_json::{Value, json};
 use std::{
@@ -833,6 +835,9 @@ fn a_memory_too_long_to_index_leaves_search_reading_every_memory() {
 
 // SQLite removes a WAL store's log and shared memory when its last
 // connection closes; a server that held none paid for that on every call.
+// The server opens the connection it keeps on a thread of its own, beside
+// the first call, so the test waits for it, then checks that it is still
+// open after a second call.
 #[test]
 fn a_server_keeps_the_store_open_between_calls() {
     let store = Store::new();
@@ -845,9 +850,13 @@ fn a_server_keeps_the_store_open_between_calls() {
     assert!(!shared(store.db()).exists(), "no connection is open");
     let mut server = Server::start(store.command(&store.db()));
     server.search(&json!({"topic": "release"}));
+    time::until("the server keeps the store open", || {
+        shared(store.db()).exists()
+    });
+    server.search(&json!({"topic": "deploy"}));
     assert!(
         shared(store.db()).exists(),
-        "the server keeps the store open"
+        "the server keeps the store open after another call"
     );
     drop(server);
 }
