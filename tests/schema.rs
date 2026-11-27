@@ -246,7 +246,7 @@ fn data(db: &Path, version: i64) -> Vec<Vec<String>> {
             [
                 "SELECT a,b,model,dimensions FROM memory_pairs ORDER BY 1,2,3,4",
                 "SELECT model,dimensions,length,floor FROM memory_pairs_state ORDER BY 1,2,3",
-                "SELECT seq,id,model,dimensions FROM memory_pairs_due ORDER BY 1",
+                "SELECT seq,id,model,dimensions,compared FROM memory_pairs_saved ORDER BY 1",
             ]
             .map(str::to_owned),
         );
@@ -584,7 +584,7 @@ fn every_snapshot_migrates_to_the_current_schema_and_keeps_its_data() {
             let kept: i64 = Connection::open(&db)
                 .unwrap()
                 .query_row(
-                    "SELECT (SELECT COUNT(*) FROM memory_pairs)+(SELECT COUNT(*) FROM memory_pairs_state)+(SELECT COUNT(*) FROM memory_pairs_due)",
+                    "SELECT (SELECT COUNT(*) FROM memory_pairs)+(SELECT COUNT(*) FROM memory_pairs_state)+(SELECT COUNT(*) FROM memory_pairs_saved)",
                     [],
                     |r| r.get(0),
                 )
@@ -1281,7 +1281,10 @@ fn first_review_after_upgrading_from(from: i64) {
                 conn,
                 "SELECT model,dimensions,length FROM memory_pairs_state ORDER BY 1",
             ),
-            rows(conn, "SELECT id FROM memory_pairs_due ORDER BY 1"),
+            rows(
+                conn,
+                "SELECT id FROM memory_pairs_saved WHERE compared=0 ORDER BY 1",
+            ),
         )
     };
     let (pairs, state, due) = kept(&conn);

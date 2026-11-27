@@ -46,7 +46,7 @@ INSERT INTO memory_vectors (id,model,dimensions,source,vector) VALUES
 INSERT INTO memory_pairs (a,b,model,dimensions) VALUES
 ('1a2b3c4d-1111-4aaa-8aaa-000000000001','1a2b3c4d-3333-4aaa-8aaa-000000000003','test-model',3);
 INSERT INTO memory_pairs_state (model,dimensions,length,floor) VALUES ('test-model',3,3,0.5);
-DELETE FROM memory_pairs_due WHERE id='1a2b3c4d-1111-4aaa-8aaa-000000000001';
+UPDATE memory_pairs_saved SET compared=1 WHERE id='1a2b3c4d-1111-4aaa-8aaa-000000000001';
 -- Projects linked by two conversations, one of them linking two.
 INSERT INTO conversation_projects (origin,project,linked_at) VALUES
 ('claude:session/x','github.com/acme/notebooks','2026-10-17 09:00:00'),

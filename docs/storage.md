@@ -35,11 +35,12 @@ memory where in that order its hold count and its passage count start
 again), `memory_ended`
 (when a memory's tag or text condition ended, how and on what evidence,
 since schema version 13), `memory_pairs`, `memory_pairs_state` and
-`memory_pairs_due` (since schema version 15: the pairs of stored vectors
+`memory_pairs_saved` (since schema version 15: the pairs of stored vectors
 review found that may be at a cutoff, the models and vector lengths they
-are complete for, and the memories whose vector was saved since; ids only,
-no text; a vector's pairs go when it is saved again or removed, and a
-store without them only makes the next review compare every pair), the
+are complete for, and each vector's last save with whether a review has
+compared it since; ids only, no text; a vector's pairs go when it is saved
+again or removed, and a store without them only makes the next review
+compare every pair), the
 views `out_of_force` (the memories ended
 or past their date) and `live_memories` (the memories in force:
 confirmed or tentative and not out of force, the test every reader that

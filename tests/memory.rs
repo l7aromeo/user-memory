@@ -113,7 +113,7 @@ fn database_contains_only_the_generic_memory_schema() {
             "memory_events",
             "memory_origins",
             "memory_pairs",
-            "memory_pairs_due",
+            "memory_pairs_saved",
             "memory_pairs_state",
             "memory_use",
             "memory_writer",

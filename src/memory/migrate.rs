@@ -180,11 +180,12 @@ END;",
 }
 
 /// Version 15 keeps similar vector pairs between reviews (#245):
-/// `memory_pairs`, `memory_pairs_state`, `memory_pairs_due` and the
+/// `memory_pairs`, `memory_pairs_state`, `memory_pairs_saved` and the
 /// triggers on `memory_vectors` that keep them in step. Nothing is
-/// filled: with no state kept, the first review compares every pair and
-/// keeps what it finds, so migrating stays as fast as before. The SQL is
-/// written out as it was at version 15.
+/// filled: a stored vector has no row in `memory_pairs_saved` until it is
+/// saved again, and with no state kept the first review compares every
+/// pair and keeps what it finds, so migrating stays as fast as before. The
+/// SQL is written out as it was at version 15.
 fn to_v15(conn: &Connection, _: Option<&Titles>) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE memory_pairs (
@@ -203,25 +204,27 @@ CREATE TABLE memory_pairs_state (
     floor REAL NOT NULL,
     PRIMARY KEY(model, dimensions, length)
 ) WITHOUT ROWID;
-CREATE TABLE memory_pairs_due (
+CREATE TABLE memory_pairs_saved (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
     id TEXT NOT NULL UNIQUE,
     model TEXT NOT NULL,
-    dimensions INTEGER NOT NULL
+    dimensions INTEGER NOT NULL,
+    compared INTEGER NOT NULL DEFAULT 0 CHECK(compared IN (0, 1))
 );
+CREATE INDEX memory_pairs_due ON memory_pairs_saved(model, dimensions) WHERE compared=0;
 CREATE TRIGGER memory_pairs_vector_inserted AFTER INSERT ON memory_vectors BEGIN
     DELETE FROM memory_pairs WHERE a=NEW.id OR b=NEW.id;
-    DELETE FROM memory_pairs_due WHERE id=NEW.id;
-    INSERT INTO memory_pairs_due(id,model,dimensions) VALUES (NEW.id,NEW.model,NEW.dimensions);
+    DELETE FROM memory_pairs_saved WHERE id=NEW.id;
+    INSERT INTO memory_pairs_saved(id,model,dimensions) VALUES (NEW.id,NEW.model,NEW.dimensions);
 END;
 CREATE TRIGGER memory_pairs_vector_changed AFTER UPDATE ON memory_vectors BEGIN
     DELETE FROM memory_pairs WHERE a=OLD.id OR b=OLD.id OR a=NEW.id OR b=NEW.id;
-    DELETE FROM memory_pairs_due WHERE id=OLD.id OR id=NEW.id;
-    INSERT INTO memory_pairs_due(id,model,dimensions) VALUES (NEW.id,NEW.model,NEW.dimensions);
+    DELETE FROM memory_pairs_saved WHERE id=OLD.id OR id=NEW.id;
+    INSERT INTO memory_pairs_saved(id,model,dimensions) VALUES (NEW.id,NEW.model,NEW.dimensions);
 END;
 CREATE TRIGGER memory_pairs_vector_deleted AFTER DELETE ON memory_vectors BEGIN
     DELETE FROM memory_pairs WHERE a=OLD.id OR b=OLD.id;
-    DELETE FROM memory_pairs_due WHERE id=OLD.id;
+    DELETE FROM memory_pairs_saved WHERE id=OLD.id;
 END;",
     )?;
     Ok(())
