@@ -2056,7 +2056,7 @@ mod tests {
                 }
                 let (state, due, pairs): (i64, i64, i64) = conn
                     .query_row(
-                        "SELECT (SELECT COUNT(*) FROM memory_pairs_state),(SELECT COUNT(*) FROM memory_pairs_due WHERE model=?1),(SELECT COUNT(*) FROM memory_pairs)",
+                        "SELECT (SELECT COUNT(*) FROM memory_pairs_state),(SELECT COUNT(*) FROM memory_pairs_saved WHERE model=?1 AND compared=0),(SELECT COUNT(*) FROM memory_pairs)",
                         [KEPT_MODEL],
                         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                     )
@@ -2086,12 +2086,14 @@ mod tests {
 
     /// The due rows of the kept-pairs model, by number.
     fn due_rows(conn: &Connection) -> Vec<(i64, String)> {
-        conn.prepare("SELECT seq,id FROM memory_pairs_due WHERE model=?1 ORDER BY seq")
-            .unwrap()
-            .query_map([KEPT_MODEL], |r| Ok((r.get(0)?, r.get(1)?)))
-            .unwrap()
-            .collect::<rusqlite::Result<_>>()
-            .unwrap()
+        conn.prepare(
+            "SELECT seq,id FROM memory_pairs_saved WHERE model=?1 AND compared=0 ORDER BY seq",
+        )
+        .unwrap()
+        .query_map([KEPT_MODEL], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
     }
 
     // A review that cannot have the write turn still answers as comparing

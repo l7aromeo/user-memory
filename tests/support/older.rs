@@ -50,7 +50,7 @@ DROP TRIGGER memory_pairs_vector_changed;
 DROP TRIGGER memory_pairs_vector_deleted;
 DROP TABLE memory_pairs;
 DROP TABLE memory_pairs_state;
-DROP TABLE memory_pairs_due;
+DROP TABLE memory_pairs_saved;
 DROP TRIGGER memory_use_reset;
 DROP TABLE hold_reset;
 DROP TABLE use_clock;
