@@ -712,16 +712,23 @@ const FIRST_ANSWER: Duration = Duration::from_secs(3);
 const APP_START_LIMIT: Duration = Duration::from_secs(30);
 
 /// How long a call the relay forwarded may wait for the server's answer
-/// before the relay answers it with an error and drops the connection. Above
-/// the slowest call the server bounds, a semantic `search` at about 214 s
-/// (two embedding requests of 2 s connect and 60 s each, then a write's three
-/// 30 s [`crate::memory::BUSY`] stages), and under the 300 s Codex gives a
-/// tool call (`DEFAULT_TOOL_TIMEOUT` in its codex-rs/codex-mcp/src/rmcp_client.rs;
-/// its docs say 60 s), so the agent gets this answer, not the app's timeout.
-/// Claude Code moves a call past two minutes to a background task, where the
-/// reply still arrives, and its own limits are far longer (code.claude.com/docs/en/mcp,
-/// "Time limits on MCP tool calls").
-const FORWARDED_CALL_LIMIT: Duration = Duration::from_secs(240);
+/// before the relay answers it with an error and drops the connection: the
+/// call's waits, which the server bounds at 90 s in all (`TOOL_CALL_BUDGET`
+/// in src/memory/budget.rs), its own work, and 10 s for the network. The
+/// heaviest work measured on a synthetic store of 10,000 memories with no
+/// other writer, release builds on GitHub's runners, is `review`: 46 s on
+/// macOS (3 cpus), 39 s on Windows x64 and 37 s on Ubuntu. An import into an
+/// empty store takes 3.7 s, an export of everything 0.2 s and a search that
+/// saves 32 vectors 0.04 s. Debug builds, an upper bound, take review past
+/// 300 s. Review's cost grows with the square of the store's size, so a
+/// review of a much larger store can still pass this limit. Under the 300 s
+/// Codex gives a tool call (`DEFAULT_TOOL_TIMEOUT` in its
+/// codex-rs/codex-mcp/src/rmcp_client.rs; its docs say 60 s), so the agent
+/// gets this answer, not the app's timeout. Claude Code moves a call past two
+/// minutes to a background task, where the reply still arrives, and its own
+/// limits are far longer (code.claude.com/docs/en/mcp, "Time limits on MCP
+/// tool calls").
+const FORWARDED_CALL_LIMIT: Duration = Duration::from_secs(150);
 
 /// [`FORWARDED_CALL_LIMIT`], which debug builds take in milliseconds from
 /// `USER_MEMORY_FORWARDED_CALL_LIMIT_MS` so tests can see a stalled server's
