@@ -809,12 +809,6 @@ const PATCH_FILES: [&str; 4] = [
     "*** Move to: ",
 ];
 
-/// Reads a hook's payload whole and keeps nothing of it: for a hook with
-/// nothing to say, so its client never writes to a closed pipe.
-pub fn drain() {
-    payload();
-}
-
 /// The tool a hook payload names.
 fn tool_name(payload: &[u8]) -> Option<String> {
     #[derive(Deserialize)]

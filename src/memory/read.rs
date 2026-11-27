@@ -642,7 +642,7 @@ pub fn search(db: &Path, input: &Search) -> Result<Value> {
 /// The passage of `m` in `slot` (see `index::rows`), cut from its text, and
 /// how many passages it has. A memory none of whose passages matched more
 /// than the whole memory shows its first.
-fn passage(m: &Memory, slot: i64) -> (&str, usize) {
+pub(super) fn passage(m: &Memory, slot: i64) -> (&str, usize) {
     let parts = passages::split(&m.content);
     let count = parts.len() + usize::from(!m.context.is_empty());
     let text = if slot == CONTEXT_SLOT && !m.context.is_empty() {

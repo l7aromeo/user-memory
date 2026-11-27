@@ -920,9 +920,8 @@ async fn run(mut cli: Cli) -> Result<()> {
         Command::SubagentStart { client, limit } => {
             Some(session::subagent_start(*client, limit.context_limit).await)
         }
-        Command::WorkingSet { .. } => {
-            session::drain();
-            Some(String::new())
+        Command::WorkingSet { client, limit } => {
+            Some(session::working_set(*client, limit.context_limit).await)
         }
         _ => None,
     };

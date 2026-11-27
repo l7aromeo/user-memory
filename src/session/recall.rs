@@ -24,6 +24,7 @@ use crate::{
         hold::HOLD_PER_EVENT,
         matcher::{Kind, Terms, WINDOW_ACTIONS},
         push::PUSH_PER_EVENT,
+        working_set::{self, Entry, Printed},
     },
     private,
 };
@@ -203,6 +204,14 @@ const ORIGIN: &str = "origin";
 /// The `meta` key set when the session's server takes no use from it:
 /// nothing is sent again this session.
 const NO_USE: &str = "no_use";
+/// The `meta` key of the main context's action count when its epoch
+/// opened: a compaction whose context has acted since then opens the next
+/// epoch, and one that finds it unchanged is the same compaction, met by
+/// its other handler (#118).
+const OPENED: &str = "opened";
+/// The `meta` key of the epoch the main context's last compaction ended,
+/// which its working set restores; none after a `clear`.
+const ENDED: &str = "ended";
 
 /// How a session (re)started, as the client's session-start payload says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -294,8 +303,8 @@ impl State {
     /// memories session start printed in full this time, which count as
     /// shown from now. A `startup` begins anew (see [`State::reset`]);
     /// `clear` empties the window and opens an epoch; `compact` opens one
-    /// and keeps the window, as the work goes on; `resume` keeps the epoch
-    /// and what it showed.
+    /// once ([`compacted`]) and keeps the window, as the work goes on;
+    /// `resume` keeps the epoch and what it showed.
     pub(super) fn start(
         path: &Path,
         source: Source,
@@ -311,16 +320,16 @@ impl State {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let (_, actions, _) = context(&tx, MAIN)?;
-        if matches!(source, Source::Clear | Source::Compact) {
-            if source == Source::Clear {
+        match source {
+            Source::Clear => {
                 tx.execute("DELETE FROM window WHERE agent = ?1", [MAIN])?;
+                open_epoch(&tx, actions)?;
+                tx.execute("DELETE FROM meta WHERE key = ?1", [ENDED])?;
             }
-            tx.execute("DELETE FROM shown WHERE agent = ?1", [MAIN])?;
-            tx.execute("DELETE FROM held WHERE agent = ?1", [MAIN])?;
-            tx.execute(
-                "UPDATE contexts SET epoch = epoch + 1, chars = 0 WHERE agent = ?1",
-                [MAIN],
-            )?;
+            Source::Compact => {
+                compacted(&tx)?;
+            }
+            Source::Startup | Source::Resume => {}
         }
         mark_whole(&tx, MAIN, whole, actions)?;
         tx.commit()?;
@@ -584,6 +593,55 @@ impl State {
         }
         tx.commit()?;
         Ok(held)
+    }
+}
+
+impl State {
+    /// The main context's working set as its compaction left it (#118):
+    /// the epoch that ended ([`compacted`], so either compact handler
+    /// opens the next one) and what the context did with each memory in
+    /// it, newest first, with the passages pushed of it, most pushed
+    /// first. None after a `clear` with no action since. Rows a restore
+    /// moved to the new epoch are read again, so two compactions with no
+    /// action between them restore the same set.
+    pub(super) fn working_set(&mut self) -> Result<Option<(i64, Vec<Entry>)>> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(ended) = compacted(&tx)? else {
+            tx.commit()?;
+            return Ok(None);
+        };
+        let entries = entries(&tx, ended)?;
+        tx.commit()?;
+        Ok(Some((ended, entries)))
+    }
+
+    /// Moves what the working set `printed` to the main context's current
+    /// epoch, which is not a use, and counts it as shown from now: whole,
+    /// or by the passages it showed. A pointer is not shown.
+    pub(super) fn restored(&mut self, printed: &[Printed]) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (epoch, actions, _) = context(&tx, MAIN)?;
+        for one in printed {
+            tx.execute(
+                "UPDATE worked SET epoch = ?3 WHERE agent = ?1 AND memory = ?2",
+                params![MAIN, one.from, epoch],
+            )?;
+            if one.whole {
+                mark_whole(&tx, MAIN, &[one.id.as_str()], actions)?;
+            }
+            for passage in &one.passages {
+                tx.execute(
+                    "INSERT OR REPLACE INTO shown(agent, memory, passage, at) VALUES (?1, ?2, ?3, ?4)",
+                    params![MAIN, one.id, passage, actions],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
     }
 }
 
@@ -1002,6 +1060,94 @@ fn context(conn: &Connection, agent: &str) -> Result<(i64, i64, usize)> {
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
     Ok((epoch, actions, usize::try_from(chars)?))
+}
+
+/// What the main context did with each memory in epochs from `epoch` on,
+/// newest first, with the passages pushed of it, most pushed first.
+fn entries(conn: &Connection, epoch: i64) -> Result<Vec<Entry>> {
+    let mut entries = Vec::new();
+    let mut rows = conn.prepare(
+        "SELECT memory, read, recorded, held, shown FROM worked
+             WHERE agent = ?1 AND epoch >= ?2 ORDER BY at DESC, changed DESC",
+    )?;
+    let mut pushed =
+        conn.prepare("SELECT passage FROM pushed WHERE memory = ?1 ORDER BY times DESC, passage")?;
+    let found = rows.query_map(params![MAIN, epoch], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            [r.get::<_, bool>(1)?, r.get(2)?, r.get(3)?, r.get(4)?],
+        ))
+    })?;
+    for row in found {
+        let (memory, [read, recorded, held, shown]) = row?;
+        let how = if read {
+            working_set::Use::Read
+        } else if recorded {
+            working_set::Use::Recorded
+        } else if held {
+            working_set::Use::Held
+        } else if shown {
+            working_set::Use::Pushed
+        } else {
+            working_set::Use::Found
+        };
+        let passages = pushed
+            .query_map([&memory], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        entries.push(Entry {
+            id: memory,
+            how,
+            passages,
+        });
+    }
+    Ok(entries)
+}
+
+/// Opens the main context's next epoch, at its action count `actions`: what
+/// it was shown or held is forgotten, and its push budget starts again.
+fn open_epoch(conn: &Connection, actions: i64) -> Result<()> {
+    conn.execute("DELETE FROM shown WHERE agent = ?1", [MAIN])?;
+    conn.execute("DELETE FROM held WHERE agent = ?1", [MAIN])?;
+    conn.execute(
+        "UPDATE contexts SET epoch = epoch + 1, chars = 0 WHERE agent = ?1",
+        [MAIN],
+    )?;
+    conn.execute(
+        "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)",
+        params![OPENED, actions.to_string()],
+    )?;
+    Ok(())
+}
+
+/// The epoch the main context's compaction ended, its next epoch opened
+/// once however its two session-start handlers run (#118): both clients
+/// run session start and the working set at once on `compact`, and the
+/// first to get here opens the epoch while the second finds it opened at
+/// the same action and only reads which epoch ended. A compaction with no
+/// action since the last one is the same stretch too, and restores its
+/// set again. None when the epoch was opened by a `clear` with no action
+/// since, which restores nothing. Run in an `IMMEDIATE` transaction.
+fn compacted(conn: &Connection) -> Result<Option<i64>> {
+    let (epoch, actions, _) = context(conn, MAIN)?;
+    let opened: Option<String> = conn
+        .query_row("SELECT value FROM meta WHERE key = ?1", [OPENED], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    if opened.and_then(|o| o.parse::<i64>().ok()) == Some(actions) {
+        let ended: Option<String> = conn
+            .query_row("SELECT value FROM meta WHERE key = ?1", [ENDED], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        return Ok(ended.and_then(|e| e.parse().ok()));
+    }
+    open_epoch(conn, actions)?;
+    conn.execute(
+        "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)",
+        params![ENDED, epoch.to_string()],
+    )?;
+    Ok(Some(epoch))
 }
 
 /// Marks each of `whole`, by the id as its print shows it, as shown in full
@@ -1446,6 +1592,110 @@ mod tests {
             state.record(MAIN, &command(), &both, ROOM_CHARS).unwrap(),
             [0, 1]
         );
+    }
+
+    /// The epoch of the main context in the file at `path`.
+    fn epoch_of(path: &Path) -> i64 {
+        let state = State::open(path, soon()).unwrap();
+        context(&state.conn, MAIN).unwrap().0
+    }
+
+    /// A session at `path` that pushed `memory` once, at its first action.
+    fn worked_on(path: &Path, memory: &str) {
+        let mut state = State::start(path, Source::Startup, &[], soon()).unwrap();
+        assert_eq!(
+            state
+                .record(MAIN, &command(), &[offer(memory, 0)], ROOM_CHARS)
+                .unwrap(),
+            [0]
+        );
+    }
+
+    // Both compact handlers run at once; whichever comes first opens the
+    // epoch, and the working set reads the epoch that ended, in either
+    // order and on two threads at once (#118).
+    #[test]
+    fn a_compaction_opens_one_epoch_however_its_handlers_run() {
+        let ids = |set: Option<(i64, Vec<Entry>)>| {
+            set.map(|(ended, entries)| {
+                (
+                    ended,
+                    entries
+                        .into_iter()
+                        .map(|e| (e.id, e.how))
+                        .collect::<Vec<_>>(),
+                )
+            })
+        };
+        let expected = Some((1, vec![("e0000001".to_owned(), working_set::Use::Pushed)]));
+        for order in ["start first", "set first", "at once"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = file(&dir);
+            worked_on(&path, "e0000001");
+            let set = match order {
+                "start first" => {
+                    State::start(&path, Source::Compact, &[], soon()).unwrap();
+                    State::open(&path, soon()).unwrap().working_set().unwrap()
+                }
+                "set first" => {
+                    let set = State::open(&path, soon()).unwrap().working_set().unwrap();
+                    State::start(&path, Source::Compact, &[], soon()).unwrap();
+                    set
+                }
+                _ => {
+                    let barrier = Arc::new(Barrier::new(2));
+                    let (b, p) = (barrier.clone(), path.clone());
+                    let start = thread::spawn(move || {
+                        b.wait();
+                        State::start(&p, Source::Compact, &[], soon()).unwrap();
+                    });
+                    barrier.wait();
+                    let set = State::open(&path, soon()).unwrap().working_set().unwrap();
+                    start.join().unwrap();
+                    set
+                }
+            };
+            assert_eq!(ids(set), expected, "{order}");
+            assert_eq!(epoch_of(&path), 2, "{order}: one epoch opened");
+            // The new epoch pushes the passage again: its earlier copy is gone.
+            let mut state = State::open(&path, soon()).unwrap();
+            assert_eq!(
+                state
+                    .record(MAIN, &command(), &[offer("e0000001", 0)], ROOM_CHARS)
+                    .unwrap(),
+                [0],
+                "{order}"
+            );
+        }
+    }
+
+    // A compaction with no action since the last one is the same stretch:
+    // it opens no epoch and its working set is the same. After a clear with
+    // no action since, a compaction restores nothing.
+    #[test]
+    fn a_compaction_without_an_action_since_restores_the_same_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = file(&dir);
+        worked_on(&path, "e0000001");
+        let mut state = State::start(&path, Source::Compact, &[], soon()).unwrap();
+        let first = state.working_set().unwrap().unwrap();
+        state
+            .restored(&[Printed {
+                from: "e0000001".to_owned(),
+                id: "e0000001".to_owned(),
+                whole: true,
+                passages: Vec::new(),
+            }])
+            .unwrap();
+        let mut state = State::start(&path, Source::Compact, &[], soon()).unwrap();
+        let again = state.working_set().unwrap().unwrap();
+        assert_eq!((again.0, again.1.len()), (first.0, 1));
+        assert_eq!(epoch_of(&path), 2);
+        State::start(&path, Source::Clear, &[], soon()).unwrap();
+        assert_eq!(epoch_of(&path), 3);
+        let mut state = State::start(&path, Source::Compact, &[], soon()).unwrap();
+        assert!(state.working_set().unwrap().is_none());
+        assert_eq!(epoch_of(&path), 3);
     }
 
     #[test]

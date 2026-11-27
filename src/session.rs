@@ -8,16 +8,18 @@
 
 mod live;
 mod recall;
+mod restore;
 mod seen;
 mod subagent;
 mod tags;
 mod tools;
 mod used;
 
+pub use restore::working_set;
 pub use subagent::subagent_start;
 #[cfg(test)]
 pub(crate) use tools::CLAUDE_TOOLS;
-pub use tools::{drain, post_tool_use, pre_tool_use};
+pub use tools::{post_tool_use, pre_tool_use};
 
 use crate::{db_path, memory, memory::FitUnit, project, setup};
 use anyhow::Context;
