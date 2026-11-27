@@ -207,9 +207,19 @@ pub(super) fn from_blob(blob: &[u8]) -> Vec<f32> {
 }
 
 pub(super) fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    cosine_normed(a, norm(a), b, norm(b))
+}
+
+/// The Euclidean norm [`cosine`] divides by.
+pub(super) fn norm(v: &[f32]) -> f32 {
+    v.iter().map(|x| x * x).sum::<f32>().sqrt()
+}
+
+/// [`cosine`] of `a` and `b` with their norms `na` and `nb` worked out
+/// before, so a vector compared with many is measured once.
+pub(super) fn cosine_normed(a: &[f32], na: f32, b: &[f32], nb: f32) -> f32 {
     let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
-    let norm = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let scale = norm(a) * norm(b);
+    let scale = na * nb;
     if scale > 0.0 { dot / scale } else { 0.0 }
 }
 

@@ -10,11 +10,7 @@ use super::{
     project_key,
     schema::{SELECT, connect, get, row, write},
     selection::refuse_local_paths,
-    similar::{
-        DUPLICATE_OVERLAP, Draft, RELATED_OVERLAP, Thresholds, category_group, cosine, document,
-        overlap, stored_vectors, thresholds,
-    },
-    words::tokenize,
+    similar::{Draft, Thresholds, document, stored_vectors, thresholds},
     write::mark_pair,
 };
 use anyhow::{Result, bail};
@@ -28,6 +24,8 @@ use std::{
     path::Path,
 };
 use uuid::Uuid;
+
+mod pairs;
 
 /// Groups returned unless asked otherwise: a few for the user to decide on
 /// at a time.
@@ -215,47 +213,6 @@ impl Groups {
             found.entry(root).or_default().push(i);
         }
         found.into_values().filter(|c| c.len() > 1).collect()
-    }
-}
-
-/// How strongly two memories match: cosine when both have comparable stored
-/// vectors, otherwise content-word overlap within one category group.
-#[derive(Clone, Copy)]
-struct Pair {
-    duplicate: bool,
-    related: bool,
-    score: f32,
-}
-
-/// `cutoffs` holds the model's cutoffs by vector length; a length without
-/// them is compared by keywords.
-fn compare(
-    a: &Memory,
-    b: &Memory,
-    vectors: &HashMap<Uuid, Vec<f32>>,
-    cutoffs: &HashMap<usize, Thresholds>,
-) -> Pair {
-    let semantic = match (vectors.get(&a.id), vectors.get(&b.id)) {
-        (Some(x), Some(y)) if x.len() == y.len() => cutoffs
-            .get(&x.len())
-            .map(|cutoffs| (cosine(x, y), *cutoffs)),
-        _ => None,
-    };
-    let same_group = category_group(&a.category).contains(&b.category);
-    let words = if same_group {
-        overlap(&tokenize(&a.content), &tokenize(&b.content))
-    } else {
-        0.0
-    };
-    let duplicate = semantic.is_some_and(|(score, cutoffs)| score >= cutoffs.duplicate)
-        || words >= DUPLICATE_OVERLAP;
-    let related = same_group
-        && (semantic.is_some_and(|(score, cutoffs)| score >= cutoffs.related)
-            || words >= RELATED_OVERLAP);
-    Pair {
-        duplicate,
-        related,
-        score: semantic.map_or(words, |(score, _)| score),
     }
 }
 
@@ -462,12 +419,12 @@ fn review_with(
         .collect();
     let (model, vectors) = match identity {
         Some(identity) => {
-            let stored = stored_vectors(conn, identity)?;
+            let mut stored = stored_vectors(conn, identity)?;
             let current = memories
                 .iter()
                 .filter_map(|m| {
-                    let (source, vector) = stored.get(&m.id)?;
-                    (*source == document(&Draft::from(m))).then(|| (m.id, vector.clone()))
+                    let (source, vector) = stored.remove(&m.id)?;
+                    (source == document(&Draft::from(m))).then_some((m.id, vector))
                 })
                 .collect();
             (identity.0.clone(), current)
@@ -490,26 +447,10 @@ fn review_with(
     let active: Vec<usize> = (0..memories.len())
         .filter(|&i| memories[i].status != "stale" && !out_of_force.contains(&memories[i].id))
         .collect();
-    let mut duplicates = Vec::new();
-    let mut related = Vec::new();
-    for (n, &i) in active.iter().enumerate() {
-        for &j in &active[n + 1..] {
-            let (a, b) = (&memories[i], &memories[j]);
-            if distinct.contains(&(a.id.min(b.id), a.id.max(b.id)))
-                || (a.source == "observed" && b.source == "observed")
-                || a.evidence_ids.contains(&b.id)
-                || b.evidence_ids.contains(&a.id)
-            {
-                continue;
-            }
-            let pair = compare(a, b, &vectors, &cutoffs);
-            if pair.duplicate {
-                duplicates.push((i, j, pair.score));
-            } else if pair.related {
-                related.push((i, j, pair.score));
-            }
-        }
-    }
+    let pairs::Links {
+        duplicates,
+        related,
+    } = pairs::links(&memories, &active, &distinct, &vectors, &cutoffs);
     // Each group with how many members it left out.
     let mut groups: Vec<(Kind, Vec<usize>, usize)> = Vec::new();
     let mut joined = Groups::new(memories.len());
