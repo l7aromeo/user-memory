@@ -2,6 +2,190 @@
 
 What changed in each release, newest first.
 
+## v0.10.0
+
+### Upgrade
+
+Run the installer again on each machine, and on the machine that runs your
+server:
+
+```bash
+curl -fsSL https://github.com/l7aromeo/user-memory/releases/latest/download/install.sh | sh
+```
+
+On Windows, in PowerShell:
+
+```powershell
+irm https://github.com/l7aromeo/user-memory/releases/latest/download/install.ps1 | iex
+```
+
+- **The store's format changes, from schema version 6 to 15.** The
+  installer's setup first backs the store up beside it, as
+  `<store>.v6-<UTC time>.bak`, then migrates it in one run. No memory is
+  lost. On a store of 100,000 memories with vectors (1.3 GB) the whole
+  upgrade took 13 to 16 s, and the store grew by 4%. The steps, each in
+  this release: history (7), a keyword index that removes a deleted
+  memory's words at once (8), passage search (9), the change queue (10),
+  keyword-index triggers under any conflict clause (11), session use (12),
+  conditions (13), the order of session use's writes (14), and review's
+  similar vector pairs (15), whose tables stay empty until the first
+  review.
+- A 0.9 binary refuses the new store, so upgrade every machine that opens
+  it, the server's included. To go back to 0.9.3, restore the
+  `.v6-<time>.bak` backup and reinstall 0.9.3, as
+  [roll back an upgrade](https://github.com/l7aromeo/user-memory/blob/main/docs/upgrade.md#roll-back-an-upgrade)
+  describes. Memories recorded since the upgrade are lost unless you
+  export them first.
+- The installer's Docker server upgrades as before: it builds the new
+  image, checks the store, stops the server, backs the store up and
+  migrates it inside the volume, then starts the server again. Running the
+  installer also updates `compose.yaml` to check the server's health
+  without the shared token, which `host token retire-shared` needs. A
+  server run from a checkout's `compose.yaml` refuses the old store until
+  `docker compose run --rm memory migrate` migrates it.
+- **Exports are format version 3.** An older user-memory refuses them;
+  version 2 files import unchanged.
+- **Setup writes more session hooks:** SubagentStart, PreToolUse,
+  PostToolUse, a second SessionStart handler on compact, and Claude Code's
+  PreCompact. The installer runs setup; if you installed another way, run
+  `user-memory setup` once. In Codex, approve the new hooks once. Codex
+  0.145.0 or later also gets the prompt hook's `--context-limit`.
+- **Restart Claude Code and Codex once after this upgrade,** as setup
+  says: a session 0.9.3 started keeps that binary until its client
+  restarts, and the restart also loads the new hooks. From 0.10.0 on, open
+  sessions move to a newer binary at their next memory call, with no
+  restart.
+- A memory server behind a reverse proxy: allow `POST /delivery` beside
+  `/export` and `/import`
+  ([memory server](https://github.com/l7aromeo/user-memory/blob/main/docs/server.md)).
+  Forward `/use`, `/tags`, `/auth/token` and `/` as well, as the updated
+  example does; otherwise the session hooks can't send what a session used
+  or the tag conditions a checkout ended.
+- Each session keeps a `.recall` file beside its snapshot in the state
+  folder. A session that is already open moves its file to the newest
+  layout in place at its next hook, keeping what it was shown.
+- The first session after the upgrade lists no rules as new.
+- A client and its memory server tell each other their minimum version:
+  session start says when either is below the other's. A memory server
+  older than its client refuses `forget` by import and a memory's history,
+  and says to upgrade it.
+
+### New
+
+- **Agents get the part of a memory that matches what they do.** Each step
+  an agent takes (a command, a file it reads or edits, a failure) is
+  matched against your memories, and the passage that matches comes after
+  the step, with whose word it is. It works from a local store and from a
+  memory server's while its connector runs. Each machine keeps a delivery
+  index of its store for this, in the state folder's `delivery/`, and a
+  server's clients keep the server's.
+- **A command one of your memories names is held back once, before it
+  runs,** with the passage as the reason the agent sees. Running the same
+  command again runs it. Holds come from this machine's store only. On a
+  slow or busy machine the hold still comes, and a rule recorded in
+  another terminal holds the agent's very next command. A note matches a
+  script however it runs (`./path`, `bash path`) and a program with or
+  without `.exe`. An agent's note that agents ran past, unchanged, in
+  three sessions in a row no longer holds; it is shown after the command
+  instead, and the user's rules always hold. `review` lists such notes as
+  a group of kind `stopped`; confirm one to make it hold again.
+- **A memory can hold until a date, a release tag or an event:** `record`
+  and `update` take `until` (`--until-date`, `--until-tag` with
+  `--until-project`, `--until-text`), and `update --ended` reports that an
+  event happened. A memory whose condition ended leaves the index, the
+  instruction files, search, read and delivery; `review` lists them.
+- **Every memory keeps a history of its changes,** with the client that
+  made each and the values it replaced: `user-memory history ID`, and
+  `read` with `history`. `update --drop-history` removes it; it is dropped
+  after a year; exports carry it.
+- **Search returns the part of a memory that matched** (`passage`), and
+  ranks a long memory by its best part.
+- **The index lists first what the project's recent sessions used,** and
+  session start shows the project's most-used knowledge after its rules.
+- **After a compaction, the agent gets back the memories it worked with,**
+  as they are in the store now; in Claude Code the compaction's summary is
+  asked to keep their ids and titles.
+- **Project rules in every context:** session start shows them first,
+  subagents get them when they start, and after a compaction they come
+  back.
+- **Session start lists the rules added or changed since this machine's
+  last session,** and how to remove one that isn't yours; `review` opens
+  with the rules and agents' memories of the last 30 days.
+- **Each machine can have its own server token,** revocable, read-only or
+  with an end date: `user-memory host token add NAME --out FILE`, `list`,
+  `revoke` and `retire-shared`. A token unused for 90 days stops working.
+  A refused machine says why.
+- **`user-memory upgrade`** moves this machine to a newer release the way
+  it was installed.
+- **`user-memory forget --import NAME`** undoes an applied import. A
+  forget by conversation copies the store into the backups folder first.
+- **An agent can confirm an observation** in another conversation, and the
+  index marks it "(learned in N sessions)": N counts the conversations
+  whose agent recorded or confirmed it, and only orders the index.
+  "(tentative)" now marks only inferences.
+- MCP hosts see each tool's hints: which tools only read, and which change
+  or remove memories. `embedding show` and doctor name an embeddings
+  endpoint off this machine and count the store's vectors.
+
+### Changed
+
+- An agent's observation reads as an agent's note, never as your rule, in
+  `read`, `search`, `review` and a refused `record`'s similar list (a new
+  `note` field).
+- Agents get clearer guidance on what to record and when, and a next step
+  when memory is unavailable; `import`, `forget` and `export` replies gain
+  `reason` or `next`.
+- The MCP tools' field descriptions are shorter: every session sends about
+  2 KB less to the model.
+- The change notice's header is reworded, `-` lines carry the memory's
+  title, and a session is no longer told of a change only it made.
+- The bundled SQLite is 3.54.1.
+
+### Faster
+
+- Forgetting or correcting a memory no longer rewrites the whole search
+  index: on 100,000 memories, about 100 ms.
+- The session hooks stay within their time limits on a large store.
+- Each prompt, session start and listed folder runs one git call fewer.
+- Review finds the pairs to compare without comparing every pair: about
+  0.2 s by words and 1.5 s with vectors at 10,000 memories, where it took
+  one and three minutes.
+- Review with an embedding model keeps the similar pairs it finds, so
+  later reviews compare only the memories embedded since; the first review
+  after the upgrade compares every pair, as before. On a store of more
+  than about 70,000 memories through a memory server, run
+  `user-memory review` once on the server's machine after upgrading.
+
+### Fixed
+
+- A session that starts while its memory server is down, or refuses the
+  token, has its memory tools and recovers when the server is back.
+- On Windows, `user-memory upgrade` and setup wait for a binary another
+  program holds for a moment.
+- A memory server's client answers a tool call the server took but never
+  answered, after 150 seconds, and reconnects.
+- A server tool call waits 90 seconds at most in all; a backup of a store
+  another program keeps locked is tried again later instead of hanging.
+- A memory server keeps an agent's session open while a call runs, so a
+  call longer than 5 minutes gets its answer.
+- A CLI command through a memory server waits up to 150 s for the server's
+  answer, as the connector does, instead of 10 s. A write that still gets
+  no answer says it may have completed and to search before repeating it.
+- Connectors on one machine ask a slow memory server one poll at a time,
+  over one MCP session.
+- A refused token's 401 is read even when the request was sent in more
+  than one write.
+- `review` never groups an inferred pattern with its own evidence. Thanks
+  to @rafaliazz for the fix
+  ([#161](https://github.com/l7aromeo/user-memory/pull/161)).
+- Search orders equal matches by whether their negations agree with the
+  query's.
+- A migration, repair or project move run twice in one second names its
+  backup apart (`-2.bak`).
+- The Docker server's upgrade says why its store check failed.
+- Hosts that ask for resources, prompts or completions get "Method not
+  found".
+
 ## v0.9.3
 
 ### Upgrade
