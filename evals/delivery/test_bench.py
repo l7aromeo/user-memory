@@ -505,6 +505,64 @@ class SessionShare(unittest.TestCase):
         self.assertGreater(run.session_share(rounds)[0], run.SESSION_BUILD_SHARE)
 
 
+def shaped(shares):
+    """Rounds of a 40 ms build whose shares are `shares`."""
+    return [{"alone": 40.0, "building": 80.0 + 40.0 * share, "finding": 80.0} for share in shares]
+
+
+# Rounds as #246's Windows run had them: a middle half from 25 % to about
+# 1,500 %, so half the rounds are over the bar on a runner whose speed
+# swung within each round.
+SWUNG = shaped([0.1, 0.2, 0.25, 0.3, 0.5, 0.8, 0.9, 1.0, 1.02, 1.1, 2.0,
+                3.0, 5.0, 9.0, 14.0, 14.7, 15.0, 15.5, 16.0, 18.0, 20.0][:run.SESSION_ROUNDS])
+
+
+class SessionJudged(unittest.TestCase):
+    """`session_judged`: a set of rounds too spread to judge is timed once
+    more, and a second one as spread is called too noisy, not a failure."""
+
+    def judged(self, *sets):
+        taken = list(sets)
+        timed = run.session_judged(lambda: taken.pop(0))
+        return timed, run.session_verdict(timed)
+
+    def test_steady_rounds_under_the_bar_are_timed_once_and_pass(self):
+        timed, (share, _, _, _, noisy) = self.judged(shaped([0.2, 0.25, 0.3] * 7))
+        self.assertEqual(len(timed), 1)
+        self.assertAlmostEqual(share, 0.25)
+        self.assertFalse(noisy)
+
+    def test_a_build_awaited_in_full_is_judged_at_once_and_over_the_bar(self):
+        # #225's awaited build: a middle half from 100 % to 106 %.
+        timed, (share, _, _, _, noisy) = self.judged(shaped([1.0, 1.03, 1.06] * 7))
+        self.assertEqual(len(timed), 1)
+        self.assertGreater(share, run.SESSION_BUILD_SHARE)
+        self.assertFalse(noisy)
+
+    def test_a_swung_set_is_timed_again_and_the_second_judged(self):
+        timed, (share, _, _, _, noisy) = self.judged(SWUNG, shaped([0.2, 0.25, 0.3] * 7))
+        self.assertEqual(len(timed), 2)
+        self.assertAlmostEqual(share, 0.25)
+        self.assertFalse(noisy)
+
+    def test_two_swung_sets_are_too_noisy_to_judge(self):
+        timed, (share, low, high, _, noisy) = self.judged(SWUNG, SWUNG)
+        self.assertEqual(len(timed), 2)
+        self.assertTrue(noisy)
+        self.assertGreater(share, run.SESSION_BUILD_SHARE, "a judged run would fail")
+        self.assertGreater(high - low, run.SESSION_NOISY_SPREAD)
+
+    def test_the_widest_calibration_run_is_judged(self):
+        # #225's widest run at 21 rounds: Windows x64, -87 % to 50 %.
+        wide = shaped([-1.5, -1.4, -1.3, -1.2, -1.0, -0.87, -0.6, -0.4, -0.2, 0.0, 0.1,
+                       0.2, 0.3, 0.4, 0.45, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
+        timed, (_, low, high, _, noisy) = self.judged(wide)
+        self.assertAlmostEqual(low, -0.87)
+        self.assertAlmostEqual(high, 0.5)
+        self.assertEqual(len(timed), 1, f"middle half {low:.0%} to {high:.0%}")
+        self.assertFalse(noisy)
+
+
 class SessionRounds(unittest.TestCase):
     def test_the_order_rotates_and_a_building_start_finds_no_base(self):
         steps, saved = [], run.bench
