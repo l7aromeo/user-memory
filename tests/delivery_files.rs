@@ -469,6 +469,36 @@ fn a_tool_hook_past_its_deadline_renames_nothing() {
     assert!(!holds(&home.overlay(), &hex("wombat-lint")));
 }
 
+/// How long a slow machine keeps a tool hook's refresh below: past the 1 s
+/// that a tool hook's 100 ms limit scaled ten times allows, and well within
+/// the room a test gives the post-tool push.
+const SLOW_REFRESH: Duration = Duration::from_millis(1_500);
+
+// A test's room gives the post-tool push as much time as the prompt hook
+// has, so a refresh that a slow machine stretches past a second still
+// lands.
+#[test]
+fn a_tool_hook_given_room_outlasts_a_slow_refresh() {
+    let home = Home::new();
+    home.record("deploy", "quokka-deploy");
+    home.hook("SessionStart", "s1", &[]);
+    home.record("lint", "wombat-lint");
+    let hold = home.path().join("hold");
+    fs::write(&hold, "").unwrap();
+    let hook = home.spawn(
+        "PostToolUse",
+        "s1",
+        &[("USER_MEMORY_HOLD_REFRESH", hold.to_str().unwrap())],
+    );
+    time::until("the hook holds the lock", || {
+        home.path().join("hold.reached").exists()
+    });
+    std::thread::sleep(SLOW_REFRESH);
+    fs::remove_file(&hold).unwrap();
+    time::finish(hook, "the hook");
+    assert!(holds(&home.overlay(), &hex("wombat-lint")));
+}
+
 #[test]
 fn an_overlay_whose_store_pruned_its_changes_writes_nothing() {
     let home = Home::new();

@@ -68,8 +68,9 @@ pub fn until(what: &str, mut done: impl FnMut() -> bool) {
 }
 
 /// The environment a hook runs in when a test checks what it prints: its
-/// time limits ten times longer, so a loaded machine never cuts it short,
-/// yet its 5-second limit still ends before [`STUCK`].
+/// time limits ten times longer, and the post-tool push at least 10 s (the
+/// hook's `HOOK_ROOM_FLOOR`), so a loaded machine never cuts it short, yet
+/// its 5-second limit still ends before [`STUCK`].
 pub const HOOK_ROOM: (&str, &str) = ("USER_MEMORY_HOOK_TIME_SCALE", "10");
 /// The hook's own time limits, for the tests of what happens at them.
 pub const HOOK_LIMITS: (&str, &str) = ("USER_MEMORY_HOOK_TIME_SCALE", "1");

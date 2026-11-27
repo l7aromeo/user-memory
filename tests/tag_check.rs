@@ -827,10 +827,11 @@ fn a_read_only_session_never_sends_its_end() {
     assert!(home.ended(&id).is_some(), "a writing session ends it");
 }
 
-/// Milliseconds each call of the slow git waits: past the tool hook's limit
-/// as the tests scale it (100 ms times `HOOK_ROOM`'s 10), so a push that
-/// waited on git would come too late to be printed.
-const SLOW_GIT_MS: u64 = 1_500;
+/// Milliseconds the tag check's lookup of its tags waits: past the room the
+/// tests give the post-tool push (`HOOK_ROOM_FLOOR`, 10 s), so a push that
+/// waited on the check would come too late to be printed. Only that call
+/// is slow, so the check itself waits once.
+const SLOW_GIT_MS: u64 = 11_000;
 
 #[test]
 fn a_tool_hook_with_no_tag_waited_for_spawns_no_git_in_a_new_folder() {
@@ -860,7 +861,11 @@ fn a_push_never_waits_on_the_tag_check_s_git() {
     // A tag is waited for and is made, so the tool hook looks it up, with
     // git, in a folder start never saw.
     home.git(&checkout, &["tag", "v9.0.0"]);
-    fs::write(home.shim().join("git.delay"), SLOW_GIT_MS.to_string()).unwrap();
+    fs::write(
+        home.shim().join("git.delay"),
+        format!("{SLOW_GIT_MS} for-each-ref"),
+    )
+    .unwrap();
     let pushed = home.ran("s1", &sub, "cargo publish");
     assert!(pushed.contains(&id[..8]), "the push arrives: {pushed:?}");
     assert!(home.end(&tag).is_some(), "the check ran after it");

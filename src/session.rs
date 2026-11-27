@@ -202,16 +202,54 @@ const PROMPT_LIMIT: Duration = Duration::from_secs(1);
 /// instruction-file sync's ([`crate::setup::SYNC_LIMIT`]), by
 /// `USER_MEMORY_HOOK_TIME_SCALE`, so tests that check what a hook prints or
 /// a write leaves give it room on a loaded machine; the tests of the limits
-/// themselves leave it unset.
+/// themselves leave it unset. The post-tool push takes [`hook_push_time`].
 pub(crate) fn hook_time(limit: Duration) -> Duration {
-    #[cfg(debug_assertions)]
-    if let Some(scale) = std::env::var("USER_MEMORY_HOOK_TIME_SCALE")
-        .ok()
-        .and_then(|scale| scale.parse::<u32>().ok())
-    {
-        return limit * scale;
+    scaled(limit, time_scale())
+}
+
+/// The time the post-tool hook's push has from its start: [`hook_time`] of
+/// `limit`, and in a debug build scaled above 1 at least
+/// [`HOOK_ROOM_FLOOR`]. The push is the post-tool hook's one deadline, so
+/// the floor changes no order between deadlines; the pre-tool hook's two,
+/// and the settle and tag check after the push, keep [`hook_time`].
+pub(crate) fn hook_push_time(limit: Duration) -> Duration {
+    push_room(limit, time_scale())
+}
+
+/// The least time the post-tool push has in a debug build scaled above 1.
+/// The prompt hook's 1 s scaled ten times is 10 s, and no prompt test has
+/// run out of that room on any CI machine; a tool hook's 100 ms scaled ten
+/// times, 1 s, ran out on a slow Windows runner. Below the 60 s a test
+/// waits before it takes a hook for hung.
+const HOOK_ROOM_FLOOR: Duration = Duration::from_secs(10);
+
+/// `limit` multiplied by `scale`, when a debug build has one.
+fn scaled(limit: Duration, scale: Option<u32>) -> Duration {
+    scale.map_or(limit, |scale| limit * scale)
+}
+
+/// [`hook_push_time`] of `limit` under `scale`.
+fn push_room(limit: Duration, scale: Option<u32>) -> Duration {
+    let run = scaled(limit, scale);
+    if scale.is_some_and(|scale| scale > 1) {
+        run.max(HOOK_ROOM_FLOOR)
+    } else {
+        run
     }
-    limit
+}
+
+/// `USER_MEMORY_HOOK_TIME_SCALE` in a debug build.
+#[cfg(debug_assertions)]
+fn time_scale() -> Option<u32> {
+    std::env::var("USER_MEMORY_HOOK_TIME_SCALE")
+        .ok()
+        .and_then(|scale| scale.parse().ok())
+}
+
+/// A release build always runs with the real limits.
+#[cfg(not(debug_assertions))]
+fn time_scale() -> Option<u32> {
+    None
 }
 
 /// The client that runs the hook; it decides the origin prefix, so the prefix
@@ -1970,6 +2008,24 @@ fn capped(text: String, limit: usize, unit: FitUnit, note: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A test's room raises the post-tool push to the floor, and a longer
+    // limit keeps its scaled time; the real limits, and none at all, stay
+    // as they are, as does every other deadline.
+    #[test]
+    fn the_push_gets_the_floor_only_when_given_room() {
+        let tool = tools::TOOL_HOOK_LIMIT;
+        assert_eq!(push_room(tool, Some(10)), HOOK_ROOM_FLOOR);
+        assert_eq!(push_room(LIMIT, Some(10)), LIMIT * 10);
+        assert_eq!(push_room(tool, Some(1)), tool);
+        assert_eq!(push_room(tool, Some(0)), Duration::ZERO);
+        assert_eq!(push_room(tool, None), tool);
+        assert_eq!(
+            scaled(tool, Some(10)),
+            tool * 10,
+            "other deadlines stay scaled"
+        );
+    }
 
     #[test]
     fn a_prompt_cut_off_at_its_limit_names_each_stage_still_running() {
