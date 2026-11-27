@@ -5510,72 +5510,67 @@ fn a_server_s_files_are_matched_only_while_a_connector_keeps_them_current() {
     drop(lock);
 }
 
-/// Seconds a test date lies ahead of now: long enough for the record,
-/// session start and one call before it passes, on a loaded machine.
-const DATE_AHEAD_SECS: i64 = 4;
-
 // A date that passes writes nothing, so a server's files still hold its
 // memory: the tool hook drops the match from the files' dates alone.
 #[test]
 fn a_server_s_memory_whose_date_passed_is_not_pushed_from_its_files() {
-    let poll = std::time::Duration::from_millis(300);
-    let host = Host::start(root());
-    let until = (jiff::Timestamp::now() + jiff::SignedDuration::from_secs(DATE_AHEAD_SECS))
-        .strftime("%Y-%m-%dT%H:%M:%SZ")
-        .to_string();
-    host.rpc(initialize(1));
-    let reply = host.rpc(call(
-        2,
-        "record",
-        json!({"type":"procedure","category":"build","context":"Releasing","title":"Run quokka-deploy","content":"Run `quokka-deploy` before the step.","reason":"Because","scope":"global","user_confirmed":true,"origin":"chat/deploy","until":{"date": until}}),
-    ));
-    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
-    let id = serde_json::from_str::<Value>(text).unwrap()["id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let machine = Machine {
-        home: tempdir().unwrap(),
-        url: format!("http://{}/mcp", host.address),
-        token: host.root.path().join("token"),
-        env: vec![("USER_MEMORY_MARKER_POLL_MS", poll.as_millis().to_string())],
-    };
-    let home = machine.home.path();
-    {
-        let _connector = machine.connector();
-        for session in ["before", "after"] {
-            machine.hook_with("session-start", session, json!({"source": "startup"}));
+    time::date_window(|date| {
+        let poll = std::time::Duration::from_millis(300);
+        let host = Host::start(root());
+        host.rpc(initialize(1));
+        let reply = host.rpc(call(
+            2,
+            "record",
+            json!({"type":"procedure","category":"build","context":"Releasing","title":"Run quokka-deploy","content":"Run `quokka-deploy` before the step.","reason":"Because","scope":"global","user_confirmed":true,"origin":"chat/deploy","until":{"date": date.until()}}),
+        ));
+        let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+        let Some(id) = date.stored(&serde_json::from_str(text).unwrap()) else {
+            return false;
+        };
+        let machine = Machine {
+            home: tempdir().unwrap(),
+            url: format!("http://{}/mcp", host.address),
+            token: host.root.path().join("token"),
+            env: vec![("USER_MEMORY_MARKER_POLL_MS", poll.as_millis().to_string())],
+        };
+        let home = machine.home.path();
+        {
+            let _connector = machine.connector();
+            for session in ["before", "after"] {
+                machine.hook_with("session-start", session, json!({"source": "startup"}));
+            }
+            machine.marker();
         }
-        machine.marker();
-    }
-    let marker = machine.marker();
-    let connected = find(home, "connected").expect("the connector's lock file");
-    let lock = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&connected)
-        .unwrap();
-    lock.lock_shared().unwrap();
-    let call = |session: &str| {
-        // The marker stays recent, as a running connector keeps it.
-        fs::File::options()
+        let marker = machine.marker();
+        let connected = find(home, "connected").expect("the connector's lock file");
+        let lock = fs::OpenOptions::new()
+            .read(true)
             .write(true)
-            .open(&marker)
-            .unwrap()
-            .set_modified(std::time::SystemTime::now())
+            .open(&connected)
             .unwrap();
-        added(&machine.hook_with(
-            "post-tool-use",
-            session,
-            json!({"tool_name":"Bash","tool_input":{"command":"quokka-deploy --now"},"tool_response":"done"}),
-        ))
-    };
-    assert!(call("before").contains(&id[..8]), "the date is ahead");
-    std::thread::sleep(std::time::Duration::from_secs(
-        DATE_AHEAD_SECS.unsigned_abs() + 1,
-    ));
-    assert_eq!(call("after"), "", "its date passed");
-    drop(lock);
+        lock.lock_shared().unwrap();
+        let call = |session: &str| {
+            // The marker stays recent, as a running connector keeps it.
+            fs::File::options()
+                .write(true)
+                .open(&marker)
+                .unwrap()
+                .set_modified(std::time::SystemTime::now())
+                .unwrap();
+            added(&machine.hook_with(
+                "post-tool-use",
+                session,
+                json!({"tool_name":"Bash","tool_input":{"command":"quokka-deploy --now"},"tool_response":"done"}),
+            ))
+        };
+        if !date.ahead(call("before").contains(&id[..8])) {
+            return false;
+        }
+        date.wait_past();
+        assert_eq!(call("after"), "", "its date passed");
+        drop(lock);
+        true
+    });
 }
 
 // A server released before the route answers 404: the client keeps no
