@@ -1325,7 +1325,11 @@ async fn stamps(
         input["rule_prints"] = json!(true);
     }
     let reply = match remote {
-        Some(connection) => connection.call("index", input).await?,
+        Some(connection) => {
+            connection
+                .call("index", input, crate::remote::HOOK_CALL_WAIT)
+                .await?
+        }
         None => {
             let input: memory::Index = serde_json::from_value(input)?;
             let db = db_path();
@@ -1428,7 +1432,11 @@ async fn index(
     let remote = remote.as_ref();
     let mut fetch = async |input: Value| -> anyhow::Result<String> {
         let page = match remote {
-            Some(connection) => connection.call("index", input).await?,
+            Some(connection) => {
+                connection
+                    .call("index", input, crate::remote::HOOK_CALL_WAIT)
+                    .await?
+            }
             None => {
                 let input: memory::Index = serde_json::from_value(input)?;
                 let db = db_path();
@@ -1540,7 +1548,11 @@ async fn linked(
 ) -> anyhow::Result<Vec<String>> {
     let input = json!({"origin": origin, "projects": []});
     let reply: Value = match remote {
-        Some(connection) => serde_json::from_str(&connection.call("link", input).await?)?,
+        Some(connection) => serde_json::from_str(
+            &connection
+                .call("link", input, crate::remote::HOOK_CALL_WAIT)
+                .await?,
+        )?,
         None => {
             let input: memory::Link = serde_json::from_value(input)?;
             let db = db_path();

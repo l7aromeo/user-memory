@@ -1386,11 +1386,12 @@ fn set_skill(enabled: bool, claude: bool) -> Result<Skill> {
 }
 
 /// The rules view from the server `remote`, else the store at `db`, within
-/// `max_bytes`.
+/// `max_bytes`, waiting `wait` for the server's answer.
 async fn render_rules(
     remote: Option<&crate::remote::Connection>,
     db: &Path,
     max_bytes: usize,
+    wait: Duration,
 ) -> Result<String> {
     match remote {
         Some(remote) => instructions::checked(
@@ -1398,6 +1399,7 @@ async fn render_rules(
                 .call(
                     "index",
                     json!({"instructions": true, "instructions_max_bytes": max_bytes}),
+                    wait,
                 )
                 .await?,
         ),
@@ -1410,7 +1412,13 @@ async fn render_rules(
 
 /// The rules view for `places` from the store or server `paths` names.
 async fn rules_view(paths: &Paths, places: &[instructions::Place]) -> Result<String> {
-    render_rules(paths.remote.as_ref(), &paths.db, instructions::room(places)).await
+    render_rules(
+        paths.remote.as_ref(),
+        &paths.db,
+        instructions::room(places),
+        crate::remote::server_call_limit(),
+    )
+    .await
 }
 
 /// Writes the user's global rules into each client's instruction file, or
@@ -1482,10 +1490,12 @@ pub async fn sync_instructions() -> Result<Vec<Client>> {
     let places = instructions::Place::for_clients(has(Client::Claude), has(Client::Codex))?;
     #[cfg(debug_assertions)]
     stall_for_tests().await;
+    // Every caller bounds a sync by SYNC_LIMIT or a hook's share of its time.
     let rules = render_rules(
         configured_remote()?.as_ref(),
         &crate::db_path(),
         instructions::room(&places),
+        crate::remote::HOOK_CALL_WAIT,
     )
     .await?;
     let kinds: Vec<Client> = [Client::Claude, Client::Codex]

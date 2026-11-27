@@ -937,7 +937,7 @@ fn connector_keeps_working_across_a_restart_between_calls() {
 /// two apart, so a call after the deadline shows it reconnects (answered at
 /// the reconnect bound) rather than waiting out another deadline.
 #[cfg(unix)]
-const FORWARDED_CALL_TEST_LIMIT_MS: u64 = 15_000;
+const SERVER_CALL_TEST_LIMIT_MS: u64 = 15_000;
 
 /// How long the stall test waits for a late reply that must not come: the
 /// resumed host answers within milliseconds.
@@ -957,12 +957,12 @@ fn a_call_a_stalled_host_never_answers_is_answered_at_the_deadline_and_its_late_
     let client = tempdir().unwrap();
     let client_token = client.path().join("token");
     fs::write(&client_token, TOKEN).unwrap();
-    let limit = FORWARDED_CALL_TEST_LIMIT_MS.to_string();
+    let limit = SERVER_CALL_TEST_LIMIT_MS.to_string();
     let mut child = connector_with(
         &host,
         client.path(),
         &client_token,
-        &[("USER_MEMORY_FORWARDED_CALL_LIMIT_MS", &limit)],
+        &[("USER_MEMORY_SERVER_CALL_LIMIT_MS", &limit)],
     );
     let mut input = child.0.stdin.take().unwrap();
     let errors = Logged::of(child.0.stderr.take().unwrap());
@@ -1011,7 +1011,7 @@ fn a_call_a_stalled_host_never_answers_is_answered_at_the_deadline_and_its_late_
         "{unanswered}"
     );
     assert!(
-        waited >= std::time::Duration::from_millis(FORWARDED_CALL_TEST_LIMIT_MS),
+        waited >= std::time::Duration::from_millis(SERVER_CALL_TEST_LIMIT_MS),
         "answered after {waited:?}, before the deadline"
     );
     // The next call reconnects instead of waiting on the dropped
@@ -1030,7 +1030,7 @@ fn a_call_a_stalled_host_never_answers_is_answered_at_the_deadline_and_its_late_
     assert_eq!(retried["result"]["isError"], true, "{retried}");
     assert!(
         waited >= RECONNECT_BOUND
-            && waited < std::time::Duration::from_millis(FORWARDED_CALL_TEST_LIMIT_MS),
+            && waited < std::time::Duration::from_millis(SERVER_CALL_TEST_LIMIT_MS),
         "answered after {waited:?}, not at the reconnect bound"
     );
     signal("CONT");
@@ -2889,6 +2889,121 @@ fn client_reply(host: &Host, home: &Path, this: Option<&str>, args: &[&str]) -> 
         String::from_utf8_lossy(&out.stderr)
     );
     serde_json::from_slice(&out.stdout).unwrap()
+}
+
+/// How long the tests below hold a server's store locked: past the 10 s a
+/// CLI call through a server used to wait (#264), and well inside the
+/// server's busy wait (30 s) and its budget for a call (90 s).
+const LOCKED_PAST_THE_OLD_WAIT: Duration = Duration::from_secs(12);
+
+/// `record` arguments for a memory titled `title`.
+fn record_args(title: &str) -> Vec<&str> {
+    vec![
+        "record",
+        "--type",
+        "preference",
+        "--category",
+        "workflow",
+        "--content",
+        title,
+        "--title",
+        title,
+        "--scope",
+        "global",
+    ]
+}
+
+/// Holds `host`'s store's write lock for `held` on a thread of its own,
+/// then lets it go; the thread ends when it has.
+fn lock_store(host: &Host, held: Duration) -> std::thread::JoinHandle<()> {
+    let lock = rusqlite::Connection::open(host.root.path().join("shared.sqlite3")).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    std::thread::spawn(move || {
+        std::thread::sleep(held);
+        lock.execute_batch("ROLLBACK").unwrap();
+    })
+}
+
+/// How many memories titled `title` the store of `host` holds.
+fn titled(host: &Host, title: &str) -> i64 {
+    rusqlite::Connection::open(host.root.path().join("shared.sqlite3"))
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM memories WHERE title=?1",
+            [title],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+// A CLI write waits as long as the server may take for the call: a store
+// locked past the CLI's old 10 s, and well inside the server's budget, is
+// stored and reported stored.
+#[test]
+fn a_cli_write_the_server_answers_late_is_reported_stored() {
+    let host = Host::start(root());
+    let home = tempdir().unwrap();
+    client_reply(
+        &host,
+        home.path(),
+        None,
+        &record_args("Keep the changelog current"),
+    );
+    let released = lock_store(&host, LOCKED_PAST_THE_OLD_WAIT);
+    let started = std::time::Instant::now();
+    let out = client_run(&host, home.path(), None, &record_args("Tag every release"));
+    let waited = started.elapsed();
+    released.join().unwrap();
+    assert!(
+        out.status.success(),
+        "after {waited:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let reply: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(reply["stored"], true, "{reply}");
+    assert!(
+        waited >= LOCKED_PAST_THE_OLD_WAIT,
+        "the record never met the lock: {waited:?}"
+    );
+    assert_eq!(titled(&host, "Tag every release"), 1);
+}
+
+// A CLI write the server doesn't answer in time may still be stored: its
+// error says so and to search before repeating it.
+#[test]
+fn a_cli_write_left_unanswered_says_to_search_before_repeating_it() {
+    let host = Host::start(root());
+    let home = tempdir().unwrap();
+    client_reply(
+        &host,
+        home.path(),
+        None,
+        &record_args("Keep the changelog current"),
+    );
+    let released = lock_store(&host, Duration::from_secs(3));
+    let out = Command::new(env!("CARGO_BIN_EXE_user-memory"))
+        .args(record_args("Tag every release"))
+        .sandboxed(home.path())
+        .env("USER_MEMORY_URL", format!("http://{}/mcp", host.address))
+        .env("USER_MEMORY_TOKEN_FILE", host.root.path().join("token"))
+        .env("USER_MEMORY_SERVER_CALL_LIMIT_MS", "1000")
+        .env_remove("USER_MEMORY_DB")
+        .output()
+        .unwrap();
+    released.join().unwrap();
+    assert!(!out.status.success());
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        said.contains(&format!(
+            "The memory server at http://{}/mcp did not answer record within 1 s; it may have completed it. Search for it before repeating it.",
+            host.address
+        )),
+        "{said}"
+    );
+    // The server stored it once the lock was gone.
+    time::until("the unanswered record is stored", || {
+        titled(&host, "Tag every release") == 1
+    });
 }
 
 /// A memory recorded through `host` and corrected once, so its history has

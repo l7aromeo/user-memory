@@ -20,6 +20,12 @@ use std::{
 /// one poll is one small request.
 pub const REMOTE_MARKER_POLL: Duration = Duration::from_secs(5);
 
+/// How long one poll waits for the server's answer. A poll left unanswered
+/// is asked again at the next one, and a marker that misses polls stops
+/// counting, so the hooks ask the server themselves; waiting longer would
+/// only hold the poller back.
+const POLL_CALL_WAIT: Duration = Duration::from_secs(10);
+
 /// Polls a quiet machine makes in [`REMOTE_MARKER_POLL`]'s stead: once a
 /// minute, so a machine left open asks the server little.
 const QUIET_POLLS: u32 = 12;
@@ -509,7 +515,12 @@ pub async fn poll(connection: Connection, mut stop: tokio::sync::watch::Receiver
                 },
             };
             let reply = connection
-                .call_in(&session, "index", poll_input(files.position()))
+                .call_in(
+                    &session,
+                    "index",
+                    poll_input(files.position()),
+                    POLL_CALL_WAIT,
+                )
                 .await
                 .ok()
                 .and_then(|text| parse_stamps_reply(&text));
