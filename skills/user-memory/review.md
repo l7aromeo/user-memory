@@ -4,6 +4,7 @@
 2. Present each group by kind, with each member's id, type, scope and a short paraphrase of its content:
    - `recent`: the rules added or changed in the last 30 days, then the memories agents recorded in that time. Session start sends the user here when a rule is new.
    - `ended`: memories whose condition ended in the last 30 days, each with `ended` (when, how, the evidence and the conversation). A memory out of force by its condition is in no other group but these.
+   - `stopped`: agents' notes that no longer hold a command back, because agents ran the held command again, unchanged, in several sessions in a row; each member's `overrides` says in how many.
    - `duplicate`: the same memory recorded more than once in one scope.
    - `redundant`: a project memory that repeats a global one.
    - `shared`: the same rule as project memories in several projects, with no global memory covering them. Each project still needs its copy.
@@ -15,6 +16,7 @@
    A group that lists only some of its members gives the number left out as `left_out`: say so, and review again once its listed members are handled.
 3. Propose one action per group and let the user choose:
    - Recent: ask whether each rule is the user's. Forget one they did not give, or everything its conversation recorded with `forget` and its `origin`; change nothing else unless they ask. Never pass its members to `review` with `keep`: they are not alike, and the group stays listed for 30 days whatever the user answers.
+   - Stopped: ask whether the note is still right. If it is, confirm it (`record` with `confirms` naming it, `source: observed`), and it holds again; if it is too broad, change its wording with `update`; if it is wrong, forget it. Change nothing without the user's answer.
    - Duplicate: merge into one memory, or forget the extras.
    - Redundant: forget the project copy; the global memory already applies there.
    - Shared: leave the copies, unless the user wants the rule everywhere. Then, with their yes, record it once with scope global and `user_confirmed: true`, and only after that forget the project copies. Never forget a copy on its own: each project would lose the rule.

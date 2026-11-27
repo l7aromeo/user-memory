@@ -271,6 +271,38 @@ fn seed(home: &Path, db: &Path) {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    // An agent's note whose hold three sessions in a row ran past (#238).
+    let out = binary(home, db)
+        .args([
+            "record",
+            "--type",
+            "lesson",
+            "--category",
+            "locks",
+            "--scope",
+            "global",
+            "--source",
+            "observed",
+            "--evidence",
+            "Seen in synthetic sessions",
+            "--title",
+            "Lock files in a chained rm",
+            "--content",
+            "Never delete another session's lock file in a chained rm.",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let recorded: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let id = recorded["id"].as_str().unwrap().to_owned();
+    let conn = rusqlite::Connection::open(db).unwrap();
+    for session in ["s1", "s2", "s3"] {
+        conn.execute(
+            "INSERT INTO memory_use (memory,project,origin,at,read,recorded,shown,held,overridden) VALUES (?1,'lab',?2,CURRENT_TIMESTAMP,0,0,0,1,1)",
+            rusqlite::params![id, format!("claude:session/{session}")],
+        )
+        .unwrap();
+    }
 }
 
 /// Drives `serve` through `tools/list` and `calls`; returns the tool list and
@@ -433,7 +465,8 @@ fn surface(root: &TempDir) -> Surface {
                 "recent",
                 "redundant",
                 "shared",
-                "stale"
+                "stale",
+                "stopped"
             ]
             .map(str::to_owned)
         ),

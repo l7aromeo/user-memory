@@ -11,6 +11,7 @@ use super::{
     schema::{SELECT, connect, get, row, write},
     selection::refuse_local_paths,
     similar::{Draft, Thresholds, document, stored_vectors, thresholds},
+    usage::{HOLD_OVERRIDES, override_runs},
     write::mark_pair,
 };
 use anyhow::{Result, bail};
@@ -131,6 +132,8 @@ enum Kind {
     Recent,
     /// Next: an end an agent made loosens a rule, which the user checks.
     Ended,
+    /// Then: a note agents ran past no longer holds, which the user checks.
+    Stopped,
     Duplicate,
     Redundant,
     Shared,
@@ -144,6 +147,7 @@ impl Kind {
     fn name(self) -> &'static str {
         match self {
             Self::Recent => "recent",
+            Self::Stopped => "stopped",
             Self::Duplicate => "duplicate",
             Self::Redundant => "redundant",
             Self::Shared => "shared",
@@ -154,10 +158,15 @@ impl Kind {
             Self::OpenCondition => "open_condition",
         }
     }
-    fn reason(self) -> &'static str {
-        match self {
+    fn reason(self) -> String {
+        let reason = match self {
             Self::Recent => {
                 "Rules added or changed, then memories agents recorded, in the last 30 days. Show them to the user; forget a rule the user did not give, only with their yes."
+            }
+            Self::Stopped => {
+                return format!(
+                    "Agents ran past these notes' holds, unchanged, in {HOLD_OVERRIDES} sessions in a row, so they no longer hold a command back and are shown after it runs. Show them to the user: confirm one to make it hold again, change it, or forget it, only with their yes."
+                );
             }
             Self::Duplicate => {
                 "These say the same thing. With the user's approval, merge them by recording one memory that supersedes them all, or forget the extras."
@@ -183,7 +192,8 @@ impl Kind {
             Self::OpenCondition => {
                 "Tag or text conditions unchanged for over 60 days. Ask the user whether each still holds; with their yes, update its until or forget it."
             }
-        }
+        };
+        reason.to_owned()
     }
 }
 
@@ -571,6 +581,22 @@ fn review_with(
     if !open.is_empty() {
         groups.push((Kind::OpenCondition, open, left_out));
     }
+    // The agents' notes that stopped holding, longest run of overrides first.
+    let runs: HashMap<String, usize> = override_runs(conn)?.into_iter().collect();
+    let mut stopped: Vec<usize> = (0..memories.len())
+        .filter(|&i| runs.contains_key(&memories[i].id.to_string()))
+        .collect();
+    stopped.sort_by(|&a, &b| {
+        let run = |i: usize| runs[&memories[i].id.to_string()];
+        run(b)
+            .cmp(&run(a))
+            .then_with(|| memories[a].id.cmp(&memories[b].id))
+    });
+    let left_out = stopped.len().saturating_sub(MAX_MEMBERS);
+    stopped.truncate(MAX_MEMBERS);
+    if !stopped.is_empty() {
+        groups.push((Kind::Stopped, stopped, left_out));
+    }
     let newest = |members: &[usize]| members.iter().map(|&i| recency(&memories[i])).max();
     let smallest = |members: &[usize]| members.iter().map(|&i| memories[i].id).min();
     groups.sort_by(|(ka, a, _), (kb, b, _)| {
@@ -596,6 +622,9 @@ fn review_with(
                         member["ended"] = end.clone();
                     }
                     super::note_tentative(&mut member);
+                    if kind == Kind::Stopped {
+                        member["overrides"] = json!(runs[&m.id.to_string()]);
+                    }
                     member
                 })
                 .collect();
@@ -799,6 +828,65 @@ mod tests {
         );
         assert_eq!(member["ended"]["origin"], "chat/end");
         assert_eq!(member["until"], json!({"text":"the parser ships"}));
+    }
+
+    /// Notes agents ran past in three sessions are in `stopped`, after
+    /// `ended`; once a note's condition ends it is out of force and only in
+    /// `ended`.
+    #[test]
+    fn a_note_out_of_force_is_not_listed_as_stopped() {
+        let (_dir, _db, conn) = store();
+        let note = |content| {
+            insert(
+                &conn,
+                New {
+                    source: "observed",
+                    ..preference("workflow", content)
+                },
+            )
+        };
+        let (note, kept) = (
+            note("Run the slow tests first"),
+            note("Lint before pushing"),
+        );
+        for id in [note, kept] {
+            for origin in ["chat/s1", "chat/s2", "chat/s3"] {
+                conn.execute(
+                    "INSERT INTO memory_use (memory,project,origin,at,read,recorded,shown,held,overridden) VALUES (?1,'github.com/example/app',?2,CURRENT_TIMESTAMP,0,0,0,1,1)",
+                    params![id.to_string(), origin],
+                )
+                .unwrap();
+            }
+        }
+        let group = |kind: &str| {
+            groups(&conn, None, false)
+                .into_iter()
+                .find(|(k, _)| k == kind)
+                .map(|(_, ids)| ids)
+                .unwrap_or_default()
+        };
+        let mut both = group("stopped");
+        both.sort();
+        let mut expected = vec![note, kept];
+        expected.sort();
+        assert_eq!(both, expected);
+        conn.execute(
+            "UPDATE memories SET until_kind='text',until_value='the suite is fast' WHERE id=?1",
+            [note.to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memory_ended (memory_id,how,evidence,origin) VALUES (?1,'evidence','the suite runs in a minute','chat/end')",
+            [note.to_string()],
+        )
+        .unwrap();
+        assert_eq!(group("ended"), [note]);
+        assert_eq!(group("stopped"), [kept]);
+        let kinds: Vec<String> = groups(&conn, None, false)
+            .into_iter()
+            .map(|(kind, _)| kind)
+            .collect();
+        assert_eq!(kinds, ["ended", "stopped"]);
     }
 
     #[test]

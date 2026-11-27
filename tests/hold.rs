@@ -961,3 +961,75 @@ fn a_hold_heeded_before_the_same_command_starts_the_count_again() {
         "the count started again"
     );
 }
+
+// `review` lists an agent's note that stopped holding, after `recent`,
+// with how many sessions in a row overrode it; once the note is
+// confirmed it holds again and the group is gone (#238).
+#[test]
+fn review_lists_a_note_that_stopped_holding_until_it_is_confirmed() {
+    let home = Home::new();
+    home.with_project();
+    let note = locks_note(&home);
+    let other = docs_fact(&home);
+    let review = || -> Value {
+        let out = home.command(&["review"]).output().unwrap();
+        assert!(out.status.success(), "{out:?}");
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let stopped = |review: &Value| -> Option<Value> {
+        review["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["kind"] == "stopped")
+            .cloned()
+    };
+    // An override, then a heeded session: the run counts from there.
+    // The store's times have whole seconds: one apart orders the sessions.
+    let apart = || std::thread::sleep(std::time::Duration::from_millis(1100));
+    home.overridden("s0", &other, CHAINED_RM);
+    apart();
+    home.start("h");
+    assert!(home.before("h", None, CHAINED_RM).is_some());
+    home.edit("h", None, "notes.md");
+    home.after("h", None, CHAINED_RM);
+    home.prompt("h");
+    apart();
+    home.overridden("s1", &other, CHAINED_RM);
+    home.overridden("s2", &other, CHAINED_RM);
+    assert_eq!(stopped(&review()), None, "two sessions are not enough");
+    home.overridden("s3", &other, CHAINED_RM);
+    let found = review();
+    let group = stopped(&found).unwrap();
+    assert_eq!(
+        group["reason"],
+        "Agents ran past these notes' holds, unchanged, in 3 sessions in a row, so they no longer hold a command back and are shown after it runs. Show them to the user: confirm one to make it hold again, change it, or forget it, only with their yes."
+    );
+    assert_eq!(group["members"][0]["id"], note.as_str());
+    assert_eq!(group["members"][0]["overrides"], 3);
+    let kinds: Vec<&str> = found["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| g["kind"].as_str().unwrap())
+        .collect();
+    let at = kinds.iter().position(|k| *k == "stopped").unwrap();
+    assert_eq!(kinds[..at], ["recent"], "right after recent: {kinds:?}");
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    home.record_with(
+        "lesson",
+        "Lock files in a chained rm",
+        "Never delete another session's lock file in `rm -rf .locks/` chained after another command.",
+        &[
+            "--source",
+            "observed",
+            "--evidence",
+            "Seen again in a third session",
+            "--confirms",
+            &note,
+            "--origin",
+            "claude:session/other",
+        ],
+    );
+    assert_eq!(stopped(&review()), None, "confirmed, so it holds again");
+}
