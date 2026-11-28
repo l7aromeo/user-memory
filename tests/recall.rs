@@ -435,6 +435,103 @@ fn each_command_of_a_line_and_each_file_it_reads_is_matched_as_its_own_step() {
 }
 
 #[test]
+fn a_here_document_is_text_the_command_reads_unless_a_shell_runs_it() {
+    let home = Home::new();
+    let suite = home.record(
+        "Only the supervisor runs the e2e suite",
+        "Workers never run `bun test:e2e`; it loads the suite's token.",
+        &[],
+    );
+    let cache = home.record(
+        "Store contract tests",
+        "CI collects only `test_<name>_contract` functions for code under `src/store/`.",
+        &[],
+    );
+    let read = format!("cat {}", home.path().join("src/store/cache.py").display());
+    let lines: Vec<(String, Vec<&str>)> = vec![
+        // A body is what the command reads, as quoted text is: its lines
+        // name no command and no file of the step, and the line goes on
+        // after its delimiter, however that is written.
+        (
+            "cat > notes/msg.txt <<'EOF'\ndocs: say the suite passes\n\nbun test:e2e passes.\nEOF"
+                .into(),
+            vec![],
+        ),
+        (
+            format!("cat <<EOF > notes/a.txt\nbun test:e2e\nEOF\n{read}"),
+            vec![cache.as_str()],
+        ),
+        (
+            format!("cat <<'EOF'\nbun test:e2e\nEOF\n{read}"),
+            vec![cache.as_str()],
+        ),
+        (
+            format!("cat << \"EOF\"\nbun test:e2e\nEOF\n{read}"),
+            vec![cache.as_str()],
+        ),
+        (
+            format!("cat <<\\EOF\nbun test:e2e\nEOF\n{read}"),
+            vec![cache.as_str()],
+        ),
+        (
+            format!("cat <<-EOF\n\tbun test:e2e\n\tEOF\n{read}"),
+            vec![cache.as_str()],
+        ),
+        (
+            format!("cat <<EOF\r\nbun test:e2e\r\nEOF\r\n{read}"),
+            vec![cache.as_str()],
+        ),
+        (format!("python3 - <<'PY'\n{read}\nPY"), vec![]),
+        // Two on one line: each body in turn.
+        (
+            format!("cat <<A <<'B'; echo done\none\nA\nbun test:e2e\nB\n{read}"),
+            vec![cache.as_str()],
+        ),
+        // A body no line ends runs to the end of the command.
+        ("cat <<EOF\nbun test:e2e".into(), vec![]),
+        // `<<` that opens none: quoted, a here-string, or a shift.
+        ("echo \"<<EOF\"\nbun test:e2e".into(), vec![suite.as_str()]),
+        ("cat <<< EOF\nbun test:e2e".into(), vec![suite.as_str()]),
+        (
+            "echo $((1 << 2))\nbun test:e2e\n2".into(),
+            vec![suite.as_str()],
+        ),
+        // A shell reads it as its script: its commands are the step's,
+        // their paths taken relative to the session's folder too.
+        (
+            "bash <<'EOF'\nbun test:e2e\nEOF".into(),
+            vec![suite.as_str()],
+        ),
+        (
+            "sh -s notes.txt <<EOF\nset -e\nbun test:e2e\nEOF".into(),
+            vec![suite.as_str()],
+        ),
+        (
+            format!("bash -e <<'EOF'\n{read}\nEOF"),
+            vec![cache.as_str()],
+        ),
+        // Not when the shell runs a script or its `-c`: the body is data.
+        (
+            "bash tools/seed.sh <<'EOF'\nbun test:e2e\nEOF".into(),
+            vec![],
+        ),
+        ("bash -c 'cat' <<'EOF'\nbun test:e2e\nEOF".into(), vec![]),
+    ];
+    for (n, (line, expected)) in lines.iter().enumerate() {
+        let session = format!("s{n}");
+        home.start(&session, "startup");
+        let pushed = home.run(&session, line);
+        for id in [&suite, &cache] {
+            assert_eq!(
+                pushed.contains(short(id)),
+                expected.contains(&id.as_str()),
+                "{line:?}: {id} in {pushed:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_file_read_through_the_shell_reaches_what_a_read_of_it_reaches() {
     let home = Home::new();
     let store = home.record(

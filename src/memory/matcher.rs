@@ -122,7 +122,8 @@ const READERS: &[&str] = &[
     "wc",
 ];
 
-/// Shells whose `-c` script is the command line they run.
+/// Shells whose `-c` script is the command line they run, and whose
+/// here-document is when they get no script otherwise ([`reads_script`]).
 const SHELLS: &[&str] = &["bash", "sh", "zsh"];
 
 /// Programs that run the script file they are given, which is what a
@@ -286,7 +287,10 @@ impl Terms {
 /// The segments of a command line: the commands of a chain, pipe or
 /// subshell, split at `&&`, `||`, `;`, `|`, `&`, parentheses, backticks
 /// and line ends outside quotes, each as its words without quotes. A
-/// redirection's `&` (`2>&1`, `&>log`) is part of its word.
+/// redirection's `&` (`2>&1`, `&>log`) is part of its word. A
+/// here-document's body is text the command reads, like quoted text, so
+/// it adds no segment, unless a shell reads it as its script
+/// ([`reads_script`]): then its commands are segments too.
 fn segments(line: &str) -> Vec<Vec<String>> {
     lex(line)
         .into_iter()
@@ -307,10 +311,59 @@ struct Word {
     span: Range<usize>,
 }
 
+/// A here-document a command line opens (`<<EOF`, `<<'EOF'`, `<<-EOF`):
+/// the segment whose input it is, by its place among the segments
+/// [`lex_line`] gives, and where its body is in the line.
+struct HereDocument {
+    segment: usize,
+    body: Range<usize>,
+}
+
 /// The words of a command line in their segments, for [`segments`] and
-/// [`word_spans`].
+/// [`word_spans`], with the commands of a here-document a shell runs
+/// after the segment it feeds.
 fn lex(line: &str) -> Vec<Vec<Word>> {
+    let (segments, documents) = lex_line(line);
+    let mut lexed = Vec::with_capacity(segments.len());
+    for (at, words) in segments.into_iter().enumerate() {
+        // A command reads the last here-document it is given.
+        let script = documents
+            .iter()
+            .rev()
+            .find(|document| document.segment == at)
+            .filter(|_| reads_script(&words))
+            .map(|document| document.body.clone());
+        lexed.push(words);
+        if let Some(body) = script {
+            for mut words in lex(&line[body.clone()]) {
+                for word in &mut words {
+                    word.span = word.span.start + body.start..word.span.end + body.start;
+                }
+                lexed.push(words);
+            }
+        }
+    }
+    lexed.retain(|words| !words.is_empty());
+    lexed
+}
+
+/// The words of a command line in their segments, empty ones kept so a
+/// [`HereDocument`] can name its segment, and the here-documents the line
+/// opens. A body starts at the end of the line that opens it and runs to
+/// the line that is its delimiter alone, or to the end of the command
+/// when none is, as a shell reads it. `<<` in quotes or in arithmetic
+/// (`$((1 << 2))`) opens none, nor does a here-string (`<<<`), whose word
+/// is read as any word.
+fn lex_line(line: &str) -> (Vec<Vec<Word>>, Vec<HereDocument>) {
     let mut segments = Vec::new();
+    let mut documents = Vec::new();
+    // Here-documents opened since the last line end: each one's segment,
+    // its delimiter, and whether its lines drop their leading tabs (`<<-`).
+    let mut opened: Vec<(usize, String, bool)> = Vec::new();
+    // How many parentheses deep in arithmetic (`((…))`) the line is.
+    let mut arithmetic = 0usize;
+    // Where the line goes on past the bodies just read.
+    let mut resume = 0;
     let mut words: Vec<Word> = Vec::new();
     let mut word = Word {
         text: String::new(),
@@ -337,6 +390,9 @@ fn lex(line: &str) -> Vec<Vec<Word>> {
         word.span.end = at + c.len_utf8();
     };
     while let Some((at, c)) = chars.next() {
+        if at < resume {
+            continue;
+        }
         let next = chars.peek().map(|&(_, next)| next);
         match (quote, c) {
             (Some(q), c) if c == q => quote = None,
@@ -345,7 +401,28 @@ fn lex(line: &str) -> Vec<Vec<Word>> {
             (None, '&') if word.text.ends_with(['>', '<']) || next == Some('>') => {
                 push(&mut word, at, c);
             }
+            (None, '<') if next == Some('<') && arithmetic == 0 => {
+                chars.next();
+                if chars.next_if(|&(_, c)| c == '<').is_some() {
+                    for (i, c) in "<<<".char_indices() {
+                        push(&mut word, at + i, c);
+                    }
+                    continue;
+                }
+                end_word(&mut word, &mut words);
+                let tabs = chars.next_if(|&(_, c)| c == '-').is_some();
+                while chars.next_if(|&(_, c)| c == ' ' || c == '\t').is_some() {}
+                let delimiter = here_delimiter(&mut chars);
+                if !delimiter.is_empty() {
+                    opened.push((segments.len(), delimiter, tabs));
+                }
+            }
             (None, '(' | ')' | '`') => {
+                if c == '(' && (arithmetic > 0 || next == Some('(')) {
+                    arithmetic += 1;
+                } else if c == ')' {
+                    arithmetic = arithmetic.saturating_sub(1);
+                }
                 // `$(` opens a command substitution: the `$` is no word.
                 if word.text.ends_with('$') {
                     word.text.pop();
@@ -365,6 +442,14 @@ fn lex(line: &str) -> Vec<Vec<Word>> {
             (None, ';' | '\n') => {
                 end_word(&mut word, &mut words);
                 segments.push(std::mem::take(&mut words));
+                if c == '\n' {
+                    resume = at + c.len_utf8();
+                    for (segment, delimiter, tabs) in opened.drain(..) {
+                        let (body, after) = here_body(line, resume, &delimiter, tabs);
+                        documents.push(HereDocument { segment, body });
+                        resume = after;
+                    }
+                }
             }
             (None, c) if c.is_whitespace() => end_word(&mut word, &mut words),
             (None, c) => push(&mut word, at, c),
@@ -372,8 +457,79 @@ fn lex(line: &str) -> Vec<Vec<Word>> {
     }
     end_word(&mut word, &mut words);
     segments.push(words);
-    segments.retain(|words| !words.is_empty());
-    segments
+    (segments, documents)
+}
+
+/// The delimiter word after `<<`, without its quotes and backslashes
+/// (`'EOF'`, `"EOF"` and `\EOF` are `EOF`), up to a space or an operator
+/// outside quotes.
+fn here_delimiter(chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>) -> String {
+    let mut delimiter = String::new();
+    let mut quote: Option<char> = None;
+    while let Some(&(_, c)) = chars.peek() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), c) => delimiter.push(c),
+            (None, '\'' | '"') => quote = Some(c),
+            (None, '\\') => {}
+            (None, c) if c.is_whitespace() || ";&|()<>`".contains(c) => break,
+            (None, c) => delimiter.push(c),
+        }
+        chars.next();
+    }
+    delimiter
+}
+
+/// A here-document's body in `line`, from `start` to the line that is
+/// `delimiter` alone (after its leading tabs when `tabs`, and a Windows
+/// line end), and where the line goes on after that one; to the end of
+/// `line` when no line is.
+fn here_body(line: &str, start: usize, delimiter: &str, tabs: bool) -> (Range<usize>, usize) {
+    let mut at = start;
+    while at < line.len() {
+        let end = line[at..].find('\n').map_or(line.len(), |n| at + n);
+        let text = line[at..end].strip_suffix('\r').unwrap_or(&line[at..end]);
+        let text = if tabs {
+            text.trim_start_matches('\t')
+        } else {
+            text
+        };
+        if text == delimiter {
+            return (start..at, (end + 1).min(line.len()));
+        }
+        at = end + 1;
+    }
+    (start..line.len(), line.len())
+}
+
+/// Whether a command's here-document is the script it runs: a shell
+/// ([`SHELLS`]) told to read its commands from its input (`-s`), or given
+/// neither a `-c` script nor a script file, does (`bash <<EOF`).
+fn reads_script(words: &[Word]) -> bool {
+    let words: Vec<String> = words.iter().map(|word| word.text.clone()).collect();
+    let Some(start) = program_start(&words) else {
+        return false;
+    };
+    let (name, args) = (program_name(&words[start]), &words[start + 1..]);
+    if !SHELLS.contains(&name.as_str()) || shell_script(args).is_some() {
+        return false;
+    }
+    let flags = args
+        .iter()
+        .take_while(|arg| arg.starts_with('-') && !arg.starts_with("--"));
+    flags.clone().any(|flag| flag.contains('s'))
+        || INTERPRETERS
+            .iter()
+            .find(|interpreter| interpreter.name == name)
+            .is_none_or(|interpreter| script_file(interpreter, args).is_none())
+}
+
+/// Where a segment's program is: its first word that neither sets a
+/// variable for it nor wraps it ([`WRAPPERS`]).
+fn program_start(words: &[String]) -> Option<usize> {
+    words
+        .iter()
+        .position(|word| !assignment(word) && !WRAPPERS.contains(&word.as_str()))
 }
 
 /// Whether `word` sets a variable for the command after it (`RUST_LOG=1`).
@@ -391,10 +547,7 @@ fn assignment(word: &str) -> bool {
 /// script is split as a line of its own.
 fn command_terms(line: &str, stems: &mut Stems, terms: &mut Terms) {
     for words in segments(line) {
-        let Some(start) = words
-            .iter()
-            .position(|word| !assignment(word) && !WRAPPERS.contains(&word.as_str()))
-        else {
+        let Some(start) = program_start(&words) else {
             continue;
         };
         let (program, args) = (words[start].as_str(), &words[start + 1..]);
