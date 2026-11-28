@@ -303,7 +303,7 @@ const ESSENTIALS_MAX: usize = 15;
 const ESSENTIAL_WHOLE_CHARS: usize = 300;
 /// The part's first line.
 pub(super) const MOST_USED_HEADER: &str =
-    "Most used in this project's recent sessions (read one for the rest before applying it):";
+    "Most used in this project's recent sessions (if one applies, read it for the rest first):";
 /// Types read as a wish about how to work: an observation of one is about
 /// the user, so the part never prints it (push.rs `reads_as_wish`).
 const WISH_TYPES: [&str; 5] = ["preference", "constraint", "value", "behavior", "pattern"];
@@ -320,21 +320,16 @@ fn printable(m: &super::Memory) -> bool {
         }
 }
 
-/// Who `m` comes from, as #117's pushes say it (push.rs `label`).
-fn label(m: &super::Memory) -> String {
-    if m.source == "explicit" {
-        return format!("The user's {}", m.memory_type);
-    }
-    match m.confirmations.max(1) {
-        1 => format!(
-            "An agent's note from an earlier session ({})",
-            m.memory_type
-        ),
-        n => format!(
-            "An agent's note from {n} earlier sessions ({})",
-            m.memory_type
-        ),
-    }
+/// What `m`'s line says before its text, as a push's does (push.rs
+/// `mark`): nothing for the user's own memory, the mark of an agent's
+/// note for one.
+fn mark(m: &super::Memory) -> &'static str {
+    let voice = if m.source == "explicit" {
+        super::push::Voice::User
+    } else {
+        super::push::Voice::Note
+    };
+    super::push::mark(voice)
 }
 
 /// The slot of each of `chosen`'s passages shown in most of `projects`'
@@ -401,13 +396,13 @@ fn printed(m: &super::Memory, slot: Option<i64>) -> String {
     let short = &m.id.to_string()[..super::read::SHORT_ID];
     let text = super::clean(&m.content, usize::MAX);
     if text.chars().count() <= ESSENTIAL_WHOLE_CHARS {
-        return format!("- {short} {}: {text}", label(m));
+        return format!("- {short} {}{text}", mark(m));
     }
     let passage = slot
         .map(|slot| passage_text(m, slot))
         .filter(|text| !text.is_empty())
         .unwrap_or_else(|| passage_text(m, 1));
-    format!("- {short} {}: {} — {passage} …", label(m), m.title)
+    format!("- {short} {}{} — {passage} …", mark(m), m.title)
 }
 
 /// The project's most-used knowledge within `room` in `unit`: the memories

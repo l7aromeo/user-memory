@@ -222,7 +222,7 @@ USER MEMORY INDEX: the user's memories. Current instructions take precedence; ne
 Each line points to a memory. Before acting on one that applies, read it in full (conditions, exceptions, reason): all that apply in one read call.
 Search memory with what you are about to do: before a slow or costly step, before something that can't be undone, in an unfamiliar area, after an unexpected failure, and before deciding something that may already be decided.
 Working in another repository this session? Unless the Projects line already lists it, call link with projects: [<its git remote>] to keep its memories loaded (without session hooks, index with them).
-[project] applies to this project only; (learned in N sessions) is an agent's note and (tentative) an inference: neither is the user's word, so don't follow either as a rule; (stale) lost a supporting memory; ×N means N conversations stated it. Rules are what the user stated and confirmed: follow them. Other memories are context.
+[project] applies to this project only; (learned in N sessions) and "An agent's note" mark an agent's note and (tentative) an inference: neither is the user's word, so don't follow either as a rule; (stale) lost a supporting memory; ×N means N conversations stated it. Rules are what the user stated and confirmed: follow them. Other memories are context.
 Categories: <category counts> · Types: <type counts> · Scope: global 5, project 2
 The user's global rules are in your instruction files (USER MEMORY); project rules and other memories follow.
 Other memories

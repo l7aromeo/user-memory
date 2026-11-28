@@ -32,7 +32,7 @@ const PROJECT: &str = "github.com/example/app";
 
 /// Opens the most-used part of session start's text.
 const MOST_USED: &str =
-    "Most used in this project's recent sessions (read one for the rest before applying it):";
+    "Most used in this project's recent sessions (if one applies, read it for the rest first):";
 
 /// A sandboxed home with its own store and a checkout of [`PROJECT`].
 struct Home {

@@ -241,7 +241,7 @@ fn a_compaction_restores_what_the_context_read_recorded_and_was_shown() {
     assert_eq!(
         set,
         format!(
-            "{HEADER}\nRead:\n- {} The user's fact: The docs build with mdBook.\n- {} Release steps; read it again before acting on it\n- {} The user's fact: Keep `src/tables.rs` sorted.\nRecorded or changed:\n- {} The user's fact: The bench runs on a quiet box.\nShown after a step:\n- {} The user's fact: Run `cargo publish --dry-run` before `cargo publish`.\nFound by a search:\n- {} Lint config; read it again before acting on it\n",
+            "{HEADER}\nRead:\n- {} The docs build with mdBook.\n- {} Release steps; if it applies, read it again first\n- {} Keep `src/tables.rs` sorted.\nRecorded or changed:\n- {} The bench runs on a quiet box.\nShown after a step:\n- {} Run `cargo publish --dry-run` before `cargo publish`.\nFound by a search:\n- {} Lint config; if it applies, read it again first\n",
             short(&second),
             short(&long),
             short(&first),
@@ -330,7 +330,7 @@ fn a_compaction_restores_the_store_as_it_is_now() {
     assert!(!set.contains("mdBook"), "{set}");
     assert!(
         set.contains(&format!(
-            "- {} The user's fact: The bench runs on the arm64 box.",
+            "- {} The bench runs on the arm64 box.",
             short(&new)
         )),
         "{set}"

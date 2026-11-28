@@ -1,7 +1,7 @@
 //! What a hook pushes after an action (#117): the passages that pass the
-//! matcher's bars, each on one line with the memory's id and a label of
-//! whose word it is, under a header that says to read the memory before
-//! applying it.
+//! matcher's bars, each on one line with the memory's id, an agent's note
+//! marked as one, under a header that says to read a memory that applies
+//! first.
 //!
 //! The text comes from the store, read after the match: the delivery
 //! index holds no text and no title. Where the store can't be read in
@@ -35,20 +35,41 @@ pub(crate) const RECALL_CHARS: usize = 1_500;
 /// passes many never makes a hook read them all.
 pub(crate) const READ_PER_EVENT: usize = 2 * PUSH_PER_EVENT;
 
-/// Opens a push after an action.
+/// Opens a push after an action. "If one applies" comes first, so no
+/// agent spends a read on a line that has nothing to do with its step.
 const HEADER: &str =
-    "From user-memory, matching this step (read one for the rest before applying it):";
+    "From user-memory, matching this step (if one applies, read it for the rest first):";
 
 /// Opens a push after an action that failed.
 const FAILED_HEADER: &str =
-    "From user-memory, matching this failed step (read one for the rest before applying it):";
+    "From user-memory, matching this failed step (if one applies, read it for the rest first):";
 
 /// What a line says of a memory whose text the hook did not read: a
-/// server's store, or a store read past the hook's limit. It has no label:
+/// server's store, or a store read past the hook's limit. It has no mark:
 /// whose word a memory is comes from its source, status and type, which
 /// the delivery index does not hold, and a line that claims none sends the
 /// agent to `read`, which gives them.
-pub(crate) const POINTER: &str = "matches this step; read it before applying it";
+pub(crate) const POINTER: &str = "matches this step; if it applies, read it first";
+
+/// What a line says before the text of an agent's note, so it is never
+/// taken for the user's own word; a line of the user's own memory says
+/// nothing before its text.
+const NOTE_MARK: &str = "An agent's note: ";
+
+/// What a line says before the text of an agent's note of a rule's type (a
+/// preference, constraint or value): its text reads as a rule, which an
+/// agent might follow as the user's, so the mark says it is none.
+const WISH_MARK: &str = "An agent's note, not the user's rule: ";
+
+/// What a line says before a memory's text in `voice`: [`NOTE_MARK`] or
+/// [`WISH_MARK`] for an agent's note, nothing for the user's own memory.
+pub(crate) fn mark(voice: Voice) -> &'static str {
+    match voice {
+        Voice::Rule | Voice::User => "",
+        Voice::Note => NOTE_MARK,
+        Voice::Wish => WISH_MARK,
+    }
+}
 
 /// Ends a passage that is part of its memory, so the agent knows there is
 /// more to read.
@@ -80,7 +101,7 @@ pub(crate) fn passes(matched: &Matched, failed: bool) -> bool {
 }
 
 /// The lines for `passing`, matches of `view` strongest first: each
-/// memory's passage and label from the store `conn`, read until
+/// memory's passage and [`mark`] from the store `conn`, read until
 /// `deadline`, or the [`POINTER`] line without it. A memory gone from the
 /// store, or whose passage no longer falls on its text, has no line.
 pub(crate) fn lines(
@@ -95,8 +116,8 @@ pub(crate) fn lines(
         let short = id.get(..SHORT_ID).unwrap_or(&id);
         let (text, named) = match conn.filter(|_| Instant::now() < deadline) {
             Some(conn) => match labelled(conn, &id, matched)? {
-                Some(Labelled { label, passage, .. }) => {
-                    (format!("- {short} {label}: {passage}"), false)
+                Some(Labelled { voice, passage, .. }) => {
+                    (format!("- {short} {}{passage}", mark(voice)), false)
                 }
                 None => continue,
             },

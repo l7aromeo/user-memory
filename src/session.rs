@@ -2082,7 +2082,7 @@ mod tests {
         let notice: String = (0..40)
             .map(|i| format!("+ e00000{i:02} A memory line of the index\n"))
             .collect();
-        let recalled = "From user-memory, matching this step (read one for the rest before applying it):\n- e0000001 The user's rule: Ask before every git push".to_owned();
+        let recalled = "From user-memory, matching this step (if one applies, read it for the rest first):\n- e0000001 Ask before every git push".to_owned();
         let limit = bytes.len(&notice);
         let text = prompt_text(Some(notice.clone()), Some(recalled.clone()), limit, bytes);
         assert!(text.len() <= limit, "{} of {limit}", text.len());

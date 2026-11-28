@@ -26,7 +26,7 @@ pub(crate) const HOLD_PER_EVENT: usize = 5;
 
 /// The most characters a hold's reason holds: [`HOLD_PER_EVENT`] passages
 /// of 400 characters, the most a push shows of one, with their ids and
-/// labels.
+/// marks.
 pub(crate) const HOLD_CHARS: usize = 2_000;
 
 /// The most holding matches a hook reads the text of: twice
@@ -68,9 +68,9 @@ impl Held {
 
     fn line(&self) -> String {
         format!(
-            "- {} {}: {}",
+            "- {} {}{}",
             self.short(),
-            self.shown.label,
+            super::push::mark(self.shown.voice),
             self.shown.passage
         )
     }
@@ -226,7 +226,7 @@ mod tests {
         assert_eq!(
             text,
             format!(
-                "{SEVERAL}\n- e0000001 The user's rule: Tag only on a go-ahead.\n- e0000001 An agent's note from an earlier session (fact): The release script tags as it runs.\n{WEIGH}{AGAIN}"
+                "{SEVERAL}\n- e0000001 Tag only on a go-ahead.\n- e0000001 An agent's note: The release script tags as it runs.\n{WEIGH}{AGAIN}"
             )
         );
         let rules = reason(&[&rule, &rule]);
