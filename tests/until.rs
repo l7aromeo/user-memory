@@ -1098,7 +1098,15 @@ const READS_EVERY_STATUS: &[(&str, &str)] = &[
 /// reads `memories`, and whether it names the test of "in force".
 fn memory_readers() -> std::collections::BTreeMap<String, bool> {
     let reads = ["FROM memories", "JOIN memories", "{SELECT}"];
-    let live = ["LIVE", "live!(", "live_memories", "ACTIVE", "condition("];
+    // `delivered!` is the delivery index's condition, which holds `live!`.
+    let live = [
+        "LIVE",
+        "live!(",
+        "delivered!(",
+        "live_memories",
+        "ACTIVE",
+        "condition(",
+    ];
     let mut reading = std::collections::BTreeSet::new();
     let mut marked = std::collections::BTreeSet::new();
     let mut files = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];

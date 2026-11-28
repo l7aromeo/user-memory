@@ -420,7 +420,12 @@ on Windows), each private to you:
   its server answers, decided under a lock on `<key>.polling.lock`), all
   empty or a few bytes; and `<key>.connected`, which every running
   connector holds a shared lock on, so the hooks read the server's
-  delivery files only while one runs. A prompt whose snapshot
+  delivery files only while one runs; `<key>.titles.lock`, which the
+  connector that answers the hooks' title lookups holds, and
+  `<key>.titles`, where it names its loopback port, a key for the
+  lookups and its process id, readable only by you, with nothing of any
+  memory ([recall during the task](how-it-works.md#recall-during-the-task)).
+  A prompt whose snapshot
   holds that position asks the server nothing
   ([session hooks](clients.md#session-hooks)).
 - `instructions/`: one record per instruction file user-memory wrote, with

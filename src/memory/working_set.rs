@@ -14,6 +14,7 @@ use super::{
     schema::get,
     write::is_live,
 };
+use crate::remote::titles::channel::Titles;
 use anyhow::Result;
 use rusqlite::Connection;
 use std::collections::HashSet;
@@ -90,10 +91,12 @@ pub(crate) struct Restored {
 /// each, within `room` in `unit`: each memory whole when it is at most
 /// [`WORKING_SET_WHOLE_CHARS`], else its title and the passages shown,
 /// else a pointer; found ones are pointers. Read through the store `conn`,
-/// or without it (a server's store) as pointers by id. Nothing for no
+/// or without it (a server's store) as pointers: by title where the
+/// connector's `titles` hold the memory (#292), else by id. Nothing for no
 /// memory in force.
 pub(crate) fn restore(
     conn: Option<&Connection>,
+    titles: Option<&Titles>,
     entries: &[Entry],
     room: usize,
     unit: FitUnit,
@@ -105,7 +108,11 @@ pub(crate) fn restore(
     for entry in ordered {
         let Some(conn) = conn else {
             if seen.insert(entry.id.clone()) {
-                let line = format!("- {} {READ_AGAIN}", short(&entry.id));
+                let short = short(&entry.id);
+                let line = match titles.and_then(|titles| titles.get(&entry.id)) {
+                    Some(named) => format!("- {short} {}; {READ_AGAIN}", one_line(&named.title)),
+                    None => format!("- {short} {READ_AGAIN}"),
+                };
                 memories.push((entry.how, vec![(pointer(&entry.id, &entry.id), line)]));
             }
             continue;

@@ -3171,6 +3171,7 @@ fn the_proxy_example_forwards_every_route_the_server_registers() {
     for known in [
         "src/remote/delivery.rs",
         "src/remote/tags.rs",
+        "src/remote/titles.rs",
         "src/remote/transfer.rs",
         "src/remote/usage.rs",
     ] {

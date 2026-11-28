@@ -38,6 +38,7 @@ mod review;
 mod rules;
 mod schema;
 mod selection;
+pub(crate) mod served_titles;
 mod similar;
 mod stamps;
 mod titles;

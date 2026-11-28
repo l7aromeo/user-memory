@@ -28,7 +28,7 @@ const POLL_CALL_WAIT: Duration = Duration::from_secs(10);
 
 /// Polls a quiet machine makes in [`REMOTE_MARKER_POLL`]'s stead: once a
 /// minute, so a machine left open asks the server little.
-const QUIET_POLLS: u32 = 12;
+pub(crate) const QUIET_POLLS: u32 = 12;
 /// Polls' worth of time after the last hook before the connector slows down:
 /// two minutes, longer than the pause between two prompts of a session.
 const QUIET_AFTER_POLLS: u32 = 24;
@@ -39,7 +39,7 @@ const STALE_AFTER_POLLS: u32 = 3;
 
 /// Times a connector looks at the marker's age in each poll: a due poll
 /// starts at most a tenth of a poll late, and the look is two file stats.
-const TICKS_PER_POLL: u32 = 10;
+pub(crate) const TICKS_PER_POLL: u32 = 10;
 
 /// Hex characters of the server key in the marker's file name: 64 bits of
 /// the SHA-256 of the server's address, so two servers never share a
@@ -61,11 +61,18 @@ const CLAIM_LOCK: &str = "polling.lock";
 /// on, which the system lets go when it exits or is killed: the hooks read
 /// a server's delivery files only while one holds it (#180).
 const CONNECTED: &str = "connected";
+/// The extension of the file the connector that answers the hooks' title
+/// lookups names its loopback port and key in (#292).
+const TITLES: &str = "titles";
+/// The extension of the file that connector holds an exclusive lock on
+/// while it answers them, which the system lets go when it exits or is
+/// killed, so another connector takes over.
+const TITLES_LOCK: &str = "titles.lock";
 
 /// [`REMOTE_MARKER_POLL`], which debug builds take in milliseconds from
 /// `USER_MEMORY_MARKER_POLL_MS` so tests can see the quiet interval and a
 /// stale marker without waiting minutes.
-fn poll_every() -> Duration {
+pub(crate) fn poll_every() -> Duration {
     #[cfg(debug_assertions)]
     if let Some(ms) = std::env::var("USER_MEMORY_MARKER_POLL_MS")
         .ok()
@@ -83,6 +90,8 @@ struct Files {
     claim: PathBuf,
     claim_lock: PathBuf,
     connected: PathBuf,
+    titles: PathBuf,
+    titles_lock: PathBuf,
 }
 
 impl Files {
@@ -98,6 +107,8 @@ impl Files {
             claim: dir.join(format!("{key}.{CLAIM}")),
             claim_lock: dir.join(format!("{key}.{CLAIM_LOCK}")),
             connected: dir.join(format!("{key}.{CONNECTED}")),
+            titles: dir.join(format!("{key}.{TITLES}")),
+            titles_lock: dir.join(format!("{key}.{TITLES_LOCK}")),
         }
     }
 
@@ -325,6 +336,28 @@ impl Files {
         };
         matches!(file.try_lock(), Err(fs::TryLockError::WouldBlock))
     }
+}
+
+/// The title lookups' files of the server at `url` (#292): the endpoint
+/// file the hooks read and the lock its writer holds.
+pub(crate) struct TitlesFiles {
+    pub(crate) endpoint: PathBuf,
+    pub(crate) lock: PathBuf,
+}
+
+/// [`TitlesFiles`] of the server at `url` in this user's state folder.
+pub(crate) fn titles_files(url: &str) -> Option<TitlesFiles> {
+    Files::of(url).map(|files| TitlesFiles {
+        endpoint: files.titles,
+        lock: files.titles_lock,
+    })
+}
+
+/// The server's position in the marker, whatever its age: what tells the
+/// title lookups' connector that a poll found a change since it last asked
+/// for titles.
+pub(crate) fn polled(url: &str) -> Option<Position> {
+    Files::of(url)?.position()
 }
 
 /// How long ago `path` was last written, none when it is missing.

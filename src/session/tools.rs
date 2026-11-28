@@ -387,7 +387,8 @@ impl Session {
     /// window and returns the push of what it matches that the context was
     /// not shown in this stretch; none when nothing passes, or the hook
     /// runs out of time, which then writes nothing. On a server's store
-    /// each line names the id alone.
+    /// each line names a memory's label and title, from the connector, or
+    /// its id alone when they don't arrive in time.
     pub(super) fn recall(
         &self,
         payload: &Value,
@@ -408,14 +409,17 @@ impl Session {
         };
         let db = super::db_path();
         let mut lines = Vec::new();
+        // Whether the deadline was checked before a lookup of titles, whose
+        // late end costs only the titles (`channel::lookup`).
+        let mut looked_up = false;
         if let Some(view) = delivery_files::open(self.remote.as_deref(), &db, &self.projects) {
             let found = view.rank(&window)?;
             // What the context had in this stretch takes no read: a passage
             // a hold deferred is among the next ones. A date passed since
             // the index was kept ends its memory with no write: dropped
-            // here, from the file alone. On a server's store every line
-            // names the id alone, so a memory named already takes no read
-            // either; a local store names one only when the read runs late.
+            // here, from the file alone. On a server's store no line holds a
+            // passage, so a memory named already takes no read either; a
+            // local store names one only when the read runs late.
             let handled = state.handled(agent, Use::Push)?;
             let now = crate::memory::until::stored_now(jiff::Timestamp::now());
             let mut passing = Vec::new();
@@ -435,18 +439,42 @@ impl Session {
                 }
             }
             if !passing.is_empty() {
-                // The store is opened only for a match's text, and only here.
-                let conn = match self.remote {
-                    None => Some(Connection::open_with_flags(
-                        &db,
-                        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-                    )?),
-                    Some(_) => None,
-                };
-                lines = push::lines(conn.as_ref(), &view, &passing, self.deadline)?;
+                match &self.remote {
+                    // The store is opened only for a match's text, and only
+                    // here.
+                    None => {
+                        let conn = Connection::open_with_flags(
+                            &db,
+                            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                        )?;
+                        lines =
+                            push::lines(push::Text::Store(&conn, self.deadline), &view, &passing)?;
+                    }
+                    // A server's titles, from the connector, current to the
+                    // files matched.
+                    Some(url) => {
+                        if Instant::now() >= self.deadline {
+                            return Ok(None);
+                        }
+                        looked_up = true;
+                        let ids = passing
+                            .iter()
+                            .map(|m| view.id(m.memory).map(str::to_owned))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        let titles = crate::remote::titles::channel::lookup(
+                            url,
+                            &delivery_files::scope(&self.projects),
+                            &delivery_files::newest(&view),
+                            &ids,
+                            self.deadline,
+                        );
+                        let text = titles.as_ref().map_or(push::Text::None, push::Text::Titles);
+                        lines = push::lines(text, &view, &passing)?;
+                    }
+                }
             }
         }
-        if Instant::now() >= self.deadline {
+        if !looked_up && Instant::now() >= self.deadline {
             return Ok(None);
         }
         // A memory a tag ended here, whose end the store doesn't have yet,

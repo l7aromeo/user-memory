@@ -40,22 +40,54 @@ pub async fn working_set(client: HookClient, context_limit: Option<usize>) -> St
         let Some((_, entries)) = state.working_set()? else {
             return Ok(String::new());
         };
-        // A server's store gives the hook no text: pointers by id.
-        let conn = match remote {
-            None => Some(Connection::open_with_flags(
-                db_path(),
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            )?),
-            Some(_) => None,
+        // A server's store gives the hook no text: pointers by title, from
+        // the connector, current to the position its last poll found.
+        let (conn, titles) = match &remote {
+            None => (
+                Some(Connection::open_with_flags(
+                    db_path(),
+                    OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                )?),
+                None,
+            ),
+            // Checked before the lookup, never after: a lookup's late end
+            // costs only the titles (`channel::lookup`).
+            Some(_) if Instant::now() >= deadline => return Ok(String::new()),
+            Some(connection) => (
+                None,
+                served_titles(&connection.url, &snapshot, &entries, deadline),
+            ),
         };
-        let restored = working_set::restore(conn.as_ref(), &entries, room, unit)?;
-        if Instant::now() >= deadline {
+        let restored = working_set::restore(conn.as_ref(), titles.as_ref(), &entries, room, unit)?;
+        if remote.is_none() && Instant::now() >= deadline {
             return Ok(String::new());
         }
         state.restored(&restored.printed)?;
         Ok(restored.text)
     });
     restored.await.ok().and_then(Result::ok).unwrap_or_default()
+}
+
+/// The titles of the memories of `entries` on the server at `url`, from the
+/// connector that answers title lookups, by `deadline`: current at least
+/// to the position the connector's last poll found, in the scope of the
+/// session `snapshot` names. None without a running connector or in time.
+fn served_titles(
+    url: &str,
+    snapshot: &std::path::Path,
+    entries: &[working_set::Entry],
+    deadline: Instant,
+) -> Option<crate::remote::titles::channel::Titles> {
+    let polled = crate::remote::marker::served(url)?;
+    let projects = super::live::load_scope(&super::live::scope_path(snapshot))?;
+    let ids: Vec<String> = entries.iter().map(|entry| entry.id.clone()).collect();
+    crate::remote::titles::channel::lookup(
+        url,
+        &crate::memory::delivery_files::scope(&projects),
+        &polled,
+        &ids,
+        deadline,
+    )
 }
 
 /// What `client`'s pre-compact hook prints for the payload on stdin: the

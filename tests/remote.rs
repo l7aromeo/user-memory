@@ -5352,8 +5352,12 @@ fn a_forget_on_the_server_leaves_a_client_s_delivery_files_within_a_poll() {
         "no file left half written"
     );
     // The connector asked for changes; nothing downloaded a base again.
+    // Only /delivery's requests count: /titles asks with `since` too.
     let asked = String::from_utf8_lossy(&proxy.sent.lock().unwrap()).into_owned();
-    let since = asked.matches("\"since\"").count();
+    let since = asked
+        .split("POST /")
+        .filter(|request| request.starts_with("delivery ") && request.contains("\"since\""))
+        .count();
     assert_eq!(delivery_asks(&proxy) - downloads, since, "{asked}");
 }
 
@@ -5631,9 +5635,9 @@ const THREE_STEPS: &str = "Pack the release with `numbat-pack --all` first. It g
 Then sign that archive with `bilby-sign --key release`. The mirror refuses an archive with no signature, and an upload it refuses has to start again from the beginning, which on a slow line takes most of an afternoon to finish. The key lives on the release machine only, so the step runs there and nowhere else, and a copy of the key on a laptop is revoked.\n\n\
 Last, ship the signed archive with `dingo-ship --channel stable`, and only once the signature checks out on a second machine, since a version shipped to the stable channel can never be taken back or replaced by another. A version that has to be withdrawn is marked as such on the channel, and the fix ships under the next version number after it.";
 
-// A line that names the id alone holds no passage, so it stands for the
-// whole memory (#293): once pushed, no other passage of the memory gives
-// the agent the same line again in the stretch.
+// A line on a server's store holds no passage, so it stands for the whole
+// memory (#293): once pushed, no other passage of the memory gives the
+// agent the same line again in the stretch.
 #[test]
 fn a_server_s_memory_named_by_its_id_is_pushed_once_for_all_its_passages() {
     let host = Host::start(root());
@@ -5658,24 +5662,19 @@ fn a_server_s_memory_named_by_its_id_is_pushed_once_for_all_its_passages() {
     let _connector = machine.connector();
     machine.hook_with("session-start", "s", json!({"source": "startup"}));
     machine.marker();
-    let run = |command: &str| {
-        added(&machine.hook_with(
-            "post-tool-use",
-            "s",
-            json!({"tool_name":"Bash","tool_input":{"command":command},"tool_response":"done"}),
-        ))
-    };
-    let pointer = |id: &str| {
-        format!(
-            "From user-memory, matching this step (if one applies, read it for the rest first):\n- {} matches this step; if it applies, read it first",
-            &id[..8]
-        )
-    };
-    assert_eq!(run("numbat-pack --all"), pointer(&id));
+    let pushed = |id: &str, title: &str| format!("{PUSH_HEADER}\n{}", title_line(id, "", title));
+    machine.until_pushed("quokka-deploy --now", |said| {
+        said == pushed(&other, "Run quokka-deploy")
+    });
+    let run = |command: &str| machine.ran("s", command);
+    assert_eq!(
+        run("numbat-pack --all"),
+        pushed(&id, "Release in three steps")
+    );
     assert_eq!(run("bilby-sign --key release"), "", "the memory was named");
     assert_eq!(
         run("dingo-ship --channel stable && quokka-deploy --now"),
-        pointer(&other),
+        pushed(&other, "Run quokka-deploy"),
         "another memory takes the line"
     );
 }
@@ -5734,6 +5733,458 @@ fn a_server_s_memory_named_already_leaves_its_read_to_another() {
     named(&run(&tools[..3]), &ids[..3]);
     named(&run(&tools[3..6]), &ids[3..6]);
     named(&run(&tools), &ids[6..]);
+}
+
+/// What opens a push after a step that didn't fail.
+const PUSH_HEADER: &str =
+    "From user-memory, matching this step (if one applies, read it for the rest first):";
+
+/// A push's line for memory `id` on a server's store whose title the
+/// connector gave (#292), after `mark`: an agent's note's, or none.
+fn title_line(id: &str, mark: &str, title: &str) -> String {
+    format!(
+        "- {} {mark}\"{title}\"; if it applies, read it first",
+        &id[..8]
+    )
+}
+
+/// A push's line naming memory `id` alone.
+fn pointer_line(id: &str) -> String {
+    format!(
+        "- {} matches this step; if it applies, read it first",
+        &id[..8]
+    )
+}
+
+impl Machine {
+    /// The push after session `session` ran `command`.
+    fn ran(&self, session: &str, command: &str) -> String {
+        added(&self.hook_with(
+            "post-tool-use",
+            session,
+            json!({"tool_name":"Bash","tool_input":{"command":command},"tool_response":"done"}),
+        ))
+    }
+
+    /// Waits until a session started now gets `want` from its push after
+    /// `command`: the connector's titles caught up with the server. Each
+    /// try is a session of its own, so no try's push is a later one's.
+    fn until_pushed(&self, command: &str, want: impl Fn(&str) -> bool) {
+        let mut tries = 0;
+        time::until("the push the connector's titles give", || {
+            tries += 1;
+            let session = format!("probe-{tries}");
+            self.hook_with("session-start", &session, json!({"source": "startup"}));
+            let pushed = self.ran(&session, command);
+            // Shown only when the test fails: what the last tries pushed.
+            eprintln!("try {tries}: {pushed:?}");
+            want(&pushed)
+        });
+    }
+
+    /// A connector, with what it writes to stderr.
+    fn logged_connector(&self) -> (ChildGuard, Logged) {
+        let mut child = self
+            .command(&["connect", "--url", &self.url, "--token-file"])
+            .arg(&self.token)
+            .spawn()
+            .unwrap();
+        let logged = Logged::of(child.stderr.take().unwrap());
+        (ChildGuard(child), logged)
+    }
+}
+
+/// The title lookups' endpoint file under `home`: the port, key and pid
+/// the answering connector wrote.
+fn endpoint(home: &Path) -> Option<Value> {
+    let path = find(home, "titles")?;
+    serde_json::from_slice(&fs::read(path).ok()?).ok()
+}
+
+// On a server's store a push names a memory's title, quoted, from the
+// running connector (#292), on the tool hook and the prompt
+// hook alike, and the working set after a compaction names its title.
+#[test]
+fn a_server_s_push_names_the_memory_s_title() {
+    let poll = std::time::Duration::from_millis(300);
+    let host = Host::start(root());
+    let id = record_tool(&host, 1, "quokka-deploy", "chat/deploy");
+    let machine = Machine {
+        home: tempdir().unwrap(),
+        url: format!("http://{}/mcp", host.address),
+        token: host.root.path().join("token"),
+        env: vec![("USER_MEMORY_MARKER_POLL_MS", poll.as_millis().to_string())],
+    };
+    let (_connector, logged) = machine.logged_connector();
+    machine.hook_with("session-start", "s", json!({"source": "startup"}));
+    machine.marker();
+    let line = title_line(&id, "", "Run quokka-deploy");
+    machine.until_pushed("quokka-deploy --now", |pushed| pushed.contains(&line));
+    assert_eq!(
+        machine.ran("s", "quokka-deploy --now"),
+        format!("{PUSH_HEADER}\n{line}")
+    );
+    machine.hook_with("session-start", "prompted", json!({"source": "startup"}));
+    let prompted = added(&machine.hook_with(
+        "prompt-submit",
+        "prompted",
+        json!({"prompt": "Run `quokka-deploy` for the release"}),
+    ));
+    assert!(prompted.contains(&line), "{prompted}");
+    assert!(
+        !prompted.contains("before the step"),
+        "no text from the server: {prompted}"
+    );
+    let restored = machine.hook_with("working-set", "s", json!({"source": "compact"}));
+    assert!(
+        restored.contains(&format!(
+            "- {} Run quokka-deploy; if it applies, read it again first",
+            &id[..8]
+        )),
+        "{restored}"
+    );
+    // The connector says nothing on stderr: its address is checked by the
+    // unit test of its listener, which runs on every OS.
+    assert!(endpoint(machine.home.path()).is_some(), "the endpoint file");
+    assert_eq!(logged.so_far(), "");
+}
+
+// The connector's titles follow the server's: an agent's note is marked as
+// one, a retitled memory is pushed by its new title once a poll found the
+// change, and a forgotten one not at all.
+#[test]
+fn a_server_s_titles_follow_its_changes_within_a_poll() {
+    let poll = std::time::Duration::from_millis(300);
+    let host = Host::start(root());
+    host.rpc(initialize(1));
+    let note = json!({"type":"procedure","category":"build","context":"Releasing","title":"Run quokka-deploy","content":"Run `quokka-deploy` before the step.","reason":"Because","scope":"global","source":"observed","user_confirmed":true,"evidence":"The release failed without it","origin":"chat/a"});
+    let reply = host.rpc(call(2, "record", note));
+    let text = reply["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{reply}"));
+    let id = serde_json::from_str::<Value>(text).unwrap()["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{text}"))
+        .to_owned();
+    let machine = Machine {
+        home: tempdir().unwrap(),
+        url: format!("http://{}/mcp", host.address),
+        token: host.root.path().join("token"),
+        env: vec![("USER_MEMORY_MARKER_POLL_MS", poll.as_millis().to_string())],
+    };
+    let _connector = machine.connector();
+    machine.hook_with("session-start", "s", json!({"source": "startup"}));
+    machine.marker();
+    let command = "quokka-deploy --now";
+    let noted = title_line(&id, "An agent's note: ", "Run quokka-deploy");
+    machine.until_pushed(command, |pushed| pushed.contains(&noted));
+
+    let updated = host.rpc(call(
+        4,
+        "update",
+        json!({"memory_id":id,"title":"Deploy with quokka-deploy","user_confirmed":true}),
+    ));
+    assert!(
+        updated["result"]["content"][0]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("\"updated\":true")),
+        "{updated}"
+    );
+    machine.until_pushed(command, |pushed| {
+        pushed.contains("Deploy with quokka-deploy")
+    });
+    machine.hook_with("session-start", "after", json!({"source": "startup"}));
+    let pushed = machine.ran("after", command);
+    assert!(!pushed.contains("\"Run quokka-deploy\""), "{pushed}");
+
+    host.rpc(call(
+        5,
+        "forget",
+        json!({"memory_id":id,"user_confirmed":true}),
+    ));
+    machine.until_pushed(command, str::is_empty);
+    machine.hook_with("session-start", "gone", json!({"source": "startup"}));
+    assert_eq!(machine.ran("gone", command), "");
+}
+
+// No title in time names the id alone, within the hook's limit: a
+// connector that answers late, an endpoint file whose key isn't the
+// connector's, as a program squatting on the port would answer with, and
+// a server without the route, which a proxy that lets only the routes it
+// knows through looks like.
+#[test]
+fn a_push_without_titles_in_time_names_the_id_alone() {
+    let poll = std::time::Duration::from_millis(300);
+    let host = Host::start(root());
+    let id = record_tool(&host, 1, "quokka-deploy", "chat/deploy");
+    let command = "quokka-deploy --now";
+    let line = title_line(&id, "", "Run quokka-deploy");
+    let pointer = format!("{PUSH_HEADER}\n{}", pointer_line(&id));
+    let machine = |env: &[(&'static str, &str)]| {
+        let mut machine = Machine {
+            home: tempdir().unwrap(),
+            url: format!("http://{}/mcp", host.address),
+            token: host.root.path().join("token"),
+            env: vec![("USER_MEMORY_MARKER_POLL_MS", poll.as_millis().to_string())],
+        };
+        machine
+            .env
+            .extend(env.iter().map(|(k, v)| (*k, (*v).to_owned())));
+        machine
+    };
+
+    // A connector that answers late costs the hook its own wait for titles
+    // at most: what it adds over a hook that finds no endpoint at all is
+    // under the tool hook's limit, the test's longer room apart.
+    let late = machine(&[("USER_MEMORY_TEST_TITLES_DELAY_MS", "2000")]);
+    let _connector = late.connector();
+    late.hook_with("session-start", "s", json!({"source": "startup"}));
+    late.marker();
+    time::until("the connector answers lookups", || {
+        endpoint(late.home.path()).is_some()
+    });
+    let timed = |session: &str| {
+        late.hook_with("session-start", session, json!({"source": "startup"}));
+        let started = std::time::Instant::now();
+        let pushed = late.ran(session, command);
+        assert_eq!(pushed, pointer, "{session}");
+        started.elapsed()
+    };
+    let slowed = (0..3).map(|n| timed(&format!("late{n}"))).min().unwrap();
+    let endpoint_file = find(late.home.path(), "titles").unwrap();
+    let aside = endpoint_file.with_extension("aside");
+    fs::rename(&endpoint_file, &aside).unwrap();
+    let alone = (0..3).map(|n| timed(&format!("alone{n}"))).min().unwrap();
+    fs::rename(&aside, &endpoint_file).unwrap();
+    let added = slowed.saturating_sub(alone);
+    assert!(added < TOOL_HOOK_LIMIT, "{added:?} added over {alone:?}");
+
+    let squatted = machine(&[]);
+    let _connector = squatted.connector();
+    squatted.hook_with("session-start", "s", json!({"source": "startup"}));
+    squatted.marker();
+    squatted.until_pushed(command, |pushed| pushed.contains(&line));
+    let path = find(squatted.home.path(), "titles").unwrap();
+    let mut file = endpoint(squatted.home.path()).unwrap();
+    file["key"] = json!("ab".repeat(32));
+    fs::write(&path, file.to_string()).unwrap();
+    assert_eq!(squatted.ran("s", command), pointer);
+}
+
+/// The tool hook's limit, src/session/tools.rs's `TOOL_HOOK_LIMIT`.
+const TOOL_HOOK_LIMIT: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// The post-tool push's deadline under `time::HOOK_ROOM`, src/session.rs's
+/// `HOOK_ROOM_FLOOR`.
+const PUSH_ROOM: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The working set's deadline under `time::HOOK_LIMITS`, src/session.rs's
+/// `LIMIT`.
+const WORKING_SET_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+// A lookup that ends past its hook's deadline, as when the OS ends a read's
+// wait a timer tick late, still leaves the id-only lines, as before titles,
+// rather than nothing: the tool push's and the working set's. The test
+// stands in for the answering connector, holding its lock and naming a
+// port that accepts and never answers, and makes each lookup end 100 ms
+// past its deadline on any OS.
+#[test]
+fn a_lookup_that_runs_to_the_deadline_still_leaves_the_id_only_line() {
+    let poll = std::time::Duration::from_millis(300);
+    let host = Host::start(root());
+    let id = record_tool(&host, 1, "quokka-deploy", "chat/deploy");
+    let mut machine = Machine {
+        home: tempdir().unwrap(),
+        url: format!("http://{}/mcp", host.address),
+        token: host.root.path().join("token"),
+        env: vec![
+            ("USER_MEMORY_MARKER_POLL_MS", poll.as_millis().to_string()),
+            // The hook would wait a minute for titles, past its deadline,
+            // and its wait ends late.
+            ("USER_MEMORY_TEST_TITLE_WAIT_MS", "60000".to_owned()),
+            ("USER_MEMORY_TEST_LOOKUP_OVERRUN_MS", "100".to_owned()),
+        ],
+    };
+    let mut connector = machine.connector();
+    machine.hook_with("session-start", "s", json!({"source": "startup"}));
+    machine.marker();
+    time::until("the connector answers lookups", || {
+        endpoint(machine.home.path()).is_some()
+    });
+    connector.0.kill().unwrap();
+    connector.0.wait().unwrap();
+    let home = machine.home.path();
+    let open = |extension: &str| {
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(find(home, extension).unwrap())
+            .unwrap()
+    };
+    let connected = open("connected");
+    connected.lock_shared().unwrap();
+    let titles_lock = find(home, "titles").unwrap().with_extension("titles.lock");
+    let owner = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(titles_lock)
+        .unwrap();
+    owner.lock().unwrap();
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut file = endpoint(home).unwrap();
+    file["port"] = json!(silent.local_addr().unwrap().port());
+    fs::write(find(home, "titles").unwrap(), file.to_string()).unwrap();
+    // One connection for each hook's lookup, kept open and never answered.
+    let held = std::thread::spawn(move || {
+        (0..2)
+            .map(|_| silent.accept().map(|(stream, _)| stream))
+            .collect::<Vec<_>>()
+    });
+    let started = std::time::Instant::now();
+    assert_eq!(
+        machine.ran("s", "quokka-deploy --now"),
+        format!("{PUSH_HEADER}\n{}", pointer_line(&id))
+    );
+    assert!(
+        started.elapsed() > PUSH_ROOM,
+        "the lookup ran past the push's deadline: {:?}",
+        started.elapsed()
+    );
+    machine
+        .env
+        .push((time::HOOK_LIMITS.0, time::HOOK_LIMITS.1.to_owned()));
+    let started = std::time::Instant::now();
+    let restored = machine.hook_with("working-set", "s", json!({"source": "compact"}));
+    assert!(
+        started.elapsed() > WORKING_SET_LIMIT,
+        "the lookup ran past the working set's deadline: {:?}",
+        started.elapsed()
+    );
+    assert!(
+        restored.contains(&format!(
+            "- {} if it applies, read it again first",
+            &id[..8]
+        )),
+        "{restored}"
+    );
+    // The connections stay open until the test ends: a hook that never
+    // asks leaves the second accept waiting, never the test.
+    drop(held);
+    drop((owner, connected));
+}
+
+// A killed connector leaves its endpoint file, whose port another program
+// may hold by then. With no connector holding the titles lock, a hook sends
+// that port nothing and names the id alone.
+#[test]
+fn a_hook_sends_a_dead_connector_s_port_nothing() {
+    let poll = std::time::Duration::from_millis(300);
+    let host = Host::start(root());
+    let id = record_tool(&host, 1, "quokka-deploy", "chat/deploy");
+    let machine = Machine {
+        home: tempdir().unwrap(),
+        url: format!("http://{}/mcp", host.address),
+        token: host.root.path().join("token"),
+        env: vec![("USER_MEMORY_MARKER_POLL_MS", poll.as_millis().to_string())],
+    };
+    let command = "quokka-deploy --now";
+    let mut connector = machine.connector();
+    machine.hook_with("session-start", "s", json!({"source": "startup"}));
+    machine.marker();
+    machine.until_pushed(command, |pushed| {
+        pushed.contains(&title_line(&id, "", "Run quokka-deploy"))
+    });
+    let port = endpoint(machine.home.path()).unwrap()["port"]
+        .as_u64()
+        .unwrap();
+    connector.0.kill().unwrap();
+    connector.0.wait().unwrap();
+    // The lock a running connector shares, held here so the hooks still
+    // read the files, as they do while another connector runs.
+    let connected = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(find(machine.home.path(), "connected").unwrap())
+        .unwrap();
+    connected.lock_shared().unwrap();
+    let squatter =
+        std::net::TcpListener::bind(("127.0.0.1", u16::try_from(port).unwrap())).unwrap();
+    squatter.set_nonblocking(true).unwrap();
+    machine.hook_with("session-start", "after", json!({"source": "startup"}));
+    assert_eq!(
+        machine.ran("after", command),
+        format!("{PUSH_HEADER}\n{}", pointer_line(&id))
+    );
+    assert_eq!(
+        squatter.accept().map(|_| ()).map_err(|err| err.kind()),
+        Err(std::io::ErrorKind::WouldBlock),
+        "the hook connected to the dead connector's port"
+    );
+    drop(connected);
+}
+
+// A server without the titles route answers 404: pushes name the id alone,
+// as from a server released before it.
+#[test]
+fn a_server_without_the_titles_route_leaves_pushes_naming_the_id() {
+    let poll = std::time::Duration::from_millis(300);
+    let host = Host::start_with(root(), None, &[("USER_MEMORY_TEST_NO_TITLES_ROUTE", "1")]);
+    let id = record_tool(&host, 1, "quokka-deploy", "chat/deploy");
+    let machine = Machine {
+        home: tempdir().unwrap(),
+        url: format!("http://{}/mcp", host.address),
+        token: host.root.path().join("token"),
+        env: vec![("USER_MEMORY_MARKER_POLL_MS", poll.as_millis().to_string())],
+    };
+    let _connector = machine.connector();
+    machine.hook_with("session-start", "s", json!({"source": "startup"}));
+    machine.marker();
+    time::until("the connector answers lookups", || {
+        endpoint(machine.home.path()).is_some()
+    });
+    // Polls' worth of time for the connector to have asked for titles.
+    std::thread::sleep(poll * 4);
+    assert_eq!(
+        machine.ran("s", "quokka-deploy --now"),
+        format!("{PUSH_HEADER}\n{}", pointer_line(&id))
+    );
+}
+
+// Of two connectors one answers title lookups; once it is killed, the
+// other takes over at its next tick.
+#[test]
+fn a_killed_title_connector_is_taken_over_by_another() {
+    let poll = std::time::Duration::from_millis(300);
+    let host = Host::start(root());
+    let id = record_tool(&host, 1, "quokka-deploy", "chat/deploy");
+    let machine = Machine {
+        home: tempdir().unwrap(),
+        url: format!("http://{}/mcp", host.address),
+        token: host.root.path().join("token"),
+        env: vec![("USER_MEMORY_MARKER_POLL_MS", poll.as_millis().to_string())],
+    };
+    let mut first = machine.connector();
+    let mut second = machine.connector();
+    machine.hook_with("session-start", "s", json!({"source": "startup"}));
+    machine.marker();
+    let command = "quokka-deploy --now";
+    let line = title_line(&id, "", "Run quokka-deploy");
+    machine.until_pushed(command, |pushed| pushed.contains(&line));
+    let owner = endpoint(machine.home.path()).unwrap()["pid"]
+        .as_u64()
+        .unwrap();
+    let (killed, left) = if u64::from(first.0.id()) == owner {
+        (&mut first, &second)
+    } else {
+        (&mut second, &first)
+    };
+    killed.0.kill().unwrap();
+    killed.0.wait().unwrap();
+    time::until("the other connector answers lookups", || {
+        endpoint(machine.home.path())
+            .is_some_and(|file| file["pid"].as_u64() == Some(u64::from(left.0.id())))
+    });
+    machine.until_pushed(command, |pushed| pushed.contains(&line));
 }
 
 // A date that passes writes nothing, so a server's files still hold its
@@ -5854,67 +6305,107 @@ fn many_clients_asking_for_one_base_cost_the_server_one_build() {
 }
 
 // Doctor on a server's client deletes the delivery files no connector kept
-// current for a day, as session start does, and leaves current ones. Unix
-// only, as the remote setup test above: setup finds the fake Codex as
-// `cli/codex` on a `:`-separated PATH, where Windows looks clients up
-// through PATHEXT on a `;`-separated one.
+// current for a day, as session start does, and leaves current ones.
+/// A client machine set up by `setup --url` for the server `host`, with a
+/// fake Codex: what doctor on a server's client checks. Unix only: setup
+/// finds the fake Codex as `cli/codex` on a `:`-separated PATH, where
+/// Windows looks clients up through PATHEXT on a `;`-separated one.
 #[cfg(unix)]
-#[test]
-fn doctor_deletes_a_server_s_delivery_files_no_connector_kept_current() {
-    let host = Host::start(root());
-    record_tool(&host, 1, "quokka-deploy", "chat/deploy");
-    let client = tempdir().unwrap();
-    let bin = client.path().join("bin");
-    let cli_dir = client.path().join("cli");
-    fs::create_dir(&cli_dir).unwrap();
-    let url = format!("http://{}/mcp", host.address);
-    let token_file = host.root.path().join("token");
-    let config = json!({"enabled":true,"transport":{"type":"stdio","command":bin.join("user-memory"),"args":["serve"],"env":{"USER_MEMORY_URL":url,"USER_MEMORY_TOKEN_FILE":token_file}}});
-    fs::write(client.path().join("fixture.json"), config.to_string()).unwrap();
-    fake::fake(&cli_dir, "codex");
-    let run = |binary: &std::path::Path, args: &[&str]| {
-        let out = Command::new(binary)
+struct Client {
+    dir: TempDir,
+}
+
+#[cfg(unix)]
+impl Client {
+    fn set_up(host: &Host) -> Self {
+        let client = Self {
+            dir: tempdir().unwrap(),
+        };
+        let dir = client.dir.path();
+        let bin = dir.join("bin");
+        let cli_dir = dir.join("cli");
+        fs::create_dir(&cli_dir).unwrap();
+        let url = format!("http://{}/mcp", host.address);
+        let token_file = host.root.path().join("token");
+        let config = json!({"enabled":true,"transport":{"type":"stdio","command":bin.join("user-memory"),"args":["serve"],"env":{"USER_MEMORY_URL":url,"USER_MEMORY_TOKEN_FILE":token_file}}});
+        fs::write(dir.join("fixture.json"), config.to_string()).unwrap();
+        fake::fake(&cli_dir, "codex");
+        let token = token_file.to_string_lossy().into_owned();
+        let installed = bin.to_string_lossy().into_owned();
+        client.run(
+            Path::new(env!("CARGO_BIN_EXE_user-memory")),
+            &[
+                "setup",
+                "--client",
+                "codex",
+                "--url",
+                &url,
+                "--token-file",
+                &token,
+                "--install-dir",
+                &installed,
+            ],
+        );
+        client
+    }
+
+    /// The installed binary.
+    fn installed(&self) -> std::path::PathBuf {
+        self.dir.path().join("bin").join("user-memory")
+    }
+
+    /// The stdout of `binary` run with `args` on this machine; it must
+    /// succeed.
+    fn run(&self, binary: &Path, args: &[&str]) -> String {
+        let out = self.output(binary, args);
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    }
+
+    /// The installed binary's `doctor`: its exit code and stdout.
+    fn doctor(&self) -> (Option<i32>, String) {
+        let out = self.output(&self.installed(), &["doctor"]);
+        (out.status.code(), String::from_utf8(out.stdout).unwrap())
+    }
+
+    /// What `binary` run with `args` on this machine gave.
+    fn output(&self, binary: &Path, args: &[&str]) -> std::process::Output {
+        let dir = self.dir.path();
+        Command::new(binary)
             .args(args)
-            .current_dir(client.path())
-            .sandboxed(client.path())
-            .env("CLAUDE_CONFIG_DIR", client.path())
-            .env("CODEX_HOME", client.path().join(".codex"))
+            .current_dir(dir)
+            .sandboxed(dir)
+            .env("CLAUDE_CONFIG_DIR", dir)
+            .env("CODEX_HOME", dir.join(".codex"))
             .env("USER_MEMORY_APP_DIRS", "")
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env_remove("GIT_CONFIG_GLOBAL")
             .env_remove("XDG_CONFIG_HOME")
-            .env("PATH", format!("{}:/usr/bin:/bin", cli_dir.display()))
+            .env(
+                "PATH",
+                format!("{}:/usr/bin:/bin", dir.join("cli").display()),
+            )
             .env_remove("USER_MEMORY_DB")
             .env_remove("USER_MEMORY_URL")
             .env_remove("USER_MEMORY_TOKEN_FILE")
             .env("USER_MEMORY_NO_UPDATE_CHECK", "1")
             .env(time::HOOK_ROOM.0, time::HOOK_ROOM.1)
             .output()
-            .unwrap();
-        assert!(out.status.success(), "{out:?}");
-        String::from_utf8(out.stdout).unwrap()
-    };
-    let token = token_file.to_string_lossy().into_owned();
-    let installed = bin.to_string_lossy().into_owned();
-    run(
-        std::path::Path::new(env!("CARGO_BIN_EXE_user-memory")),
-        &[
-            "setup",
-            "--client",
-            "codex",
-            "--url",
-            &url,
-            "--token-file",
-            &token,
-            "--install-dir",
-            &installed,
-        ],
-    );
-    let installed = bin.join("user-memory");
-    run(&installed, &["session-start"]);
-    let home = client.path();
+            .unwrap()
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_deletes_a_server_s_delivery_files_no_connector_kept_current() {
+    let host = Host::start(root());
+    record_tool(&host, 1, "quokka-deploy", "chat/deploy");
+    let client = Client::set_up(&host);
+    let installed = client.installed();
+    client.run(&installed, &["session-start"]);
+    let home = client.dir.path();
     assert_eq!(delivery_files(home).len(), 2, "a base and its overlay");
-    let said = run(&installed, &["doctor"]);
+    let said = client.run(&installed, &["doctor"]);
     assert!(!said.contains("Delivery index"), "{said}");
     assert_eq!(delivery_files(home).len(), 2, "current files stay");
     let day_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(25 * 60 * 60);
@@ -5926,7 +6417,7 @@ fn doctor_deletes_a_server_s_delivery_files_no_connector_kept_current() {
             .set_modified(day_ago)
             .unwrap();
     }
-    let said = run(&installed, &["doctor"]);
+    let said = client.run(&installed, &["doctor"]);
     assert!(
         said.contains(
             "Delivery index: deleted 2 files that may hold words the memory server removed."
@@ -5934,6 +6425,35 @@ fn doctor_deletes_a_server_s_delivery_files_no_connector_kept_current() {
         "{said}"
     );
     assert_eq!(delivery_files(home), Vec::<std::path::PathBuf>::new());
+}
+
+// Doctor on a client of a server whose release answers /titles, getting
+// 404 for it, names the fix: a reverse proxy in front of the server lets
+// only the routes it knows through. A server released before the route
+// gets no such line.
+#[cfg(unix)]
+#[test]
+fn doctor_names_a_proxy_that_keeps_the_titles_route_from_the_client() {
+    let no_route = [("USER_MEMORY_TEST_NO_TITLES_ROUTE", "1")];
+    for (version, told) in [(Some("0.10.1"), true), (None, false)] {
+        let host = Host::start_with(root(), version, &no_route);
+        let client = Client::set_up(&host);
+        let (code, said) = client.doctor();
+        let line = format!(
+            "Memory titles: the memory server at http://{}/mcp runs 0.10.1, which has a /titles route, but this machine gets 404 for it, so a push there names each memory by its id alone. A reverse proxy in front of the server likely lets only the routes it knows through; add /titles to its allow list, as docs/server.md shows",
+            host.address
+        );
+        assert_eq!(said.contains(&line), told, "{version:?}: {said}");
+        assert_eq!(said.contains("Memory titles"), told, "{version:?}: {said}");
+        // An action needed makes doctor exit 3, as every action does.
+        assert_eq!(code, Some(if told { 3 } else { 0 }), "{version:?}: {said}");
+    }
+    // The route there: no such line.
+    let host = Host::start_as(root(), Some("0.10.1"));
+    let client = Client::set_up(&host);
+    let (code, said) = client.doctor();
+    assert!(!said.contains("Memory titles"), "{said}");
+    assert_eq!(code, Some(0), "{said}");
 }
 
 // A server that no longer answers the delivery route, as one put back to

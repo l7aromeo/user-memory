@@ -494,7 +494,9 @@ Found by a search:
   prints its title and the passages pushed of it, or, like what a search
   found and what does not fit, its title and "if it applies, read it
   again first". An agent's note is marked as a push marks it. On a memory
-  server's store each line names the id alone.
+  server's store each line is the last of these: the title from the
+  connector, as a push gets it, or the id alone when the connector has
+  none.
 - **The store as it is now:** a memory changed since prints its current
   text, a superseded one the memory in force that replaced it, and a
   forgotten or stale one, or one whose condition ended, nothing. A
@@ -518,10 +520,29 @@ On a memory server's store, the hooks match against the index its
 connector keeps on this machine, and only while it keeps it current: a
 connector runs, its last poll is recent, and the files are at or past the
 position that poll found, so a memory forgotten on the server is never
-matched. Every line then names the memory by its id alone, as above:
-whose word a memory is, and its text, are on the server, which a tool
-hook never asks. So a memory is named once in 100 steps, whichever of
-its passages the steps match.
+matched. A line there holds no passage, since the text is on the server,
+which a tool hook never asks. It names the memory's title, quoted, with
+an agent's note marked as one:
+
+```output
+From user-memory, matching this step (if one applies, read it for the rest first):
+- e0000005 "Build the release with cargo zigbuild"; if it applies, read it first
+- e0000006 An agent's note: "cargo zigbuild needs Zig 0.14"; if it applies, read it first
+```
+
+The titles come from the connector. It asks the server for each scope's
+titles (`/titles`) when its poll finds the server's position moved, keeps
+them in its memory only, never on disk, and answers the hooks on
+127.0.0.1. One connector on the machine answers; another takes over
+within half a second when it exits. A hook waits at most 25 ms, and uses
+the titles only when they are current to the files it matched, so a
+title changed or a memory forgotten on the server never shows from
+before the change. Without them in time (no connector answering, a
+server released before `/titles`, or a proxy that doesn't let it
+through, which `user-memory doctor` names), a line names the id alone:
+`- e0000005 matches this step; if it applies, read it first`. Either way
+a memory is named once in 100 steps, whichever of its passages the steps
+match.
 
 Limits of what the clients tell a hook:
 

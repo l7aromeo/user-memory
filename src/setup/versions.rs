@@ -63,6 +63,16 @@ pub(crate) const HANDOVER_SINCE: Version = Version {
     patch: 0,
 };
 
+/// The first release whose server can answer `/titles` (#292): every one
+/// after 0.10.0, the last without it. A server from it on that a client
+/// gets 404 from for the route is behind a proxy that doesn't let it
+/// through, which doctor says.
+pub(crate) const TITLES_SINCE: Version = Version {
+    major: 0,
+    minor: 10,
+    patch: 1,
+};
+
 /// The oldest client this server supports, which the handshake names so a
 /// client can say when it must be upgraded. Raised only by a release whose
 /// server needs something older clients don't send: none since 0.8.0, the
@@ -304,6 +314,12 @@ fn said(result: &serde_json::Value) -> (String, Option<Version>, Option<Version>
         .and_then(serde_json::Value::as_str)
         .and_then(Version::parse);
     (shown, server, min_client)
+}
+
+/// The release a handshake result names its server by, when it is one
+/// (`X.Y.Z`).
+pub(crate) fn server_release(result: &serde_json::Value) -> Option<Version> {
+    said(result).1
 }
 
 /// The version in `user-memory --version`'s output (`user-memory X.Y.Z`),

@@ -152,7 +152,7 @@ other than the host connect only through the proxy.
        proxy_send_timeout 300s;
    }
 
-   location ~ ^/(export|import|delivery)$ {     # export, import, delivery index
+   location ~ ^/(export|import|delivery|titles)$ {  # export, import, delivery index, titles
        client_max_body_size 129m;               # a 64 MiB file and titles map
        proxy_pass http://127.0.0.1:8765;
        proxy_set_header Host $host;
@@ -191,6 +191,16 @@ other than the host connect only through the proxy.
    CDN in front of the server: CDNs often strip `Authorization`, cache or
    restrict `POST`, and cut streamed responses short. Point the host name
    straight at the proxy (on Cloudflare: a DNS-only record).
+
+   `/titles` sends a client's connector the title, source and type of
+   each memory its sessions' projects can be pushed, so a push names each
+   memory by its title and marks an agent's note: whole once, under 2 MB
+   at 10,000 memories, then only what changed. What changed lists the ids
+   of memories changed anywhere in the store that the scope doesn't hold,
+   another project's included but never their titles, as `/delivery`'s
+   changes do: a token reaches every project anyway. A proxy that doesn't
+   let `/titles` through leaves pushes naming ids alone, and
+   `user-memory doctor` on the client says so.
 
    `/delivery` sends each client the delivery index of its sessions'
    projects, 2.7 MB at 10,000 memories, when it has none. The server keeps

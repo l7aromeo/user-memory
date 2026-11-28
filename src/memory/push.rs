@@ -4,8 +4,10 @@
 //! first.
 //!
 //! The text comes from the store, read after the match: the delivery
-//! index holds no text and no title. Where the store can't be read in
-//! time, or lives on a server, a line names the id alone ([`POINTER`]).
+//! index holds no text and no title. On a server's store the hook has no
+//! text: a line names the memory's label and title, from the connector
+//! ([`titled`], #292). Where neither arrives in time, a line names the id
+//! alone ([`POINTER`]).
 
 use super::{
     delivery::{Error, View},
@@ -15,6 +17,7 @@ use super::{
     reads_as_wish,
 };
 use crate::memory::in_force::live;
+use crate::remote::titles::channel::Titles;
 use rusqlite::{Connection, OptionalExtension};
 use std::time::Instant;
 
@@ -44,12 +47,21 @@ const HEADER: &str =
 const FAILED_HEADER: &str =
     "From user-memory, matching this failed step (if one applies, read it for the rest first):";
 
-/// What a line says of a memory whose text the hook did not read: a
-/// server's store, or a store read past the hook's limit. It has no mark:
+/// How a line that holds no passage ends: the condition first, so no agent
+/// reads every such line, whatever its step.
+macro_rules! read_first {
+    () => {
+        "if it applies, read it first"
+    };
+}
+
+/// What a line says of a memory whose text the hook did not read: a store
+/// read past the hook's limit, or a server's store whose titles did not
+/// arrive in time. It has no mark:
 /// whose word a memory is comes from its source, status and type, which
 /// the delivery index does not hold, and a line that claims none sends the
 /// agent to `read`, which gives them.
-pub(crate) const POINTER: &str = "matches this step; if it applies, read it first";
+pub(crate) const POINTER: &str = concat!("matches this step; ", read_first!());
 
 /// What a line says before the text of an agent's note, so it is never
 /// taken for the user's own word; a line of the user's own memory says
@@ -75,6 +87,25 @@ pub(crate) fn mark(voice: Voice) -> &'static str {
 /// more to read.
 const MORE: &str = " …";
 
+/// The line of a memory on a server's store, whose text the hook never
+/// reads: its [`mark`] and title, from the connector (#292). The title is
+/// quoted, so it is never read as the memory's text.
+fn titled(short: &str, mark: &str, title: &str) -> String {
+    let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    format!("- {short} {mark}\"{title}\"; {}", read_first!())
+}
+
+/// The [`mark`] of a memory of `source` and `memory_type`, as a server's
+/// titles give them: none for an inference, which no hook pushes.
+fn served_mark(source: &str, memory_type: &str) -> Option<&'static str> {
+    match source {
+        "explicit" => Some(mark(Voice::User)),
+        "observed" if reads_as_wish(memory_type) => Some(mark(Voice::Wish)),
+        "observed" => Some(mark(Voice::Note)),
+        _ => None,
+    }
+}
+
 /// One memory's line in a push.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Line {
@@ -82,8 +113,8 @@ pub(crate) struct Line {
     pub(crate) id: String,
     /// The passage's slot: the key a passage's text is shown once by.
     pub(crate) passage: i64,
-    /// Whether the line names the id alone, the [`POINTER`]: it holds no
-    /// passage, so it is shown once for the memory, whichever passage
+    /// Whether the line holds no passage: the [`POINTER`], or a server's
+    /// [`titled`] line. It is shown once for the memory, whichever passage
     /// matched (#293).
     pub(crate) named: bool,
     /// The line as pushed, without its line break.
@@ -100,28 +131,53 @@ pub(crate) fn passes(matched: &Matched, failed: bool) -> bool {
     }
 }
 
-/// The lines for `passing`, matches of `view` strongest first: each
-/// memory's passage and [`mark`] from the store `conn`, read until
-/// `deadline`, or the [`POINTER`] line without it. A memory gone from the
-/// store, or whose passage no longer falls on its text, has no line.
+/// Where a push's lines come from.
+pub(crate) enum Text<'a> {
+    /// This machine's store, read until a deadline: each memory's passage
+    /// and mark.
+    Store(&'a Connection, Instant),
+    /// A server's titles from the connector, current to the delivery
+    /// files' position: each memory's mark and title.
+    Titles(&'a Titles),
+    /// Nothing in time: each memory's id alone.
+    None,
+}
+
+/// The lines for `passing`, matches of `view` strongest first, from
+/// `source`: a passage and its [`mark`], a mark and title ([`titled`]), or
+/// the [`POINTER`] line. A memory gone from the store, or from the
+/// server's titles, an inference, and a passage that no longer falls on
+/// its text have no line.
 pub(crate) fn lines(
-    conn: Option<&Connection>,
+    source: Text<'_>,
     view: &View,
     passing: &[&Matched],
-    deadline: Instant,
 ) -> Result<Vec<Line>, Error> {
     let mut lines = Vec::with_capacity(passing.len());
     for matched in passing {
         let id = view.id(matched.memory)?.to_owned();
         let short = id.get(..SHORT_ID).unwrap_or(&id);
-        let (text, named) = match conn.filter(|_| Instant::now() < deadline) {
-            Some(conn) => match labelled(conn, &id, matched)? {
+        let read = match &source {
+            Text::Store(conn, deadline) if Instant::now() < *deadline => Some(conn),
+            _ => None,
+        };
+        let (text, named) = match (read, &source) {
+            (Some(conn), _) => match labelled(conn, &id, matched)? {
                 Some(Labelled { voice, passage, .. }) => {
                     (format!("- {short} {}{passage}", mark(voice)), false)
                 }
                 None => continue,
             },
-            None => (format!("- {short} {POINTER}"), true),
+            (None, Text::Titles(titles)) => {
+                let Some(named) = titles.get(&id) else {
+                    continue;
+                };
+                let Some(mark) = served_mark(&named.source, &named.memory_type) else {
+                    continue;
+                };
+                (titled(short, mark, &named.title), true)
+            }
+            (None, _) => (format!("- {short} {POINTER}"), true),
         };
         lines.push(Line {
             id,
@@ -288,13 +344,14 @@ mod tests {
         index::stems::{Field, Stems},
         matcher::{Action, Kind, Window},
     };
-    use std::time::Duration;
+    use crate::remote::titles::channel::Named;
 
-    /// A server's store, or a store not read before the hook's deadline,
-    /// gives each passing match a line naming its id alone: no label, no
-    /// text.
+    /// A store not read before the hook's deadline, or a server's store
+    /// whose titles did not arrive, gives each passing match a line naming
+    /// its id alone: no label, no text. A server's titles give its label
+    /// and title.
     #[test]
-    fn without_the_store_a_push_names_the_id_alone() {
+    fn without_the_store_a_push_names_a_title_or_the_id_alone() {
         const A: &str = "e0000001-0000-4000-8000-000000000001";
         let row = |slot, words: &str, anchors: &[&str]| SourceRow {
             slot,
@@ -322,8 +379,7 @@ mod tests {
         let found = view.rank(&window).unwrap();
         let passing: Vec<&Matched> = found.iter().filter(|m| passes(m, false)).collect();
         assert_eq!(passing.len(), 1);
-        let later = Instant::now() + Duration::from_secs(60);
-        let lines = lines(None, &view, &passing, later).unwrap();
+        let lines = lines(Text::None, &view, &passing).unwrap();
         let pointer = format!("- e0000001 {POINTER}");
         assert_eq!(
             lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(),
@@ -335,8 +391,53 @@ mod tests {
         );
         // A store, but the deadline passed: the same line, the store unread.
         let store = Connection::open_in_memory().unwrap();
-        let late = super::lines(Some(&store), &view, &passing, Instant::now()).unwrap();
+        let late = super::lines(Text::Store(&store, Instant::now()), &view, &passing).unwrap();
         assert_eq!(late, lines);
+
+        // A server's titles: the mark and quoted title, still held to once
+        // per memory; a memory gone from them, or an inference, has no line.
+        let named = |source: &str, title: &str| Named {
+            title: title.to_owned(),
+            source: source.to_owned(),
+            memory_type: "fact".to_owned(),
+        };
+        let titles = Titles::of([(A.to_owned(), named("explicit", "Publish  with\ncargo"))]);
+        let titled = super::lines(Text::Titles(&titles), &view, &passing).unwrap();
+        assert_eq!(
+            titled.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(),
+            [r#"- e0000001 "Publish with cargo"; if it applies, read it first"#]
+        );
+        assert!(titled[0].named);
+        let note = Titles::of([(A.to_owned(), named("observed", "Publish on Tuesdays"))]);
+        let noted = super::lines(Text::Titles(&note), &view, &passing).unwrap();
+        assert_eq!(
+            noted[0].text,
+            r#"- e0000001 An agent's note: "Publish on Tuesdays"; if it applies, read it first"#
+        );
+        let mut wish = named("observed", "Prefer tabs");
+        wish.memory_type = "preference".to_owned();
+        let wished = super::lines(
+            Text::Titles(&Titles::of([(A.to_owned(), wish)])),
+            &view,
+            &passing,
+        )
+        .unwrap();
+        assert_eq!(
+            wished[0].text,
+            r#"- e0000001 An agent's note, not the user's rule: "Prefer tabs"; if it applies, read it first"#
+        );
+        let gone = Titles::of([]);
+        assert!(
+            super::lines(Text::Titles(&gone), &view, &passing)
+                .unwrap()
+                .is_empty()
+        );
+        let inferred = Titles::of([(A.to_owned(), named("inferred", "A guess"))]);
+        assert!(
+            super::lines(Text::Titles(&inferred), &view, &passing)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
