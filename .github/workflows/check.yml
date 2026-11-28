@@ -24,9 +24,11 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    # About twice the longest green run, rounded up to 5 minutes: 949 s on
-    # Ubuntu, 153 s on macOS.
-    timeout-minutes: 35
+    # About twice the longest complete run, rounded up to 5 minutes: 1,629 s
+    # on Ubuntu (run 45987293743, just check 1,300 s of it); macOS's longest
+    # is 1,436 s, with an empty cache after a toolchain change (run
+    # 46092507864). nextest ends a hung test after 5 minutes.
+    timeout-minutes: 55
     env:
       # One run reports every failing test (.config/nextest.toml).
       NEXTEST_PROFILE: ci
