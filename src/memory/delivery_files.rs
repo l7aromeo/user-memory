@@ -1903,14 +1903,18 @@ impl Files {
     fn open_served(&self, marker: Option<&Position>, scope: &[String]) -> Option<View> {
         let marker = marker?;
         let view = self.view(scope)?;
-        let newest = view
-            .overlay
-            .as_ref()
-            .map_or(&view.base.header, |overlay| &overlay.header);
-        marker
-            .within(&Position::kept(newest.position.clone()))
-            .then_some(view)
+        marker.within(&newest(&view)).then_some(view)
     }
+}
+
+/// The position of `view`'s newest file: its overlay's, else its base's.
+/// What it holds is current to that position.
+pub(crate) fn newest(view: &View) -> Position {
+    let header = view
+        .overlay
+        .as_ref()
+        .map_or(&view.base.header, |overlay| &overlay.header);
+    Position::kept(header.position.clone())
 }
 
 /// Each scope whose base this machine keeps of the server at `url`, with

@@ -147,6 +147,11 @@ FORGETS = 5
 # The store's global memories the cost phase forgets: each forget is timed
 # with the delivery files and then without them, on another memory.
 FORGET_GLOBALS = 2 * FORGETS
+# Sessions a server's client tries the title push in while its connector
+# catches up with a record, a few each poll (`TITLE_WARM_TRIES_PER_POLL`):
+# four polls' worth, where it takes one and a tick.
+TITLE_WARM_TRIES_PER_POLL = 5
+TITLE_WARM_TRIES = 4 * TITLE_WARM_TRIES_PER_POLL
 # The tag the upkeep's tag-waiting session waits for (#121): one no checkout
 # has, so the check looks and ends nothing.
 PENDING_TAG = "v99.0.0"
@@ -938,13 +943,15 @@ def read_shared(path):
         return file.read()
 
 
-def served(binary, folder):
-    """#180's costs through the real binary, with the store in `folder`
-    served by `host` on loopback to a client in a throwaway home: session
-    start downloading its scope's base against finding it, the base's size,
-    and how long a forget on the server takes to leave the client's files
-    with a connector running. Returns session start's medians downloading
-    and finding, the base's bytes, and the forget's time (None when the
+def served(binary, folder, tool_limit):
+    """#180's and #292's costs through the real binary, with the store in
+    `folder` served by `host` on loopback to a client in a throwaway home:
+    session start downloading its scope's base against finding it, the
+    base's size, the tool hook pushing a memory's title from the connector
+    (`pair`ed, against `tool_limit`), and how long a forget on the server
+    takes to leave the client's files with a connector running. Returns
+    session start's medians downloading and finding, the base's bytes, the
+    title push's set (`hook_set`), and the forget's time (None when the
     words never left)."""
     server = folder / "server"
     server.mkdir()
@@ -981,6 +988,21 @@ def served(binary, folder):
                            capture_output=True, input=json.dumps(payload), text=True)
             return (time.perf_counter() - began) * 1000
 
+        def tool_said(event, session, cwd, **extra):
+            """The client's post-tool hook's time and the text it added to
+            the context; with no `session`, it returns before it reads its
+            session."""
+            payload = {"cwd": str(cwd), "hook_event_name": event, **extra}
+            if session is not None:
+                payload["session_id"] = session
+            began = time.perf_counter()
+            out = subprocess.run([str(binary), "post-tool-use", "--client", "claude"], env=env,
+                                 check=True, capture_output=True, input=json.dumps(payload), text=True)
+            took = (time.perf_counter() - began) * 1000
+            # The text itself, not its JSON, whose quotes are escaped.
+            said = json.loads(out.stdout) if out.stdout.strip() else {}
+            return took, said.get("hookSpecificOutput", {}).get("additionalContext", "")
+
         starts = {"downloading": [], "finding": []}
         for n in range(SESSION_PAIRS):
             for path in delivery.glob("*") if delivery.exists() else []:
@@ -996,6 +1018,13 @@ def served(binary, folder):
                                      stderr=subprocess.DEVNULL)
         word = "zircon-tally"
         hexed = word.encode().hex().encode()
+        # The sessions the title push is timed in start before the memory
+        # is recorded: a session start after it shows it, which counts as
+        # pushed, so no tool hook there would push it.
+        for n in range(TITLE_WARM_TRIES):
+            start(f"warm{n}")
+        for n in range(HOOK_RUNS):
+            start(f"titled{n}")
         out = subprocess.run([str(binary), "record", "--type", "procedure", "--category", "build",
                               "--title", "Zircon tally", "--content", f"Run `{word}` before counting.",
                               "--scope", "global"], env=env, check=True, capture_output=True, text=True)
@@ -1019,6 +1048,31 @@ def served(binary, folder):
         deadline = time.perf_counter() + 10 * poll / 1000
         while held() is not True and time.perf_counter() < deadline:
             time.sleep(0.05)
+
+        # The tool hook naming the memory's command, each run in a session
+        # of its own, so each pushes it: its title, once the connector's
+        # titles caught up with the record.
+        title = '"Zircon tally"'
+        call = {"tool_name": "Bash", "tool_input": {"command": word}, "tool_response": {"stdout": ""}}
+        said = ""
+        for n in range(TITLE_WARM_TRIES):
+            said = tool_said("PostToolUse", f"warm{n}", cwd, **call)[1]
+            if title in said:
+                break
+            time.sleep(poll / 1000 / TITLE_WARM_TRIES_PER_POLL)
+        else:
+            raise SystemExit(f"the connector never gave the hooks the recorded memory's title; "
+                             f"the last push: {said!r}")
+        titled, missed = [], []
+        for n in range(HOOK_RUNS):
+            took, out, base = pair(tool_said, n, "PostToolUse", f"titled{n}", cwd, **call)
+            done = push_checked(out, title, took, base, tool_limit, missed)
+            if done is None:
+                raise SystemExit(f"a tool hook did not push the memory's title in {took:.1f} ms, "
+                                 f"within its {tool_limit} ms limit: {out!r}")
+            if done and n:
+                titled.append((took, base))
+
         subprocess.run([str(binary), "forget", memory], env=env, check=True, capture_output=True)
         forgot = time.perf_counter()
         left = None
@@ -1028,7 +1082,7 @@ def served(binary, folder):
                 break
             time.sleep(0.05)
         return (statistics.median(starts["downloading"]), statistics.median(starts["finding"]),
-                size, left)
+                size, hook_set(titled, missed), left)
     finally:
         for process in (connector, host):
             if process:
@@ -1054,7 +1108,8 @@ HOOK_WHAT = {"tool": "the tool hook pushing nothing", "push": "the tool hook pus
              "tagged": "the tool hook with a tag waited for",
              "looked_up": "the tool hook looking a tag up",
              "hold": "the pre-tool hook holding a command back",
-             "prompted": "the prompt hook pushing a memory"}
+             "prompted": "the prompt hook pushing a memory",
+             "titled": "the tool hook pushing a server memory's title"}
 # How each hook line is reported: the hook, and what its runs do.
 HOOK_SAYS = {"tool": ("tool hook  ", "after a change, nothing pushed"),
              "push": ("tool hook  ", "after a change, pushing the memory its command names"),
@@ -1063,7 +1118,9 @@ HOOK_SAYS = {"tool": ("tool hook  ", "after a change, nothing pushed"),
              "looked_up": ("tool hook  ", "with a tag waited for, after a ref change, pushing the "
                                           "memory its command names"),
              "hold": ("pre-tool hook", "after a change, holding back the command a memory names"),
-             "prompted": ("prompt hook", "after a change, pushing the memory its words name")}
+             "prompted": ("prompt hook", "after a change, pushing the memory its words name"),
+             "titled": ("tool hook  ", "on a server's client, pushing the title of the memory its "
+                                       "command names")}
 
 
 def hook_limits(tool_limit, hold_limit, prompt_limit):
@@ -1188,11 +1245,14 @@ def cost(found, seed, size, keep, drawn):
         print(f"  prompt hook {kept['prompt']:6.1f} ms building a missing base: "
               f"{'built' if kept['built_at_prompt'] else 'NOT built'} "
               f"(limit {prompt_limit} ms)")
-        downloading, finding, base_bytes, left = served(found["user-memory"], folder)
+        downloading, finding, base_bytes, titled, left = served(found["user-memory"], folder,
+                                                                tool_limit)
         poll = rust_ms("src/remote/marker.rs", "REMOTE_MARKER_POLL")
         print(f"  a server's client: session start median {downloading:6.1f} ms downloading its base "
               f"({base_bytes / 1e6:.1f} MB), {finding:6.1f} ms finding it ({SESSION_PAIRS} pairs, "
               f"limit {rust_ms('src/session.rs', 'LIMIT')} ms)")
+        print_hook_line("titled", [titled], tool_limit)
+        titled_verdict = hook_verdict([titled], tool_limit)
         print(f"  a server's client: a forget left its files in "
               f"{'never' if left is None else f'{left:.0f} ms'} "
               f"(limit {FORGET_LEFT_POLLS} polls of {poll} ms)")
@@ -1205,7 +1265,8 @@ def cost(found, seed, size, keep, drawn):
             print(f"  {mode:<11} median {median:6.1f} ms, 95th percentile {p95:6.1f} ms, "
                   f"largest {samples[-1]:6.1f} ms")
         served_ok = (downloading <= rust_ms("src/session.rs", "LIMIT")
-                     and left is not None and left <= FORGET_LEFT_POLLS * poll)
+                     and left is not None and left <= FORGET_LEFT_POLLS * poll
+                     and not titled_verdict["over"])
         return (worst, share, kept, limits, start, served_ok)
 
 
@@ -1264,8 +1325,9 @@ def main():
             print("the prompt hook did not build the missing base within its limit")
             over = True
         if args.check_cost and not served_ok:
-            print("a server's client downloaded its base past session start's limit, "
-                  "or a forget did not leave its files within the polls allowed")
+            print("a server's client downloaded its base past session start's limit, pushed a "
+                  "memory's title past the tool hook's, or a forget did not leave its files "
+                  "within the polls allowed")
             over = True
         return 1 if over else 0
     if args.sweep:

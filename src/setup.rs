@@ -1800,6 +1800,7 @@ pub async fn doctor(options: &Options) -> Result<Health> {
                 Some(versions::ServerStep::Note(note)) => println!("{note}"),
                 None => {}
             }
+            check_titles_route(remote, &result, &mut actions).await;
         }
     } else if options.update_check_enabled(saved.as_ref())
         && !update::off_by_environment()
@@ -2178,6 +2179,28 @@ fn check_served_delivery(url: &str, actions: &mut Vec<String>, failures: &mut Ve
         );
     }
     held_delivery_files(&cleaned, actions);
+}
+
+/// On a memory server's client, whether the server's titles route reaches
+/// this machine (#292): a server whose handshake `result` names a release
+/// with the route, answering 404 for it, is behind a reverse proxy that
+/// lets only the routes it knows through, and every push there names the
+/// id alone until the proxy lets `/titles` through too.
+async fn check_titles_route(
+    remote: &crate::remote::Connection,
+    result: &serde_json::Value,
+    actions: &mut Vec<String>,
+) {
+    let Some(server) = versions::server_release(result) else {
+        return;
+    };
+    if server < versions::TITLES_SINCE || !matches!(remote.reaches_titles().await, Ok(false)) {
+        return;
+    }
+    actions.push(format!(
+        "Memory titles: the memory server at {} runs {server}, which has a /titles route, but this machine gets 404 for it, so a push there names each memory by its id alone. A reverse proxy in front of the server likely lets only the routes it knows through; add /titles to its allow list, as docs/server.md shows",
+        remote.url
+    ));
 }
 
 /// The action for each delivery file another program keeps open.

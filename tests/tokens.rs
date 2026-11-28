@@ -876,6 +876,80 @@ fn the_delivery_route_refuses_a_request_without_a_valid_token_as_export_does() {
     assert_eq!(other.status, 409, "{}", other.body);
 }
 
+/// The titles route (#292) refuses a request without a valid token as the
+/// export route does: none, a stranger's, a revoked one, an expired one,
+/// each with no title in its body. A read-only token gets titles, which
+/// `index` and `read` give it anyway. Every token gets only the scope it
+/// asks for: a memory of another project is never in the answer.
+#[test]
+fn the_titles_route_answers_only_a_valid_token_and_only_the_scope_asked() {
+    let host = Host::start();
+    let writer = Session::open(&host, SHARED);
+    let titled = |title: &str, scope: Value| {
+        let mut args = record_args(title);
+        args.as_object_mut()
+            .unwrap()
+            .extend(scope.as_object().unwrap().clone());
+        let (failed, stored) = writer.call("record", args);
+        assert!(!failed, "{stored}");
+    };
+    titled("Prefer tabs", json!({}));
+    titled(
+        "Run the app's linter",
+        json!({"scope":"project","project":"github.com/acme/app"}),
+    );
+    titled(
+        "Keep the tool's secret name",
+        json!({"scope":"project","project":"github.com/acme/other"}),
+    );
+    let revoked = host.add("revoked", &[]);
+    host.token(&["revoke", "revoked"]);
+    let expired = host.add("expired", &["--expires", "5"]);
+    host.registry_conn()
+        .execute(
+            "UPDATE client_tokens SET expires_at = ?1 WHERE name = 'expired'",
+            [now() - 1],
+        )
+        .unwrap();
+    let reader = host.add("reader", &["--read-only"]);
+    let body = r#"{"projects":["github.com/acme/app"]}"#;
+    let stranger = "not-a-token-of-this-server-at-all-0123456789";
+    for (token, challenge) in [
+        ("", None),
+        (stranger, None),
+        (revoked.as_str(), Some(REVOKED)),
+        (expired.as_str(), Some(EXPIRED)),
+    ] {
+        let titles = host.send("POST", "/titles", token, body);
+        let export = host.send("POST", "/export", token, "{}");
+        assert_eq!(titles.status, 401, "{token:?}: {}", titles.body);
+        assert_eq!(
+            (titles.status, &titles.challenge),
+            (export.status, &export.challenge),
+            "{token:?}"
+        );
+        if let Some(challenge) = challenge {
+            assert_eq!(titles.challenge, challenge);
+        }
+        assert!(!titles.body.contains("Prefer tabs"), "{}", titles.body);
+    }
+    for token in [SHARED, reader.as_str()] {
+        let titles = host.send("POST", "/titles", token, body);
+        assert_eq!(titles.status, 200, "{}", titles.body);
+        let said: Value = serde_json::from_str(&titles.body).unwrap();
+        let mut named: Vec<&str> = said["memories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|memory| memory["title"].as_str().unwrap())
+            .collect();
+        named.sort_unstable();
+        assert_eq!(named, ["Prefer tabs", "Run the app's linter"], "{token:?}");
+        assert!(!titles.body.contains("secret name"), "{}", titles.body);
+        assert_eq!(said["whole"], true);
+    }
+}
+
 /// A new rule's list ends, on a machine whose token is read-only, with who
 /// can remove one; on a machine whose token writes, with `forget`.
 #[test]

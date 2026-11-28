@@ -30,6 +30,7 @@ pub(crate) mod refused;
 pub(crate) mod scope;
 mod sessions;
 pub(crate) mod tags;
+pub(crate) mod titles;
 mod tokens;
 mod transfer;
 pub(crate) mod usage;
@@ -548,6 +549,7 @@ pub async fn host(options: HostOptions) -> Result<()> {
         ));
     let transfers = transfer::routes(db.clone(), allowed.clone());
     let delivery = delivery::routes(db.clone(), allowed.clone());
+    let titles = titles::routes(db.clone(), allowed.clone());
     let usage = usage::routes(db.clone(), allowed.clone());
     let tag_route = tags::routes(db.clone(), allowed);
     let health = Health::new(db.clone());
@@ -562,7 +564,7 @@ pub async fn host(options: HostOptions) -> Result<()> {
             sessions::Sessions::start(),
             config,
         );
-    // /mcp, the export, import, delivery, use and tags endpoints and a
+    // /mcp, the export, import, delivery, titles, use and tags endpoints and a
     // token's own revocation need a token (src/remote/gate.rs). `/` names
     // the service for health checks and reverse-proxy smoke tests, reads no
     // memory and needs no token; other paths are 404.
@@ -570,6 +572,7 @@ pub async fn host(options: HostOptions) -> Result<()> {
         .nest_service("/mcp", service)
         .merge(transfers)
         .merge(delivery)
+        .merge(titles)
         .merge(usage)
         .merge(tag_route)
         .merge(own_token)
@@ -611,7 +614,8 @@ pub async fn connect_over(
     // Beside the relay, never in it: the hooks on this machine read the
     // server's position from the marker it keeps.
     let (stop, stopping) = tokio::sync::watch::channel(false);
-    let mut poller = tokio::spawn(marker::poll(connection.clone(), stopping));
+    let mut poller = tokio::spawn(marker::poll(connection.clone(), stopping.clone()));
+    let mut titles = tokio::spawn(titles::owner::serve(connection.clone(), stopping));
     let relayed = forward(
         local,
         remote,
@@ -632,6 +636,14 @@ pub async fn connect_over(
             .is_err()
         {
             poller.abort();
+        }
+    });
+    tokio::spawn(async move {
+        if tokio::time::timeout(marker::POLLER_END_WAIT, &mut titles)
+            .await
+            .is_err()
+        {
+            titles.abort();
         }
     });
     relayed

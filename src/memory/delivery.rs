@@ -17,6 +17,36 @@ use crate::memory::index::{
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params_from_iter};
 use std::{collections::HashMap, fmt, path::Path};
 
+/// The condition over the row `$table` of `memories` that holds for a
+/// memory the hooks deliver in a scope: in force, of the global scope or of
+/// the projects in the JSON array `?1`, and never a guess or an observation
+/// about the user (inferred memories, types `behavior` and `pattern`).
+/// Written out only here: the delivery index and a server's titles
+/// (`super::served_titles`) both expand it, so they hold the same memories.
+macro_rules! delivered {
+    ($table:literal) => {
+        concat!(
+            $crate::memory::in_force::live!($table),
+            " AND ",
+            $table,
+            ".source!='inferred' AND ",
+            $table,
+            ".memory_type NOT IN ('behavior','pattern') AND (",
+            $table,
+            ".scope='global' OR (",
+            $table,
+            ".scope='project' AND ",
+            $table,
+            ".project IN (SELECT value FROM json_each(?1))))"
+        )
+    };
+}
+#[allow(
+    unused_imports,
+    reason = "used by served_titles, which the delivery bench's mirror leaves out"
+)]
+pub(in crate::memory) use delivered;
+
 /// The first byte of a term's key: an anchor's sorts before a stem's.
 pub(in crate::memory) fn prefix(anchor: bool) -> u8 {
     if anchor { b'a' } else { b's' }
@@ -692,16 +722,12 @@ pub(crate) struct Overlay {
 /// order: [`CANDIDATES`] for the ids in `?2`.
 const CHANGED_CANDIDATES: &str = concat!(
     "SELECT k.key,m.id FROM search_keys k JOIN memories m ON m.id=k.id WHERE ",
-    live!("m"),
-    " AND m.source!='inferred' \
-     AND m.memory_type NOT IN ('behavior','pattern') \
-     AND (m.scope='global' OR (m.scope='project' AND m.project IN (SELECT value FROM json_each(?1)))) \
-     AND m.id IN (SELECT value FROM json_each(?2)) \
-     ORDER BY k.key"
+    delivered!("m"),
+    " AND m.id IN (SELECT value FROM json_each(?2)) ORDER BY k.key"
 );
 
 /// A JSON array of `items`, for `json_each`.
-fn json_array(items: &[String]) -> String {
+pub(in crate::memory) fn json_array(items: &[String]) -> String {
     format!(
         "[{}]",
         items
@@ -772,7 +798,10 @@ fn current_changes(conn: &Connection) -> Result<(String, i64, i64), Error> {
 
 /// Each memory changed after change `since`, in change order, with whether
 /// it was removed.
-fn changed_since(conn: &Connection, since: i64) -> Result<Vec<(String, bool)>, Error> {
+pub(in crate::memory) fn changed_since(
+    conn: &Connection,
+    since: i64,
+) -> Result<Vec<(String, bool)>, Error> {
     let mut changed = Vec::new();
     let mut statement = conn.prepare(
         "SELECT memory_id,removed_at IS NOT NULL FROM memory_changes WHERE change>?1 ORDER BY change",
@@ -1095,16 +1124,12 @@ impl View {
     }
 }
 
-/// The memories search may deliver in a scope: active ones of the global
-/// scope and of `projects`, never a guess or an observation about the user
-/// (inferred memories, types `behavior` and `pattern`).
+/// The memories search may deliver in a scope ([`delivered`]), in key
+/// order.
 pub(in crate::memory) const CANDIDATES: &str = concat!(
     "SELECT k.key,m.id FROM search_keys k JOIN memories m ON m.id=k.id WHERE ",
-    live!("m"),
-    " AND m.source!='inferred' \
-     AND m.memory_type NOT IN ('behavior','pattern') \
-     AND (m.scope='global' OR (m.scope='project' AND m.project IN (SELECT value FROM json_each(?1)))) \
-     ORDER BY k.key"
+    delivered!("m"),
+    " ORDER BY k.key"
 );
 
 /// The base file of the memories search may deliver in the global scope
