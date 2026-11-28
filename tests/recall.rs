@@ -529,6 +529,64 @@ fn a_here_document_is_text_the_command_reads_unless_a_shell_runs_it() {
 }
 
 #[test]
+fn earlier_steps_lift_a_memory_the_command_points_at_and_never_make_one_up() {
+    let home = Home::new();
+    // Shares only `git` with the command; its title is what the steps
+    // before it talk about.
+    let carried = home.record(
+        "Pipeline runner artifacts stay where the runner wrote them",
+        "Keep each pipeline runner's artifacts where the runner wrote them, and read them back with `git -C <folder>` rather than copying them out.",
+        &[],
+    );
+    // Names the command's folder: about the command, if short of the bar
+    // on the command alone.
+    let fixtures = home.record(
+        "Lexer fixtures are regenerated, never edited by hand",
+        "After a change under `src/parse/`, regenerate the lexer fixtures with the fixture tool; an edited fixture is overwritten.",
+        &[],
+    );
+    home.record(
+        "git status shows the branch first",
+        "`git status --short` lists changes.",
+        &[],
+    );
+    let diff = "git -C . diff HEAD~1 -- src/parse/lexer/rules.py";
+    home.start("alone", "startup");
+    let alone = home.run("alone", diff);
+    assert!(!alone.contains(short(&carried)), "{alone}");
+    assert!(!alone.contains(short(&fixtures)), "{alone}");
+    // Steps about the pipeline runner's artifacts, then the command: the
+    // memory they talk about is still no part of it.
+    home.start("talked", "startup");
+    home.prompt(
+        "talked",
+        "The pipeline runner artifacts are stale after the last run; find out why",
+    );
+    assert_eq!(home.run("talked", "ls artifacts/pipeline-runner"), "");
+    let talked = home.run("talked", diff);
+    assert!(!talked.contains(short(&carried)), "{talked}");
+    // Nor in a line of several commands, each matched as if alone.
+    home.start("chained", "startup");
+    home.prompt(
+        "chained",
+        "The pipeline runner artifacts are stale after the last run; find out why",
+    );
+    home.run("chained", "ls artifacts/pipeline-runner");
+    let chained = home.run("chained", &format!("echo start; {diff}"));
+    assert!(!chained.contains(short(&carried)), "{chained}");
+    // Steps about the lexer fixtures lift the memory the command points at.
+    home.start("lifted", "startup");
+    home.prompt(
+        "lifted",
+        "The lexer fixtures look edited by hand; regenerate them",
+    );
+    home.run("lifted", "ls tests/fixtures/lexer");
+    let lifted = home.run("lifted", diff);
+    assert!(lifted.contains(short(&fixtures)), "{lifted}");
+    assert!(!lifted.contains(short(&carried)), "{lifted}");
+}
+
+#[test]
 fn a_file_read_through_the_shell_reaches_what_a_read_of_it_reaches() {
     let home = Home::new();
     let store = home.record(

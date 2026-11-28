@@ -105,6 +105,10 @@ struct TuningArgs {
     /// Actions after which a term's weight halves (WINDOW_HALF_LIFE).
     #[arg(long)]
     half_life: Option<f64>,
+    /// The share a passage needs from the firing action's own terms
+    /// before older actions add to it (WINDOW_SHARE_FLOOR).
+    #[arg(long)]
+    share_floor: Option<f64>,
 }
 
 impl TuningArgs {
@@ -113,6 +117,7 @@ impl TuningArgs {
         Tuning {
             window_actions: self.window.unwrap_or(base.window_actions),
             half_life: self.half_life.unwrap_or(base.half_life),
+            share_floor: self.share_floor.unwrap_or(base.share_floor),
         }
     }
 }

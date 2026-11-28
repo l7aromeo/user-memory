@@ -379,7 +379,10 @@ From user-memory, matching this step (if one applies, read it for the rest first
   the line's own.
 - **What is pushed:** a passage that holds an anchor the step names (a
   command with its next word, a path, a code span) and matches the work of
-  the last 30 steps well enough. Words alone never push one. Each line
+  the last 30 steps well enough. After a command, the earlier steps count
+  only once the command itself covers enough of the passage: they lift a
+  passage the command points at, and never one it shares only a common
+  program with, such as `git`. Words alone never push one. Each line
   names the memory's id, then the passage. A passage of an agent's note
   follows `An agent's note:`, so the agent never takes it for your word,
   and one of a rule's type (a preference, constraint or value), whose text

@@ -74,6 +74,17 @@ pub(crate) const COMMAND_FAILURE_BAR: f64 = 0.6;
 /// at 1.0 it would see 1.14 and lose 0.09 of anchored recall.
 pub(crate) const HOLD_BAR: f64 = 0.75;
 
+/// The share a passage needs from the terms of the action that fired
+/// alone before the window's older actions add to it (#299). Below it, the
+/// passage's share is its own: older steps lift a passage the step points
+/// at toward a push or a hold, and no longer make one up for a step that
+/// holds only a common anchor of it, such as `git`. On the delivery
+/// benchmark's tuning seeds every floor from 0.2 drops all 24 holds its
+/// carried tasks made that way, with needed holds unchanged; 0.2 to 0.3
+/// cost at most one right delivery per store size, 0.5 up to 8. 0.25 sits
+/// above the 0.21 such a step held alone in #299's case.
+pub(crate) const WINDOW_SHARE_FLOOR: f64 = 0.25;
+
 /// The `mixed` score a passage needs to be pushed after any action but a
 /// command (#117): a prompt, a file, a message. 0.4 pushes on a rare
 /// anchor and never on common words alone.
@@ -816,6 +827,7 @@ pub(in crate::memory) fn terms(action: &Action, stems: &mut Stems) -> Terms {
 pub(crate) struct Tuning {
     pub(crate) window_actions: usize,
     pub(crate) half_life: f64,
+    pub(crate) share_floor: f64,
 }
 
 impl Default for Tuning {
@@ -823,6 +835,7 @@ impl Default for Tuning {
         Self {
             window_actions: WINDOW_ACTIONS,
             half_life: WINDOW_HALF_LIFE,
+            share_floor: WINDOW_SHARE_FLOOR,
         }
     }
 }
@@ -1337,8 +1350,10 @@ fn ranked(source: &impl Lookup, window: &Window) -> Result<Vec<Matched>, Error> 
         let worth = |field: Field| {
             let base = if anchor { ANCHOR_WEIGHT } else { weight(field) } * want.weight;
             let held = holders.max(1) as f64;
+            let store = base * rarity(all, held) / rarest;
             Gain {
-                store: base * rarity(all, held) / rarest,
+                store,
+                own: if want.fired { store } else { 0.0 },
                 mixed: if anchor {
                     base / held.sqrt()
                 } else {
@@ -1426,9 +1441,14 @@ fn ranked(source: &impl Lookup, window: &Window) -> Result<Vec<Matched>, Error> 
                 } else {
                     flags.parts
                 };
-                split.best_share(held, &possible_parts)
+                split.best_share(held, &possible_parts, window.tuning.share_floor)
             } else if possible > 0.0 {
-                total.store / possible
+                share(
+                    total.own,
+                    total.store - total.own,
+                    possible,
+                    window.tuning.share_floor,
+                )
             } else {
                 0.0
             },
@@ -1449,13 +1469,29 @@ fn ranked(source: &impl Lookup, window: &Window) -> Result<Vec<Matched>, Error> 
 #[derive(Clone, Copy, Default)]
 struct Gain {
     store: f64,
+    /// What of `store` the terms of the action that fired hold.
+    own: f64,
     mixed: f64,
 }
 
 impl Gain {
     fn add(&mut self, other: Gain) {
         self.store += other.store;
+        self.own += other.own;
         self.mixed += other.mixed;
+    }
+}
+
+/// A passage's share of `most`, the most the action that fired could
+/// score: what its own terms hold, `own`, and what the window's older
+/// actions add, `others`, once its own reach `floor`
+/// ([`WINDOW_SHARE_FLOOR`]).
+fn share(own: f64, others: f64, most: f64, floor: f64) -> f64 {
+    let alone = own / most;
+    if alone < floor {
+        alone
+    } else {
+        (own + others) / most
     }
 }
 
@@ -1483,9 +1519,10 @@ impl Split {
         self.terms.extend(other.terms);
     }
 
-    /// The best share among the parts in `held`: the window's other
-    /// actions and the part's own terms against `possible`, its most.
-    fn best_share(&self, held: u64, possible: &[f64]) -> f64 {
+    /// The best share among the parts in `held`: the part's own terms,
+    /// and the window's other actions once those reach `floor` (see
+    /// [`share`]), against `possible`, its most.
+    fn best_share(&self, held: u64, possible: &[f64], floor: f64) -> f64 {
         let mut best = 0.0f64;
         for (part, most) in possible.iter().enumerate() {
             let bit = 1u64 << part;
@@ -1498,7 +1535,7 @@ impl Split {
                 .filter(|(parts, _)| parts & bit != 0)
                 .map(|(_, store)| store)
                 .sum();
-            best = best.max((self.others + own) / most);
+            best = best.max(share(own, self.others, *most, floor));
         }
         best
     }

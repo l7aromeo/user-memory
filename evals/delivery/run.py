@@ -16,6 +16,7 @@ reports precision and recall of what the bars deliver
     just delivery-bench --sweep               # bars and window on the tuning seeds
     just delivery-bench --cost                # one lookup's time, 10,000 memories
     just delivery-bench --failure-curve 0.2,0.3,0.4,0.6  # failure-only pushes by bar
+    just delivery-bench --share-floor 0       # older steps' terms always count
 """
 
 import argparse
@@ -1286,12 +1287,15 @@ def main():
     parser.add_argument("--prompt-curve", help="prompt bars, on stems alone, to report prompt pushes at")
     parser.add_argument("--failure-curve",
                         help="failure bars to report failure-only pushes at, with and without an anchor")
+    parser.add_argument("--share-floor", type=float,
+                        help="the share a passage needs from the firing action alone before older "
+                             "actions add to it (WINDOW_SHARE_FLOOR); 0 lets them always add")
     parser.add_argument("--debug", action="store_true", help="use the debug build")
     parser.add_argument("--keep", type=Path, help="keep the built stores in this folder")
     args = parser.parse_args()
     found = binaries(not args.debug)
     sizes = [int(s) for s in args.sizes.split(",")]
-    tuning = {}
+    tuning = {} if args.share_floor is None else {"share-floor": args.share_floor}
     if args.cost or args.check_cost:
         seed, size = REPORT_SEEDS[0], max(sizes)
         worst, build_added, kept, limits, start, served_ok = cost(
