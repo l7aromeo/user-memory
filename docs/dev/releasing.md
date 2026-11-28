@@ -80,14 +80,15 @@ built binary is refused if it holds the build machine's home folder.
 
 1. **Build:** once the release pull request is merged and the tag
    approved, tag its commit on `main` and push the tag `v<version>`. First the run checks that the tag matches
-   `Cargo.toml`'s version and that the Dockerfile's Rust is the current
-   stable release (`scripts/check-rust-stable`), refusing an older one
-   unless a `# Pinned below stable: <reason>` comment just above
-   `RUST_IMAGE` says why, such as a minimum supported Rust version. Each
+   `Cargo.toml`'s version and that `rust-toolchain.toml`'s Rust is the
+   current stable release (`scripts/check-rust-stable`), refusing an older
+   one unless a `# Pinned below stable: <reason>` comment just above its
+   `channel` line says why, such as a minimum supported Rust version. Each
    target builds on its own runner (`--build-only`). Linux targets build in
-   the Dockerfile's Rust image, so they need no newer glibc than today's
-   releases; the log prints each runner's architecture and each Linux
-   binary's glibc floor. The two Windows targets build on Windows runners in
+   the Dockerfile's `toolchain` stage, Debian bookworm with that Rust
+   ([development](development.md#build-and-check)), so they need no newer
+   glibc than bookworm's 2.36; the log prints each runner's architecture and
+   each Linux binary's glibc floor. The two Windows targets build on Windows runners in
    PowerShell, as the script would: only the client binary, with the
    checkout's and the runner's profile paths remapped out of it and checked
    absent (the dependencies' sources sit outside the profile, since the

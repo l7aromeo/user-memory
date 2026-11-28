@@ -1,8 +1,12 @@
 # The Rust every cargo command in a checkout uses, whatever the machine's
-# default: the version of the Dockerfile's RUST_IMAGE, which the workflows
-# also name (tests/ci.rs holds the three together). rustfmt and clippy are
-# what `just check` runs beyond the compiler.
+# default, and the one every build installs: the Dockerfile's toolchain
+# stage (the server image and the Linux release builds) and the release's
+# macOS and Windows builds read it here, and the workflows name it too
+# (tests/ci.rs holds them together). A release refuses a channel behind the
+# current stable Rust unless the comment line just above it starts with
+# "# Pinned below stable:" and says why (scripts/check-rust-stable).
+# rustfmt and clippy are what `just check` runs beyond the compiler.
 [toolchain]
-channel = "1.100.0"
+channel = "1.100.1"
 components = ["rustfmt", "clippy"]
 profile = "minimal"

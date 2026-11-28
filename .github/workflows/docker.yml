@@ -44,6 +44,8 @@ jobs:
             install.sh
             uninstall.sh
             Dockerfile
+            .dockerignore
+            rust-toolchain.toml
             compose*.yaml
             src/**
             tests/install.rs
@@ -63,15 +65,16 @@ jobs:
       - uses: actions/checkout@v7
       - name: Install zsh
         run: sudo apt-get update -qq && sudo apt-get install -y -qq zsh
-      # The server build, made in the Dockerfile's Rust image as a release
-      # makes it.
+      # The server build, made in the Dockerfile's toolchain stage as a
+      # release makes it.
       - name: Build the server for Docker
         run: zsh scripts/client-release --build-only --target x86_64-unknown-linux-gnu --out "$RUNNER_TEMP/build"
-      # The toolchain the server image and the release builds use (Dockerfile).
+      # The toolchain the server image and the release builds use
+      # (rust-toolchain.toml).
       # rust-toolchain.toml's components, so the tests below fetch nothing.
       - uses: dtolnay/rust-toolchain@v1
         with:
-          toolchain: "1.100.0"
+          toolchain: "1.100.1"
           components: rustfmt, clippy
       - uses: actions/cache@v6
         with:

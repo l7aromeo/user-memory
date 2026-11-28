@@ -393,8 +393,10 @@ fn docker(args: &[String]) -> u8 {
         "network" => say("172.17.0.1"),
         "compose" => compose(args),
         "run" => {
+            // A release build: the binary, and the glibc floor read in the image.
             if let Some(out) = args.iter().find_map(|arg| arg.strip_suffix(":/out")) {
                 fs::write(Path::new(out).join("user-memory"), "linux binary").unwrap();
+                fs::write(Path::new(out).join("glibc"), "2.36\n").unwrap();
             }
             0
         }

@@ -90,16 +90,6 @@ fn the_check_workflow_runs_every_check_on_both_platforms_without_secrets() {
     assert!(!workflow.contains("secrets."), "{workflow}");
 }
 
-/// The Dockerfile's Rust version, which every workflow builds with.
-fn dockerfile_rust() -> String {
-    let dockerfile = repo_file("Dockerfile");
-    let image = dockerfile
-        .lines()
-        .find_map(|l| l.strip_prefix("ARG RUST_IMAGE=rust:"))
-        .unwrap();
-    image.split('-').next().unwrap().to_owned()
-}
-
 /// The docker workflow runs the opt-in Docker installer test for real on
 /// Linux, with a server build made as a release makes it. A test it names
 /// that no longer exists would run nothing and still pass, so the name is
@@ -174,19 +164,14 @@ fn toolchain_file_rust() -> String {
 /// reads rust-toolchain.toml.
 const TOOLCHAIN_WORKFLOWS: [&str; 3] = ["check.yml", "docker.yml", "windows.yml"];
 
-/// One Rust everywhere: the Dockerfile's (the server image, and the release
-/// builds read it), rust-toolchain.toml's (every cargo command in a
-/// checkout) and each workflow's toolchain step. The file overrides what a
-/// workflow installs, so if the two disagreed a run would use the file's
-/// version while its log named the workflow's.
+/// One Rust everywhere: rust-toolchain.toml's (every cargo command in a
+/// checkout, and every build installs it) and each workflow's toolchain
+/// step. The file overrides what a workflow installs, so if the two
+/// disagreed a run would use the file's version while its log named the
+/// workflow's.
 #[test]
-fn the_toolchain_file_the_dockerfile_and_every_workflow_name_one_rust() {
-    let rust = dockerfile_rust();
-    assert_eq!(
-        toolchain_file_rust(),
-        rust,
-        "rust-toolchain.toml's channel is not the Dockerfile's {rust}"
-    );
+fn the_toolchain_file_and_every_workflow_name_one_rust() {
+    let rust = toolchain_file_rust();
     let mut pinned = Vec::new();
     for (name, text) in workflows() {
         let docs = YamlLoader::load_from_str(&text).unwrap();
@@ -195,7 +180,7 @@ fn the_toolchain_file_the_dockerfile_and_every_workflow_name_one_rust() {
                 if let Some(toolchain) = step["with"]["toolchain"].as_str() {
                     assert_eq!(
                         toolchain, rust,
-                        "{name}: its toolchain is not the Dockerfile's {rust}"
+                        "{name}: its toolchain is not rust-toolchain.toml's {rust}"
                     );
                     pinned.push(name.clone());
                 }
@@ -208,6 +193,69 @@ fn the_toolchain_file_the_dockerfile_and_every_workflow_name_one_rust() {
             "{name} has no toolchain step"
         );
     }
+}
+
+/// The Docker architectures of the Linux targets a release builds, each
+/// needing its own rustup-init checksum in the Dockerfile.
+const LINUX_ARCHES: [(&str, &str); 2] = [
+    ("x86_64-unknown-linux-gnu", "AMD64"),
+    ("aarch64-unknown-linux-gnu", "ARM64"),
+];
+
+/// The Linux builds' Rust comes from Debian bookworm and rustup, never from
+/// a Rust image, so a new Rust never waits for one: the Dockerfile names no
+/// Rust version, reads rust-toolchain.toml, and pins rustup-init's
+/// SHA-256 for every Linux target release.yml builds.
+#[test]
+fn the_dockerfile_installs_the_toolchain_file_s_rust_on_debian() {
+    let dockerfile = repo_file("Dockerfile");
+    let rust = toolchain_file_rust();
+    assert!(
+        !dockerfile.contains(&rust),
+        "the Dockerfile names Rust {rust}"
+    );
+    assert!(!dockerfile.contains("FROM rust"), "{dockerfile}");
+    assert!(!dockerfile.contains("RUST_IMAGE"), "{dockerfile}");
+    assert!(
+        dockerfile
+            .lines()
+            .any(|l| l == "FROM debian:bookworm AS toolchain"),
+        "{dockerfile}"
+    );
+    assert!(
+        dockerfile
+            .lines()
+            .any(|l| l == "COPY rust-toolchain.toml /usr/local/rust-toolchain.toml"),
+        "{dockerfile}"
+    );
+    assert!(
+        !dockerfile
+            .lines()
+            .any(|l| l.contains("curl ") && l.contains('|')),
+        "rustup-init is downloaded and checked, never piped: {dockerfile}"
+    );
+    let release = repo_file(".github/workflows/release.yml");
+    for (target, arch) in LINUX_ARCHES {
+        assert!(release.contains(&format!("target: {target}")), "{target}");
+        let sha = dockerfile
+            .lines()
+            .find_map(|l| l.strip_prefix(&format!("ARG RUSTUP_SHA256_{arch}=")))
+            .unwrap_or_else(|| panic!("no rustup-init checksum for {arch}"));
+        assert!(
+            sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit()),
+            "{arch}: {sha}"
+        );
+        assert!(
+            dockerfile.contains(&format!("sha256=$RUSTUP_SHA256_{arch}")),
+            "{arch}"
+        );
+    }
+    assert!(
+        repo_file(".dockerignore")
+            .lines()
+            .any(|l| l == "!rust-toolchain.toml"),
+        "the toolchain stage needs rust-toolchain.toml in its context"
+    );
 }
 
 /// The shellcheck the check workflow installs: its latest stable release
@@ -371,8 +419,8 @@ fn an_action_below_its_latest_major_needs_a_reason() {
 }
 
 /// The release workflow's check that its Rust toolchain is the current
-/// stable, run offline against a stable channel file and a Dockerfile made
-/// here.
+/// stable, run offline against a stable channel file and a
+/// rust-toolchain.toml made here.
 #[cfg(unix)]
 fn rust_stable(pinned_lines: &str, stable: &str) -> (bool, String) {
     rust_stable_after(pinned_lines, stable, "")
@@ -392,10 +440,10 @@ fn rust_stable_after(pinned_lines: &str, stable: &str, rest: &str) -> (bool, Str
         ),
     )
     .unwrap();
-    let dockerfile = dir.path().join("Dockerfile");
+    let toolchain = dir.path().join("rust-toolchain.toml");
     fs::write(
-        &dockerfile,
-        format!("# syntax=docker/dockerfile:1\n{pinned_lines}\nFROM ${{RUST_IMAGE}} AS build\n"),
+        &toolchain,
+        format!("[toolchain]\n{pinned_lines}\ncomponents = [\"rustfmt\", \"clippy\"]\n"),
     )
     .unwrap();
     let out = std::process::Command::new("sh")
@@ -405,7 +453,7 @@ fn rust_stable_after(pinned_lines: &str, stable: &str, rest: &str) -> (bool, Str
             "RUST_STABLE_CHANNEL",
             format!("file://{}", channel.display()),
         )
-        .env("DOCKERFILE", &dockerfile)
+        .env("TOOLCHAIN_FILE", &toolchain)
         .output()
         .unwrap();
     let text =
@@ -417,7 +465,7 @@ fn rust_stable_after(pinned_lines: &str, stable: &str, rest: &str) -> (bool, Str
 #[cfg(unix)]
 #[test]
 fn a_release_needs_the_current_stable_rust_or_a_reason() {
-    let pin = "ARG RUST_IMAGE=rust:1.99.1-bookworm";
+    let pin = "channel = \"1.99.1\"";
     let (ok, text) = rust_stable(pin, "1.99.1");
     assert!(ok, "{text}");
     // Numbers, not text: 1.100.0 is newer than 1.99.1.
@@ -438,7 +486,7 @@ fn a_release_needs_the_current_stable_rust_or_a_reason() {
     );
     let (ok, text) = rust_stable(&format!("# Pinned below stable:\n{pin}"), "1.100.0");
     assert!(!ok, "a reason must say something: {text}");
-    let (ok, text) = rust_stable("ARG RUST_IMAGE=rust:1.100.0-bookworm", "1.99.1");
+    let (ok, text) = rust_stable("channel = \"1.100.0\"", "1.99.1");
     assert!(ok, "a newer pin is fine: {text}");
 }
 
@@ -458,7 +506,7 @@ fn the_stable_check_reads_a_large_manifest_without_an_error() {
             format!("\n[pkg.rust.target.t{n}]\navailable = true\nurl = \"https://example.invalid/rust-{n}.tar.gz\"\n")
         })
         .collect();
-    let (ok, text) = rust_stable_after("ARG RUST_IMAGE=rust:1.99.1-bookworm", "1.99.1", &rest);
+    let (ok, text) = rust_stable_after("channel = \"1.99.1\"", "1.99.1", &rest);
     assert!(ok, "{text}");
     assert_eq!(text, "Rust 1.99.1 is current (stable is 1.99.1).\n");
 }
@@ -496,10 +544,12 @@ const WINDOWS_PATHS: [&str; 8] = [
 /// The paths whose change runs the real Docker installer test on a pull
 /// request: the installers, the server and its build, and what decides
 /// that (scripts/ci-changes).
-const DOCKER_PATHS: [&str; 11] = [
+const DOCKER_PATHS: [&str; 13] = [
     "install.sh",
     "uninstall.sh",
     "Dockerfile",
+    ".dockerignore",
+    "rust-toolchain.toml",
     "compose*.yaml",
     "src/**",
     "tests/install.rs",
@@ -775,7 +825,7 @@ fn the_windows_workflow_checks_x64_and_arm64_on_code_changes() {
             .position(|step| *step == wanted)
             .unwrap_or_else(|| panic!("no step {wanted:?} in {steps:?}"))
     };
-    let toolchain = at(&dockerfile_rust());
+    let toolchain = at(&toolchain_file_rust());
     let tools = at(&format!("just,cargo-nextest@{NEXTEST}"));
     let module = at(&format!(
         "pwsh -NoProfile -Command \"Install-Module PSScriptAnalyzer -RequiredVersion {PSSCRIPTANALYZER} -Scope CurrentUser -Force\""

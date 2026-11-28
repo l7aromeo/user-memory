@@ -1,27 +1,29 @@
 #!/bin/sh
-# Refuses a release whose Rust toolchain, the Dockerfile's RUST_IMAGE that
-# every build uses, is older than the current stable Rust release, unless
-# the comment line just above that ARG starts with "# Pinned below stable:"
-# and says why, as for a minimum supported Rust version.
+# Refuses a release whose Rust toolchain, the channel rust-toolchain.toml
+# names and every build installs, is older than the current stable Rust
+# release, unless the comment line just above that channel line starts with
+# "# Pinned below stable:" and says why, as for a minimum supported Rust
+# version.
 #
 # Usage: scripts/check-rust-stable
 #   RUST_STABLE_CHANNEL  the stable channel to read (default: the official
 #                        manifest, static.rust-lang.org); a file:// URL works
-#   DOCKERFILE           the Dockerfile to read (default: the repository's)
+#   TOOLCHAIN_FILE       the toolchain file to read (default: the
+#                        repository's rust-toolchain.toml)
 #
 # It reads the network, so the release workflow runs it, not `just check`.
 set -eu
 
 channel=${RUST_STABLE_CHANNEL:-https://static.rust-lang.org/dist/channel-rust-stable.toml}
-dockerfile=${DOCKERFILE:-$(dirname "$0")/../Dockerfile}
+toolchain=${TOOLCHAIN_FILE:-$(dirname "$0")/../rust-toolchain.toml}
 
 fail() {
     printf 'check-rust-stable: %s\n' "$*" >&2
     exit 1
 }
 
-pinned=$(sed -n 's/^ARG RUST_IMAGE=rust:\([0-9][0-9.]*\)-.*/\1/p' "$dockerfile")
-[ -n "$pinned" ] || fail "$dockerfile names no RUST_IMAGE=rust:<version>-…"
+pinned=$(sed -n 's/^channel = "\([0-9][0-9.]*\)"$/\1/p' "$toolchain")
+[ -n "$pinned" ] || fail "$toolchain names no channel = \"<version>\""
 # The manifest's [pkg.rust] section holds version = "1.99.1 (<hash> <date>)".
 # awk reads the whole manifest, about 1 MB: stopping at the version would
 # leave printf writing to a closed pipe, an error where SIGPIPE is ignored,
@@ -40,8 +42,8 @@ if [ "$pinned" = "$stable" ] || [ "$newer" = "$pinned" ]; then
     exit 0
 fi
 
-reason=$(awk '/^ARG RUST_IMAGE=/ { print previous; exit } { previous = $0 }' "$dockerfile" |
+reason=$(awk '/^channel = / { print previous; exit } { previous = $0 }' "$toolchain" |
     sed -n 's/^# Pinned below stable: *\(..*\)$/\1/p')
 [ -n "$reason" ] ||
-    fail "the Dockerfile pins Rust $pinned, but the current stable is $stable; update RUST_IMAGE, or say why it stays with a comment line just above it: # Pinned below stable: <reason>"
+    fail "rust-toolchain.toml pins Rust $pinned, but the current stable is $stable; update its channel, or say why it stays with a comment line just above it: # Pinned below stable: <reason>"
 echo "Rust $pinned stays below stable $stable: $reason"
