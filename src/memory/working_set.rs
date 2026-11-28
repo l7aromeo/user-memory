@@ -7,7 +7,12 @@
 //! changed rule never comes back in its old form.
 
 use super::{
-    FitUnit, Memory, ids::SHORT_ID, push::label, read::passage, schema::get, write::is_live,
+    FitUnit, Memory,
+    ids::SHORT_ID,
+    push::{label, mark},
+    read::passage,
+    schema::get,
+    write::is_live,
 };
 use anyhow::Result;
 use rusqlite::Connection;
@@ -28,7 +33,7 @@ const SUPERSEDE_HOPS: usize = 8;
 const WORKING_SET_HEADER: &str = "What this context worked with before it was compacted, from user-memory as it is now (a memory changed since shows its current text):";
 
 /// Ends a line the working set names without its text.
-const READ_AGAIN: &str = "read it again before acting on it";
+const READ_AGAIN: &str = "if it applies, read it again first";
 
 /// What the context did with a memory, in the order the working set
 /// prints them: what it chose to read comes before what a hook guessed.
@@ -112,7 +117,7 @@ pub(crate) fn restore(
         if !seen.insert(id.clone()) {
             continue;
         }
-        let Some((_, label)) = label(
+        let Some((voice, _)) = label(
             &memory.source,
             &memory.status,
             &memory.memory_type,
@@ -122,6 +127,7 @@ pub(crate) fn restore(
         };
         let short = short(&id);
         let title = one_line(&memory.title);
+        let mark = mark(voice);
         // Its forms, the fullest first: what the room allows prints.
         let mut forms = Vec::new();
         if entry.how != Use::Found {
@@ -133,7 +139,7 @@ pub(crate) fn restore(
                     whole: true,
                     passages: Vec::new(),
                 };
-                forms.push((whole, format!("- {short} {label}: {content}")));
+                forms.push((whole, format!("- {short} {mark}{content}")));
             }
             let shown: Vec<(i64, String)> = entry
                 .passages
@@ -149,7 +155,7 @@ pub(crate) fn restore(
                     whole: false,
                     passages: shown.iter().map(|(slot, _)| *slot).collect(),
                 };
-                let line = format!("- {short} {label}: {title}; shown: {} …", texts.join(" … "));
+                let line = format!("- {short} {mark}{title}; shown: {} …", texts.join(" … "));
                 forms.push((part, line));
             }
         }

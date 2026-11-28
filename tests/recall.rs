@@ -24,7 +24,7 @@ use tempfile::{TempDir, tempdir};
 
 /// Opens every push after a call that did not fail.
 const HEADER: &str =
-    "From user-memory, matching this step (read one for the rest before applying it):";
+    "From user-memory, matching this step (if one applies, read it for the rest first):";
 
 /// A sandboxed home with its own store, its sessions working in it.
 struct Home {
@@ -234,7 +234,7 @@ fn a_command_pushes_the_note_naming_it_once_per_agent_context() {
     assert_eq!(
         pushed,
         format!(
-            "{HEADER}\n- {} The user's procedure: Run `cargo publish --dry-run` before `cargo publish`; a failed upload burns the version.",
+            "{HEADER}\n- {} Run `cargo publish --dry-run` before `cargo publish`; a failed upload burns the version.",
             short(&note)
         )
     );
@@ -250,10 +250,7 @@ fn a_command_pushes_the_note_naming_it_once_per_agent_context() {
     assert!(sub.contains(short(&note)), "{sub}");
     // A rule naming an action is delivered at it, as the user's rule.
     let rule = home.run("s1", "git push origin main");
-    assert!(
-        rule.contains("The user's rule: Ask before every `git push`."),
-        "{rule}"
-    );
+    assert!(rule.contains("Ask before every `git push`."), "{rule}");
     // Another session starts with no rows.
     home.start("s2", "startup");
     assert!(home.run("s2", "cargo publish").contains(short(&note)));
@@ -658,11 +655,12 @@ fn an_agents_note_is_labelled_as_one() {
         ],
     );
     home.start("s1", "startup");
-    // A note about the work names its type and no rule.
+    // A note about the work is marked as a note; one of a rule's type says
+    // it is not the user's rule.
     let pushed = home.run("s1", "./scripts/release.sh");
     assert!(
         pushed.contains(&format!(
-            "- {} An agent's note from an earlier session (lesson): `./scripts/release.sh` fails",
+            "- {} An agent's note: `./scripts/release.sh` fails",
             short(&note)
         )),
         "{pushed}"
@@ -670,7 +668,7 @@ fn an_agents_note_is_labelled_as_one() {
     let pushed = home.run("s1", "./scripts/deploy.sh");
     assert!(
         pushed.contains(&format!(
-            "- {} An agent's note, learned in 1 session, not the user's rule: Run `./scripts/deploy.sh`",
+            "- {} An agent's note, not the user's rule: Run `./scripts/deploy.sh`",
             short(&habit)
         )),
         "{pushed}"
@@ -693,10 +691,7 @@ fn a_long_memory_pushes_its_matching_passage_only() {
     let id = home.record("Parser upkeep", &content, &[]);
     home.start("s1", "startup");
     let pushed = home.run("s1", "cargo publish --dry-run");
-    let line = pushed.strip_prefix(&format!(
-        "{HEADER}\n- {} The user's procedure: ",
-        short(&id)
-    ));
+    let line = pushed.strip_prefix(&format!("{HEADER}\n- {} ", short(&id)));
     let passage = line.unwrap_or_else(|| panic!("{pushed}"));
     assert!(
         passage.contains("Before a release run `cargo publish --dry-run` and read its warnings."),
@@ -732,10 +727,7 @@ fn each_passage_of_a_memory_is_pushed_at_the_step_naming_it() {
     ] {
         let pushed = home.run("s1", command);
         let line = pushed
-            .strip_prefix(&format!(
-                "{HEADER}\n- {} The user's procedure: ",
-                short(&id)
-            ))
+            .strip_prefix(&format!("{HEADER}\n- {} ", short(&id)))
             .unwrap_or_else(|| panic!("{command}: {pushed}"));
         assert!(line.contains(passage), "{command}: {line}");
         assert!(!line.contains('\n'), "one line: {pushed}");
@@ -819,7 +811,7 @@ fn session_start_opens_epochs_and_its_rules_in_full_count_as_shown() {
 
 /// Opens every push after a call that failed.
 const FAILED_HEADER: &str =
-    "From user-memory, matching this failed step (read one for the rest before applying it):";
+    "From user-memory, matching this failed step (if one applies, read it for the rest first):";
 
 #[test]
 fn after_a_claude_code_failure_the_anchored_note_is_pushed_as_a_failure() {
@@ -844,7 +836,7 @@ fn after_a_claude_code_failure_the_anchored_note_is_pushed_as_a_failure() {
     assert_eq!(
         pushed,
         format!(
-            "{FAILED_HEADER}\n- {} The user's procedure: `./scripts/release.sh` fails without a tag on the commit.",
+            "{FAILED_HEADER}\n- {} `./scripts/release.sh` fails without a tag on the commit.",
             short(&trap)
         )
     );
@@ -1198,7 +1190,7 @@ fn a_prompt_pushes_what_its_words_name_after_the_notice_and_a_task_notification_
     assert_eq!(
         recalled,
         format!(
-            "- {} The user's procedure: Keep `docs/notes.md` in step with the parser.",
+            "- {} Keep `docs/notes.md` in step with the parser.",
             short(&docs)
         )
     );

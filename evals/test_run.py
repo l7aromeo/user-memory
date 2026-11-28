@@ -1568,12 +1568,12 @@ class ClientToolsAndHooks(unittest.TestCase):
     def test_a_codex_push_the_hook_output_lacks_is_a_harness_error(self):
         push = {"agent": "main", "agent_id": "main", "memory": "e0000001-0000-4000-8000-000000000001",
                 "passage": 0}
-        shown = {"event": "postToolUse", "text": "From user-memory, matching this failed step (read one "
-                 "for the rest before applying it):\n- e0000001 The user's rule: Ask before every push"}
+        shown = {"event": "postToolUse", "text": "From user-memory, matching this failed step (if one "
+                 "applies, read it for the rest first):\n- e0000001 Ask before every push"}
         record = {**run.blank_record(0), "client": "codex", "pushed": [push]}
         self.assertEqual(run.unseen_pushes({**record, "hook_context": [shown]}), [])
         self.assertEqual(run.unseen_pushes(record), [push], "no hook output at all")
-        quoted = {"event": "postToolUse", "text": "- e0000001 The user's rule: Ask before every push"}
+        quoted = {"event": "postToolUse", "text": "- e0000001 Ask before every push"}
         self.assertEqual(run.unseen_pushes({**record, "hook_context": [quoted]}), [push],
                          "a line without the push header")
         other = {**shown, "text": shown["text"].replace("e0000001", "e0000002")}

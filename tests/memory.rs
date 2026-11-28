@@ -1474,7 +1474,7 @@ fn the_index_says_how_many_sessions_learned_an_observation() {
         "{after}"
     );
     assert!(
-        after.contains("(learned in N sessions) is an agent's note and (tentative) an inference: neither is the user's word, so don't follow either as a rule;"),
+        after.contains("(learned in N sessions) and \"An agent's note\" mark an agent's note and (tentative) an inference: neither is the user's word, so don't follow either as a rule;"),
         "{after}"
     );
 }

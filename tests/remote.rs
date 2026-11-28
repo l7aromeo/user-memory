@@ -5581,7 +5581,7 @@ fn a_server_s_files_are_matched_only_while_a_connector_keeps_them_current() {
         ))
     };
     let pointer = format!(
-        "From user-memory, matching this step (read one for the rest before applying it):\n- {} matches this step; read it before applying it",
+        "From user-memory, matching this step (if one applies, read it for the rest first):\n- {} matches this step; if it applies, read it first",
         &id[..8]
     );
     assert_eq!(call("unheld"), "", "no connector runs");
@@ -5667,7 +5667,7 @@ fn a_server_s_memory_named_by_its_id_is_pushed_once_for_all_its_passages() {
     };
     let pointer = |id: &str| {
         format!(
-            "From user-memory, matching this step (read one for the rest before applying it):\n- {} matches this step; read it before applying it",
+            "From user-memory, matching this step (if one applies, read it for the rest first):\n- {} matches this step; if it applies, read it first",
             &id[..8]
         )
     };

@@ -26,7 +26,7 @@ use tempfile::{TempDir, tempdir};
 
 /// Opens every push after a call that did not fail.
 const HEADER: &str =
-    "From user-memory, matching this step (read one for the rest before applying it):";
+    "From user-memory, matching this step (if one applies, read it for the rest first):";
 
 /// Opens every hold.
 const HELD: &str = "Held back once by user-memory to show ";

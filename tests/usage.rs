@@ -695,7 +695,7 @@ fn used_row(memory: &str, read: bool, shown: bool) -> Value {
 
 /// The most-used part's first line.
 const MOST_USED: &str =
-    "Most used in this project's recent sessions (read one for the rest before applying it):";
+    "Most used in this project's recent sessions (if one applies, read it for the rest first):";
 /// Opens the tests' project's rules.
 const RULES_OF_PROJECT: &str =
     "Project rules of github.com/example/app, strongest first; the user stated them, follow them:";
@@ -810,25 +810,20 @@ fn session_start_shows_what_most_of_the_project_s_sessions_used() {
     assert_eq!(ids(&part), [&often, &note, &long, &half], "{text}");
     assert_eq!(
         part[0],
-        format!("- {often} The user's fact: Integration tests need the mock server")
+        format!("- {often} Integration tests need the mock server")
     );
     assert_eq!(
         part[1],
-        format!(
-            "- {note} An agent's note from an earlier session (fact): The fixtures regenerate with just fixtures"
-        )
+        format!("- {note} An agent's note: The fixtures regenerate with just fixtures")
     );
     assert_eq!(
         part[2],
         format!(
-            "- {long} The user's fact: Releases are signed before upload — {} …",
+            "- {long} Releases are signed before upload — {} …",
             first.trim_end()
         )
     );
-    assert_eq!(
-        part[3],
-        format!("- {half} The user's decision: The cache stays in SQLite")
-    );
+    assert_eq!(part[3], format!("- {half} The cache stays in SQLite"));
     let at = |line: &str| text.find(line).unwrap_or_else(|| panic!("{line}: {text}"));
     assert!(at(RULES_OF_PROJECT) < at(MOST_USED), "{text}");
     assert!(at(MOST_USED) < at(INDEX_HEADER), "{text}");
