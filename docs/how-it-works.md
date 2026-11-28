@@ -373,7 +373,10 @@ From user-memory, matching this step (read one for the rest before applying it):
   `python3 tools/build.py`) is also matched as if the script ran alone,
   and a program run by its path matches a memory that writes it with or
   without `./`. Quoted text, such as a commit message, is no part of the
-  command.
+  command, nor is a here-document's body (the lines after `<<'EOF'` up to
+  `EOF`), which is text the command reads. A shell that runs one as its
+  script (`bash <<'EOF'`) is the exception: its commands are matched as
+  the line's own.
 - **What is pushed:** a passage that holds an anchor the step names (a
   command with its next word, a path, a code span) and matches the work of
   the last 30 steps well enough. Words alone never push one. Each line
