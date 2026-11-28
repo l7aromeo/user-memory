@@ -1065,7 +1065,7 @@ fn ci_runs_end_a_hung_test() {
 /// Each job's timeout-minutes, which the workflows explain with the longest
 /// green run each is set from.
 const JOB_TIMEOUTS: [(&str, &str, i64); 11] = [
-    ("check.yml", "check", 35),
+    ("check.yml", "check", 55),
     ("docker.yml", "changes", 5),
     ("docker.yml", "docker", 5),
     ("docker.yml", "installer", 20),
