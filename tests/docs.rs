@@ -3081,14 +3081,28 @@ fn the_docs_give_every_tools_hints() {
     assert_eq!(documented, code);
 }
 
-/// The source files that build the memory server's router.
-const ROUTER_SOURCES: [&str; 5] = [
-    "src/remote.rs",
-    "src/remote/delivery.rs",
-    "src/remote/tags.rs",
-    "src/remote/transfer.rs",
-    "src/remote/usage.rs",
-];
+/// The source files that build the memory server's router: `src/remote.rs`
+/// and every file under `src/remote/` that makes a `Router`, found rather
+/// than listed, so a new route's file can't be left out.
+fn router_sources() -> Vec<String> {
+    fn under(dir: &Path, found: &mut Vec<String>) {
+        for entry in fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                under(&path, found);
+            } else if path.extension().is_some_and(|e| e == "rs")
+                && fs::read_to_string(&path).unwrap().contains("Router::new()")
+            {
+                let relative = path.strip_prefix(repo_file("")).unwrap();
+                found.push(relative.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    let mut found = vec!["src/remote.rs".to_owned()];
+    under(&repo_file("src/remote"), &mut found);
+    found.sort();
+    found
+}
 
 /// The paths a router source registers: `.route("/path"` and
 /// `.nest_service("/path"` literals, and `.route(&format!("/{ROUTE}")` with
@@ -3152,7 +3166,17 @@ fn proxied(doc: &str) -> Vec<String> {
 
 #[test]
 fn the_proxy_example_forwards_every_route_the_server_registers() {
-    let mut routes: Vec<String> = ROUTER_SOURCES
+    let sources = router_sources();
+    // The routers known when this check was written are among those found.
+    for known in [
+        "src/remote/delivery.rs",
+        "src/remote/tags.rs",
+        "src/remote/transfer.rs",
+        "src/remote/usage.rs",
+    ] {
+        assert!(sources.iter().any(|s| s == known), "{known} in {sources:?}");
+    }
+    let mut routes: Vec<String> = sources
         .iter()
         .flat_map(|file| routes_in(file, &fs::read_to_string(repo_file(file)).unwrap()))
         .collect();
