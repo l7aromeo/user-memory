@@ -411,7 +411,11 @@ From user-memory, matching this step (read one for the rest before applying it):
 - **Time:** a tool hook has 100 ms. A memory whose text it could not read
   in that time is named by its id alone, with no label, since whose word
   it is comes from the store:
-  `- e0000005 matches this step; read it before applying it`.
+  `- e0000005 matches this step; read it before applying it`. Such a line
+  holds no passage, so it comes once for the memory: another passage of
+  it gives no such line again in the same 100 steps. It stops nothing
+  else: a passage's text can still be pushed when a later hook reads it
+  in time, and a hold still holds.
 
 ### Held back before it runs
 
@@ -517,7 +521,8 @@ connector runs, its last poll is recent, and the files are at or past the
 position that poll found, so a memory forgotten on the server is never
 matched. Every line then names the memory by its id alone, as above:
 whose word a memory is, and its text, are on the server, which a tool
-hook never asks.
+hook never asks. So a memory is named once in 100 steps, whichever of
+its passages the steps match.
 
 Limits of what the clients tell a hook:
 

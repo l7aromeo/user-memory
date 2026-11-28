@@ -413,7 +413,9 @@ impl Session {
             // What the context had in this stretch takes no read: a passage
             // a hold deferred is among the next ones. A date passed since
             // the index was kept ends its memory with no write: dropped
-            // here, from the file alone.
+            // here, from the file alone. On a server's store every line
+            // names the id alone, so a memory named already takes no read
+            // either; a local store names one only when the read runs late.
             let handled = state.handled(agent, Use::Push)?;
             let now = crate::memory::until::stored_now(jiff::Timestamp::now());
             let mut passing = Vec::new();
@@ -425,7 +427,10 @@ impl Session {
                 if passing.len() == push::READ_PER_EVENT {
                     break;
                 }
-                if !handled.contains(view.id(matched.memory)?, matched.slot) {
+                let id = view.id(matched.memory)?;
+                if !handled.contains(id, matched.slot)
+                    && !(self.remote.is_some() && handled.named(id))
+                {
                     passing.push(matched);
                 }
             }
@@ -453,6 +458,7 @@ impl Session {
             .map(|line| Offer {
                 memory: &line.id,
                 passage: line.passage,
+                named: line.named,
                 chars: line.text.chars().count() + 1,
             })
             .collect();
@@ -540,6 +546,7 @@ impl Session {
             .map(|one| Offer {
                 memory: &one.id,
                 passage: one.passage,
+                named: false,
                 chars: one.chars(),
             })
             .collect();

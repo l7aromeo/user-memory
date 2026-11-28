@@ -612,6 +612,44 @@ fn a_long_memory_pushes_its_matching_passage_only() {
     assert!(passage.chars().count() < 500, "{passage}");
 }
 
+/// A memory of three passages, each naming a command no other names:
+/// each paragraph is too long to share a passage with the next.
+const THREE_STEPS: &str = "Pack the release with `numbat-pack --all` first. It gathers every crate the workspace builds, checks that each one has a version the registry has not seen, and writes one archive beside the manifest so the next steps read a single file. A crate it cannot gather stops the step with its name, and the archive is written again from the start once that crate builds.\n\n\
+Then sign that archive with `bilby-sign --key release`. The mirror refuses an archive with no signature, and an upload it refuses has to start again from the beginning, which on a slow line takes most of an afternoon to finish. The key lives on the release machine only, so the step runs there and nowhere else, and a copy of the key on a laptop is revoked.\n\n\
+Last, ship the signed archive with `dingo-ship --channel stable`, and only once the signature checks out on a second machine, since a version shipped to the stable channel can never be taken back or replaced by another. A version that has to be withdrawn is marked as such on the channel, and the fix ships under the next version number after it.";
+
+// A text push shows the passage that matches, so each passage of one
+// memory is shown once, at the step that names it.
+#[test]
+fn each_passage_of_a_memory_is_pushed_at_the_step_naming_it() {
+    let home = Home::new();
+    let id = home.record("Release in three steps", THREE_STEPS, &[]);
+    home.start("s1", "startup");
+    for (command, passage) in [
+        ("numbat-pack --all", "`numbat-pack --all`"),
+        ("bilby-sign --key release", "`bilby-sign --key release`"),
+        (
+            "dingo-ship --channel stable",
+            "`dingo-ship --channel stable`",
+        ),
+    ] {
+        let pushed = home.run("s1", command);
+        let line = pushed
+            .strip_prefix(&format!(
+                "{HEADER}\n- {} The user's procedure: ",
+                short(&id)
+            ))
+            .unwrap_or_else(|| panic!("{command}: {pushed}"));
+        assert!(line.contains(passage), "{command}: {line}");
+        assert!(!line.contains('\n'), "one line: {pushed}");
+    }
+    assert_eq!(
+        home.run("s1", "numbat-pack --all"),
+        "",
+        "each passage once in a stretch"
+    );
+}
+
 impl Home {
     /// Makes the home a checkout of `github.com/you/app`.
     fn checkout(&self) {

@@ -5625,6 +5625,117 @@ fn a_server_s_files_are_matched_only_while_a_connector_keeps_them_current() {
     drop(lock);
 }
 
+/// A memory of three passages, each naming a command no other names:
+/// each paragraph is too long to share a passage with the next.
+const THREE_STEPS: &str = "Pack the release with `numbat-pack --all` first. It gathers every crate the workspace builds, checks that each one has a version the registry has not seen, and writes one archive beside the manifest so the next steps read a single file. A crate it cannot gather stops the step with its name, and the archive is written again from the start once that crate builds.\n\n\
+Then sign that archive with `bilby-sign --key release`. The mirror refuses an archive with no signature, and an upload it refuses has to start again from the beginning, which on a slow line takes most of an afternoon to finish. The key lives on the release machine only, so the step runs there and nowhere else, and a copy of the key on a laptop is revoked.\n\n\
+Last, ship the signed archive with `dingo-ship --channel stable`, and only once the signature checks out on a second machine, since a version shipped to the stable channel can never be taken back or replaced by another. A version that has to be withdrawn is marked as such on the channel, and the fix ships under the next version number after it.";
+
+// A line that names the id alone holds no passage, so it stands for the
+// whole memory (#293): once pushed, no other passage of the memory gives
+// the agent the same line again in the stretch.
+#[test]
+fn a_server_s_memory_named_by_its_id_is_pushed_once_for_all_its_passages() {
+    let host = Host::start(root());
+    host.rpc(initialize(1));
+    let reply = host.rpc(call(
+        2,
+        "record",
+        json!({"type":"procedure","category":"build","context":"Releasing","title":"Release in three steps","content":THREE_STEPS,"reason":"Because","scope":"global","user_confirmed":true,"origin":"chat/release"}),
+    ));
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    let id = serde_json::from_str::<Value>(text).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let other = record_tool(&host, 3, "quokka-deploy", "chat/deploy");
+    let machine = Machine {
+        home: tempdir().unwrap(),
+        url: format!("http://{}/mcp", host.address),
+        token: host.root.path().join("token"),
+        env: Vec::new(),
+    };
+    let _connector = machine.connector();
+    machine.hook_with("session-start", "s", json!({"source": "startup"}));
+    machine.marker();
+    let run = |command: &str| {
+        added(&machine.hook_with(
+            "post-tool-use",
+            "s",
+            json!({"tool_name":"Bash","tool_input":{"command":command},"tool_response":"done"}),
+        ))
+    };
+    let pointer = |id: &str| {
+        format!(
+            "From user-memory, matching this step (read one for the rest before applying it):\n- {} matches this step; read it before applying it",
+            &id[..8]
+        )
+    };
+    assert_eq!(run("numbat-pack --all"), pointer(&id));
+    assert_eq!(run("bilby-sign --key release"), "", "the memory was named");
+    assert_eq!(
+        run("dingo-ship --channel stable && quokka-deploy --now"),
+        pointer(&other),
+        "another memory takes the line"
+    );
+}
+
+// On a server's store a memory named already takes none of the matches a
+// hook reads (`READ_PER_EVENT`, 6): a seventh that matches less, behind
+// six named ones the window matches more, still gets its line.
+#[test]
+fn a_server_s_memory_named_already_leaves_its_read_to_another() {
+    let host = Host::start(root());
+    let tools = [
+        "aardvark-one",
+        "badger-two",
+        "civet-three",
+        "dhole-four",
+        "eland-five",
+        "fossa-six",
+        "gerbil-seven",
+    ];
+    let ids: Vec<String> = (0u64..)
+        .zip(tools)
+        .map(|(n, tool)| record_tool(&host, 1 + 2 * n, tool, "chat/tools"))
+        .collect();
+    let machine = Machine {
+        home: tempdir().unwrap(),
+        url: format!("http://{}/mcp", host.address),
+        token: host.root.path().join("token"),
+        env: Vec::new(),
+    };
+    let _connector = machine.connector();
+    machine.hook_with("session-start", "s", json!({"source": "startup"}));
+    machine.marker();
+    let run = |tools: &[&str]| {
+        let command = tools
+            .iter()
+            .map(|tool| format!("{tool} --now"))
+            .collect::<Vec<_>>()
+            .join(" && ");
+        added(&machine.hook_with(
+            "post-tool-use",
+            "s",
+            json!({"tool_name":"Bash","tool_input":{"command":command},"tool_response":"done"}),
+        ))
+    };
+    let named = |pushed: &str, of: &[String]| {
+        let mut ids: Vec<&str> = pushed
+            .lines()
+            .skip(1)
+            .map(|line| line.split(' ').nth(1).unwrap())
+            .collect();
+        ids.sort_unstable();
+        let mut want: Vec<&str> = of.iter().map(|id| &id[..8]).collect();
+        want.sort_unstable();
+        assert_eq!(ids, want, "{pushed}");
+    };
+    named(&run(&tools[..3]), &ids[..3]);
+    named(&run(&tools[3..6]), &ids[3..6]);
+    named(&run(&tools), &ids[6..]);
+}
+
 // A date that passes writes nothing, so a server's files still hold its
 // memory: the tool hook drops the match from the files' dates alone.
 #[test]
