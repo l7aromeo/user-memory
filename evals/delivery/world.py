@@ -28,7 +28,12 @@ When a memory is needed, by shape:
 - a project essential, such as how the project builds, at the prompt of
   most tasks, whatever their kind of work;
 - a point of a long merged memory, as the shape it would have alone;
-- a look-alike or filler memory, never.
+- a look-alike or filler memory, never;
+- a memory a task's early steps talk about, never at a later step that
+  shares only a common program with it ("carried"): "pipeline runner
+  artifacts stay where the runner wrote them; read them back with
+  `git -C <folder>`" is no help at `git -C . diff`, however much the
+  steps before said about pipelines.
 
 What keeps the benchmark honest:
 - a needed memory names its subject the way a person writes it down, not
@@ -329,6 +334,18 @@ SPLIT_PROBES = 8
 # Common words around each half's word, enough that each half is a passage.
 SPLIT_HALF_WORDS = (45, 60)
 
+# Tasks whose early steps talk about a subject that one memory's title
+# names, then run a command that shares only its program with that
+# memory (#299): the subject's words and the memory each task has.
+CARRIED_SUBJECTS = [("pipeline", "runner", "artifact"), ("mirror", "snapshot", "bucket"),
+                    ("vendor", "patch", "upstream"), ("fixture", "sample", "corpus"),
+                    ("locale", "catalog", "plural"), ("sandbox", "quota", "tenant"),
+                    ("webhook", "payload", "signature"), ("archive", "manifest", "checksum")]
+# The seed's offset for the carried tasks' own draws, so adding them left
+# the rest of a world as it was drawn before, but for the filler they take
+# the place of.
+CARRIED_SEED = 299
+
 # Share of a filler memory's words that are the world's common words.
 FILLER_COMMON_SHARE = 0.15
 
@@ -375,6 +392,7 @@ class World:
         self._look_alikes()
         self._tasks()
         self._split_probes()
+        self._carried(seed)
         self._filler()
         rng.shuffle(self.memories)
 
@@ -601,6 +619,32 @@ class World:
                                "actions": [{"kind": "search", "text": f"{first} {second}", "failed": False}],
                                "needs": [{"action": 0, "memory": m["id"], "point": 0,
                                           "subject": "split"}]})
+
+    def _carried(self, seed):
+        """Tasks that talk about a subject for a few steps, then run `git`
+        on something else, each with a memory whose title names the
+        subject and whose text shares only `git` with that command:
+        needed at none of them."""
+        rng = random.Random(seed + CARRIED_SEED)
+        for n, (a, b, c) in enumerate(CARRIED_SUBJECTS):
+            component = rng.choice(self.components)
+            title = f"{a.capitalize()} {b} {c}s stay where the {b} wrote them"
+            text = (f"Keep each {a} {b}'s {c}s where the {b} wrote them, and read them back with "
+                    f"`git -C <folder>` rather than copying them out.")
+            self._memory("carried", "preference", "workflow", title, text, PROJECT,
+                         about=["work", "carried"], anchored=True)
+            actions = [
+                {"kind": "prompt", "failed": False, "about": ["work", "research"],
+                 "text": f"The {a} {b} {c}s are stale after the last run; find out why"},
+                {"kind": "search", "failed": False, "text": f"{a} {b} {c}"},
+                {"kind": "message", "failed": False,
+                 "text": f"The {a} {b} kept last week's {c}s; checking what changed."},
+                {"kind": "command", "failed": False, "about": ["command", "git", "diff"],
+                 "text": f"git -C {ROOT_FOLDER} diff HEAD~1 -- {self.files[component]}"},
+            ]
+            self.tasks.append({"id": f"carried-{n}", "kind": "research", "project": PROJECT,
+                               "session": n % SESSIONS, "unnamed": False, "actions": actions,
+                               "needs": []})
 
     # --- tasks ----------------------------------------------------------
 

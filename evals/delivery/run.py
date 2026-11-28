@@ -61,7 +61,7 @@ HALF_LIVES = [2.0, 5.0, 10.0]
 # Whether a push needs an anchor of the action (#125's named change).
 ANCHOR_RULES = [False, True]
 # Shapes of memory the report breaks down, and how a delivery is classed.
-SHAPES = ("note", "trap", "lesson", "decision", "rule", "merged", "look-alike", "filler")
+SHAPES = ("note", "trap", "lesson", "decision", "rule", "merged", "look-alike", "carried", "filler")
 HOWS = ("now", "late", "about", "elsewhere")
 # Budgets of #125.
 PUSH_PRECISION = 0.8
