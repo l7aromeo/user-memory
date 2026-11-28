@@ -1074,7 +1074,7 @@ const JOB_TIMEOUTS: [(&str, &str, i64); 11] = [
     ("release.yml", "publish", 5),
     ("release.yml", "version", 5),
     ("windows.yml", "changes", 5),
-    ("windows.yml", "check", 35),
+    ("windows.yml", "check", 75),
     ("windows.yml", "windows", 5),
 ];
 

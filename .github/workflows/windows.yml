@@ -62,9 +62,11 @@ jobs:
             runner: windows-11-arm
     name: check (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
-    # About twice the longest complete run (1,039 s on x64, every test run),
-    # rounded up to 5 minutes; nextest ends a hung test after 5 minutes.
-    timeout-minutes: 35
+    # About twice the longest complete run, rounded up to 5 minutes: about
+    # 2,130 s on ARM64 with an empty cache (#291), whose cost check was cut
+    # off at 2,106 s some 20 s short; warm ARM64 runs take 1,670 to 1,880 s.
+    # nextest ends a hung test after 5 minutes.
+    timeout-minutes: 75
     env:
       # One run reports every failing test (.config/nextest.toml).
       NEXTEST_PROFILE: ci
