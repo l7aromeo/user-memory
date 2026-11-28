@@ -133,6 +133,12 @@ const READERS: &[&str] = &[
     "wc",
 ];
 
+/// Programs that write each file they are given, as the write tool does:
+/// `tee notes/a.txt` writes `notes/a.txt`, so a line that writes several
+/// files is a part per file, each a step on its file, as a redirection's
+/// is.
+const WRITERS: &[&str] = &["tee"];
+
 /// Shells whose `-c` script is the command line they run, and whose
 /// here-document is when they get no script otherwise ([`reads_script`]).
 const SHELLS: &[&str] = &["bash", "sh", "zsh"];
@@ -276,9 +282,9 @@ pub(crate) struct Terms {
     /// rare as one memory's when none does: a spelling no memory uses says
     /// nothing of the command. Kept, as `parts`, for the action that fires.
     pub(crate) paths: Vec<BTreeSet<String>>,
-    /// The part is a reading command's read of one file, tested as a read
-    /// with the read tool is (see [`Matched::on_command`]).
-    pub(crate) read: bool,
+    /// The part is one file a command reads or writes, tested as a step of
+    /// the file tools is (see [`Matched::on_command`]).
+    pub(crate) file: bool,
 }
 
 impl Terms {
@@ -297,16 +303,35 @@ impl Terms {
 
 /// The segments of a command line: the commands of a chain, pipe or
 /// subshell, split at `&&`, `||`, `;`, `|`, `&`, parentheses, backticks
-/// and line ends outside quotes, each as its words without quotes. A
-/// redirection's `&` (`2>&1`, `&>log`) is part of its word. A
+/// and line ends outside quotes, each as its words without quotes, and
+/// apart from them the files its redirections name: the file `<` reads,
+/// and the one `>`, `>>`, `>|`, `&>` or `<>` writes. A
 /// here-document's body is text the command reads, like quoted text, so
 /// it adds no segment, unless a shell reads it as its script
 /// ([`reads_script`]): then its commands are segments too.
-fn segments(line: &str) -> Vec<Vec<String>> {
+fn segments(line: &str) -> Vec<Segment> {
     lex(line)
         .into_iter()
-        .map(|words| words.into_iter().map(|word| word.text).collect())
+        .map(|lexed| {
+            let mut segment = Segment::default();
+            for word in lexed {
+                if word.redirected {
+                    segment.files.push(word.text);
+                } else {
+                    segment.words.push(word.text);
+                }
+            }
+            segment
+        })
         .collect()
+}
+
+/// One command of a line, as [`segments`] gives it: its words, and each
+/// file a redirection of it reads or writes.
+#[derive(Default)]
+struct Segment {
+    words: Vec<String>,
+    files: Vec<String>,
 }
 
 /// Where each word of a command line is in it, split as [`segments`]
@@ -316,10 +341,22 @@ pub(crate) fn word_spans(line: &str) -> impl Iterator<Item = Range<usize>> {
     lex(line).into_iter().flatten().map(|word| word.span)
 }
 
-/// A word of a command line, as [`segments`] gives it, and where it is.
+/// A word of a command line, as [`segments`] gives it, where it is, and
+/// whether it is the file a redirection names.
 struct Word {
     text: String,
     span: Range<usize>,
+    redirected: bool,
+}
+
+impl Word {
+    fn new() -> Self {
+        Self {
+            text: String::new(),
+            span: 0..0,
+            redirected: false,
+        }
+    }
 }
 
 /// A here-document a command line opens (`<<EOF`, `<<'EOF'`, `<<-EOF`):
@@ -364,7 +401,9 @@ fn lex(line: &str) -> Vec<Vec<Word>> {
 /// the line that is its delimiter alone, or to the end of the command
 /// when none is, as a shell reads it. `<<` in quotes or in arithmetic
 /// (`$((1 << 2))`) opens none, nor does a here-string (`<<<`), whose word
-/// is read as any word.
+/// is read as any word. A redirection outside quotes and a `[[ … ]]`
+/// test marks the word after it as the file it names, and its
+/// number (`2>`) is no word.
 fn lex_line(line: &str) -> (Vec<Vec<Word>>, Vec<HereDocument>) {
     let mut segments = Vec::new();
     let mut documents = Vec::new();
@@ -376,21 +415,15 @@ fn lex_line(line: &str) -> (Vec<Vec<Word>>, Vec<HereDocument>) {
     // Where the line goes on past the bodies just read.
     let mut resume = 0;
     let mut words: Vec<Word> = Vec::new();
-    let mut word = Word {
-        text: String::new(),
-        span: 0..0,
-    };
+    let mut word = Word::new();
     let mut quote: Option<char> = None;
+    // Whether the next word is the file of a redirection.
+    let mut redirect = false;
     let mut chars = line.char_indices().peekable();
-    let end_word = |word: &mut Word, words: &mut Vec<Word>| {
+    let end_word = |word: &mut Word, words: &mut Vec<Word>, redirect: &mut bool| {
         if !word.text.is_empty() {
-            words.push(std::mem::replace(
-                word,
-                Word {
-                    text: String::new(),
-                    span: 0..0,
-                },
-            ));
+            word.redirected = std::mem::take(redirect);
+            words.push(std::mem::replace(word, Word::new()));
         }
     };
     let push = |word: &mut Word, at: usize, c: char| {
@@ -409,7 +442,8 @@ fn lex_line(line: &str) -> (Vec<Vec<Word>>, Vec<HereDocument>) {
             (Some(q), c) if c == q => quote = None,
             (Some(_), c) => push(&mut word, at, c),
             (None, '\'' | '"') => quote = Some(c),
-            (None, '&') if word.text.ends_with(['>', '<']) || next == Some('>') => {
+            // `&>` sends both outputs to its file: the `&` is no word.
+            (None, '&') if next == Some('>') && word.text.is_empty() => {
                 push(&mut word, at, c);
             }
             (None, '<') if next == Some('<') && arithmetic == 0 => {
@@ -420,13 +454,28 @@ fn lex_line(line: &str) -> (Vec<Vec<Word>>, Vec<HereDocument>) {
                     }
                     continue;
                 }
-                end_word(&mut word, &mut words);
+                end_word(&mut word, &mut words, &mut redirect);
                 let tabs = chars.next_if(|&(_, c)| c == '-').is_some();
                 while chars.next_if(|&(_, c)| c == ' ' || c == '\t').is_some() {}
                 let delimiter = here_delimiter(&mut chars);
                 if !delimiter.is_empty() {
                     opened.push((segments.len(), delimiter, tabs));
                 }
+            }
+            (None, '>' | '<') if !(c == '<' && next == Some('<')) && !in_test(&words) => {
+                // A descriptor's number or `&` before it is no word; any
+                // other word before it is one (`echo a>b`).
+                if word.text == "&" || word.text.chars().all(|c| c.is_ascii_digit()) {
+                    word = Word::new();
+                } else {
+                    end_word(&mut word, &mut words, &mut redirect);
+                }
+                // `>>`, `>|` and `<>` are one operator.
+                chars.next_if(|&(_, n)| n == '>' || (c == '>' && n == '|'));
+                // `>&2` and `2>&1` copy a descriptor: the word after the `&`
+                // is a number, which names no file, and `>&file` names one.
+                chars.next_if(|&(_, n)| n == '&');
+                redirect = true;
             }
             (None, '(' | ')' | '`') => {
                 if c == '(' && (arithmetic > 0 || next == Some('(')) {
@@ -439,7 +488,8 @@ fn lex_line(line: &str) -> (Vec<Vec<Word>>, Vec<HereDocument>) {
                     word.text.pop();
                     word.span.end -= '$'.len_utf8();
                 }
-                end_word(&mut word, &mut words);
+                end_word(&mut word, &mut words, &mut redirect);
+                redirect = false;
                 segments.push(std::mem::take(&mut words));
             }
             (None, '&' | '|') => {
@@ -447,11 +497,13 @@ fn lex_line(line: &str) -> (Vec<Vec<Word>>, Vec<HereDocument>) {
                 if next == Some(c) {
                     chars.next();
                 }
-                end_word(&mut word, &mut words);
+                end_word(&mut word, &mut words, &mut redirect);
+                redirect = false;
                 segments.push(std::mem::take(&mut words));
             }
             (None, ';' | '\n') => {
-                end_word(&mut word, &mut words);
+                end_word(&mut word, &mut words, &mut redirect);
+                redirect = false;
                 segments.push(std::mem::take(&mut words));
                 if c == '\n' {
                     resume = at + c.len_utf8();
@@ -462,13 +514,20 @@ fn lex_line(line: &str) -> (Vec<Vec<Word>>, Vec<HereDocument>) {
                     }
                 }
             }
-            (None, c) if c.is_whitespace() => end_word(&mut word, &mut words),
+            (None, c) if c.is_whitespace() => end_word(&mut word, &mut words, &mut redirect),
             (None, c) => push(&mut word, at, c),
         }
     }
-    end_word(&mut word, &mut words);
+    end_word(&mut word, &mut words, &mut redirect);
     segments.push(words);
     (segments, documents)
+}
+
+/// Whether a segment's words so far open a `[[ … ]]` test, where `<` and
+/// `>` compare strings.
+fn in_test(words: &[Word]) -> bool {
+    words.first().is_some_and(|word| word.text == "[[")
+        && !words.iter().any(|word| word.text == "]]")
 }
 
 /// The delimiter word after `<<`, without its quotes and backslashes
@@ -517,7 +576,11 @@ fn here_body(line: &str, start: usize, delimiter: &str, tabs: bool) -> (Range<us
 /// ([`SHELLS`]) told to read its commands from its input (`-s`), or given
 /// neither a `-c` script nor a script file, does (`bash <<EOF`).
 fn reads_script(words: &[Word]) -> bool {
-    let words: Vec<String> = words.iter().map(|word| word.text.clone()).collect();
+    let words: Vec<String> = words
+        .iter()
+        .filter(|word| !word.redirected)
+        .map(|word| word.text.clone())
+        .collect();
     let Some(start) = program_start(&words) else {
         return false;
     };
@@ -554,10 +617,15 @@ fn assignment(word: &str) -> bool {
 
 /// A shell command line's terms, as parts (see [`Terms::parts`]): each
 /// segment is one, except that a reading command ([`READERS`]) is one per
-/// path it names, each a read of that path alone, and a shell's `-c`
-/// script is split as a line of its own.
+/// path it names, each a read of that path alone, a writing one
+/// ([`WRITERS`]) one per file it writes, and a shell's `-c` script is
+/// split as a line of its own. Each file a redirection reads or writes is
+/// a part of its own too, as the file tools' step on that file is.
 fn command_terms(line: &str, stems: &mut Stems, terms: &mut Terms) {
-    for words in segments(line) {
+    for Segment { words, files } in segments(line) {
+        for file in &files {
+            file_part(file, stems, terms);
+        }
         let Some(start) = program_start(&words) else {
             continue;
         };
@@ -581,28 +649,43 @@ fn command_terms(line: &str, stems: &mut Stems, terms: &mut Terms) {
                 terms,
             );
         }
-        let paths: Vec<usize> = if READERS.contains(&name.as_str()) {
-            (0..args.len())
-                .filter(|&i| path_argument(&args[i]))
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let paths: Vec<usize> =
+            if READERS.contains(&name.as_str()) || WRITERS.contains(&name.as_str()) {
+                (0..args.len())
+                    .filter(|&i| path_argument(&args[i]))
+                    .collect()
+            } else {
+                Vec::new()
+            };
         if paths.is_empty() {
             part_terms(program, args.iter().map(String::as_str), stems, terms);
             continue;
         }
-        // Reading a file is a read of it, as the read tool's is.
         for &path in &paths {
-            let mut part = Terms {
-                read: true,
-                ..Terms::default()
-            };
-            path_terms(&args[path], stems, &mut part);
-            terms.add_part(part);
+            file_part(&args[path], stems, terms);
         }
     }
 }
+
+/// Adds `path`, a file a command reads or writes, to `terms` as a part of
+/// its own: a step on that file, as the read or write tool's is. A device
+/// (`/dev/null`) and a word that holds no anchor name no file.
+fn file_part(path: &str, stems: &mut Stems, terms: &mut Terms) {
+    if path.starts_with(DEVICES) || !path_argument(path) {
+        return;
+    }
+    let mut part = Terms {
+        file: true,
+        ..Terms::default()
+    };
+    path_terms(path, stems, &mut part);
+    terms.add_part(part);
+}
+
+/// Where a command's devices are, which a redirection names and no work
+/// is about: `2>/dev/null` names no file, or a memory holding the anchor
+/// `null` would come after every command that silences its errors.
+const DEVICES: &str = "/dev/";
 
 /// The script a shell's arguments run: the word after its first short
 /// flags that hold `c` (`-c`, `-lc`), before any other argument.
@@ -1254,7 +1337,7 @@ fn ranked(source: &impl Lookup, window: &Window) -> Result<Vec<Matched>, Error> 
     let mut reads = 0u64;
     for (i, part) in fired_parts.iter().enumerate() {
         let bit = 1u64 << i.min(MAX_PARTS - 1);
-        if part.read {
+        if part.file {
             reads |= bit;
         }
         let keys = part
@@ -2226,12 +2309,12 @@ mod tests {
         assert!(read[2].contains("tools/package.py") && !read[2].contains("readme.md"));
         assert_eq!(parts("cp README.md src/a.py tools/").len(), 1);
         // Subshells, substitutions and backticks split; a redirection's `&`
-        // does not.
+        // does not, and the file a redirection names is a part of its own.
         for (line, count) in [
             ("(cd tools && make package)", 2),
             ("echo $(cat VERSION) `git rev-parse HEAD`", 3),
             ("cargo test 2>&1 | tail -5", 2),
-            ("cargo build &> build.log", 1),
+            ("cargo build &> build.log", 2),
         ] {
             assert_eq!(parts(line).len(), count, "{line}: {:?}", parts(line));
         }
@@ -2256,7 +2339,7 @@ mod tests {
             "C:/tools/rg.exe store src/store/cache.py tools/package.py",
         );
         assert_eq!(read.parts.len(), 2, "{read:?}");
-        assert!(read.parts.iter().all(|part| part.read), "{read:?}");
+        assert!(read.parts.iter().all(|part| part.file), "{read:?}");
         for line in [
             "C:/tools/cargo.exe publish",
             r"C:\tools\cargo.exe publish",
