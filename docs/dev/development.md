@@ -833,8 +833,10 @@ push needing an anchor of the action. The sweep tries single bars on the
 store's score, on the share and on the mixed score. `--bars` reports at
 other bars, on any of those with `scale=NAME` (repeat it to compare several
 on the same stores), `--prompt-curve` at several prompt bars on stems alone,
-`--failure-curve` at several failure bars with and without an anchor, and
-`--keep DIR` keeps the built stores. `--presence` adds how often session
+`--failure-curve` at several failure bars with and without an anchor,
+`--share-floor` with another `WINDOW_SHARE_FLOOR` (0 lets earlier steps
+always add to a command's share, as before #299), and `--keep DIR` keeps
+the built stores. `--presence` adds how often session
 start already lists what the tasks need: today's, from `user-memory
 session-start`, and a model of the index ordered by use, whose constants
 are in `evals/delivery/presence.py`. The measures' own tests run with
