@@ -363,7 +363,11 @@ From user-memory, matching this step (if one applies, read it for the rest first
   ran alone, so a note on one of them comes after the whole line; a command
   that reads files (`cat`, `head`, `sed`, `grep`, PowerShell's
   `Get-Content` and the like) is matched once for each file it names, as a
-  read of that file. A path in a command names what a read of it does: its
+  read of that file. A file a command reads or writes through a
+  redirection (`< in.json`, `> out.txt`, `>> log`, `2> err.log`), or that
+  `tee` writes, is a step on that file too, as the read or write tool's
+  is, whatever the program; `2>&1`, `>&2` and `/dev/null` name no file.
+  A path in a command names what a read of it does: its
   folders and its file name, taken relative to the session's folder. On
   Windows a path matches whichever of `\` and `/` it is written with,
   with its drive as Git Bash writes it (`/c/`) too, and the session's

@@ -587,6 +587,93 @@ fn earlier_steps_lift_a_memory_the_command_points_at_and_never_make_one_up() {
 }
 
 #[test]
+fn a_file_a_command_redirects_to_or_from_is_a_step_on_it_whatever_the_program() {
+    let home = Home::new();
+    let drafts = home.record(
+        "Release drafts are reviewed before they are sent",
+        "Every file under `notes/drafts/` is reviewed by the maintainer before it is sent; never paste one straight into an issue.",
+        &[],
+    );
+    home.record(
+        "git status shows the branch first",
+        "`git status --short` lists changes.",
+        &[],
+    );
+    let null = home.record(
+        "A missing field reads as null",
+        "In the export a missing field is `null`, never an empty string.",
+        &[],
+    );
+    // The file tools' steps on a file of the folder, to match.
+    home.start("write", "startup");
+    let written = home.call(
+        "write",
+        None,
+        "Write",
+        json!({"file_path": home.path().join("notes/drafts/msg.txt"), "content": "text"}),
+        json!({}),
+    );
+    assert!(written.contains(short(&drafts)), "{written}");
+    let lines: &[(&str, bool)] = &[
+        // Read, by a reading command or from a redirection.
+        ("cat notes/drafts/msg.txt", true),
+        ("cat < notes/drafts/msg.txt", true),
+        ("python3 tools/check.py < notes/drafts/in.json", true),
+        // Written, through a redirection, whatever the program.
+        (
+            "cat > notes/drafts/msg.txt <<'EOF'\nRelease notes\nEOF",
+            true,
+        ),
+        (
+            "cat >> notes/drafts/msg.txt <<'EOF'\nOne more line\nEOF",
+            true,
+        ),
+        ("head -20 CHANGELOG.md > notes/drafts/msg.txt", true),
+        ("sed -n 1,5p CHANGELOG.md > notes/drafts/msg.txt", true),
+        ("echo done > notes/drafts/msg.txt", true),
+        ("printf 'x\\n' > notes/drafts/msg.txt", true),
+        ("grep -n TODO src/lib.rs >notes/drafts/todo.txt", true),
+        ("echo x >| notes/drafts/msg.txt", true),
+        ("cargo build &> notes/drafts/build.log", true),
+        ("cargo build 2>notes/drafts/err.log", true),
+        ("echo x >&notes/drafts/msg.txt", true),
+        // Written by `tee`, which writes the files it names.
+        ("echo x | tee notes/drafts/msg.txt", true),
+        (
+            "echo x | tee -a notes/other/a.txt notes/drafts/msg.txt",
+            true,
+        ),
+        // A shell's script from its input, its output redirected.
+        (
+            "bash > notes/other/run.log <<'EOF'\ncat notes/drafts/msg.txt\nEOF",
+            true,
+        ),
+        // No file of the folder: another folder, a quoted `>`, a copied
+        // descriptor, a device, a comparison, or a body's text.
+        (
+            "cat > notes/other/msg.txt <<'EOF'\nsee notes/drafts/msg.txt\nEOF",
+            false,
+        ),
+        ("echo \"> notes/drafts/msg.txt\"", false),
+        ("cargo build 2>&1 | tail -5", false),
+        ("echo x >&2", false),
+        ("cargo build 2>/dev/null", false),
+        ("[[ $v > notes/drafts/msg.txt ]] && echo later", false),
+    ];
+    let mut wrong = Vec::new();
+    for (n, (line, expected)) in lines.iter().enumerate() {
+        let session = format!("s{n}");
+        home.start(&session, "startup");
+        let pushed = home.run(&session, line);
+        // A device names no file: a memory on `null` never comes.
+        if pushed.contains(short(&drafts)) != *expected || pushed.contains(short(&null)) {
+            wrong.push(*line);
+        }
+    }
+    assert!(wrong.is_empty(), "wrong after {wrong:?}");
+}
+
+#[test]
 fn a_file_read_through_the_shell_reaches_what_a_read_of_it_reaches() {
     let home = Home::new();
     let store = home.record(
