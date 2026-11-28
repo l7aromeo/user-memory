@@ -59,8 +59,12 @@ const MORE: &str = " …";
 pub(crate) struct Line {
     /// The memory's id.
     pub(crate) id: String,
-    /// The passage's slot, the key it is shown once by.
+    /// The passage's slot: the key a passage's text is shown once by.
     pub(crate) passage: i64,
+    /// Whether the line names the id alone, the [`POINTER`]: it holds no
+    /// passage, so it is shown once for the memory, whichever passage
+    /// matched (#293).
+    pub(crate) named: bool,
     /// The line as pushed, without its line break.
     pub(crate) text: String,
 }
@@ -89,16 +93,19 @@ pub(crate) fn lines(
     for matched in passing {
         let id = view.id(matched.memory)?.to_owned();
         let short = id.get(..SHORT_ID).unwrap_or(&id);
-        let text = match conn.filter(|_| Instant::now() < deadline) {
+        let (text, named) = match conn.filter(|_| Instant::now() < deadline) {
             Some(conn) => match labelled(conn, &id, matched)? {
-                Some(Labelled { label, passage, .. }) => format!("- {short} {label}: {passage}"),
+                Some(Labelled { label, passage, .. }) => {
+                    (format!("- {short} {label}: {passage}"), false)
+                }
                 None => continue,
             },
-            None => format!("- {short} {POINTER}"),
+            None => (format!("- {short} {POINTER}"), true),
         };
         lines.push(Line {
             id,
             passage: matched.slot,
+            named,
             text,
         });
     }
@@ -301,7 +308,10 @@ mod tests {
             lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(),
             [pointer.as_str()]
         );
-        assert_eq!((lines[0].id.as_str(), lines[0].passage), (A, 1));
+        assert_eq!(
+            (lines[0].id.as_str(), lines[0].passage, lines[0].named),
+            (A, 1, true)
+        );
         // A store, but the deadline passed: the same line, the store unread.
         let store = Connection::open_in_memory().unwrap();
         let late = super::lines(Some(&store), &view, &passing, Instant::now()).unwrap();
@@ -381,6 +391,7 @@ mod tests {
         let line = |id: &str, text: &str| Line {
             id: id.to_owned(),
             passage: 1,
+            named: false,
             text: text.to_owned(),
         };
         let lines = [

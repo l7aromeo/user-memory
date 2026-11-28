@@ -60,6 +60,13 @@ pub(super) const SESSION_PUSH_CHARS: usize = 8_000;
 /// holds the id as session start prints it, its first characters.
 const WHOLE: i64 = -1;
 
+/// The passage number of a push that named a memory by its id alone
+/// (#293), by its full id. It stops only later such lines of that memory
+/// in the stretch: the line holds no passage, so another passage's text,
+/// and a hold of one, still tell the agent what the line did not. On a
+/// local store the line comes only from a hook that ran out of time.
+const NAMED: i64 = -2;
+
 /// The state file's layout. An older one is upgraded in place, by running
 /// [`SCHEMA`] and setting this number, so a session that moves to a new
 /// binary keeps its state: that holds only while each layout change adds
@@ -288,6 +295,9 @@ pub(super) struct Call<'a> {
 pub(super) struct Offer<'a> {
     pub(super) memory: &'a str,
     pub(super) passage: i64,
+    /// Whether the line names the id alone: shown once for the memory
+    /// ([`NAMED`]), whichever passage matched.
+    pub(super) named: bool,
     pub(super) chars: usize,
 }
 
@@ -461,8 +471,10 @@ impl State {
     /// Adds `step` to `agent`'s window and marks as shown those of `offers`
     /// not shown in this stretch, in order, at most [`PUSH_PER_EVENT`]
     /// within `room` characters, while the epoch's budget holds; returns
-    /// their positions in `offers`. All or nothing: a hook that cannot write
-    /// before its deadline pushes nothing and loses its step.
+    /// their positions in `offers`. An offer that names the id alone is
+    /// shown once for its memory ([`NAMED`]), and not where its passage was
+    /// shown. All or nothing: a hook that cannot write before its deadline
+    /// pushes nothing and loses its step.
     pub(super) fn record(
         &mut self,
         agent: &str,
@@ -500,24 +512,32 @@ impl State {
             if chars + offer.chars > SESSION_PUSH_CHARS || event + offer.chars > room {
                 continue;
             }
-            let whole: bool = tx
+            // A passage's text is shown once by its passage, which the
+            // insert below checks; a line naming the id alone also checks
+            // its passage here, and is shown once by NAMED.
+            let (key, also) = if offer.named {
+                (NAMED, offer.passage)
+            } else {
+                (offer.passage, WHOLE)
+            };
+            let seen: bool = tx
                 .query_row(
-                    "SELECT 1 FROM shown WHERE agent = ?1 AND memory = substr(?2, 1, length(memory)) AND passage = ?3 AND ?4 - at <= ?5
+                    "SELECT 1 FROM shown WHERE agent = ?1 AND memory = substr(?2, 1, length(memory)) AND passage IN (?3, ?7) AND ?4 - at <= ?5
                      UNION ALL
                      SELECT 1 FROM held WHERE agent = ?1 AND memory = ?2 AND passage = ?6 AND shown = 1 AND ?4 - at <= ?5",
-                    params![agent, offer.memory, WHOLE, at, STRETCH_ACTIONS, offer.passage],
+                    params![agent, offer.memory, WHOLE, at, STRETCH_ACTIONS, offer.passage, also],
                     |_| Ok(true),
                 )
                 .optional()?
                 .unwrap_or(false);
-            if whole {
+            if seen {
                 continue;
             }
             let marked = tx.execute(
                 "INSERT INTO shown(agent, memory, passage, at) VALUES (?1, ?2, ?3, ?4)
                  ON CONFLICT(agent, memory, passage) DO UPDATE SET at = excluded.at
                  WHERE excluded.at - shown.at > ?5",
-                params![agent, offer.memory, offer.passage, at, STRETCH_ACTIONS],
+                params![agent, offer.memory, key, at, STRETCH_ACTIONS],
             )?;
             if marked == 1 {
                 chars += offer.chars;
@@ -562,6 +582,8 @@ impl State {
             let (memory, passage) = row?;
             if passage == WHOLE {
                 handled.whole.push(memory);
+            } else if passage == NAMED {
+                handled.named.push(memory);
             } else {
                 handled.passages.insert((memory, passage));
             }
@@ -716,6 +738,8 @@ pub(super) struct Handled {
     passages: std::collections::HashSet<(String, i64)>,
     /// The ids, as session start prints them, of memories printed whole.
     whole: Vec<String>,
+    /// The full ids of memories a push named by the id alone ([`NAMED`]).
+    named: Vec<String>,
 }
 
 impl Handled {
@@ -725,6 +749,11 @@ impl Handled {
             .iter()
             .any(|short| id.starts_with(short.as_str()))
             || self.passages.contains(&(id.to_owned(), passage))
+    }
+
+    /// Whether memory `id` was named by its id alone ([`NAMED`]).
+    pub(super) fn named(&self, id: &str) -> bool {
+        self.named.iter().any(|named| named == id)
     }
 }
 
@@ -1370,6 +1399,7 @@ mod tests {
         Offer {
             memory,
             passage,
+            named: false,
             chars: 100,
         }
     }
@@ -1463,6 +1493,7 @@ mod tests {
                             let offers = [Offer {
                                 memory: &memory,
                                 passage: 0,
+                                named: false,
                                 chars,
                             }];
                             barrier.wait();
@@ -1489,6 +1520,7 @@ mod tests {
         let big = |memory| Offer {
             memory,
             passage: 0,
+            named: false,
             chars: SESSION_PUSH_CHARS - 100,
         };
         // A passage past what is left is skipped; a smaller one after it fits.
@@ -1526,6 +1558,7 @@ mod tests {
         let over = Offer {
             memory: "e0000006",
             passage: 0,
+            named: false,
             chars: 101,
         };
         assert_eq!(
@@ -1563,11 +1596,13 @@ mod tests {
             Offer {
                 memory: "e0000007",
                 passage: 0,
+                named: false,
                 chars: 151,
             },
             Offer {
                 memory: "e0000008",
                 passage: 0,
+                named: false,
                 chars: 150,
             },
         ];
@@ -1616,6 +1651,51 @@ mod tests {
                 .record(MAIN, &command(), &reprinted, ROOM_CHARS)
                 .unwrap(),
             [] as [usize; 0]
+        );
+    }
+
+    // A line naming the id alone holds no passage (#293): it is shown once
+    // for its memory, and stops later such lines alone. A passage's text,
+    // and a hold, still come after it.
+    #[test]
+    fn a_line_naming_the_id_alone_stops_only_later_such_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = file(&dir);
+        let mut state = State::start(&path, Source::Startup, &["e0000008"], soon()).unwrap();
+        let id = "e0000007-0000-4000-8000-000000000007";
+        let pointer = |memory, passage| Offer {
+            named: true,
+            ..offer(memory, passage)
+        };
+        let mut record = |agent: &str, offer: Offer| {
+            state
+                .record(agent, &command(), &[offer], ROOM_CHARS)
+                .unwrap()
+                .len()
+        };
+        assert_eq!(record(MAIN, offer(id, 1)), 1);
+        assert_eq!(record(MAIN, pointer(id, 1)), 0, "its passage was shown");
+        assert_eq!(record(MAIN, pointer(id, 2)), 1);
+        assert_eq!(record(MAIN, pointer(id, 3)), 0, "named already");
+        assert_eq!(record("a1", pointer(id, 3)), 1, "to that context alone");
+        for passage in [2, 3] {
+            assert_eq!(record(MAIN, offer(id, passage)), 1, "text of {passage}");
+        }
+        let printed = "e0000008-0000-4000-8000-000000000008";
+        assert_eq!(record(MAIN, pointer(printed, 1)), 0, "printed whole");
+        let handled = state.handled(MAIN, Use::Push).unwrap();
+        assert!(handled.named(id) && !handled.contains(id, 4));
+        assert!(!state.handled(MAIN, Use::Hold).unwrap().contains(id, 4));
+        let call = Call {
+            id: "t-1",
+            key: "k1",
+        };
+        assert_eq!(
+            state
+                .hold(MAIN, call, &[offer(id, 4)], &[], ROOM_CHARS, soon())
+                .unwrap(),
+            [0],
+            "a hold still holds"
         );
     }
 
