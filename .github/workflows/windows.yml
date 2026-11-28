@@ -76,10 +76,11 @@ jobs:
       AWS_LC_SYS_PREBUILT_NASM: ${{ matrix.arch == 'x64' && '1' || '' }}
     steps:
       - uses: actions/checkout@v7
-      # The toolchain the server image and the release builds use (Dockerfile).
+      # The toolchain the server image and the release builds use
+      # (rust-toolchain.toml).
       - uses: dtolnay/rust-toolchain@v1
         with:
-          toolchain: "1.100.0"
+          toolchain: "1.100.1"
           components: rustfmt, clippy
       # cargo-nextest (tests/ci.rs NEXTEST) runs the tests in `just check`.
       - uses: taiki-e/install-action@v2

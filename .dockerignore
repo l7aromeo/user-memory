@@ -1,9 +1,10 @@
-# Only what the image builds from. rust-toolchain.toml stays out: the image
-# is the RUST_IMAGE's Rust, and the file would make rustup fetch the
-# rustfmt and clippy it names, which the build never runs.
+# Only what the image builds from. The toolchain stage reads the Rust
+# version from rust-toolchain.toml; the build stage copies no more than the
+# sources, so the file never makes rustup fetch its rustfmt and clippy.
 *
 !Cargo.toml
 !Cargo.lock
+!rust-toolchain.toml
 !src/
 !src/**
 !skills/

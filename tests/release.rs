@@ -558,11 +558,13 @@ fn build_only_compiles_the_binaries_and_nothing_else() {
     );
 }
 
-// A Linux build runs in the Dockerfile's image with that image's Rust. The
-// host's rustc and rustup are never asked: on a runner, the checkout's
-// rust-toolchain.toml would make rustup install a toolchain first.
+// A Linux build runs in an image built from the Dockerfile's toolchain
+// stage, with the Rust the archive's rust-toolchain.toml names, and prints
+// the glibc floor read in that image. The host's rustc and rustup are never
+// asked: on a runner, the checkout's rust-toolchain.toml would make rustup
+// install a toolchain first.
 #[test]
-fn a_linux_build_uses_the_image_rust_and_never_the_host_rust() {
+fn a_linux_build_uses_the_toolchain_file_s_rust_and_never_the_host_rust() {
     if !has_zsh() {
         return;
     }
@@ -570,11 +572,16 @@ fn a_linux_build_uses_the_image_rust_and_never_the_host_rust() {
     let source = source_tree(dir.path());
     fs::write(
         source.join("Dockerfile"),
-        "ARG RUST_IMAGE=rust:9.8.7-bookworm\n",
+        "FROM debian:bookworm AS toolchain\n",
     )
     .unwrap();
-    git(&source, &["add", "Dockerfile"]);
-    git(&source, &["commit", "-q", "-m", "image"]);
+    fs::write(
+        source.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"9.8.7\"\ncomponents = [\"rustfmt\", \"clippy\"]\n",
+    )
+    .unwrap();
+    git(&source, &["add", "Dockerfile", "rust-toolchain.toml"]);
+    git(&source, &["commit", "-q", "-m", "toolchain"]);
     let host = dir.path().join("host-rust");
     fs::create_dir_all(&host).unwrap();
     let calls = dir.path().join("host-rust.calls");
@@ -614,8 +621,20 @@ fn a_linux_build_uses_the_image_rust_and_never_the_host_rust() {
     );
     let docker = fs::read_to_string(dir.path().join("docker.log")).unwrap();
     assert!(
-        docker.contains(" -e RUSTUP_TOOLCHAIN=9.8.7 ") && docker.contains(" rust:9.8.7-bookworm "),
+        docker.contains(
+            "build -q --platform linux/arm64 --target toolchain -t user-memory-toolchain:9.8.7-arm64 "
+        ),
         "{docker}"
+    );
+    assert!(
+        docker.contains(" -e RUSTUP_TOOLCHAIN=9.8.7 ")
+            && docker.contains(" user-memory-toolchain:9.8.7-arm64 sh -ec "),
+        "{docker}"
+    );
+    assert!(
+        text(&built).0.contains("   needs glibc 2.36\n"),
+        "{}",
+        text(&built).0
     );
     assert_eq!(
         files(&out),

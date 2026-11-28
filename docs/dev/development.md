@@ -11,17 +11,37 @@ Requirements: [rustup](https://rustup.rs/) and a C build toolchain (SQLite
 is bundled). The Rust version comes from `rust-toolchain.toml`: in a
 checkout, every cargo command uses it with rustfmt and clippy, whatever the
 machine's default, and rustup installs it on first use. It is the version the
-workflows and the release builds use, the Dockerfile's `RUST_IMAGE`, so
-`just check` here and in CI run the same lints. Moving to a new Rust release
-is one change in three places, the Dockerfile, `rust-toolchain.toml` and the
-workflows' `toolchain:` lines, which `cargo test --test ci` holds together.
-Move it when a new stable Rust is out, not only at a release, so the checks
-run the lints a release will build with; the release run refuses a Rust
-older than the current stable
+workflows and the release builds use, so `just check` here and in CI run the
+same lints. Moving to a new Rust release is one change in two places,
+`rust-toolchain.toml`'s `channel` and the workflows' `toolchain:` lines,
+which `cargo test --test ci` holds together. Move it when a new stable Rust
+is out, not only at a release, so the checks run the lints a release will
+build with; the release run refuses a Rust older than the current stable
 ([releasing](releasing.md#build-and-publish-on-github)).
 A build that runs neither rustfmt nor clippy (the server image, the release
-builds) names the version itself, through `RUSTUP_TOOLCHAIN` or its image,
-so rustup fetches nothing more.
+builds) installs the version alone, with no components, so rustup fetches
+nothing more.
+
+The server image and the Linux release builds get their Rust from the
+Dockerfile's `toolchain` stage: Debian bookworm, whose glibc (2.36) is the
+oldest the Linux releases need, with rustup installing the channel
+`rust-toolchain.toml` names. No Rust image is involved, so a new Rust never
+waits for one. The stage downloads a pinned `rustup-init` and checks it
+against the SHA-256 the Dockerfile holds for each Linux architecture. To
+move rustup to a newer release:
+
+1. Read its version from
+   <https://static.rust-lang.org/rustup/release-stable.toml>.
+2. For each Linux target the release builds, copy the checksum from
+   `https://static.rust-lang.org/rustup/archive/<version>/<target>/rustup-init.sha256`
+   (`x86_64-unknown-linux-gnu` for `RUSTUP_SHA256_AMD64`,
+   `aarch64-unknown-linux-gnu` for `RUSTUP_SHA256_ARM64`).
+3. Set `RUSTUP_VERSION` and both checksums in the Dockerfile in one commit,
+   then build the image (`docker build .`): a checksum that doesn't match
+   stops the build at `sha256sum -c`.
+
+`cargo test --test ci` checks that the Dockerfile names no Rust version and
+has a checksum for every Linux target the release builds.
 
 ```bash
 cargo install cargo-nextest --locked   # once

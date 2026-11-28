@@ -58,17 +58,18 @@ jobs:
       rust: ${{ steps.read.outputs.rust }}
     steps:
       - uses: actions/checkout@v7
-      # A release builds with the current stable Rust, unless the Dockerfile
-      # says why it stays older. Only here: it reads the network.
+      # A release builds with the current stable Rust, unless
+      # rust-toolchain.toml says why it stays older. Only here: it reads the
+      # network.
       - name: The Rust toolchain is the current stable
         run: sh scripts/check-rust-stable
       - name: Read the version and the Rust toolchain
         id: read
         run: |
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
-          # The server's Dockerfile names the Rust image every build uses.
-          rust=$(sed -n 's/^ARG RUST_IMAGE=rust:\([0-9.]*\)-.*/\1/p' Dockerfile)
-          [ -n "$version" ] && [ -n "$rust" ] || { echo "::error::Cargo.toml or the Dockerfile names no version"; exit 1; }
+          # rust-toolchain.toml names the Rust every build installs.
+          rust=$(sed -n 's/^channel = "\([0-9.]*\)"$/\1/p' rust-toolchain.toml)
+          [ -n "$version" ] && [ -n "$rust" ] || { echo "::error::Cargo.toml or rust-toolchain.toml names no version"; exit 1; }
           if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
             echo "::error::the tag $GITHUB_REF_NAME does not match Cargo.toml's version $version"
             exit 1
@@ -90,8 +91,9 @@ jobs:
             runner: macos-15
           - target: x86_64-apple-darwin
             runner: macos-15-intel
-          # Linux builds run in the Dockerfile's Rust image, so the binaries
-          # need no newer glibc than Debian bookworm's, as before.
+          # Linux builds run in the Dockerfile's toolchain stage, Debian
+          # bookworm with that Rust, so the binaries need no newer glibc
+          # than bookworm's 2.36.
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-24.04
           - target: aarch64-unknown-linux-gnu

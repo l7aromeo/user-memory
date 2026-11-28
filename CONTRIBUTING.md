@@ -19,9 +19,8 @@ for now, and why.
 ## Set up
 
 You need [rustup](https://rustup.rs/), which installs the Rust that
-`rust-toolchain.toml` names on first use (the Dockerfile's `RUST_IMAGE`,
-which the checks and the release builds use), a C build toolchain (SQLite
-is bundled),
+`rust-toolchain.toml` names on first use (the Rust the checks, the server
+image and the release builds use), a C build toolchain (SQLite is bundled),
 [just](https://github.com/casey/just) and
 [cargo-nextest](https://nexte.st/):
 
